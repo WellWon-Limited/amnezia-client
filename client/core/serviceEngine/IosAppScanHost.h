@@ -98,10 +98,33 @@ inline IosAppScanControl iosAppScanControlFrom(const QByteArray &json)
 
 // What the in-app host can do before its engine answered scan_caps: the extension's fixture (the same engine and
 // the same iOS pools: full 1, legs 6 in one instance, awg 2), but no tunnel needed.
+// The app process's own pools, sent to the engine as host options "platform_limits" (libxray patch 0014,
+// awg-apple 3.1.4-tribe.15): the extension's engine build is compiled for one probe instance and no composites
+// (about 50 MB in all); the app has hundreds of MB (device 18.11: +25 MB per scan, 3.3 GB headroom). 4 full-profile
+// probes at once + 1 leg instance; composites verified. An engine without patch 0014 ignores the field and answers
+// its compiled caps (the coordinator always plans from the engine's own scan_caps reply).
+inline constexpr int kIosAppMaxFull = 4;
+inline constexpr int kIosAppMaxInstances = 5;
+inline constexpr int kIosAppMaxAwg = 2;
+
+inline QJsonObject iosAppScanPlatformLimits()
+{
+    return QJsonObject{{QStringLiteral("max_full"), kIosAppMaxFull},
+                       {QStringLiteral("max_instances"), kIosAppMaxInstances},
+                       {QStringLiteral("max_awg"), kIosAppMaxAwg},
+                       {QStringLiteral("can_verify_composite"), true},
+                       {QStringLiteral("needs_vpn"), false},
+                       {QStringLiteral("platform"), QStringLiteral("ios-app")}};
+}
+
 inline ScanHostCaps iosAppScanKnownCaps()
 {
     ScanHostCaps c = iosScanKnownCaps();
     c.needsVpn = false;
+    c.maxFullConcurrent = kIosAppMaxFull;
+    c.maxAwgConcurrent = kIosAppMaxAwg;
+    c.canVerifyComposite = true;
+    c.platform = QStringLiteral("ios-app");
     return c;
 }
 
@@ -233,7 +256,8 @@ private:
 
 // --- host options and replies ------------------------------------------------------------------------------------
 
-// Host options of one message to the app engine (engine.go HostOptions): the bind index with scan_start, the app's
+// Host options of one message to the app engine (engine.go HostOptions): the app's pools (platform_limits, every
+// message: scan_caps answers them, scan_start runs with them), the bind index with scan_start, the app's
 // path element as `gen` when known (the engine stamps progress and access attempts with it; the coordinator's tuple
 // has the same "app" element, so the exclusion bracket compares like for like), host_epoch always.
 inline QByteArray iosAppScanHostOptions(unsigned bindIndex, bool hasGen, const ScanNetSource &gen, quint64 epoch)
@@ -244,6 +268,7 @@ inline QByteArray iosAppScanHostOptions(unsigned bindIndex, bool hasGen, const S
     if (hasGen)
         o.insert(QStringLiteral("gen"), scanNetSourceToJson(gen));
     o.insert(QStringLiteral("host_epoch"), double(epoch));
+    o.insert(QStringLiteral("platform_limits"), iosAppScanPlatformLimits());
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 

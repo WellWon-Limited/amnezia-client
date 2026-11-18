@@ -51,7 +51,10 @@ class AwgApple(ConanFile):
     # without the data watch (conandata.yml). Core, toolchain and gates are those of tribe.12.
     # tribe.13 was the data watch branch's own number before the merge (tribe.11 + 0012 in one
     # patch) and never left that branch.
-    version = "3.1.4-tribe.14"
+    # tribe.15: tribe.14 + the engine's host limits (../amnezia-libxray/patches/0014-tribe-scan-host-limits.patch,
+    # after 0012): the host's own probe pools in its host options, so the iOS app process (the in-app probe host)
+    # runs several full-profile probes and composites while the extension keeps its compiled single instance.
+    version = "3.1.4-tribe.15"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
@@ -104,6 +107,10 @@ class AwgApple(ConanFile):
     # tribe.14 = tribe.12 + the data watch (0012, 0016): the same core, toolchain, shared patches
     # and gates; the typecheck of 0015 then covers the data watch's adapter code as well.
     _xray_pins["3.1.4-tribe.14"] = _xray_pins["3.1.4-tribe.12"]
+    # tribe.15 = tribe.14 + engine patch 0014 (host limits); everything else identical.
+    _xray_pins["3.1.4-tribe.15"] = dict(_xray_pins["3.1.4-tribe.14"],
+                                        engine_patches=("0012-tribe-scan-engine.patch",
+                                                        "0014-tribe-scan-host-limits.patch"))
 
     @property
     def _pins(self):

@@ -1,0 +1,160 @@
+Tribe (libxray 0014, on top of the engine patch 0012): host limits. The host's own probe pools in its host
+options ({"platform_limits": {max_full, max_leg, max_awg, max_instances, can_verify_composite, needs_vpn,
+platform}}) replace the platform's compiled ones per message, so one engine build serves the iOS tunnel
+extension (one probe instance, about 50 MB in all) and the iOS app process (several full-profile probes at once,
+composites). Host options are written by the host only; the app's request cannot raise a pool. Module-agnostic
+(tribescan/ only), like 0012. Gate: TestTribeScanHostLimits (-tags tribescan_testkit).
+
+diff --git a/tribescan/export.go b/tribescan/export.go
+index 1c10ec5..3b1aa15 100644
+--- a/tribescan/export.go
++++ b/tribescan/export.go
+@@ -210,6 +210,7 @@ func Message(requestJSON, hostOptionsJSON string, plat Platform) string {
+ 		return encode(r)
+ 	}
+ 	epoch := parseHostEpoch(hostOptionsJSON)
++	plat = plat.WithHostLimits(hostOptionsJSON) // the host's own pools (hostlimits.go): caps and the scan agree
+ 	switch req.Action {
+ 	case "scan_caps":
+ 		return encode(plat.Caps())
+diff --git b/tribescan/hostlimits.go b/tribescan/hostlimits.go
+new file mode 100644
+index 0000000..02789ce
+--- /dev/null
++++ b/tribescan/hostlimits.go
+@@ -0,0 +1,56 @@
++package tribescan
++
++// Host limits (libxray patch 0014): the host's own pools in its host options, {"platform_limits": {...}},
++// replacing the platform's compiled ones for this message - scan_caps answers them and a scan_start runs with
++// them. Only the host writes host options (never the app's request bytes), so the app cannot raise a pool. Why:
++// one engine build serves two iOS processes - the tunnel extension (about 50 MB in all: one probe instance,
++// no composites) and the app (hundreds of MB to spare: several full-profile probes at once, composites).
++// Fields (each optional; out of range = ignored, the compiled value stays):
++//   max_full 0..8, max_leg 0..16, max_awg 0..8 (the pools), max_instances 1..8 (core instances alive at once;
++//   0 = "no cap" is never accepted from a host), can_verify_composite, needs_vpn (bool), platform (name,
++//   <= 16 header-safe chars, scan_caps.platform).
++
++import "encoding/json"
++
++type hostLimits struct {
++	MaxFull            *int    `json:"max_full"`
++	MaxLeg             *int    `json:"max_leg"`
++	MaxAwg             *int    `json:"max_awg"`
++	MaxInstances       *int    `json:"max_instances"`
++	CanVerifyComposite *bool   `json:"can_verify_composite"`
++	NeedsVPN           *bool   `json:"needs_vpn"`
++	Platform           *string `json:"platform"`
++}
++
++// WithHostLimits returns the platform with the host's limits of hostOptionsJSON applied; unchanged when the
++// options carry none or are malformed.
++func (p Platform) WithHostLimits(hostOptionsJSON string) Platform {
++	if hostOptionsJSON == "" {
++		return p
++	}
++	var o struct {
++		L *hostLimits `json:"platform_limits"`
++	}
++	if json.Unmarshal([]byte(hostOptionsJSON), &o) != nil || o.L == nil {
++		return p
++	}
++	set := func(v *int, lo, hi int, dst *int) {
++		if v != nil && *v >= lo && *v <= hi {
++			*dst = *v
++		}
++	}
++	set(o.L.MaxFull, 0, 8, &p.MaxFull)
++	set(o.L.MaxLeg, 0, 16, &p.MaxLeg)
++	set(o.L.MaxAwg, 0, 8, &p.MaxAwg)
++	set(o.L.MaxInstances, 1, 8, &p.MaxInstances)
++	if o.L.CanVerifyComposite != nil {
++		p.CanVerifyComposite = *o.L.CanVerifyComposite
++	}
++	if o.L.NeedsVPN != nil {
++		p.NeedsVPN = *o.L.NeedsVPN
++	}
++	if n := o.L.Platform; n != nil && *n != "" && len(*n) <= 16 && headerSafe(*n) {
++		p.Name = *n
++	}
++	return p
++}
+diff --git b/tribescan/hostlimits_test.go b/tribescan/hostlimits_test.go
+new file mode 100644
+index 0000000..2f3f90f
+--- /dev/null
++++ b/tribescan/hostlimits_test.go
+@@ -0,0 +1,73 @@
++//go:build tribescan_testkit
++
++package tribescan
++
++// Gate of the host limits (patch 0014): scan_caps answers the host's pools; a scan_start with them runs that
++// many full-profile probes at once on a platform compiled for one; out-of-range values and malformed options
++// change nothing.
++
++import (
++	"encoding/json"
++	"fmt"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++func TestTribeScanHostLimits(t *testing.T) {
++	e := newKitEnv(t)
++	plat := e.plat
++	plat.Name, plat.MaxFull, plat.MaxLeg, plat.MaxInstances, plat.CanVerifyComposite, plat.NeedsVPN = "ios", 1, 6, 1, false, true
++
++	caps := func(opts string) Caps {
++		var c Caps
++		if err := json.Unmarshal([]byte(Message(`{"action":"scan_caps"}`, opts, plat)), &c); err != nil {
++			t.Fatal(err)
++		}
++		return c
++	}
++	app := `{"platform_limits":{"max_full":3,"max_instances":4,"can_verify_composite":true,"needs_vpn":false,"platform":"ios-app"}}`
++	if c := caps(""); c.MaxFullConcurrent != 1 || c.CanVerifyComposite || !c.NeedsVPN || *c.Platform != "ios" {
++		t.Fatalf("compiled caps %+v", c)
++	}
++	if c := caps(app); c.MaxFullConcurrent != 3 || c.MaxLegConcurrent != 6 || !c.CanVerifyComposite || c.NeedsVPN || *c.Platform != "ios-app" {
++		t.Fatalf("host caps %+v", c)
++	}
++	for _, bad := range []string{`{"platform_limits":{"max_full":9,"max_instances":0,"max_leg":17,"platform":"a b"}}`,
++		`{"platform_limits":{"max_full":-1}}`, `{"platform_limits":"x"}`, `{`, `{"bind_interface_index":3}`} {
++		if c := caps(bad); c.MaxFullConcurrent != 1 || c.MaxLegConcurrent != 6 || *c.Platform != "ios" {
++			t.Fatalf("%s: %+v", bad, c)
++		}
++	}
++
++	e.srv.SetMode("slow_first_byte", false)
++	e.srv.Delay.Store(300)
++	defer e.srv.SetMode("ok", false)
++	run := func(opts string, want int) {
++		var maxLive atomic.Int64
++		p := plat
++		p.JobHook = func(string) {
++			for n, seen := LiveInstances(), maxLive.Load(); n > seen && !maxLive.CompareAndSwap(seen, n); seen = maxLive.Load() {
++			}
++		}
++		var cands []map[string]any
++		for i := 0; i < 6; i++ {
++			cands = append(cands, KitFullCandidate(fmt.Sprintf("c%d", i), e.vless))
++		}
++		e.srv.maxInflight.Store(0)
++		r := KitRun(t, KitRequest(fmt.Sprintf("s-hl-%d", want), e.srv.Base(), map[string]any{"concurrency": 6}, 30000, cands...), opts, p, 30*time.Second)
++		ok := 0
++		for _, d := range r.Data() {
++			if d.Error == "" {
++				ok++
++			}
++		}
++		t.Logf("opts %s: live max %d, ok %d, %v", opts, maxLive.Load(), ok, r.Elapsed)
++		if maxLive.Load() != int64(want) || ok != 6 {
++			t.Fatalf("want %d at once, got %d (ok %d)", want, maxLive.Load(), ok)
++		}
++	}
++	run("", 1)
++	run(app, 3)
++	assertNoInstances(t)
++}

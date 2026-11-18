@@ -1,4 +1,22 @@
 patches:
+  "3.1.4-tribe.15":
+    # tribe.14's patches byte for byte; the engine's host limits are a shared engine patch
+    # (../amnezia-libxray/patches/0014-tribe-scan-host-limits.patch, conanfile.py engine_patches).
+    - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
+    - patch_file: "patches/0002-xray-socket-protection-result.patch"
+    - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
+    - patch_file: "patches/0006-tribe-persistent-heal-soft-restart.patch"
+    - patch_file: "patches/0007-tribe-fresh-port-on-return.patch"
+    - patch_file: "patches/0008-tribe-logger-context-loss-gate.patch"
+    - patch_file: "patches/0009-tribe-userspace-direct-split.patch"
+    - patch_file: "patches/0010-tribe-upstream-http.patch"
+    - patch_file: "patches/0011-tribe-outbound-stats.patch"
+    - patch_file: "patches/0012-tribe-data-watch.patch"
+    - patch_file: "patches/0013-tribe-scan-probe.patch"
+    - patch_file: "patches/0014-tribe-scan-awg.patch"
+    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"
+    - patch_file: "patches/0016-tribe-data-watch-adapter.patch"
   "3.1.4-tribe.14":
     # tribe.12 (0001-0011 and 0013-0015, all unchanged, byte for byte) + the data watch, in two
     # patches of its own:
