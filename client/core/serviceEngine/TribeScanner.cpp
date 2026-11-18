@@ -2108,6 +2108,14 @@ void TribeScanner::sampleSpeed(qint64 bytes, int timeoutMs, std::function<void(c
 
 void TribeScanner::connectFailed(const QString &nodeId) { dispatch(m_m.connectFailed(nodeId, now())); }
 void TribeScanner::attemptEnded() { dispatch(m_m.attemptEnded(now())); }
+void TribeScanner::connectRefused(const QString &nodeId)
+{
+    // queued: the engine answers from inside the ConnectRow action of the running dispatch
+    QMetaObject::invokeMethod(this, [this, nodeId]() {
+        emitLog(QStringLiteral("connect_refused node=%1").arg(nodeId));
+        dispatch(m_m.connectRefused(nodeId, now()));
+    }, Qt::QueuedConnection);
+}
 void TribeScanner::reportQueueChanged() { dispatch(m_m.reportQueueState(m_engine->reportQueueFull(), now())); }
 
 void TribeScanner::refreshSwitches()
