@@ -71,5 +71,13 @@ for slot in 'void AvpnEngineQml::onConnectionStateChanged(' 'void AvpnEngineQml:
 done
 [ "$(code "$FACADE" | grep -cF 'm_opInFlight = false;')" = "1" ] || bad "E1: the operation latches are released only in settleOperation"
 
+# Stage 2: the Scanner's proven rows are probe proofs in the one ledger; a whoami we cancelled is no evidence.
+has "$(code "$FACADE")" 'scanner->onResultsSaved = [this](const avpn::ScanCachedResult &c) {' \
+    && has "$(code "$FACADE")" 'm_engine.recordProbeProof(node, QStringLiteral("scanner"))' \
+    || bad "stage 2: the Scanner's results must reach the path engine's ledger"
+has "$(code "$ENGINE/TribeScanner.cpp")" 'onResultsSaved(c);' || bad "stage 2: the Scanner must hand its saved results over"
+has "$(code "$FACADE")" 'if (r->error() == QNetworkReply::OperationCanceledError && !o.timedOut) {' \
+    || bad "stage 2: a whoami cancelled by our own reset must be no evidence (devicectl relaunch, net_error 5)"
+
 [ "$fail" = 0 ] && echo "check_lifecycle_142_wiring: OK" || echo "check_lifecycle_142_wiring: FAILED"
 exit $fail

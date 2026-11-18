@@ -11,6 +11,7 @@
 
 #include "TuningStore.h"
 #include "path/PathTunables.h"
+#include "path/PathRace.h"
 
 #include <QtGlobal>
 
@@ -293,6 +294,23 @@ inline path::AttemptTimings attemptTimingsTuned()
     t.budgetMs = num("attempt_budget_ms", d.budgetMs, 10000, 120000);
     t.maxPaths = num("attempt_max_paths", d.maxPaths, 1, 32);
     t.stopConfirmMs = num("attempt_stop_confirm_ms", d.stopConfirmMs, 2000, 30000);
+    return t;
+}
+
+// Stage 2: the probe race's numbers (path/PathRace.h), server-tunable; compiled defaults to be calibrated on device.
+inline path::RaceTimings raceTimingsTuned()
+{
+    const path::RaceTimings d;
+    const auto num = [](const char *key, int def, int lo, int hi) {
+        return qBound(lo, int(TuningStore::numberOr(QLatin1String(key), def)), hi);
+    };
+    path::RaceTimings t = d;
+    t.parallelism = num("race_parallelism", d.parallelism, 1, 8);
+    t.staggerMs = num("race_stagger_ms", d.staggerMs, 0, 2000);
+    t.waveSize = num("race_wave_size", d.waveSize, 1, 32);
+    t.raceBudgetMs = num("race_budget_ms", d.raceBudgetMs, 2000, 30000);
+    t.probeTimeoutMs = num("race_probe_timeout_ms", d.probeTimeoutMs, 1000, 15000);
+    t.providerPerRace = num("race_provider_per_race", d.providerPerRace, 0, 8);
     return t;
 }
 

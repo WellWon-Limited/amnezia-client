@@ -41,6 +41,28 @@ struct FakeTunnel : ITunnelControl {
     void down() override { ++downs; }
 };
 
+// Stage 2: a probe host double - records what the race asked; the test answers through onProbeResult.
+struct FakeProber : path::IPathProber {
+    bool on = true;
+    QList<std::pair<path::ProbeStamp, QString>> started;
+    int cancels = 0;
+    path::ProberCaps caps() const override
+    {
+        path::ProberCaps c;
+        c.available = on;
+        return c;
+    }
+    void start(const path::ProbeStamp &s, const path::PathCandidate &p, int) override { started.append({ s, p.id.id }); }
+    void cancel(const path::ProbeStamp &) override { ++cancels; }
+    path::ProbeStamp stampOf(const char *node) const
+    {
+        for (const auto &e : started)
+            if (e.second == QLatin1String(node))
+                return e.first;
+        return {};
+    }
+};
+
 static QByteArray awg(const char *id, int host, const char *cc, const char *endpoint, double weight = 1.0,
                       bool manual = false)
 {
@@ -433,6 +455,45 @@ int main(int argc, char **argv)
         CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
         r.journal << r.eng.takeAttemptJournal();
         CHECK(journalHas(r.journal, "attempt_superseded_by_live_session"));
+    }
+
+    // Stage 2 in the engine: no host or the server switch off - stage 1 exactly; with both, the race runs first and
+    // the owner starts with the first proven path; the spent bytes go to the one byte ledger.
+    {
+        Rig r(pool);
+        FakeProber prober;
+        r.eng.setProber(&prober);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17") && prober.started.isEmpty()); // switch off
+    }
+    {
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true},
+                              {QStringLiteral("path_race"), true}}, {}, {});
+        Rig r(pool);
+        FakeProber prober;
+        qint64 charged = 0;
+        r.eng.setProber(&prober);
+        r.eng.setProbeBudget([] { return qint64(-1); }, [&charged](qint64 b) { charged += b; });
+        QString err;
+        CHECK(r.eng.connect(err) && r.eng.attemptRunning() && r.tun.ups.isEmpty() && r.eng.raceRunning());
+        r.pass(1000); // the stagger: more probes start
+        CHECK(prober.started.size() >= 2);
+        r.eng.onProbeResult(prober.stampOf("16"), path::PathOutcome::ProbeOk, 70000);
+        CHECK(r.last() == QLatin1String("16") && charged == 70000); // the proven path is the owner's first leg
+        r.journal << r.eng.takeAttemptJournal();
+        CHECK(journalHas(r.journal, "race_winner node=16") && journalHas(r.journal, "source=race"));
+        r.up();
+        CHECK(r.eng.verifySucceeded() && r.result().connected && !r.eng.raceRunning()); // the race ends with the result
+        // a stale result of that race changes nothing
+        r.eng.onProbeResult(prober.stampOf("17"), path::PathOutcome::ProbeOk, 1000);
+        CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+        // no host: stage 1
+        Rig q(pool);
+        FakeProber off;
+        off.on = false;
+        q.eng.setProber(&off);
+        CHECK(q.eng.connect(err) && q.last() == QLatin1String("17") && off.started.isEmpty());
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true}}, {}, {});
     }
 
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);

@@ -495,6 +495,8 @@ void TribeScanner::persistCache(const ScanCachedResult &c)
 {
     if (c.networkKey.isEmpty())
         return;
+    if (onResultsSaved)
+        onResultsSaved(c);
     const QString key = scanCacheStoreKey(c.networkKey, c.fingerprint);
     QJsonObject stored = scanCachedResultToJson(c);
     stored.insert(QLatin1String(kScanCachedLabelRuleKey), QLatin1String(kScanCachedLabelRule));

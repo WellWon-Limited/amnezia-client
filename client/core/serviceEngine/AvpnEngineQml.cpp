@@ -7249,6 +7249,20 @@ void AvpnEngineQml::attachScanner(TribeScanner *scanner)
     if (!scanner)
         return;
     scanner->setParent(this); // owned: deleted first in the destructor (it holds the adapter and the host)
+    // Stage 2: one fact, one store - a row the Scanner proved (works / slow) on this network is a probe proof in the
+    // path engine's ledger, and Auto reads it from there. A Scanner failure is not recorded (a light probe never
+    // quarantines a path). The Scanner drops results of an older network itself (its generation tuple).
+    scanner->onResultsSaved = [this](const avpn::ScanCachedResult &c) {
+        int recorded = 0;
+        for (const avpn::ScanCachedRow &r : c.rows) {
+            if (r.cls != avpn::ScanClass::Works && r.cls != avpn::ScanClass::Slow)
+                continue;
+            const QString node = r.origin == avpn::ScanOrigin::Upstream ? avpn::upstreamNodeIdFor(r.profileId) : r.id;
+            recorded += m_engine.recordProbeProof(node, QStringLiteral("scanner")) ? 1 : 0;
+        }
+        reliabilityEvent(QStringLiteral("scan_results_to_ledger rows=%1 recorded=%2").arg(c.rows.size()).arg(recorded));
+        syncAttempt(); // the ledger is persisted with the attempt's journal
+    };
     scanner->configureApi(m_nam, [this]() { return m_baseUrl; }, [this]() { return m_configPubKeyHex; },
                           [this]() { return authToken(); });
     connect(scanner, &TribeScanner::shadeChanged, this, &AvpnEngineQml::shadeChanged);
@@ -8357,6 +8371,15 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
         // the latter also covers device sleep) = the app was suspended mid-request: no evidence.
         // Not counted as a sent request; Connected without the mark; memory and streak untouched.
         const qint64 sinceArm = std::max(m_verifyClock.elapsed() - t0, QDateTime::currentMSecsSinceEpoch() - armedWall);
+        // Device round 18.11 (relaunch through devicectl): the check of an adopted tunnel was aborted by our own
+        // connection reset (net_error 5, not our timeout) and read as "no data" - the engine left a working node.
+        // A request we cancelled is no evidence: the check did not happen (the owner runs it again).
+        if (r->error() == QNetworkReply::OperationCanceledError && !o.timedOut) {
+            --m_verifyAttempts;
+            finishWhoami(epoch, avpn::WhoamiVerdict::CheckLimited, facts + QStringLiteral(" no_evidence=cancelled"),
+                         /*tiebreakDone=*/true);
+            return;
+        }
         if (avpn::whoamiCutBySuspension(v, o, sinceArm, left)) {
             --m_verifyAttempts;
 #ifdef Q_OS_IOS

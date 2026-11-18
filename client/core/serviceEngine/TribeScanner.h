@@ -332,6 +332,10 @@ public:
     // The timer fired (the IScanTimer's onFire; public for the tests' fake timer).
     void timerFired();
 
+    // Stage 2 of the path engine: the results of a finished scan, as saved (the engine writes them into its ledger
+    // at "probe ok" strength - one fact, and Auto reads it from there). Called on the GUI thread.
+    std::function<void(const ScanCachedResult &)> onResultsSaved;
+
 signals:
     void viewChanged();
     void shadeChanged();

@@ -10,6 +10,7 @@
 #pragma once
 
 #include "../path/AttemptOwner.h"
+#include "../path/PathRace.h"
 
 #include <QHash>
 #include <QList>
@@ -62,12 +63,44 @@ struct PathScript {
     }
 };
 
+// Stage 2: what a light probe of a path does on a network. Default (no probe script): derived from the tunnel
+// behaviour - works -> probe ok, no data -> probe fails, no handshake -> the probe never answers, refusals fail.
+struct ProbeBehaviour {
+    enum class Kind { Ok, Fail, Silent };
+    Kind kind = Kind::Silent;
+    int ms = 900;
+    qint64 bytes = 70 * 1024;
+    bool loseAnswer = false; // provider: the batch API's answer is lost (the probe seat lives until the server's TTL)
+    static ProbeBehaviour ok(int ms, qint64 bytes = 70 * 1024) { return { Kind::Ok, ms, bytes, false }; }
+    static ProbeBehaviour fail(int ms, qint64 bytes = 4096) { return { Kind::Fail, ms, bytes, false }; }
+    static ProbeBehaviour silent() { return { Kind::Silent, 0, 0, false }; }
+    static ProbeBehaviour lostAnswer() { return { Kind::Silent, 0, 0, true }; }
+};
+
 // network local key -> path id -> script; a path without a script on a network does not handshake there.
 struct World {
     QHash<QString, QHash<QString, PathScript>> scripts;
 
     void set(const QString &net, const QString &path, const PathScript &s) { scripts[net][path] = s; }
     void set(const QString &net, const QString &path, const Behaviour &b) { set(net, path, PathScript::always(b)); }
+    QHash<QString, QHash<QString, ProbeBehaviour>> probes;
+    void setProbe(const QString &net, const QString &path, const ProbeBehaviour &b) { probes[net][path] = b; }
+    ProbeBehaviour probeAt(const QString &net, const QString &path, PathKind kind, qint64 t) const
+    {
+        if (probes.value(net).contains(path))
+            return probes.value(net).value(path);
+        const Behaviour b = at(net, path, t);
+        switch (b.kind) {
+        case Behaviour::Kind::Works:
+            return ProbeBehaviour::ok(kind == PathKind::Provider ? 1500 : std::min(b.upMs + 300, 1100));
+        case Behaviour::Kind::NoData: return ProbeBehaviour::fail(1500);
+        case Behaviour::Kind::StartError:
+        case Behaviour::Kind::NoSeat: return ProbeBehaviour::fail(300);
+        case Behaviour::Kind::NoHandshake:
+        case Behaviour::Kind::Silent: break;
+        }
+        return ProbeBehaviour::silent();
+    }
     Behaviour at(const QString &net, const QString &path, qint64 t) const
     {
         return scripts.value(net).contains(path) ? scripts.value(net).value(path).at(t) : Behaviour::noHandshake();
@@ -113,6 +146,51 @@ public:
     // --- driving --------------------------------------------------------------------------------------------
     void deliver(const AttemptEvent &ev) { apply(owner.handle(ev, ctx())); }
 
+    // --- stage 2: the race in front of the owner (the engine's rule: ServiceEngine::beginRaceForTap) ---------
+    PathRace race;
+    ProberCaps caps;            // available = false: no host (stage-1 behaviour)
+    qint64 bytesLeft = -1;      // -1 = no cap (Wi-Fi); cellular: the Scanner's hour budget
+    qint64 bytesSpent = 0;
+    int probesStarted = 0;
+    int providerProbes = 0;
+    int lostSeatAnswers = 0;    // provider probe seats left to the server's TTL
+    bool raceFirst = false;
+    qint64 ownerStartedMs = -1;
+    QStringList raceLog;
+
+    AttemptResult raceTap(const UserChoice &c, TransportMode mode = TransportMode::Auto, qint64 maxMs = 120000)
+    {
+        m_tapAt = now;
+        ownerStartedMs = -1;
+        const quint64 before = owner.attempt();
+        raceFirst = false;
+        if (caps.available && c.kind != UserChoice::Kind::ExactPath) {
+            SelectInput in;
+            in.pool = m_pool;
+            in.evidence = ledger.viewOf(tracker.current().local, m_pool, wall());
+            in.choice = c;
+            in.mode = mode;
+            const QList<RankedPath> order = selectPaths(in);
+            const bool known = !order.isEmpty() && order.first().view.state == PathState::Working;
+            QList<PathCandidate> list;
+            for (int i = known ? 1 : 0; i < order.size(); ++i)
+                list << order.at(i).path;
+            m_raceChoice = c;
+            m_raceMode = mode;
+            raceFirst = !known && !list.isEmpty();
+            applyRace(race.begin(now, list, tracker.current(), caps, bytesLeft, PathRace::Costs{}));
+            if (raceFirst && !race.running())
+                raceFirst = false;
+        }
+        if (!raceFirst && ownerStartedMs < 0) { // never a second start: the race may have started the owner already
+            ownerStartedMs = now;
+            deliver(AttemptEvent::userStart(now, c, mode, tracker.current()));
+        }
+        const auto done = [&] { return !results.isEmpty() && results.last().attempt > before; };
+        run(done, maxMs);
+        return done() ? results.last() : AttemptResult{};
+    }
+
     // A tap: UserStart now, then run until the attempt's terminal result (or maxMs of virtual time).
     AttemptResult tap(const UserChoice &c, TransportMode mode = TransportMode::Auto, qint64 maxMs = 120000)
     {
@@ -131,7 +209,11 @@ public:
     {
         at(t, [this, o] {
             if (tracker.observe(o))
+            {
+                if (race.running())
+                    applyRace(race.networkChanged(now, tracker.current()));
                 deliver(AttemptEvent::networkChanged(now, tracker.current()));
+            }
         });
     }
     // The app is suspended in [from, from + forMs): no tick, every callback due inside is delivered on resume.
@@ -163,7 +245,11 @@ public:
             }
             now = t;
             if (t == nextTick && t != nextItem)
+            {
+                if (race.running())
+                    applyRace(race.tick(now));
                 deliver(AttemptEvent::tick(now));
+            }
         }
     }
 
@@ -242,7 +328,11 @@ private:
                     ledger.record(e.report.network, e.report.path, e.report.outcome, wall(), e.report.connectMs,
                                   e.report.ttfbMs);
                 break;
-            case EffectType::Finish: results.append(e.result); break;
+            case EffectType::Finish:
+                results.append(e.result);
+                if (race.running())
+                    at(now, [this] { applyRace(race.stop(now)); });
+                break;
             case EffectType::Show: break;
             case EffectType::StopUnconfirmed: break;
             }
@@ -256,6 +346,65 @@ private:
     QList<std::pair<qint64, qint64>> m_suspend;
     QHash<quint64, Behaviour> m_legBehaviour;
     QHash<quint64, int> m_checkGen;
+    UserChoice m_raceChoice;
+    TransportMode m_raceMode = TransportMode::Auto;
+
+    void startOwnerAfterRace(const char *why)
+    {
+        if (!raceFirst)
+            return;
+        raceFirst = false;
+        ownerStartedMs = now;
+        raceLog << QStringLiteral("owner:%1").arg(QLatin1String(why));
+        deliver(AttemptEvent::userStart(now, m_raceChoice, m_raceMode, tracker.current()));
+    }
+
+    void applyRace(const QList<RaceEffect> &effects)
+    {
+        for (const RaceEffect &e : effects) {
+            switch (e.type) {
+            case RaceEffectType::StartProbe: {
+                ++probesStarted;
+                raceLog << QStringLiteral("probe:%1").arg(e.path.id.id);
+                const ProbeBehaviour b = m_world.probeAt(tracker.current().local, e.path.id.id, e.path.kind, now);
+                if (e.path.kind == PathKind::Provider)
+                    ++providerProbes;
+                if (b.loseAnswer)
+                    ++lostSeatAnswers;
+                if (b.kind == ProbeBehaviour::Kind::Silent)
+                    break; // the race's own bound cancels it
+                const ProbeStamp st = e.stamp;
+                const PathOutcome o = b.kind == ProbeBehaviour::Kind::Ok ? PathOutcome::ProbeOk : PathOutcome::NoData;
+                const qint64 bytes = b.bytes;
+                at(now + b.ms, [this, st, o, bytes] { applyRace(race.probeDone(now, st, o, bytes)); });
+                break;
+            }
+            case RaceEffectType::CancelProbe: break;
+            case RaceEffectType::Report:
+                reports.append(OutcomeReport{ e.network, e.networkGeneration, e.path.id, e.outcome, -1, -1 });
+                if (tracker.isCurrent(e.networkGeneration))
+                    ledger.record(e.network, e.path.id, e.outcome, wall());
+                break;
+            case RaceEffectType::Spent:
+                bytesSpent += e.bytes;
+                if (bytesLeft >= 0)
+                    bytesLeft = std::max<qint64>(0, bytesLeft - e.bytes);
+                break;
+            case RaceEffectType::Winner:
+                if (ledger.view(tracker.current().local, e.path.id, wall()).state == PathState::Working) {
+                    race.acceptWinner(e.path.id.id);
+                    raceLog << QStringLiteral("winner:%1").arg(e.path.id.id);
+                    startOwnerAfterRace("winner");
+                }
+                break;
+            case RaceEffectType::Done:
+                raceLog << QStringLiteral("done:%1").arg(QLatin1String(raceDoneReasonName(e.reason)));
+                if (e.reason != RaceDoneReason::Stopped)
+                    startOwnerAfterRace(raceDoneReasonName(e.reason));
+                break;
+            }
+        }
+    }
     qint64 m_tapAt = 0;
 };
 
