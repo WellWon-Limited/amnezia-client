@@ -3462,6 +3462,92 @@ static void properties()
 }
 
 // --- provider rows (contract 1.10.0, owner 17.11) and the network change after a result ------------------------
+
+// «Найти ещё» (ScanMachine::moreTapped, 18.11): the next batch skips what this network judged, keeps the rows found,
+// counts its own new rows for the stop, says when nothing is left; a country restricts the batch.
+static void findMore()
+{
+    World w = baseWorld("more", hostMac(), ScanNetKind::Wifi);
+    w.nodes = ownOnly(w.nodes);
+    w.numbers.insert(QStringLiteral("scan_stop_works"), 1); // one working row ends a batch
+    const auto candidatesOf = [](const ScanStep &s) {
+        QList<ScanCandidate> out;
+        for (const ScanAction &a : s.actions)
+            if (a.kind == ScanActionKind::StartHostScan)
+                out << a.candidates;
+        return out;
+    };
+    const auto works = [](const QString &id) {
+        ScanProbeFacts f = goodData();
+        f.id = id;
+        f.egressNode = id.section(QLatin1Char(':'), 0, 0);
+        return f;
+    };
+    ScanMachine m(w.caps);
+    m.opened(openOf(w, QString(), false), kT0);
+    const QList<ScanCandidate> first = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50));
+    CHECK(first.size() >= 3);
+    if (first.size() < 3)
+        return;
+    m.hostProgress(progressOf(m, {works(first.at(0).id)}), kT0 + 900);
+    m.tick(kT0 + 50 + 8000);
+    ScanView v = m.view(kT0 + 8100);
+    CHECK(!v.scanning && v.verifiedCount == 1 && v.moreAvailable && v.batch == 1);
+    CHECK(scanViewToJson(v).value(QStringLiteral("more_available")).toBool() && scanViewToJson(v).value(QStringLiteral("batch")).toInt() == 1);
+
+    // batch 2: the proven row stays fresh, its candidate is not probed again; the stop counts the new rows only
+    CHECK(m.moreTapped(QString(), kT0 + 9000).has(ScanActionKind::RequestManifest)); // no manual cooldown for a continuation
+    const QList<ScanCandidate> second = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 9050));
+    bool skipped = !second.isEmpty();
+    for (const ScanCandidate &c : second)
+        skipped = skipped && c.id != first.at(0).id;
+    CHECK(skipped && second.size() == first.size() - 1);
+    v = m.view(kT0 + 9060);
+    CHECK(v.scanning && v.verifiedCount == 1 && v.batch == 2);
+    QList<ScanProbeFacts> all;
+    for (const ScanCandidate &c : second)
+        all << works(c.id);
+    m.hostProgress(progressOf(m, all), kT0 + 9900);
+    m.tick(kT0 + 9050 + 8000);
+    v = m.view(kT0 + 17200);
+    CHECK(!v.scanning && v.verifiedCount == 1 + second.size() && !v.moreAvailable); // everything judged: nothing more
+
+    // batch 3: nothing left - ends at once, still nothing more
+    m.moreTapped(QString(), kT0 + 18000);
+    const QList<ScanCandidate> third = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 18050));
+    v = m.view(kT0 + 18100);
+    CHECK(third.isEmpty() && !v.scanning && !v.moreAvailable && v.batch == 3 && v.verifiedCount == 1 + second.size());
+
+    // a country batch over the whole pool: only that country's candidates, the filter set to it
+    ScanMachine c(w.caps);
+    c.opened(openOf(w, QString(), false), kT0);
+    const QList<ScanCandidate> any = candidatesOf(c.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50));
+    c.tick(kT0 + 50 + 8000);
+    QString cc;
+    for (const ScanCandidate &x : any)
+        if (!x.countryCode.isEmpty())
+            cc = x.countryCode;
+    CHECK(!cc.isEmpty());
+    c.moreTapped(cc.toLower(), kT0 + 9000);
+    const QList<ScanCandidate> only = candidatesOf(c.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 9050));
+    bool sameCountry = !only.isEmpty();
+    for (const ScanCandidate &x : only)
+        sameCountry = sameCountry && x.countryCode == cc;
+    CHECK(sameCountry && c.view(kT0 + 9060).moreCountry == cc);
+
+    // an ordinary open after a series starts a new one
+    ScanMachine o(w.caps);
+    o.opened(openOf(w, QString(), false), kT0);
+    o.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+    o.tick(kT0 + 50 + 8000);
+    o.moreTapped(QString(), kT0 + 9000);
+    o.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 9050);
+    o.tick(kT0 + 9050 + 8000);
+    CHECK(o.view(kT0 + 17100).batch == 2);
+    o.retryTapped(kT0 + 60000);
+    CHECK(o.view(kT0 + 60010).batch == 1);
+}
+
 static void rowsAfter17Nov()
 {
     // the manifest's `kind`: absent = Unspecified, unknown = auto
@@ -3691,6 +3777,7 @@ int main(int argc, char **argv)
     labSeams();
     cooldownRule();
     rowsAfter17Nov();
+    findMore();
     overruns();
     properties();
     if (g_fail) {

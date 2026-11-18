@@ -285,6 +285,10 @@ public:
     Q_INVOKABLE void connectAndScan();
     Q_INVOKABLE void gotIt();
     Q_INVOKABLE void chooseCountry(const QString &cc);
+    // «Найти ещё»: the next batch of this network's candidates not judged yet (country "" = the whole pool, else a
+    // scan of that country over the whole pool). The view says more_available / batch / more_country
+    // (ScanMachine::moreTapped).
+    Q_INVOKABLE void findMore(const QString &country = QString());
     Q_INVOKABLE void tapRow(const QString &id);
     Q_INVOKABLE void tapCheck();
     Q_INVOKABLE void tapReportLink();

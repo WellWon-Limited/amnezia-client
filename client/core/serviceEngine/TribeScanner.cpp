@@ -1908,6 +1908,13 @@ void TribeScanner::connectAndScan()
 }
 void TribeScanner::gotIt() { dispatch(m_m.gotItTapped(now())); }
 void TribeScanner::chooseCountry(const QString &cc) { dispatch(m_m.filterChosen(cc, now())); }
+void TribeScanner::findMore(const QString &country)
+{
+    if (!m_enabled || m_serverOff)
+        return;
+    emitLog(QStringLiteral("find_more country=%1").arg(country.isEmpty() ? QStringLiteral("-") : country));
+    dispatch(m_m.moreTapped(country, now()));
+}
 void TribeScanner::tapRow(const QString &id) { dispatch(m_m.rowTapped(id, now())); }
 void TribeScanner::tapCheck() { dispatch(m_m.checkTapped(now())); }
 void TribeScanner::tapReportLink() { dispatch(m_m.reportLinkTapped(now())); }

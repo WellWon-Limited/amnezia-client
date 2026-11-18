@@ -571,6 +571,11 @@ struct ScanView {
     ScanEmptyView empty;
     ScanNetKind net = ScanNetKind::Unknown;
     qint64 nextChangeAtMs = -1;      // re-read view() then (countdowns, progress)
+    // «Найти ещё» (ScanMachine::moreTapped): a finished scan left candidates of this network without a verdict;
+    // false after a batch that found nothing left = «nothing more». batch = 1 for the first scan of a series.
+    bool moreAvailable = false;
+    int batch = 0;
+    QString moreCountry;             // the country of the running / last continuation ("" = whole pool)
 };
 
 // PathOutcomeItem.probe / DoctorScanRow.probe of a probe kind.
@@ -777,6 +782,33 @@ public:
             m_screenOpen = false;
             s.actions << act(ScanActionKind::CloseScreen);
         }
+        finishStep(s, now);
+        return s;
+    }
+
+    // «Найти ещё» (the continuation): the next batch over the whole pool on this network - every candidate this
+    // network has not judged yet (a row with a verdict, a failure; «Не проверено» rows are tried again), restricted
+    // to one country when `country` is given (a country scan). Rows already found stay fresh; the batch stops at
+    // scan_stop_works NEW working rows, scan_stop_ms or the byte budget (unchanged). The manual cooldown does not
+    // apply (other candidates). A network that changed since the last scan, or no finished scan yet, runs an
+    // ordinary scan (restricted to the country when given). Nothing left: the scan ends at once,
+    // nothing_to_probe, and moreAvailable stays false - the «nothing more» signal of the view.
+    ScanStep moreTapped(const QString &country, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        if (scanPhaseScanning(m_phase)) {
+            finishStep(s, now);
+            return s;
+        }
+        const bool sameNet = m_completed && m_scanNet.key == m_net.key && m_scanNet.generation() == m_net.generation();
+        m_continuation = true;
+        m_moreKeepRows = sameNet;
+        m_moreCountry = country.trimmed().toUpper();
+        m_worksBase = sameNet ? freshWorkingCount() : 0;
+        if (!sameNet)
+            m_shownNet.clear();
+        beginScan(now, s);
         finishStep(s, now);
         return s;
     }
@@ -1526,6 +1558,9 @@ public:
         v.scanning = scanPhaseScanning(m_phase);
         v.hero = v.scanning;
         v.net = m_net.kind;
+        v.moreAvailable = !v.scanning && m_completed && m_moreAvailable;
+        v.batch = m_batch;
+        v.moreCountry = m_moreCountry;
         const QList<ScanRowView> all = displayRows(now);
         for (const ScanRowView &r : all) {
             if (r.verified && !r.fromCache)
@@ -2286,10 +2321,21 @@ private:
         }
         m_scanNet = m_net;
         m_completed = false;
+        // «Найти ещё» (moreTapped): a continuation keeps this network's rows fresh and its judged set; any other
+        // scan starts a new series.
+        const bool keepRows = m_continuation && m_moreKeepRows;
+        if (!m_continuation) {
+            m_shownNet.clear();
+            m_batch = 0;
+            m_moreCountry.clear();
+            m_worksBase = 0;
+        }
+        ++m_batch;
+        m_moreAvailable = false;
         m_cands.clear();
         m_unverified.clear();
         m_tapFailed.clear();
-        m_filter.clear();
+        m_filter = m_continuation ? m_moreCountry : QString();
         m_lastSeq = 0;
         m_spent = 0;
         m_cap = -1;
@@ -2300,7 +2346,8 @@ private:
         m_deadline = -1;
         m_emptyReason.clear();
         m_noScanReason.clear();
-        m_failuresThisScan.clear();
+        if (!keepRows)
+            m_failuresThisScan.clear();
         m_verdicts.clear();
         m_nvReasonOf.clear();
         m_liveReasons.clear();
@@ -2309,8 +2356,9 @@ private:
         m_planCandidates = 0;
         m_scanStartAt = now;
         m_outcomes.begin(m_net.key);
-        // Rows of the previous result become cached rows of this network.
-        for (int i = m_rows.size() - 1; i >= 0; --i) {
+        // Rows of the previous result become cached rows of this network (a continuation keeps them fresh: same
+        // network, same generation - the rows of the batches before stay this series' evidence).
+        for (int i = keepRows ? -1 : m_rows.size() - 1; i >= 0; --i) {
             Row &r = m_rows[i];
             if (m_current.working() && r.id == m_current.nodeId) {
                 // The live connection is live evidence, never a cached row; its proof is redone per scan (F2).
@@ -2380,7 +2428,9 @@ private:
         in.net = m_scanNet.kind;
         in.tunables = m_t;
         in.freshFailures = m_manifest.freshFailures + scanFreshFailures(m_cachedFailures, now, m_t.cacheFailTtlS);
-        in.restrictCountry = m_manifest.restrictCountry;
+        in.restrictCountry = m_continuation && !m_moreCountry.isEmpty() ? m_moreCountry : m_manifest.restrictCountry;
+        if (m_continuation && m_moreKeepRows)
+            in.skip = m_shownNet;
         in.upstreamNames = m_manifest.upstreamNames;
         in.lastKnownGood = m_manifest.lastKnownGood;
         in.awgMiniEnabled = m_manifest.awgMiniEnabled;
@@ -2816,8 +2866,8 @@ private:
     // until it has its verdict or the deadline comes.
     void checkStop(qint64 now, ScanStep &s)
     {
-        if ((m_phase != ScanPhase::Reach && m_phase != ScanPhase::Data) || freshWorkingCount() < m_t.stopWorks)
-            return;
+        if ((m_phase != ScanPhase::Reach && m_phase != ScanPhase::Data) || freshWorkingCount() - m_worksBase < m_t.stopWorks)
+            return; // a continuation counts only its own new working rows
         int maxTier = -1;
         for (const ScanRowView &r : displayRows(now))
             if (r.verified && !r.current && r.state != ScanRowState::Connecting && r.state != ScanRowState::Failed)
@@ -3210,6 +3260,18 @@ private:
         m_finishedAt = now;
         m_completed = true;
         m_startedVpn = false;
+        // «Найти ещё»: this network's judged ids grow; more is available while a planned candidate has no verdict
+        // (the stop came first or it stayed «Не проверено»).
+        for (const Row &r : m_rows)
+            if (!r.cached && (scanClassWorking(r.base) || scanClassFailure(r.base)))
+                m_shownNet.insert(r.id);
+        for (const ScanCachedFailure &f : m_failuresThisScan)
+            m_shownNet.insert(f.id);
+        m_moreAvailable = false;
+        for (const Cand &c : m_cands)
+            m_moreAvailable = m_moreAvailable || !m_shownNet.contains(c.c.id);
+        m_continuation = false;
+        m_moreKeepRows = false;
         freezeHost(now, s);
         m_hostDone = true;
         settleUnjudged(); // a tap's stop, a failed connect: every candidate in its bucket before the rows are read
@@ -3926,6 +3988,14 @@ private:
     bool m_liveProbeSent = false;     // this scan sent the live-tunnel probe (bytes moved: the cooldown holds)
     qint64 m_lastManifestAt = LLONG_MIN / 2; // the last manifest request (the buttons' back-off)
     qint64 m_finishedAt = 0;
+    // «Найти ещё» (moreTapped)
+    bool m_continuation = false;     // the scan being begun is a continuation
+    bool m_moreKeepRows = false;     // ... on the same network: rows stay fresh, judged ids skipped
+    QString m_moreCountry;
+    QSet<QString> m_shownNet;        // ids judged on this network in this series
+    int m_worksBase = 0;             // fresh working rows before the continuation (its stop counts the new ones)
+    int m_batch = 0;
+    bool m_moreAvailable = false;
     bool m_completed = false;
     bool m_screenOpen = false;
     bool m_startedVpn = false;
@@ -4163,6 +4233,9 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     o.insert(QStringLiteral("rows"), rows);
     o.insert(QStringLiteral("verified"), v.verifiedCount);
     o.insert(QStringLiteral("unverified"), v.unverifiedCount);
+    o.insert(QStringLiteral("more_available"), v.moreAvailable);
+    o.insert(QStringLiteral("batch"), v.batch);
+    o.insert(QStringLiteral("more_country"), v.moreCountry);
     QJsonObject card;
     card.insert(QStringLiteral("mode"), QLatin1String(scanCardModeName(v.card.mode)));
     card.insert(QStringLiteral("button"), QLatin1String(scanCardButtonName(v.card.button)));

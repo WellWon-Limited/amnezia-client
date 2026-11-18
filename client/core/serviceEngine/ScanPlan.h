@@ -73,6 +73,7 @@ struct ScanPlanInput {
     QSet<QString> freshFailures;            // engine node ids
     QString lastKnownGood;                  // engine node id proven on this network (the path engine's ledger)
     QString restrictCountry;                // empty = every country
+    QSet<QString> skip;                     // «Найти ещё»: ids already judged on this network (excluded "shown")
     QMap<QString, QString> upstreamNames;   // profile_id -> display name (UpstreamNode.h::upstreamDisplayName)
     bool awgMiniEnabled = false;            // features.scanner_awg_mini (scanAwgMiniFlag), compiled default off
     bool awgProbeIpKnown = false;           // the app resolved the API's IP (the RU-split carve-out set)
@@ -222,6 +223,10 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
             exclude(mn.nodeId, "current");
             continue;
         }
+        if (in.skip.contains(mn.nodeId)) {
+            exclude(mn.nodeId, "shown");
+            continue;
+        }
         const auto it = pool.constFind(mn.nodeId);
         if (it == pool.constEnd()) {
             exclude(mn.nodeId, "not_in_pool");
@@ -294,6 +299,10 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
             const QString id = upstreamNodeIdFor(u.profileId);
             if (!currentId.isEmpty() && id == currentId) {
                 exclude(id, "current");
+                continue;
+            }
+            if (in.skip.contains(id)) {
+                exclude(id, "shown");
                 continue;
             }
             // The provider's own balancer is an Auto candidate only, never a Scanner row (contract 1.10.0; the
