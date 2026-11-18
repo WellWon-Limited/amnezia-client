@@ -308,6 +308,9 @@ public:
     void sampleSpeed(qint64 bytes, int timeoutMs, std::function<void(const ScanSpeedSample &)> done);
     void connectFailed(const QString &nodeId);
     void attemptEnded();
+    // The engine refused a ConnectRow before touching the tunnel (the pin failed, the row's node is gone): the row
+    // returns to its normal state and the list takes taps again. Safe to call from inside connectRow (queued).
+    void connectRefused(const QString &nodeId);
     void reportQueueChanged();
     void refreshSwitches();
     void noteUpstreamRevision(qint64 revision);

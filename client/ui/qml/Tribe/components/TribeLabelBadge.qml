@@ -13,13 +13,16 @@ Rectangle {
     property color fg: Theme.color.accent
     property color fill: Theme.color.badgeAccent
     property bool small: false
+    // the filled variant (owner, device test of 142: the Scanner's «Подключено» must dominate «Доступно»): `fill` is
+    // the solid tone, `fg` the text on it; the border takes the fill instead of the text colour
+    property bool filled: false
 
     implicitHeight: small ? Theme.badge.heightSmall : Theme.badge.height
     implicitWidth: badgeText.implicitWidth + 2 * (small ? Theme.badge.padXSmall : Theme.badge.padX)
     radius: Theme.radius.pill
     color: badge.fill
     border.width: 1
-    border.color: badge.fg
+    border.color: badge.filled ? badge.fill : badge.fg
 
     Accessible.role: Accessible.StaticText
     Accessible.name: badge.label

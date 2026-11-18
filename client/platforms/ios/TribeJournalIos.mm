@@ -22,8 +22,13 @@ void TribeJournalIos_setNativeLogging(bool on)
 
 bool TribeJournalIos_isTestFlight()
 {
+    // A sandbox receipt alone also marks a development or ad-hoc install (device test of 142: journal_on said
+    // testflight:true on a build run from Xcode). Those carry their provisioning profile in the bundle; a TestFlight
+    // (and App Store) install never does.
     NSURL *receipt = [[NSBundle mainBundle] appStoreReceiptURL];
-    return receipt && [[receipt lastPathComponent] isEqualToString:@"sandboxReceipt"];
+    const bool sandbox = receipt && [[receipt lastPathComponent] isEqualToString:@"sandboxReceipt"];
+    const bool provisioned = [[NSBundle mainBundle] pathForResource:@"embedded" ofType:@"mobileprovision"] != nil;
+    return sandbox && !provisioned;
 }
 
 bool TribeJournalIos_beginBackground(std::function<void()> onExpired)
