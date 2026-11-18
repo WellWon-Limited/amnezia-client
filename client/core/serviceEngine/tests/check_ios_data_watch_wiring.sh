@@ -344,29 +344,20 @@ order "$app_write" 'locked = flock(lockFd, LOCK_EX | LOCK_NB) == 0;' 'const BOOL
 order "$stop_body" 'tribeDataWatch.noteStop(userInitiated: reason == .userInitiated)' 'tribeDataWatch.detach()' \
     || bad "E6: a stop must tell the runtime whether the user stopped the tunnel"
 
-# ---- A10: stage 2 in the app ------------------------------------------------------------------------------
+# ---- A10: stage 2 in the app is inert (path engine, design 2026-11-17: the attempt owner is the only one that
+# chooses a path) - the plan never carries candidates, nothing adopts a switch, there is no way back to take; the
+# session plumbing of the hand-over (status replies, Reasserting, engine down) stays as it was --------------------
 ctor="$(body_of "$FACADE" 'AvpnEngineQml::AvpnEngineQml(')"
 plan_fn="$(body_of "$FACADE" 'void AvpnEngineQml::writeTunnelWatchPlan(')"
-order "$plan_fn" 'if (in.watch && in.watchSwitch)' 'in.candidates = m_engine.extensionSwitchCandidates();' \
-    && [ "$(printf '%s\n' "$plan_fn" | grep -A1 'if (in.watch && in.watchSwitch)' | grep -c 'in.candidates = m_engine.extensionSwitchCandidates();')" = "1" ] \
-    || bad "A10: candidates may be collected only with both flags on"
-[ "$(grep -c 'extensionSwitchCandidates()' "$FACADE")" = "1" ] || bad "A10: the candidates are asked from one place"
-[ "$(grep -c 'adoptExtensionSwitch(' "$FACADE")" = "1" ] || bad "A10: a switch is adopted from one place"
+has "$plan_fn" 'in.candidates = m_engine.extensionSwitchCandidates();' || bad "A10: the plan's candidates come from the engine"
+has "$(code "$ENGINE/ServiceEngine.h")" 'QList<WatchPlanCandidate> extensionSwitchCandidates() const { return {}; }' \
+    || bad "A10: the extension must get no candidate to switch to (one owner of the path)"
+[ "$(grep -c 'adoptExtensionSwitch' "$FACADE" "$ENGINE/ServiceEngine.cpp" "$ENGINE/ServiceEngine.h" | awk -F: '{s+=$2} END {print s}')" = "0" ] \
+    || bad "A10: nothing adopts a switch of the extension any more"
 resume_fn="$(body_of "$FACADE" 'void AvpnEngineQml::setupTunnelWatchResume()')"
-has "$resume_fn" 'if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false),' \
-    || bad "A10: the adopted node is checked by the app only where the app has a check (node_scan)"
-# Third review, T7: the evidence against the node that was left is filed under the network and the moment
-# of the switch itself (the extension tells both), not of the adoption; the engine is told separately
-# which network the phone is on now.
-adopt_op="$(printf '%s\n' "$resume_fn" | awk '/ops.adoptSwitch = /{on=1} on{print} on && /^    };/{exit}')"
-order "$adopt_op" 'm_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());' 'm_engine.adoptExtensionSwitch(' \
-    && has "$adopt_op" 'avpn::watchEvidenceNetKey(stamp.net, avpn::networkMemoryKey(QStringLiteral("cellular"), diagCarrier()),' \
-    && has "$adopt_op" 'stamp.atMs))' \
-    || bad "A10: the evidence must carry the network and the time of the switch the extension reported"
-has "$glue" 'metadata\["switch_ms"\] = made.atMs' && has "$glue" 'metadata\["switch_net"\] = made.net' \
-    || bad "A10: every status reply after a switch must say when and on which kind of network it was made"
-# Second review, R3: a switch is adopted from ANY status reply - the facade passes every changed session
-# to the hand-over object before its own identity rules; and a Reasserting -> Connected asks for a reply.
+has "$resume_fn" 'ops.adoptSwitch = \[\](const QString &, const avpn::WatchSwitchStamp &) { return false; };' \
+    && has "$resume_fn" 'ops.restartToChoice = \[\] {};' && has "$resume_fn" 'ops.forgetNode = \[\](const QString &) {};' \
+    || bad "A10: the hand-over's stage-2 effects must be inert"
 meta_ctx="$(code "$FACADE" | grep -A8 '&IosController::sessionMetadataChanged, this,')"
 order "$meta_ctx" 'm_watchResume->onSessionMetadata(metadata);' 'adoptNativeIdentity();' \
     || bad "A10: every status reply's session must reach the hand-over before the app's own identity rules"
@@ -374,48 +365,16 @@ order "$meta_ctx" 'm_watchResume->onSessionMetadata(metadata);' 'adoptNativeIden
     || bad "A10: the hand-over hears of a session change and of a Reasserting from one place each"
 has "$(code "$FACADE")" 'if (m_watchResume && avpn::sessionReasserted(s == Vpn::Connected, m_lastTunnelState == Vpn::Connecting, engineStateBefore))' \
     || bad "A10: a Reasserting is recognised by the tested rule, with the engine's state before the callback"
-# The hook needs the PREVIOUS tunnel state, so it sits before the cache is assigned; the hand-over object
-# therefore must not ask the cache at that moment (tested: tunnel_watch_check, the reviewer's case 3).
 order "$(code "$FACADE")" 'm_watchResume->onReasserted();' 'm_lastTunnelState = s; // AVPN' \
     || bad "A10: the Reasserting hook must run while the previous tunnel state is still known"
-has "$(code "$ENGINE/TunnelWatchResume.h")" 'begin(QStringLiteral("reasserted"), /\*connectedNow=\*/true);' \
-    || bad "A10: a Reasserting begins the hand-over without asking the facade's cached tunnel state"
-# Second review, R4: the way back to the user's choice is the ordinary restart, asked by the hand-over.
-back="$(printf '%s\n' "$resume_fn" | awk '/ops.restartToChoice = /{on=1} on{print} on && /^    };/{exit}')"
-has "$back" 'm_needsRestart = true;' && has "$back" 'm_restartOrigin = QStringLiteral("extension_return");' && has "$back" 'reconcile();' \
-    || bad "A10: the way back must be the facade's ordinary restart through reconcile"
-for token in 'clearPin' 'setPinned' 'm_savedPin' 'm_wantConnected' 'verifySucceeded' 'verifyFailed' 'onDead' 'guardedStart' 'guardedStop' 'm_tunnel' 'QTimer'; do
-    has "$back" "$token" && bad "A10: the way back must only ask for the ordinary restart ($token)"
-done
-facts="$(printf '%s\n' "$resume_fn" | awk '/ops.returnFacts = /{on=1} on{print} on && /^    };/{exit}')"
-has "$facts" 'in.nodeScanOn = featureEnabled(QStringLiteral("node_scan"), false);' \
-    && has "$facts" 'in.busy = m_opInFlight || m_needsRestart || m_paused || !uiForeground();' \
-    && has "$facts" 'm_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());' \
-    || bad "A10: the facts of the way back: the app's own check exists, nothing is in flight, on the screen, the evidence of THIS network"
-has "$plan_fn" 'm_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());' \
-    || bad "A10: every plan write must tell the engine which network the phone is on (evidence of another network excludes nothing)"
-# Second review, R5: no engine in the tunnel - the ordinary restart, by the tested decision.
 down_fn="$(body_of "$FACADE" 'void AvpnEngineQml::onTunnelEngineDown()')"
 order "$down_fn" 'if (!avpn::decideEngineDownRestart(in))' 'm_needsRestart = true;' && has "$down_fn" 'reconcile();' \
-    && has "$down_fn" 'in.foreground = uiForeground();' && has "$down_fn" 'in.restartPending = m_needsRestart;' \
     || bad "A10: an engine-down reply must lead to the ordinary restart, by decideEngineDownRestart"
 has "$ctor" '&IosController::tunnelEngineDown' && has "$ctor" '&AvpnEngineQml::onTunnelEngineDown' \
     || bad "A10: the facade must hear that the tunnel has no engine"
 down_ctx="$(code "$CONTROLLER" | grep -A3 'if (engineDown) {')"
 has "$down_ctx" 'emit tunnelEngineDown();' && has "$down_ctx" 'return;' && [ "$(count "$CONTROLLER" 'emit tunnelEngineDown()')" = "1" ] \
     || bad "A10: a reply without an engine must be told and judged by nothing else"
-# The engine: the node the extension left is evidence for one network, not a failure of the session.
-adopt_fn="$(body_of "$ENGINE/ServiceEngine.cpp" 'bool ServiceEngine::adoptExtensionSwitch(')"
-has "$adopt_fn" 'm_extEvidence.note(m_currentNodeId, netKey, atMs > 0 && atMs <= now ? atMs : now, now);' \
-    || bad "A10: the node the extension left must be kept as evidence for the network and the moment of the switch"
-has "$adopt_fn" 'm_extEvidenceNet = ' && bad "A10: adopting a switch must not decide which network the phone is on (the facade tells it)"
-has "$adopt_fn" 'm_failedThisSession' && bad "A10: an adopted switch must not mark the node failed for the session"
-[ "$(code "$ENGINE/ServiceEngine.cpp" | grep -c 'm_failedThisSession.contains\|m_failedThisSession.isEmpty\|, m_failedThisSession)')" = "0" ] \
-    || bad "A10: the engine's picks must read the exclusions through sessionExclusions() (failed in the session + fresh evidence)"
-for token in 'clearPin' 'setPinnedNode' 'm_savedPin' 'onDead' 'verifyFailed'; do
-    has "$(printf '%s\n' "$resume_fn" | awk '/ops.adoptSwitch = /{on=1} on{print} on && /^    };/{exit}')" "$token" \
-        && bad "A10: adopting a switch must not touch the pin or run the app's ladder ($token)"
-done
 cfg_start="$(body_of "$ENGINE/ConfigService.cpp" 'void ConfigService::start()')"
 order "$cfg_start" '#ifdef Q_OS_IOS' 'freezeCachedFeatures(c.features, /\*ios=\*/true);' \
     && has "$cfg_start" 'freezeCachedFeatures(c.features, /\*ios=\*/false);' \
@@ -535,7 +494,7 @@ order "$whoami" 'deferWhileTunnelWatchFrozen("whoami"' 'avpn::whoamiAttemptGate(
     || bad "A5: a late whoami attempt must wait for the snapshot before it is judged"
 has "$whoami" 'deferWhileTunnelWatchFrozen("whoami_reply"' || bad "A5: a whoami reply cut by a freeze must wait for the snapshot"
 verify="$(body_of "$FACADE" 'void AvpnEngineQml::verifyAttempt(')"
-order "$verify" 'deferWhileTunnelWatchFrozen("verify"' 'avpn::xrayVerifyTimeoutMsTuned()' \
+order "$verify" 'deferWhileTunnelWatchFrozen("verify"' 'm_engine.dataCheckMs()' \
     || bad "A5: a late verify attempt must wait for the snapshot before its budget is judged"
 has "$verify" 'deferWhileTunnelWatchFrozen("tiebreak_reply"' || bad "A5: a tiebreak reply cut by a freeze must wait for the snapshot"
 frozen="$(body_of "$FACADE" 'bool AvpnEngineQml::tunnelWatchFrozen(')"
@@ -598,8 +557,8 @@ has "$(body_of "$CONTROLLER" 'bool IosController::appIsActive() const')" 'applic
 # What the hand-over does with a verdict is tested (tunnel_watch_check: handOver). Here: the effects the
 # facade hands to it are what they claim to be and touch nothing else.
 # (The two effects of the way back - stage 2, checked in A10 - are the ordinary restart and its facts.)
-verdict_effects="$(printf '%s\n' "$setup" | awk '/ops.returnFacts = |ops.restartToChoice = /{skip=1} !skip{print} skip && /^    };/{skip=0}')"
-has "$verdict_effects" 'ops.adoptSwitch = ' && has "$verdict_effects" 'ops.forgetNode = ' && ! has "$verdict_effects" 'extension_return' \
+verdict_effects="$(printf '%s\n' "$setup" | grep -v 'ops.returnFacts = \|ops.restartToChoice = ')"
+has "$verdict_effects" 'ops.adoptSwitch = ' && has "$verdict_effects" 'ops.forgetNode = ' \
     || bad "A8: the scan of the verdict's effects lost its subject"
 for token in 'm_savedPin' 'clearPin' 'setPinned' 'm_wantConnected' 'verifySucceeded' 'verifyFailed' 'noteDataPlaneFailure' 'rememberNetworkPath' \
              'guardedStop' 'guardedStart' 'm_needsRestart' 'onDead' 'reconcile('; do
@@ -607,7 +566,7 @@ for token in 'm_savedPin' 'clearPin' 'setPinned' 'm_wantConnected' 'verifySuccee
 done
 has "$setup" 'ops.reenterVerifying = \[this\] { return m_engine.reenterVerifying(); };' || bad "A8: the engine's consent is the engine's own answer"
 order "$setup" 'ops.startVerification = \[this\] {' 'startDataPathVerification();' || bad "A8: the re-check must be the app's own data check"
-order "$setup" 'ops.forgetNode = ' 'avpn::networkMemoryForgetStored(' || bad "A8: forgetting the node is the per-network memory's own function"
+has "$setup" 'ops.forgetNode = \[\](const QString &) {};' || bad "A8: the app keeps no per-network memory of its own - the ledger records the re-check's outcome"
 resume_h="$(code "$ENGINE/TunnelWatchResume.h")"
 order "$resume_h" 'if (watchVerdictForgetsNode(w.verdict))' 'm_ops.forgetNode(nodeId);' \
     || bad "A8: the per-network memory forgets the node only on a verdict the judge confirmed"

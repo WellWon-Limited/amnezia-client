@@ -10,6 +10,7 @@
 #pragma once
 
 #include "TuningStore.h"
+#include "path/PathTunables.h"
 
 #include <QtGlobal>
 
@@ -269,6 +270,29 @@ inline VerifyStep verifyStepFor(bool httpOk, bool statsValid, qint64 rxBytes)
     if (!statsValid)
         return VerifyStep::AcceptedWithoutStats;
     return VerifyStep::KeepTrying;
+}
+
+// Path engine, stage 1 (design 2026-11-17): the numbers of one connect attempt (path/PathTunables.h holds the
+// compiled defaults, measured on the iPhone Air 17-18.11). Every number is a server number with a clamp:
+//   attempt_awg_start_ms 4500 [2000..20000], attempt_xray_start_ms 5000 [2000..20000],
+//   attempt_provider_start_ms 6000 [2000..20000], attempt_data_check_ms 4000 [1500..15000],
+//   attempt_budget_ms 45000 [10000..120000], attempt_max_paths 12 [1..32], attempt_stop_confirm_ms 10000
+//   [2000..30000].
+inline path::AttemptTimings attemptTimingsTuned()
+{
+    const path::AttemptTimings d;
+    const auto num = [](const char *key, int def, int lo, int hi) {
+        return qBound(lo, int(TuningStore::numberOr(QLatin1String(key), def)), hi);
+    };
+    path::AttemptTimings t = d;
+    t.awgStartMs = num("attempt_awg_start_ms", d.awgStartMs, 2000, 20000);
+    t.xrayStartMs = num("attempt_xray_start_ms", d.xrayStartMs, 2000, 20000);
+    t.providerStartMs = num("attempt_provider_start_ms", d.providerStartMs, 2000, 20000);
+    t.dataCheckMs = num("attempt_data_check_ms", d.dataCheckMs, 1500, 15000);
+    t.budgetMs = num("attempt_budget_ms", d.budgetMs, 10000, 120000);
+    t.maxPaths = num("attempt_max_paths", d.maxPaths, 1, 32);
+    t.stopConfirmMs = num("attempt_stop_confirm_ms", d.stopConfirmMs, 2000, 30000);
+    return t;
 }
 
 // Upstream nodes (plan provider-pool v2, point 6; CONNECT-INVARIANTS §1, §17.2): the lease acquire runs

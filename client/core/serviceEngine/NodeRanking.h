@@ -46,7 +46,7 @@ inline int barsForNode(int rttMs) { return SignalQuality::barsForRtt(rttMs); }
 //  - the node carrying the tunnel with the live probe confirmed dead: red bars, no figure;
 //  - a provider node: its list figure only (nodePool: the Scanner's latest result on this network), else none -
 //    never the probe through the tunnel (owner 17.11);
-//  - our own node carrying the tunnel: the live probe (at least one bar while it has not answered yet);
+//  - our own node carrying the tunnel: the live probe once it has a figure (no bars next to a dash), else its list figure;
 //  - any other own node: its off-tunnel ICMP figure, else none.
 struct NodeFigure {
     int ms = -1;
@@ -62,9 +62,10 @@ inline NodeFigure nodeFigure(bool upstream, bool currentLive, bool liveReachable
         f.failed = true;
         return f;
     }
-    if (currentLive && !upstream) {
-        f.bars = liveReachable ? std::max(1, liveBars) : 1;
-        f.ms = liveReachable && liveRttMs >= 0 ? liveRttMs : -1;
+    // Live bars only with a live figure: the connected row never shows green bars next to a dash.
+    if (currentLive && !upstream && liveReachable && liveRttMs >= 0) {
+        f.bars = std::max(1, liveBars);
+        f.ms = liveRttMs;
         return f;
     }
     if (listRttMs >= 0) {

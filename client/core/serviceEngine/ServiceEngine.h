@@ -11,12 +11,10 @@
 #include "Identity.h"
 #include "NodePool.h"
 #include "NodeRotation.h"
-#include "Selector.h"
 #include "Switcher.h"
 #include "TransportModeGate.h"
-#include "TransportPick.h"
 #include "TunnelWatchPlan.h"
-#include "TunnelWatchStatus.h"
+#include "path/AttemptOwner.h"
 #include "dto/Subscription.h"
 
 #include <QByteArray>
@@ -41,12 +39,12 @@ enum class EngineState { Disconnected, Selecting, Connecting, Verifying, Connect
 // трогаем (равная ревизия каждые ~20 с вымывала его), фасаду — ни changed(), ни persistPin, ни проб.
 enum class ReseedResult { Applied, Deferred, Rejected, Unchanged };
 
-// 5.1.109 (R7): result of ServiceEngine::shiftSwitchClock.
-enum class SwitchClockResync { NoPhase, Shifted, AlreadyShifted };
-
 class ServiceEngine {
 public:
-    ServiceEngine() : m_switcher(nullptr) {}
+    ServiceEngine() : m_switcher(nullptr), m_owner(path::AttemptTimings{})
+    {
+        m_net.observe(path::NetworkObservation{}); // "unknown" until the platform tells the network (observeNetwork)
+    }
 
     // Платформенный туннель-адаптер (владение — у вызывающего).
     void setTunnel(ITunnelControl *tunnel) { m_tunnel = tunnel; m_switcher = Switcher(tunnel); }
@@ -188,19 +186,12 @@ public:
     QString currentNodeId() const { return m_currentNodeId; }
 
     // ---- Upstream nodes (plan provider-pool v2, lane L1; CONNECT-INVARIANTS proposal §31) ----
-    // excludeForAttempt: the start of an upstream node failed BEFORE its tunnel came up (no seat, refused,
-    // bad or no answer) - the tunnel adapter calls it right before it reports the tunnel Error, so the
-    // restart of this attempt (reconcile -> connect, or the engine's own switch) never picks the same
-    // node again: excluded from every pick of this attempt (also from the retry without session
-    // exclusions) and counted as a failure of its tier. Cleared by requestStop() (a new attempt), pruned
-    // by a pool refresh. code = a stable code for the switch log, never a credential.
-    void excludeForAttempt(const QString &nodeId, const QString &code);
-    QString attemptExclusionCode(const QString &nodeId) const { return m_attemptExcluded.value(nodeId); }
-    bool hasAttemptExclusions() const { return !m_attemptExcluded.isEmpty(); }
-    // The lease owner said the running upstream session must leave its node (terminal answer, no seat on
-    // a re-acquire, the seat of a provisional start never confirmed): step 3 of the §20 ladder through
-    // the reconcile owner's dead-session path (the facade calls it deferred). The node is excluded for
-    // the attempt. false = nothing to leave (not connected on an upstream node).
+    // The start of a provider node was refused BEFORE its tunnel came up (no seat, refused, bad or no answer):
+    // the tunnel adapter calls it right before it reports the tunnel Error. It is an outcome of the leg for the
+    // attempt owner (no seat / refused - recorded in the ledger as a short cooldown, never the network ladder).
+    void noteStartRefused(const QString &nodeId, const QString &code);
+    // The lease owner said the running upstream session must leave its node: the live session is lost (refused /
+    // no seat recorded) and the failover attempt walks on without it. false = not connected on an upstream node.
     bool leaveUpstreamNode(const QString &code, const QString &detail = QString());
     bool currentNodeIsUpstream() const;
     // upstream_revision of the subscription in force (0 = none).
@@ -208,72 +199,50 @@ public:
     // The node by id (the tunnel adapter builds an upstream bring-up from it). nullptr = not in the pool.
     const SubscriptionNode *nodeById(const QString &nodeId) const { return findNode(nodeId); }
     // Standby-pack candidates (UpstreamEngine.h::standbyPackCandidates, computed by the facade): merged
-    // after the subscription's nodes into every pick, the pin and the debug rows. Empty = none.
+    // after the subscription's nodes into the candidates of every choice and the debug rows. Empty = none.
     void setStandbyCandidates(const QList<SubscriptionNode> &nodes);
     const QList<SubscriptionNode> &subscriptionNodes() const { return m_pool.nodes(); }
     const QList<SubscriptionNode> &candidateNodes() const { return m_merged; }
-    // A start of this attempt failed before its tunnel came up (native error, protocol error, start
-    // watchdog): with upstream candidates in the pool it counts as a failure of the node's tier (the
-    // tier rule must see own nodes fail in a whitelist window) and the node is not retried in the
-    // attempt. Switch off or no upstream candidate = no-op (the behaviour before: §29.7).
-    void noteStartFailedForTier(const QString &why);
-    // A user start / stop: a new attempt - its exclusions are forgotten. The engine's own stops inside
-    // one attempt (watchdog, restart) keep them.
-    // Build 142 (S5, DebugSnapshot.h::decideAwgNoHandshake): an own Auto start on AmneziaWG got no handshake
-    // at the first native timeout. The attempt's TRANSPORT BAN is one piece of attempt state (m_awgBanned)
-    // with one reader (bannedByAttempt) that every pick consults: pickTransport (connect, the pin, failover,
-    // reseed), the row-tap hint, network memory, the interrupted-switch replay and the legacy pickers. It
-    // is not an attempt exclusion: the "every candidate failed" reset of connect() and a pool refresh do not
-    // touch it. It ends with the attempt (beginUserAttempt: a user start / stop) and on any action of the
-    // person on the intent (clearAwgBan from the facade: a pick, a row tap, «Авто»); our own stops keep it.
-    // At the top of connect() it yields when this start could take no Xray at all (a refresh removed them, the
-    // AmneziaWG mode chosen by hand, a pinned location without one) - before any pick, so the pin keeps
-    // priority; failed Xray starts are retried, never AmneziaWG. The provider tier rule reads the ban too
-    // (UpstreamTierGate::ineligible): banned nodes are not candidates of any tier.
-    // xrayPickWithoutAwg: a capability - with every own AmneziaWG node out, THIS start (its mode, its pinned
-    // location if any) could take an Xray node at all; failures of the attempt are not absence.
-    bool xrayPickWithoutAwg() const;
-    void banAwgForAttempt();
-    void clearAwgBan() { m_awgBanned = false; }
-    bool awgBanned() const { return m_awgBanned; }
-    bool bannedByAttempt(const SubscriptionNode &n) const;
-    void beginUserAttempt()
-    {
-        m_attemptExcluded.clear();
-        m_awgBanned = false; // build 142 (S5): the transport ban ends with the attempt
-        clearAttemptOrder(); // AVPN Scanner: a hint belongs to the attempt it was given for
-    }
-    // ---- AVPN Scanner (CONNECT-INVARIANTS §32 п. 2, plan scanner-client-plan.md §2.12) ----
-    // A row tap's one-attempt order hint: the visible order after the country filter, starting after the
-    // tapped row. The existing ladder consults it in this attempt only, before its own pick: step 3 of
-    // onDead (another node), and connect()/nextCandidate() when the pinned node itself cannot be raised.
-    // A hinted node is taken only when it is a candidate the ladder could take anyway (supported, alive,
-    // allowed by the transport mode, not failed in this session or excluded in this attempt). Gone after
-    // ttlMs, on beginUserAttempt() (a user start / stop / another tap), when data passed (verifySucceeded,
-    // a Connected without a verify phase) and on an adoption. requestStop() keeps it: the restart that
-    // moves a live tunnel onto the tapped row runs through requestStop. No timer, no I/O.
-    void setAttemptOrder(const QStringList &order, qint64 ttlMs);
-    QStringList attemptOrder() const; // the live hint ("" entries dropped, expired = empty)
-    void clearAttemptOrder()
-    {
-        m_attemptOrder.clear();
-        m_attemptOrderUntilMs = -1;
-    }
-    // The target of the engine's own two-phase switch while its down phase runs ("" = none).
-    QString pendingSwitchNodeId() const { return m_pendingSwitchNodeId; }
-    // Nodes whose data plane failed since the last stop (the ladder does not go round them).
-    QSet<QString> failedThisSession() const { return m_failedThisSession; }
+
+    // ---- Path engine, stage 1 (design 2026-11-17; path/*.h) ----------------------------------------------
+    // ONE owner of every connect attempt (path::AttemptOwner) and ONE evidence store (path::PathLedger, per
+    // local network). connect() begins an attempt for the user's choice; the owner brings candidates up one at a
+    // time through this engine (up/down of the tunnel adapter), judges each by its start deadline and by one
+    // in-tunnel data check (Verifying), records attributable outcomes and ends with one result. The facade
+    // feeds: the network (observeNetwork), a tick (attemptTick), the tunnel callbacks (onTunnel*), the data
+    // check (verify*), and reads the result (takeAttemptResult) and the journal lines (takeAttemptJournal).
+    // The choice: Auto / preferred country / exact server (path::UserChoice); the transport mode is stronger.
+    void setUserChoice(const path::UserChoice &c) { m_choice = c; }
+    const path::UserChoice &userChoice() const { return m_choice; }
+    // Every observation of the platform's network (tunnel down medium, fingerprint). A new local key = a new
+    // generation: an attempt in flight restarts on the new network, late answers of the old one change nothing.
+    void observeNetwork(const path::NetworkObservation &o);
+    const path::NetworkKey &network() const { return m_net.current(); }
+    void attemptTick();
+    bool attemptRunning() const { return m_owner.running(); }
+    // "checked N of M" of the running attempt (0/0 = no walk).
+    int attemptChecked() const { return m_owner.running() ? m_owner.progressDone() : 0; }
+    int attemptTotal() const { return m_owner.running() ? m_owner.progressTotal() : 0; }
+    // The data check deadline of a leg (the facade's checks finish inside it).
+    int dataCheckMs() const { return m_owner.timings().dataCheckMs; }
+    std::optional<path::AttemptResult> takeAttemptResult() { return std::exchange(m_lastResult, std::nullopt); }
+    QStringList takeAttemptJournal() { return std::exchange(m_attemptJournal, QStringList()); }
+    // The ledger (persisted by the facade: QSettings avpn/pathLedger).
+    void loadPathLedger(const QByteArray &json) { m_ledger = path::PathLedger::fromJson(json); m_ledgerDirty = false; }
+    QByteArray pathLedgerJson() const { return m_ledger.toJson(); }
+    bool pathLedgerDirty() const { return m_ledgerDirty; }
+    void clearPathLedgerDirty() { m_ledgerDirty = false; }
+    // The state of a node on the current network ("working" / "unknown" / "suspect" / "dead").
+    QString pathStateHere(const QString &nodeId) const;
+    // Nodes that failed on the current network (suspect / dead) and the newest working one ("" = none) -
+    // the Scanner's plan reads them instead of its own caches.
+    QSet<QString> pathsFailedHere() const;
+    QString bestWorkingPathHere() const;
+    // Test hook: attempt numbers without TuningStore.
+    void setAttemptTimingsForTest(const path::AttemptTimings &t) { m_timingsForTest = t; }
+
     // The subscription in force (account fields + the device's tunnel address; nodes via candidateNodes()).
     const Subscription &subscription() const { return m_pool.subscription(); }
-    // "Own tier pre-exhausted by evidence" (UpstreamTier.h::decideFastTierOpen): the facade hands the
-    // reachability evidence it has before each start; connect() decides for THIS attempt (a pin / manual
-    // pick never), logs one line, and the tier gate then treats every own node as freshly failed on this
-    // network - Auto commits to the upstream tier without starting an own node. The next connect()
-    // decides again on fresh evidence.
-    void setFastTierEvidence(const FastTierEvidence &e) { m_fastEvidence = e; }
-    bool fastTierOpen() const { return m_fastTierOpen; }
-    QString fastTierWhy() const { return m_fastTierWhy; }
-
     // AVPN awg31-xray-v1: транспорт текущей ноды ("awg"/"xray"; пусто = нет текущей) и её локация.
     QString currentNodeProto() const;
     bool currentNodeIsXray() const { return isXrayProto(currentNodeProto()); }
@@ -289,7 +258,7 @@ public:
     //                       (у него handshake-критерий HealthLoop). true = произошёл свитч.
     // Все — без I/O; переходы туннеля, как всегда, приходят колбэками onTunnel*().
     bool isVerifying() const { return m_state == EngineState::Verifying; }
-    bool verifySucceeded();
+    bool verifySucceeded(int ttfbMs = -1);
     // reason: failover reason for onDead; any non-health-DEAD reason goes straight to step 3 of
     // the ladder (other transport of the same location, then another location).
     bool verifyFailed(const QString &reason = QStringLiteral("verify failed (failover)"));
@@ -305,56 +274,10 @@ public:
     // in the transport history at most once per rise and without a time to traffic. Compiled for every
     // platform, called only from the facade's Q_OS_IOS block (PLATFORM-SCOPING §2).
     bool reenterVerifying();
-    // AVPN (iOS data watch, build 141, stage 2). The nodes the packet tunnel extension may switch to in
-    // place while the app sleeps - the engine's own failover order with what the extension cannot raise
-    // taken out (TunnelWatchCandidates.h), only nodes whose DNS, MTU and routed ranges equal the current
-    // node's, each with its own half of the tunnel configuration. Empty when the current node is unknown.
-    QList<WatchPlanCandidate> extensionSwitchCandidates() const;
-    // The extension moved the tunnel to `nodeId`. Only in Connected / Verifying, only to another node of
-    // the pool: that node becomes the current one, the health sample and the heal budget start over. The
-    // node it left is NOT marked failed for the session: the extension's proof is about one network and
-    // it ages - it is kept as evidence for `netKey` for half an hour (WatchEvidence), and while it is
-    // fresh on that network the engine's own picks skip the node. Not a step of the app's ladder: no DEAD,
-    // no failure streak, no transport history; the pin, the intent and the mode are not touched.
-    // `verify`: back to Verifying - the facade then runs its own data check before "Connected" is shown.
-    // Compiled for every platform, called only from the facade's Q_OS_IOS block.
-    // `netKey`, `atMs`: the network and the moment the extension left the node (0 = now).
-    bool adoptExtensionSwitch(const QString &nodeId, bool verify, const QString &netKey, qint64 atMs = 0);
-    // The network the phone is on now (the facade's network-memory key): evidence made on another
-    // network excludes nothing here.
-    void setExtensionEvidenceNetwork(const QString &netKey) { m_extEvidenceNet = netKey; }
-    // What the way back to the user's choice needs to know (TunnelWatchStatus.h::decideExtensionReturn):
-    // the extension took the session out of the pinned location and it is still out; an ordinary start
-    // would raise that location; the evidence against the node the user was on is still fresh here.
-    struct ExtensionReturnFacts {
-        bool movedByExtension = false;
-        bool pinRaisable = false;
-        bool evidenceFresh = false;
-    };
-    ExtensionReturnFacts extensionReturnFacts() const;
+    // AVPN (iOS data watch, stage 2): the extension never switches in place - the attempt owner is the only one
+    // that chooses a path (design 2026-11-17 §4). The plan's candidate list is always empty.
+    QList<WatchPlanCandidate> extensionSwitchCandidates() const { return {}; }
     bool feedProbeResult(bool ok);
-
-    // Plan v3 step 5 (features.node_scan, set by the facade before each user start): every
-    // transport, not only xray, enters Verifying after the platform reports the tunnel up; the
-    // facade verifies the data path with GET /v1/whoami and calls verifySucceeded (data proven),
-    // verifyFailed (next path) or verifyInconclusive (not decided: connected, streak untouched).
-    // Off (default) = the previous behaviour: awg is Connected at once, xray verifies.
-    void setVerifyEveryTransport(bool on) { m_verifyEveryTransport = on; }
-    bool verifyEveryTransport() const { return m_verifyEveryTransport; }
-
-    // Plan v3 step 5: network memory - the node that last carried data on the current network
-    // (facade: QSettings avpn/netMemory, NetworkMemory.h). connect() takes it as the first
-    // candidate right after the manual choice when it is in the pool, alive, allowed by the
-    // transport mode, not manual_only/RU (§14.3) and not failed in this session. Empty = none.
-    void setNetworkMemoryNode(const QString &nodeId) { m_networkMemoryNodeId = nodeId; }
-    QString networkMemoryNode() const { return m_networkMemoryNodeId; }
-    // Owner test 06.11: the remembered node is used only with a fresh measured RTT (it is in the
-    // current selection pool). Why it was not used: "" (used or none) | "unreachable" (no fresh RTT)
-    // | "ineligible" (not in the pool/mode/alive/failed this session).
-    QString networkMemorySkipReason() const;
-    // The node the last connect() raised because of the network memory and that has not come up yet
-    // (cleared on the tunnel coming up and on stop). The facade forgets it when that start fails.
-    QString networkMemoryStartNode() const { return m_networkMemoryStartNodeId; }
 
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
@@ -408,25 +331,6 @@ public:
     // Journal lines of the gate (and of the pin rule) since the last call - the facade writes them.
     QStringList takeModeJournal() { return m_modeGate.takeJournal(); }
 
-    // AVPN awg31-xray-v1: локальная история транспортов (EWMA успеха/времени до трафика по паре
-    // локация×proto, TransportPick.h). Персистит фасад (QSettings avpn/transportHistory):
-    // load на старте, serialize — когда transportHistoryDirty().
-    //  recordTransportOutcome(ok) — исход подъёма ТЕКУЩЕЙ ноды: ok=true на реальном Connected
-    //    (awg — фасад на Vpn::Connected; xray — сам движок в verifySucceeded), ok=false на провале
-    //    (Error при старте — фасад; DEAD/verify/probe — сам движок). Один успех и один провал на
-    //    сессию подъёма (повторы игнорируются). true = записано.
-    const TransportHistory &transportHistory() const { return m_transportHistory; }
-    TransportHistory &transportHistory() { return m_transportHistory; }
-    void loadTransportHistory(const QByteArray &bytes)
-    {
-        m_transportHistory = TransportHistory::deserialize(bytes);
-        m_historyDirty = false;
-    }
-    QByteArray transportHistoryJson() const { return m_transportHistory.serialize(); }
-    bool transportHistoryDirty() const { return m_historyDirty; }
-    void clearTransportHistoryDirty() { m_historyDirty = false; }
-    bool recordTransportOutcome(bool ok);
-
     // AVPN (live-node picker): ручной выбор/ротация поверх авто-логики.
     //  setPinnedNode(nodeId) — «Выбрать»: только закрепляет узел (m_pinnedNodeId=nodeId), НЕ коннектит.
     //    Модель «выбор = задать цель, коннект — кнопкой»: следующий connect() (orb «Connect») поднимет
@@ -447,7 +351,7 @@ public:
     // фасад использует для «Обновить подключение» через единый reconcile). Пусто = некуда ротировать.
     QString nextLiveNodeId() const;
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
-    bool hasConnectablePin() const { return pinnedCandidate() != nullptr; }
+    bool hasConnectablePin() const;
     // 5.1.109: the pinned location has connectable nodes but none of them serves transport mode
     // `mode` (read as effectiveTransportMode) - the no_transport refusal of setPinnedNode (which
     // normalizes the stored mode first), without its side effects (setPinnedNode also drops the
@@ -466,7 +370,7 @@ public:
     // flicker show it only when the choice is deterministic (pin or a manual transport mode).
     // 5.1.109: the pick helpers read the effective mode (transportMode()), as connect() does after
     // normalizeTransportMode() - test transport_pick_check §15.
-    const SubscriptionNode *nextCandidate() const;
+    const SubscriptionNode *nextCandidate() const; // the owner's first choice now (PathSelect), no side effect
     QString pinnedLocation() const;                           // AVPN awg31-xray-v1
     // AVPN (RU-нода): закреплена ли сейчас РФ-нода (countryCode==RU). RU достижима ТОЛЬКО через ручной pin
     // (авто-выбор её исключает) → по этому флагу RU-direct-сплит отключается (full-tunnel через РФ).
@@ -474,7 +378,7 @@ public:
     // AVPN: снять закрепление (вернуться в авто). «Авто (быстрейший)» (reprobe) и ручная ротация
     // (rotateNext) снимают pin — иначе connect() всегда отдаёт приоритет закреплённой ноде, и
     // возврат-в-авто / offline-ротация молча ломаются (reselect закреплённой).
-    void clearPin() { m_pinnedNodeId.clear(); }               // AVPN
+    void clearPin() { m_pinnedNodeId.clear(); m_choice = path::UserChoice::automatic(); } // AVPN: back to Auto
 
     // AVPN: правдивый статус. up() ставит туннель в очередь (async), поэтому connect() остаётся в
     // Connecting; реальные переходы прилетают из VpnConnection::connectionStateChanged через
@@ -485,7 +389,7 @@ public:
     //  onTunnelDisconnected() — туннель отключился (Connected/Verifying/… → Disconnected, без свитча).
     // Возвращают true, если фаза изменилась (вызывающий шлёт changed()).
     bool onTunnelConnected();
-    bool onTunnelError();
+    bool onTunnelError(bool tunnelGone = false); // tunnelGone: the Error proves the tunnel is down (desktop)
     bool onTunnelDisconnected();
 
     // AVPN (Android-адопт): туннель ФАКТИЧЕСКИ жив (AndroidController::initConnectionState после
@@ -507,42 +411,6 @@ public:
     {
         return {m_sessionHintNodeId, m_sessionHintProto, m_sessionHintEndpoint};
     }
-
-    // Poll independently of health sampling (including when the uplink is offline).
-    // AVPN (фикс-волна 2026-09-22, K5/B4): часы свитча — ПО ФАЗАМ: фаза down (ждём Disconnected
-    // старого рантайма) — бюджет timeoutMs; фаза up (up() на цель отправлен) — часы перезапускаются,
-    // бюджет max(timeoutMs, reconcileWatchdogMsTuned()) — не меньше сторожа коннекта. Истечение →
-    // Error + interruptedSwitch (фасад повторяет старт с анти-зацикливанием, намерение НЕ снимает).
-    bool expireSwitch(int timeoutMs = 30000);
-    // 5.1.109 (R7): the app process was frozen (iOS suspension, laptop sleep) for frozenMs - the time of
-    // the running switch phase did not pass for us: its clock moves forward by the freeze (never past
-    // now) so the deadline is judged on time we could observe. The facade calls it from a late tick
-    // (DebugSnapshot.h::decideDeadlineTick) and asks for a fresh status. false = no phase clock runs.
-    // At most once per phase (R7a): later late ticks of the same phase return AlreadyShifted and the
-    // deadline is judged normally - worst case one extra interval. A shift in the up phase also marks
-    // the up() as frozen (R7d: no time-to-traffic sample). expireSwitch clamps a future start (R7c).
-    SwitchClockResync shiftSwitchClock(qint64 frozenMs);
-    // R7d: the start watchdog re-armed after a freeze - the current up() has no honest time to traffic.
-    void noteAppFrozenDuringUp() { m_upFrozen = true; }
-    bool switchInUpPhase() const { return m_state == EngineState::Switching && m_switchUpPhase; }
-
-    // AVPN (фикс-волна 2026-09-22, K5/B4/B5): внутренний свитч/failover движка прерван (Error или
-    // дедлайн фазы). Фасад по hasInterruptedSwitch() понимает, что шёл НАШ свитч (не внешний обрыв):
-    // намерение сохраняется, следующий старт — после подтверждённого down, с анти-зацикливанием.
-    //  interruptedSwitchTarget() — цель, которую стоит повторить (прервано в фазе down: цель ещё не
-    //    пробовали — в том числе переподъём той же ноды, шаг 2 лестницы; фаза up переподъёма в окне
-    //    grace смены сети — тоже: сеть не готова, нода не виновата); пусто — цель провалила подъём
-    //    (фаза up: нода в сессионных провалах). connect() сам предпочитает сохранённую цель
-    //    (одноразово), авто-выбор повтора ранжирует по failoverRtt (свежий поверх последнего
-    //    известного: в connected замеров не было), сессию лечения той же ноды и счётчик провалов
-    //    data-plane НЕ сбрасывает (повтор — не действие пользователя); запись сбрасывается там же и
-    //    в requestStop()/setPinnedNode()/адопте.
-    //  interruptedSwitchCause() — "error_down" / "error_up" / "deadline_down" / "deadline_up".
-    bool hasInterruptedSwitch() const { return m_interrupted.active; }
-    QString interruptedSwitchTarget() const { return m_interrupted.target; }
-    QString interruptedSwitchReason() const { return m_interrupted.reason; }
-    QString interruptedSwitchCause() const { return m_interrupted.cause; }
-    void clearInterruptedSwitch() { m_interrupted = InterruptedSwitch{}; }
 
     // AVPN: пользователь нажал «стоп». Помечаем НАМЕРЕННОЕ отключение (state→Disconnected,
     // сбрасываем текущую ноду) ДО m_tunnel.down(), иначе прилетевший Disconnected уйдёт в
@@ -567,12 +435,6 @@ public:
     // (телеметрия benchExtra: паттерн «оператор×нода×heal помог/нет» ищется по отчётам).
     int rebindHealTries() const { return m_rebindHealTries; }
 
-    // AVPN (независимое ревью волны, MAJOR-1): подряд идущие провалы data-plane за сессию
-    // (health-DEAD / провал verify / провал живой пробы) и признак «кап исчерпан» — движок ушёл в
-    // Error вместо очередного круга failover. Сбрасываются успешной пробой через туннель
-    // (verifySucceeded / feedProbeResult(true)) и явным действием пользователя (connect/stop/адопт).
-    int dataPlaneFailStreak() const { return m_dataPlaneFailStreak; }
-    bool dataPlaneExhausted() const { return m_dataPlaneExhausted; }
     int rebindHealTotal() const { return m_rebindHealTotal; }
     TunnelStats currentStats() const { return m_tunnel ? m_tunnel->readStats() : TunnelStats{}; }
 
@@ -593,46 +455,25 @@ private:
     bool ensureSubscription(QNetworkAccessManager *nam, const QString &baseUrl,
                             SecureAppSettingsRepository *store, QString &error);
 
-    // tunnelStillUp=true (health-DEAD из tick — туннель ещё «поднят») → down()→ждём Disconnected→up();
-    // false (failover из реального Disconnected/Error — туннель уже опущен) → up() сразу.
-    // reason — для switchLog (dead / verify failed / probe failed).
-    // AVPN (фикс-волна 2026-09-22, B6): лестница лечения на health-DEAD при живом туннеле —
-    // шаг 1 rebind (новый порт в NE, кап rebind_heal_max_tries, отказ NE → шаг пропускается);
-    // шаг 2 переподъём ТОЙ ЖЕ ноды (down→up, кап dead_reup_max_tries, kill-switch
-    // features.dead_reup_same_node); шаг 3 — другая нода, сначала та же локация, RTT — последний
-    // известный (с пометкой возраста). Неизвестная identity: шаг 1, затем авто-выбор из пула.
-    bool onDead(bool tunnelStillUp, const QString &reason = QString()); // выбрать кандидата (исключая текущую) и переключиться
+    // The live session stopped carrying data (health DEAD, a failed live probe or re-check) or went away
+    // (tunnelStillUp=false). Step 1 (B6) - rebind the socket on the same node (AmneziaWG, rebind_heal_max_tries,
+    // a refusal of the NE skips it) - stays here. Otherwise the failover is a new attempt of the owner
+    // (loseLiveSession): the first health DEAD of a node within its re-up budget (dead_reup_max_tries) does not
+    // blame it, so the attempt raises it again first (step 2); a proven dead data plane is recorded and the
+    // attempt walks on without it (step 3). reason - for the switch log.
+    bool onDead(bool tunnelStillUp, const QString &reason = QString());
 
-    // AVPN (live-node picker): backend-фолбэк выбор по max weight среди ЖИВЫХ нод, исключая exclA/exclB
-    // (мёртвая/текущая). Живой = health-агрегат > 0; пустой health = живой (бэкенд провижинит живыми).
-    // Не делает I/O (в отличие от Selector::pick) — чистый выбор по данным подписки. nullptr = нет.
-    // Легаси-цепочка (kill-switch transport_auto_pick=false).
-    const SubscriptionNode *pickByWeight(const QString &exclA, const QString &exclB) const; // AVPN
-
-    // AVPN (выбор по скорости): среди ЖИВЫХ нод (health-агрегат > 0, исключая exclA/exclB) выбрать с
-    // МИНИМАЛЬНЫМ измеренным RTT (m_measuredRtt, off-tunnel ICMP). nullptr = ни одна не измерена → caller
-    // откатывается на Selector::pick/pickByWeight. Без I/O (использует уже накопленный кэш — CONNECT-INVARIANTS §1).
-    // Легаси-цепочка (kill-switch transport_auto_pick=false).
-    const SubscriptionNode *pickByMeasuredRtt(const QString &exclA, const QString &exclB) const; // AVPN
-
-    // AVPN awg31-xray-v1: выбор транспорта по локациям (TransportPick.h) — pin-локация / та же
-    // локация при failover / соседние; учитывает ручной режим, сессионные провалы, историю.
-    // withExclusions=false — повторная попытка без сессионных провалов (иначе «нет нод» после
-    // круга failover'ов). nullptr = кандидатов нет.
-    // useLastKnownRtt=true (failover) — RTT без TTL (свежий поверх последнего известного).
-    const SubscriptionNode *pickTransport(const QString &preferLocation, const QString &preferNodeId,
-                                          const QString &exclA, bool withExclusions,
-                                          bool useLastKnownRtt = false) const;
-    QSet<QString> awgNodeIds() const; // build 142 (S5): every own AmneziaWG node of the candidates
-    QHash<QString, int> failoverRtt() const;
-    // Upstream nodes: the tier gate of the automatic pick (disabled while features.upstream_nodes is off).
-    UpstreamTierGate tierGate() const;
+    // The pool of the attempt owner: supported, alive nodes as paths (path::pathCandidateFromNode).
+    QList<path::PathCandidate> pathPool() const;
+    path::SelectionContext ownerContext() const;
+    void feedOwner(const path::AttemptEvent &ev);
+    void applyOwnerEffects(const QList<path::AttemptEffect> &effects);
+    void attemptJournal(const QString &line);
+    path::AttemptTimings attemptTimings() const;
+    // A live session is gone or no longer carries data (health DEAD after the heal steps, the data check of a
+    // live session failed, the lease asked to leave): the failover attempt through the owner.
+    void loseLiveSession(path::PathOutcome outcome, bool tunnelGone, bool restart, const QString &why);
     const SubscriptionNode *findNode(const QString &nodeId) const;
-    const SubscriptionNode *pinnedCandidate() const;
-    const SubscriptionNode *networkMemoryCandidate() const; // plan v3 step 5
-    // AVPN Scanner: the first node of the live attempt-order hint the ladder may take (see setAttemptOrder);
-    // `exclude` = the node being left. nullptr = no hint or no usable hinted node.
-    const SubscriptionNode *hintedCandidate(const QString &exclude) const;
     bool anySupportedNode() const;
     // 5.1.109: can location `loc` be raised at all / under transport mode `mode` (the rule of
     // setPinnedNode and pinLacksTransport). anySupported - a connectable node of any proto.
@@ -643,8 +484,6 @@ private:
     ModeChange applyGateOutcome(const TransportModeGate::Outcome &o);
     ModeActivity withEnginePhase(ModeActivity a) const;
     void judgeAdoptedSession(const QString &sessionProto, bool adoptedNow);
-    // Провал data-plane текущей ноды: история + сессионный список провалов.
-    void noteDataPlaneFailure();
     // AVPN awg31-xray-v1 (reseed): применимо ли тело сейчас (терминал ИЛИ текущая/целевая нода без изменений).
     bool reseedApplicableNow(const Subscription &sub) const;
     static bool sameNodeIdentity(const SubscriptionNode &a, const SubscriptionNode &b);
@@ -668,19 +507,9 @@ private:
     void noteHealStep();
     void noteHealthyTick(const TunnelStats &stats, qint64 nowEpoch);
     bool applyLoadedSubscription(const Subscription &sub);
-    // Внутренний свитч прерван (Error/дедлайн): фиксируем для фасада (см. hasInterruptedSwitch).
-    void noteSwitchInterrupted(const QString &cause);
-
-    // AVPN (фикс iOS-шторма свитча): двухфазный секвенс-свитч. requestSwitch ставит m_state=Switching
-    // (→ transient Disconnected/Error от down() НЕ запускает failover) и: при tunnelUp — down(), ждём
-    // реальный Disconnected (onTunnelDisconnected→continuePendingSwitch→up); при !tunnelUp — up() сразу.
-    // НЕЛЬЗЯ up() сразу после down() на iOS (NEVPNManager «Operation Cancelled»). reason — для switchLog.
-    bool requestSwitch(const QString &targetNodeId, bool tunnelUp, const QString &reason); // AVPN
-    bool continuePendingSwitch(); // AVPN: поднять up() на отложенную целевую ноду (туннель уже опущен)
 
     Identity      m_identity;
     NodePool      m_pool;
-    Selector      m_selector;
     bool          m_lkgActive = false; // AVPN (LKG): пул наполнен из дискового кэша, свежего фетча ещё не было
     Switcher      m_switcher;
     HealthLoop    m_health;
@@ -694,14 +523,6 @@ private:
     QHash<QString, RttSample> m_rttLastKnown; // последний известный замер без TTL (failover)
     qint64        m_rttSetAtMs = -1;          // момент последнего set/merge (measuredRttAgeMs)
     std::function<qint64()> m_nowMsFn;        // тестовые часы (пусто = системные)
-    qint64        m_switchStartedMs = -1;     // B4: начало ТЕКУЩЕЙ фазы свитча (-1 = часы не идут)
-    bool          m_switchUpPhase = false;    // B4: фаза up (up() на цель отправлен)
-    bool          m_pendingSwitchIsReup = false; // B6: текущий свитч — переподъём той же ноды
-    QString       m_upPhaseReason;            // B4/B5: причина свитча в фазе up (для interruptedSwitch)
-    QString       m_pendingSwitchNodeId; // AVPN: целевая нода во время двухфазного свитча (пусто = нет)
-    QString       m_pendingSwitchReason; // AVPN: причина для switchLog (pinned/rotate/dead)
-    struct InterruptedSwitch { bool active = false; QString target, reason, cause; };
-    InterruptedSwitch m_interrupted;     // B4/B5: прерванный внутренний свитч (решает фасад)
     // A5/B3: подсказка identity адоптированной сессии (sessionMetadata), когда нода не опознана.
     QString       m_sessionHintNodeId, m_sessionHintProto, m_sessionHintEndpoint;
     QString       m_pinDroppedForTransport; // 5.1.109 (review R1), takePinDroppedForTransport
@@ -723,40 +544,24 @@ private:
     qint64        m_tickPrevRx = -1;        // rx прошлого tick (рост rx = доказательство живого туннеля)
     // AVPN awg31-xray-v1:
     TransportModeGate m_modeGate; // 5.1.109: the stored choice and the mode in force (TransportModeGate.h)
-    TransportHistory m_transportHistory;
-    bool          m_historyDirty = false;
-    QSet<QString> m_failedThisSession;   // узлы, провалившие data-plane с последнего стопа (failover не ходит по кругу)
-    // AVPN (iOS data watch, stage 2): what the packet tunnel extension proved against nodes it left, per
-    // network, for half an hour; the network the phone is on; the node the user was on when the extension
-    // first moved the session (empty = it did not, or the session is back there).
-    WatchEvidence m_extEvidence;
-    QString       m_extEvidenceNet;
-    QString       m_extOriginNodeId;
-    // Nodes the engine's own picks skip: failed in this session, or proved dead by the extension on
-    // this network within the last half hour. Without an adopted switch this is m_failedThisSession.
-    QSet<QString> sessionExclusions() const;
-    QHash<QString, QString> m_attemptExcluded; // upstream: start failed in this attempt (nodeId -> code)
-    bool m_awgBanned = false; // build 142 (S5): AmneziaWG banned for the rest of this attempt (bannedByAttempt)
-    FastTierEvidence m_fastEvidence;           // upstream: reachability evidence of the facade
-    bool          m_fastTierOpen = false;      // upstream: own tier pre-exhausted for this attempt
-    QString       m_fastTierWhy;
+    // Path engine (design 2026-11-17): the one owner of attempts, the evidence, the network, the user's choice.
+    path::AttemptOwner m_owner;
+    path::PathLedger m_ledger;
+    bool m_ledgerDirty = false;
+    path::NetworkTracker m_net;
+    path::UserChoice m_choice;
+    std::optional<path::AttemptResult> m_lastResult;
+    QStringList m_attemptJournal;
+    QList<path::AttemptEvent> m_ownerQueue;
+    bool m_inOwner = false;
+    bool m_facadeStop = false;                 // the facade itself takes the tunnel down (user stop / restart)
+    std::optional<path::AttemptTimings> m_timingsForTest;
     QList<SubscriptionNode> m_packCandidates;  // upstream: synthesized from the standby pack
     QList<SubscriptionNode> m_merged;          // subscription nodes + pack candidates (the pick pool)
     void rebuildCandidates();
-    bool          m_verifyEveryTransport = false; // plan v3 step 5: features.node_scan (see setter)
-    QString       m_networkMemoryNodeId;           // plan v3 step 5: last node that carried data on this network
-    QString       m_networkMemoryStartNodeId;      // owner test 06.11: started from memory, not up yet
     int           m_probeFailStreak = 0; // xray: провалы живой пробы подряд (feedProbeResult)
-    int           m_dataPlaneFailStreak = 0; // провалы data-plane подряд за сессию (кап — ConnectTunables.h)
-    bool          m_dataPlaneExhausted = false; // кап исчерпан: Error вместо очередного failover
-    bool          m_upFrozen = false;          // R7d: the app froze during this up() (no time to traffic)
-    bool          m_switchClockShifted = false; // R7a: the phase clock was shifted for a freeze once
-    qint64        m_upStartedMs = 0;     // момент последнего up() — время до «реального трафика» для истории
-    bool          m_okRecorded = false;  // один успех / один провал на сессию подъёма
-    bool          m_failRecorded = false;
+    qint64        m_upStartedMs = 0;     // момент последнего up()
     std::optional<Subscription> m_pendingReseed; // отложенное тело reseed (применить в терминале)
-    QStringList   m_attemptOrder;            // AVPN Scanner: a row tap's one-attempt order hint
-    qint64        m_attemptOrderUntilMs = -1; // its end (nowMs clock); -1 = none
 };
 
 } // namespace avpn

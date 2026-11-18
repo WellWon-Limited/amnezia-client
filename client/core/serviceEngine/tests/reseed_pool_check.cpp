@@ -90,6 +90,13 @@ static Subscription parse(const QByteArray &json)
     return sub;
 }
 
+// Path engine (design 2026-11-17): a leg is Connected only after its data check through the tunnel.
+static bool upConnected(ServiceEngine &eng)
+{
+    const bool up = eng.onTunnelConnected();
+    return eng.isVerifying() ? eng.verifySucceeded() : up;
+}
+
 static QStringList poolIds(const ServiceEngine &eng)
 {
     QStringList ids;
@@ -152,7 +159,7 @@ int main(int argc, char **argv)
         CHECK(eng.loadSubscription(subJson({ A, B }, 1), err));
         CHECK(eng.setPinnedNode(QStringLiteral("A"), err));
         CHECK(eng.connect(err));
-        CHECK(eng.onTunnelConnected() && eng.state() == EngineState::Connected);
+        CHECK(upConnected(eng) && eng.state() == EngineState::Connected);
         CHECK(eng.currentNodeId() == QLatin1String("A"));
         // A не изменилась (endpoint + pubkey те же), B ушла, C пришла → Applied на живом туннеле
         CHECK(eng.reseedPool(parse(subJson({ A, C }, 2))) == ReseedResult::Applied);
@@ -168,13 +175,15 @@ int main(int argc, char **argv)
         CHECK(!eng.applyPendingReseed()); // всё ещё подключены к изменившейся ноде
         // терминал → применяется
         eng.requestStop();
-        CHECK(eng.applyPendingReseed());
+        eng.onTunnelDisconnected(); // the platform confirms the stop
+        // between two runtimes the engine applies the deferred body itself (GAP-1); the facade post-processes it
+        CHECK(!eng.hasPendingReseed() && eng.takeReseedAppliedInSwitch());
         CHECK(eng.poolRevision() == 3);
         CHECK(!eng.hasPendingReseed());
         CHECK(!eng.applyPendingReseed()); // повторно нечего
         // A сменила pubkey → тоже «изменилась»
         CHECK(eng.connect(err));
-        CHECK(eng.onTunnelConnected());
+        CHECK(upConnected(eng));
         const QByteArray A3 = awgNodeJson("A", 1, "FI", "10.0.0.99:585", "NEWPUBKEY00000000000000000000000000000000000=");
         CHECK(eng.reseedPool(parse(subJson({ A3, C }, 4))) == ReseedResult::Deferred);
         // Disconnected-терминал → pending остаётся до явного applyPendingReseed (зовёт фасад через singleShot)
@@ -185,7 +194,7 @@ int main(int argc, char **argv)
         // текущая нода ИСЧЕЗЛА из нового пула → Deferred (не рвём живой туннель)
         CHECK(eng.setPinnedNode(QStringLiteral("A"), err));
         CHECK(eng.connect(err));
-        CHECK(eng.onTunnelConnected());
+        CHECK(upConnected(eng));
         CHECK(eng.reseedPool(parse(subJson({ C }, 5))) == ReseedResult::Deferred);
         CHECK(eng.onTunnelError());
         CHECK(eng.applyPendingReseed());
@@ -195,7 +204,7 @@ int main(int argc, char **argv)
         // более новая ревизия перекрывает pending; loadSubscription (bootstrap) сбрасывает pending
         CHECK(eng.setPinnedNode(QStringLiteral("C"), err));
         CHECK(eng.connect(err));
-        CHECK(eng.onTunnelConnected());
+        CHECK(upConnected(eng));
         const QByteArray C2 = awgNodeJson("C", 3, "US", "10.0.0.33:585");
         CHECK(eng.reseedPool(parse(subJson({ C2 }, 6))) == ReseedResult::Deferred);
         CHECK(eng.reseedPool(parse(subJson({ C2, A }, 7))) == ReseedResult::Deferred);
@@ -203,7 +212,9 @@ int main(int argc, char **argv)
         CHECK(eng.hasPendingReseed());
         CHECK(eng.poolRevision() == 5);
         eng.requestStop();
-        CHECK(eng.applyPendingReseed());
+        eng.onTunnelDisconnected(); // the platform confirms the stop
+        // between two runtimes the engine applies the deferred body itself (GAP-1); the facade post-processes it
+        CHECK(!eng.hasPendingReseed() && eng.takeReseedAppliedInSwitch());
         CHECK(eng.poolRevision() == 8);
         // K5/B1: loadSubscription по ревизии НЕ отвергает (порядок держит фасад по sequence).
         CHECK(eng.loadSubscription(subJson({ A }, 7), err));
@@ -250,7 +261,9 @@ int main(int argc, char **argv)
         CHECK(eng.reseedPool(parse(subJson({ X2, B }, 3))) == ReseedResult::Deferred);
         // в Verifying тоже не применяем (не терминал)
         eng.requestStop();
-        CHECK(eng.applyPendingReseed());
+        eng.onTunnelDisconnected(); // the platform confirms the stop
+        // between two runtimes the engine applies the deferred body itself (GAP-1); the facade post-processes it
+        CHECK(!eng.hasPendingReseed() && eng.takeReseedAppliedInSwitch());
         CHECK(eng.connect(err));
         CHECK(eng.onTunnelConnected() && eng.state() == EngineState::Verifying);
         const QByteArray X3 = xrayNodeJson("X", 9, "EE", "22222222-2222-4333-8444-555555555555");
@@ -281,7 +294,7 @@ int main(int argc, char **argv)
         CHECK(eng.loadSubscription(subJson({ A, B }, 1), err));
         CHECK(eng.setPinnedNode(QStringLiteral("A"), err));
         CHECK(eng.connect(err));
-        CHECK(eng.onTunnelConnected());
+        CHECK(upConnected(eng));
         auto changed = parse(subJson({ A, B }, 2));
         changed.nodes[0].awg.S1 += 1;
         CHECK(eng.reseedPool(changed) == ReseedResult::Deferred);

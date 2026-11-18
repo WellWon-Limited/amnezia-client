@@ -187,6 +187,10 @@ static void testNetworkKey()
     CHECK(coarseNetworkKey(home).isEmpty());
     CHECK(coarseNetworkKey(cell("250-01", "lte")) == QLatin1String("cellular:250-01"));
 
+    NetworkTracker first;
+    CHECK(first.observe(NetworkObservation{}) && first.current().local == QLatin1String("unknown")
+          && first.current().usable() && first.current().generation == 1); // nothing known: still connectable
+    CHECK(first.observe(wifi("192.168.1.1")) && first.current().generation == 2);
     NetworkTracker t;
     CHECK(t.observe(home) && t.current().generation == 1);
     CHECK(!t.observe(home) && t.current().generation == 1);

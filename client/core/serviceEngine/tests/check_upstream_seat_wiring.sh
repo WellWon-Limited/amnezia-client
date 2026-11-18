@@ -69,9 +69,9 @@ has "$prep" 'const quint64 id = m_upOwner.prepareSerial();' && has "$prep" 'retu
 # F9
 ctn="$(body_of "$FAC" 'void AvpnEngineQml::connectToNode(')"
 p1="$(first_line "$ctn" 'const QString pinBefore = m_engine.pinnedNodeId();')"
-p2="$(first_line "$ctn" 'm_engine.setPinnedNode(nodeId, err)')"
+p2="$(first_line "$ctn" 'pinServer(nodeId, err)')"
 { [ -n "$p1" ] && [ -n "$p2" ] && [ "$p1" -lt "$p2" ]; } \
-    || bad "F9: connectToNode must read the pin BEFORE setPinnedNode"
+    || bad "F9: connectToNode must read the pin BEFORE pinServer"
 has "$ctn" ', &pinBefore);' || bad "F9: connectToNode must hand the earlier pin to pinAndReconnectImpl"
 has "$pin" 'const QString prevPin = pinBefore ? *pinBefore : m_engine.pinnedNodeId();' \
     || bad "F9: pinAndReconnectImpl must restore the caller's earlier pin"

@@ -248,7 +248,9 @@ int main(int argc, char **argv)
         CHECK(eng.setPinnedNode(QStringLiteral("fra-01"), pinErr)); // awg по-прежнему закрепляется
     }
 
-    // --- 8) failover: текущая умерла, xray с лучшим RTT — уходим на awg; альтернатив нет → Error ---
+    // --- 8) failover (path engine: a new attempt of the owner): the live node dropped by itself proves nothing -
+    // it is raised again first; a data plane proven dead walks on to the next AWG node, never to the xray node the
+    // client cannot raise (xray_client off), whatever its RTT ---
     {
         ServiceEngine eng;
         FakeTunnel tun;
@@ -258,35 +260,19 @@ int main(int argc, char **argv)
                                              awgNodeJson("fastA", "DE", 1.0),
                                              xrayNodeJson("x-1", 9.0) }),
                                    err));
-        CHECK(eng.setPinnedNode(QStringLiteral("cur"), err));
-        CHECK(eng.connect(err));
+        CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("cur"));
         eng.onTunnelConnected();
-        CHECK(eng.state() == EngineState::Connected);
-
+        CHECK(eng.verifySucceeded() && eng.state() == EngineState::Connected);
         QHash<QString, int> rtt;
         rtt.insert(QStringLiteral("x-1"), 5); // приманка
         rtt.insert(QStringLiteral("fastA"), 60);
         eng.setMeasuredRtt(rtt);
         CHECK(eng.notifyConnectionLost());
-        CHECK(tun.lastUpNodeId == QLatin1String("fastA"));
-
-        // единственная альтернатива — xray → failover честно не находит кандидата (Error, без краша).
-        ServiceEngine eng2;
-        FakeTunnel tun2;
-        eng2.setTunnel(&tun2);
-        CHECK(eng2.loadSubscription(subJson({ awgNodeJson("cur", "FI", 5.0),
-                                              xrayNodeJson("x-1", 9.0) }),
-                                    err));
-        CHECK(eng2.setPinnedNode(QStringLiteral("cur"), err));
-        CHECK(eng2.connect(err));
-        eng2.onTunnelConnected();
-        QHash<QString, int> rtt2;
-        rtt2.insert(QStringLiteral("x-1"), 5);
-        eng2.setMeasuredRtt(rtt2);
-        const int upsBefore = tun2.upCalls;
-        CHECK(!eng2.notifyConnectionLost());
-        CHECK(eng2.state() == EngineState::Error);
-        CHECK(tun2.upCalls == upsBefore); // на xray не поднимались
+        CHECK(tun.lastUpNodeId == QLatin1String("cur")); // re-up of the proven node first
+        eng.onTunnelConnected();
+        CHECK(eng.isVerifying() && eng.verifyFailed(QStringLiteral("no data")));
+        CHECK(eng.onTunnelDisconnected());
+        CHECK(tun.lastUpNodeId == QLatin1String("fastA")); // never x-1
     }
 
     // --- 9) rotateNext: xray не считается «живой альтернативой» ---

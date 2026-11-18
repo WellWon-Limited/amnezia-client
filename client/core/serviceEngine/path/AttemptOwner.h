@@ -150,7 +150,7 @@ struct AttemptEvent {
     TransportMode mode = TransportMode::Auto;        // UserStart
     NetworkKey network;                              // UserStart, NetworkChanged, LiveLost, Adopted
     PathCandidate path;                              // Adopted
-    bool tunnelGone = false;                         // LiveLost
+    bool tunnelGone = false;                         // LiveLost, PathFailed
     bool restart = false;                            // LiveLost
 
     static AttemptEvent userStart(qint64 now, const UserChoice &c, TransportMode m, const NetworkKey &net)
@@ -189,10 +189,12 @@ struct AttemptEvent {
     }
     static AttemptEvent tunnelUp(qint64 now, const PathStamp &s) { return cb(EventType::TunnelUp, now, s); }
     static AttemptEvent stopConfirmed(qint64 now, const PathStamp &s) { return cb(EventType::StopConfirmed, now, s); }
-    static AttemptEvent pathFailed(qint64 now, const PathStamp &s, PathOutcome o)
+    // tunnelGone: the platform already reports the tunnel down (nothing to stop, no confirmation to wait for).
+    static AttemptEvent pathFailed(qint64 now, const PathStamp &s, PathOutcome o, bool tunnelGone = false)
     {
         AttemptEvent e = cb(EventType::PathFailed, now, s);
         e.outcome = o;
+        e.tunnelGone = tunnelGone;
         return e;
     }
     static AttemptEvent dataChecked(qint64 now, const PathStamp &s, PathOutcome o, int ttfbMs = -1)
@@ -242,7 +244,7 @@ public:
         case EventType::UserStop: onUserStop(out); break;
         case EventType::PathFailed:
             if (isLiveLeg(ev.stamp) && (m_phase == AttemptPhase::Starting || m_phase == AttemptPhase::Checking))
-                failLeg(isSuccess(ev.outcome) ? PathOutcome::Inconclusive : ev.outcome, out);
+                failLeg(isSuccess(ev.outcome) ? PathOutcome::Inconclusive : ev.outcome, out, ev.tunnelGone ? &ctx : nullptr);
             break;
         case EventType::TunnelUp:
             if (isLiveLeg(ev.stamp) && m_phase == AttemptPhase::Starting) {
@@ -277,6 +279,7 @@ public:
     quint64 attempt() const { return m_attempt; }
     const NetworkKey &network() const { return m_net; }
     PathStamp currentLeg() const { return m_leg.stamp; }
+    PathStamp stoppingLeg() const { return m_stopping; }
     const PathCandidate &currentPath() const { return m_leg.path; }
     const UserChoice &choice() const { return m_choice; }
     // "checked N of M" of the running attempt on this network: legs brought up, and those plus the candidates
@@ -285,6 +288,8 @@ public:
     int progressTotal() const { return m_progressTotal; }
     qint64 awakeMs() const { return m_awake; }
     const AttemptTimings &timings() const { return m_t; }
+    // New numbers (the server may tune them): they apply from the next deadline that is set.
+    void setTimings(const AttemptTimings &t) { m_t = t; }
 
     int startTimeoutMs(PathKind k) const
     {
@@ -375,10 +380,18 @@ private:
         m_phase = AttemptPhase::Stopping;
     }
 
-    void failLeg(PathOutcome o, QList<AttemptEffect> &out)
+    // gone (non-null): the tunnel is already down - no stop, the next choice at once.
+    void failLeg(PathOutcome o, QList<AttemptEffect> &out, const SelectionContext *gone = nullptr)
     {
         report(o, -1, -1, out);
-        stopLeg(out);
+        if (!gone) {
+            stopLeg(out);
+            return;
+        }
+        m_phase = AttemptPhase::Idle;
+        m_leg = Leg{};
+        if (m_running)
+            beginNext(*gone, out);
     }
 
     void connected(int ttfbMs, QList<AttemptEffect> &out)

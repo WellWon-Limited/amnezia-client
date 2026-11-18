@@ -197,12 +197,6 @@ signals:
     // AVPN (owner test 06.11, review of 136): the native stopped an adopted session that never
     // completed a handshake (stopNeverConnectedAdoptedSession) - the facade logs the real reason.
     void adoptedDeadSessionStopped();
-    // AVPN (build 142): handshake timeout number `timeouts` (1, 2, ...) of the awaited session, and the NE
-    // answered that its engine never handshook and got no data. Told at every timeout, whatever states the
-    // session went through meanwhile. requestSentMs: when that status request was sent (wall clock) - an answer
-    // to a request older than the app's last freeze is no evidence (DebugSnapshot.h::nativeFactFresh). The
-    // facade decides (DebugSnapshot.h::decideNoHandshake); nothing here changes the native behaviour.
-    void handshakeNeverCompleted(int timeouts, qint64 requestSentMs);
     // AVPN (контракт K4): итог provider message {"action":"rebind"}. performed=true — NE ответил
     // {"rebind":"performed"}; false — {"rebind":"denied",...}, нет живого туннеля, ошибка отправки
     // или ответ не пришёл за 3 с. Эмитится ровно один раз на каждый вызов rebindTunnel(), вернувший

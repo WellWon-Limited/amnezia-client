@@ -1,11 +1,9 @@
 // AVPN (фикс-волна 2026-09-22, зона CL-A, пробелы критика полноты): последовательности вызовов
 // ФАСАДА (AvpnEngineQml) против настоящего ServiceEngine/HealthLoop. Фасад зовёт движок через
-// DebugSnapshot.h::facadeNoteNetworkChange / facadeEngineStop — здесь те же функции.
+// DebugSnapshot.h::facadeNoteNetworkChange — здесь та же функция.
 //  GAP-2 (жалоба 3): смена сети каждые 6 с 5 минут при мёртвом data-plane — DEAD наступает
 //        (раньше фасад перед noteNetworkChange звал resetHealthSampling() и DEAD не наступал никогда);
-//  GAP-3 (жалобы 1/2): повтор после дедлайна фазы down переподъёма EE — connect() идёт на EE и
-//        бюджет лечения/стрик data-plane не сбрасываются (раньше guardedStop → requestStop() стирал
-//        цель: выбор по пину/весам, карусель лечения заново).
+//  Scanner rows (path engine): a row is one exact path - raised as it is, never a fallback to another row.
 // Каждый блок содержит и «контроль старого поведения»: прежняя последовательность фасада на том же
 // движке воспроизводит дефект (иначе тест ничего бы не доказывал).
 #include "../DebugSnapshot.h"
@@ -98,7 +96,7 @@ static qint64 flappingDeadAfter(bool legacyReset)
     QString err;
     CHECK(eng.loadSubscription(subJson(7), err));
     CHECK(eng.connect(err));
-    CHECK(eng.onTunnelConnected());
+    CHECK(eng.onTunnelConnected() && eng.verifySucceeded()); // path engine: Connected after the data check
     const qint64 start = 100000;
     const qint64 staleHs = start - 600; // handshake старше 180 с
     qint64 tx = 0;
@@ -129,25 +127,19 @@ static QByteArray subJson3(int rev)
         + awgNodeJson("11", 11, "FI", "203.0.113.11:585") + "] }";
 }
 
-// The facade's row tap on the engine (AvpnEngineQml::connectToNode): the user-start bookkeeping when the
-// tunnel is down, the hint (head = the tapped row), the pin; then reconcile raises it when the intent is on.
-// Returns whether connect() ran (the intent rule pinReconnectIntent of the facade).
-static bool rowTap(ServiceEngine &eng, const QString &node, const QStringList &after, bool tunnelUp, bool force,
-                   qint64 ttlMs = 120000)
+// The facade's row tap on the engine (AvpnEngineQml::connectToNode): the pin of the row and its one exact path (a
+// Scanner row never falls back - path engine, design 2026-11-17 §3); then reconcile raises it when the intent is on
+// (a live tunnel: the facade's stop, confirmed, then the start). Returns whether connect() ran.
+static bool rowTap(ServiceEngine &eng, const QString &node, bool tunnelUp, bool force)
 {
-    const ScannerRowConnect rc = scannerRowConnect(tunnelUp);
-    if (rc.userStartBookkeeping)
-        eng.beginUserAttempt();
-    QStringList hint{node};
-    hint << after;
-    facadeScanRowHint(eng, hint, ttlMs);
     QString err;
     CHECK(eng.setPinnedNode(node, err));
+    eng.setUserChoice(path::UserChoice::exactPath(node));
     const PinReconnectIntent in = pinReconnectIntent(tunnelUp, force);
     if (!in.wantConnected)
         return false;
-    if (in.needsRestart) { // reconcile: stop -> Disconnected -> start (guardedStop -> facadeEngineStop)
-        facadeEngineStop(eng, false);
+    if (in.needsRestart) { // reconcile: guardedStop -> requestStop -> Disconnected -> start
+        eng.requestStop();
         eng.onTunnelDisconnected();
     }
     return eng.connect(err);
@@ -165,9 +157,8 @@ int main(int argc, char **argv)
         eng.setTunnel(&tun);
         QString err;
         CHECK(eng.loadSubscription(subJson3(7), err));
-        eng.setMeasuredRtt({{QStringLiteral("9"), 40}, {QStringLiteral("10"), 150}, {QStringLiteral("11"), 60}});
         // The Scanner's row: forced, so the VPN-off tap really connects - on the far node it named.
-        CHECK(rowTap(eng, QStringLiteral("10"), {QStringLiteral("11")}, /*tunnelUp=*/false, scannerRowConnect(false).forceConnect));
+        CHECK(rowTap(eng, QStringLiteral("10"), /*tunnelUp=*/false, scannerRowConnect(false).forceConnect));
         CHECK(tun.upCalls == 1);
         CHECK(tun.lastUpNodeId == QLatin1String("10"));
         CHECK(eng.currentNodeId() == QLatin1String("10"));
@@ -176,11 +167,11 @@ int main(int argc, char **argv)
         FakeTunnel tun2;
         eng2.setTunnel(&tun2);
         CHECK(eng2.loadSubscription(subJson3(7), err));
-        CHECK(!rowTap(eng2, QStringLiteral("10"), {}, false, /*force=*/false));
+        CHECK(!rowTap(eng2, QStringLiteral("10"), false, /*force=*/false));
         CHECK(tun2.upCalls == 0);
     }
 
-    // --- AVPN Scanner: VPN on -> row tap -> the ordinary move (stop -> Disconnected -> start), hint kept ---
+    // --- AVPN Scanner: VPN on -> row tap -> the ordinary move (stop -> Disconnected -> start) on the row ---
     {
         TuningStore::set({}, {}, {}, {});
         ServiceEngine eng;
@@ -188,113 +179,34 @@ int main(int argc, char **argv)
         eng.setTunnel(&tun);
         QString err;
         CHECK(eng.loadSubscription(subJson3(7), err));
-        eng.setMeasuredRtt({{QStringLiteral("9"), 40}, {QStringLiteral("10"), 150}, {QStringLiteral("11"), 60}});
         CHECK(eng.connect(err));
-        CHECK(tun.lastUpNodeId == QLatin1String("9"));
-        CHECK(eng.onTunnelConnected());
-        const int downsBefore = tun.downCalls;
-        // The tunnel-up tap: requestStop of the restart must not take the hint with it.
-        const ScannerRowConnect rc = scannerRowConnect(true);
-        CHECK(!rc.userStartBookkeeping);
-        facadeScanRowHint(eng, {QStringLiteral("11"), QStringLiteral("10")}, 120000);
-        CHECK(eng.setPinnedNode(QStringLiteral("11"), err));
-        facadeEngineStop(eng, false);
-        tun.down();
-        eng.onTunnelDisconnected();
-        CHECK(eng.attemptOrder() == (QStringList{QStringLiteral("11"), QStringLiteral("10")}));
-        CHECK(eng.connect(err));
-        CHECK(tun.lastUpNodeId == QLatin1String("11"));
-        CHECK(tun.downCalls == downsBefore + 1);
-        // AWG without a verify phase: Connected = data path over, the hint is gone.
-        CHECK(eng.onTunnelConnected());
-        CHECK(eng.attemptOrder().isEmpty());
+        CHECK(eng.onTunnelConnected() && eng.verifySucceeded());
+        const QString first = tun.lastUpNodeId;
+        CHECK(!scannerRowConnect(true).userStartBookkeeping);
+        const QString row = first == QLatin1String("11") ? QStringLiteral("9") : QStringLiteral("11");
+        CHECK(rowTap(eng, row, /*tunnelUp=*/true, true));
+        CHECK(tun.lastUpNodeId == row && tun.upCalls == 2);
     }
 
-    // --- AVPN Scanner: the ladder takes the next HINTED row, not its own RTT pick ---
-    for (const bool withHint : {true, false}) {
-        TuningStore::set({}, {}, {}, {});
-        qint64 clk = 5'000'000;
-        ServiceEngine eng;
-        FakeTunnel tun;
-        eng.setTunnel(&tun);
-        eng.setNowMsForTest([&clk]() { return clk; });
-        QString err;
-        CHECK(eng.loadSubscription(subJson3(7), err));
-        eng.setMeasuredRtt({{QStringLiteral("9"), 40}, {QStringLiteral("10"), 150}, {QStringLiteral("11"), 60}});
-        eng.setVerifyEveryTransport(true); // features.node_scan: every transport passes a data check (§29)
-        // Tapped US (10); the visible order after it: FI (11), then EE (9). Without a hint the ladder's own
-        // pick after US is EE (best RTT).
-        CHECK(rowTap(eng, QStringLiteral("10"), withHint ? QStringList{QStringLiteral("11"), QStringLiteral("9")} : QStringList{},
-                     false, true));
-        if (!withHint)
-            eng.clearAttemptOrder();
-        CHECK(tun.lastUpNodeId == QLatin1String("10"));
-        CHECK(eng.onTunnelConnected());
-        // The data check of US failed (verifyFailed -> onDead step 3), the two-phase switch runs.
-        CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
-        eng.onTunnelDisconnected(); // the old runtime is down -> up() on the target
-        CHECK(tun.lastUpNodeId == (withHint ? QLatin1String("11") : QLatin1String("9")));
-        if (withHint) {
-            // FI fails too: the next hinted row (EE), never back to the failed US.
-            CHECK(eng.onTunnelConnected());
-            CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
-            eng.onTunnelDisconnected();
-            CHECK(tun.lastUpNodeId == QLatin1String("9"));
-        }
-    }
-
-    // --- AVPN Scanner: the hint lives for one attempt only (TTL, a new user attempt) ---
+    // --- AVPN Scanner: a row is one exact path - its failure ends the attempt, no other row is raised ---
     {
         TuningStore::set({}, {}, {}, {});
-        qint64 clk = 7'000'000;
         ServiceEngine eng;
         FakeTunnel tun;
         eng.setTunnel(&tun);
-        eng.setNowMsForTest([&clk]() { return clk; });
+        qint64 now = 1'800'000'000'000LL;
+        eng.setNowMsForTest([&now] { return now; });
+        eng.setAttemptTimingsForTest(path::AttemptTimings{});
         QString err;
         CHECK(eng.loadSubscription(subJson3(7), err));
-        eng.setMeasuredRtt({{QStringLiteral("9"), 40}, {QStringLiteral("10"), 150}, {QStringLiteral("11"), 60}});
-        facadeScanRowHint(eng, {QStringLiteral("10"), QStringLiteral("11")}, 120000);
-        CHECK(eng.nextCandidate() && eng.nextCandidate()->nodeId == QLatin1String("10"));
-        {
-            // connect() raises the hint's head (the tapped row) before the pin's location pick: the pin is a
-            // location, its best transport may be another row than the one the scan verified.
-            ServiceEngine e2;
-            FakeTunnel t2;
-            e2.setTunnel(&t2);
-            CHECK(e2.loadSubscription(subJson3(7), err));
-            CHECK(e2.setPinnedNode(QStringLiteral("9"), err));
-            facadeScanRowHint(e2, {QStringLiteral("11")}, 120000);
-            CHECK(e2.connect(err));
-            CHECK(t2.lastUpNodeId == QLatin1String("11"));
-            e2.clearAttemptOrder();
-            facadeEngineStop(e2, false);
-            e2.onTunnelDisconnected();
-            CHECK(e2.connect(err));
-            CHECK(t2.lastUpNodeId == QLatin1String("9")); // no hint: the pin as before
+        CHECK(rowTap(eng, QStringLiteral("10"), false, true));
+        for (int i = 0; i < 12; ++i) { // the start deadline passes: no handshake
+            now += 500;
+            eng.attemptTick();
         }
-        clk += 121'000; // past scan_attempt_hint_ttl_s
-        eng.setMeasuredRtt({{QStringLiteral("9"), 40}, {QStringLiteral("10"), 150}, {QStringLiteral("11"), 60}}); // a fresh round
-        CHECK(eng.attemptOrder().isEmpty());
-        CHECK(eng.nextCandidate() && eng.nextCandidate()->nodeId == QLatin1String("9")); // the ordinary pick again
-        facadeScanRowHint(eng, {QStringLiteral("10")}, 120000);
-        CHECK(!eng.attemptOrder().isEmpty());
-        eng.beginUserAttempt(); // the orb, a stop, another tap
-        CHECK(eng.attemptOrder().isEmpty());
-        // A zero TTL or an empty order is no hint.
-        facadeScanRowHint(eng, {QStringLiteral("10")}, 0);
-        CHECK(eng.attemptOrder().isEmpty());
-        facadeScanRowHint(eng, {QString(), QStringLiteral(" ")}, 120000);
-        CHECK(eng.attemptOrder().isEmpty());
-        // Data passed (verifySucceeded): the attempt is over.
-        facadeScanRowHint(eng, {QStringLiteral("10")}, 120000);
-        eng.setVerifyEveryTransport(true);
-        CHECK(eng.connect(err));
-        CHECK(eng.onTunnelConnected());
-        CHECK(eng.isVerifying());
-        CHECK(!eng.attemptOrder().isEmpty());
-        CHECK(eng.verifySucceeded());
-        CHECK(eng.attemptOrder().isEmpty());
+        CHECK(eng.onTunnelDisconnected()); // the stop of the row's leg confirmed
+        const std::optional<path::AttemptResult> r = eng.takeAttemptResult();
+        CHECK(r && r->reason == path::FailReason::ExactNodeFailed && tun.upCalls == 1);
     }
 
     // --- GAP-2: флаппинг сети не глушит DEAD мёртвого туннеля ---
@@ -309,65 +221,6 @@ int main(int argc, char **argv)
                 (long long) deadAfter, grace, cycles);
         // контроль: прежняя последовательность фасада — DEAD не наступает за 5 минут никогда
         CHECK(flappingDeadAfter(/*legacyReset=*/true) == -1);
-    }
-
-    // --- GAP-3: повтор после дедлайна фазы down переподъёма EE сохраняет цель и бюджет лечения ---
-    {
-        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}}, {}, {});
-        for (const bool keep : { true, false }) {
-            int ee = 0, targetLost = 0, secondDeadMovedOn = 0, streakKept = 0;
-            for (int i = 0; i < 20; ++i) {
-                qint64 clk = 1'000'000;
-                ServiceEngine eng;
-                FakeTunnel tun;
-                eng.setTunnel(&tun);
-                eng.setNowMsForTest([&clk]() { return clk; });
-                QString err;
-                eng.loadSubscription(subJson(7), err);
-                eng.setMeasuredRtt({{QStringLiteral("9"), 40}, {QStringLiteral("10"), 150}});
-                eng.connect(err);
-                eng.onTunnelConnected();
-                clk += 300'000;                          // 5 мин connected: свежий RTT-кэш истёк
-                feedDead(eng, tun, 1000, 0);             // шаг 2: переподъём EE, down() отправлен
-                clk += 16'000;
-                if (!eng.expireSwitch(15000))            // натив молчит: дедлайн фазы down
-                    continue;
-                const int streakBefore = eng.dataPlaneFailStreak();
-                // фасад onSwitchDeadline → guardedStop("switch_deadline", keep) → натив Connected →
-                // ... → подтверждённый Disconnected → reconcile → guardedStart → connect()
-                facadeEngineStop(eng, keep);
-                tun.down();
-                eng.onTunnelDisconnected();
-                if (!eng.hasInterruptedSwitch())
-                    ++targetLost;
-                eng.connect(err);
-                const QString retryNode = tun.lastUpNodeId;
-                if (retryNode == QLatin1String("9"))
-                    ++ee;
-                if (eng.dataPlaneFailStreak() == streakBefore)
-                    ++streakKept;
-                // переподъём EE истрачен: следующий DEAD — к другой ноде, а не снова переподъём EE
-                eng.onTunnelConnected();
-                const int upsBefore = tun.upCalls;
-                if (feedDead(eng, tun, 5000, 1000)) {
-                    eng.onTunnelDisconnected();
-                    if (tun.upCalls > upsBefore && tun.lastUpNodeId != retryNode)
-                        ++secondDeadMovedOn;
-                }
-            }
-            fprintf(stderr, "GAP-3 keep=%d: ee=%d target_lost=%d streak_kept=%d second_dead_moved_on=%d\n",
-                    int(keep), ee, targetLost, streakKept, secondDeadMovedOn);
-            if (keep) {
-                CHECK(targetLost == 0);
-                CHECK(ee == 20);                         // повтор на цель прерванного свитча — EE
-                CHECK(streakKept == 20);
-                CHECK(secondDeadMovedOn == 20);             // бюджет лечения не вернулся — нет карусели
-            } else {
-                // контроль: прежний путь (requestStop) теряет цель и возвращает бюджет лечения
-                CHECK(targetLost == 20);
-                CHECK(secondDeadMovedOn == 0);                // снова переподъём той же ноды
-            }
-        }
     }
 
     if (g_failed) {

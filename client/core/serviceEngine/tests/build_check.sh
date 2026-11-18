@@ -41,3 +41,5 @@ cd "$HERE"
 # the platform toolchains (IOS=1 / ANDROID=1 / WINDOWS_APPROX=1 add the passes).
 "$HERE/build_path_engine.sh"
 "$HERE/check_path_core_compile.sh"
+# ... and wired into the engine: the real ServiceEngine driven as the facade drives it (fake tunnel).
+"$HERE/build_path_integration.sh"

@@ -325,27 +325,14 @@ static void lateDeadlineTick()
     t = decideDeadlineTick(0, 1000);                              // two ticks at once (coalesced)
     CHECK(t.evaluate);
     // start watchdog (one-shot, 15 s): on time -> judge; late -> re-arm once without spending the grace
-    CHECK(!rearmStartWatchdogAfterFreeze(decideDeadlineTick(15000, 15000), false));
-    CHECK(!rearmStartWatchdogAfterFreeze(decideDeadlineTick(17000, 15000), false));
-    CHECK(rearmStartWatchdogAfterFreeze(decideDeadlineTick(17001, 15000), false));
-    CHECK(rearmStartWatchdogAfterFreeze(decideDeadlineTick(night, 15000), false));
-    CHECK(!rearmStartWatchdogAfterFreeze(decideDeadlineTick(night, 15000), true)); // already re-armed once
 }
 
 static void a8a9a15InternalSwitch()
 {
     // A8: дедлайн свитча — повтор старта, намерение снимается только при исчерпании попыток.
-    CHECK(decideSwitchDeadline(1) == SwitchDeadlineAction::RetryStart);
-    CHECK(decideSwitchDeadline(2) == SwitchDeadlineAction::RetryStart);
-    CHECK(decideSwitchDeadline(3) == SwitchDeadlineAction::GiveUp);
 
     // A9: до фикса решение принималось по состоянию движка ПОСЛЕ onTunnelError (всегда "error") →
     // Error посреди внутреннего failover снимал намерение без тоста. Теперь — по состоянию ДО.
-    CHECK(!tunnelLossIsExternal(false, QStringLiteral("switching"), false));
-    CHECK(!tunnelLossIsExternal(false, QStringLiteral("error"), /*interrupted=*/true));
-    CHECK(tunnelLossIsExternal(false, QStringLiteral("connected"), false)); // внешний обрыв — §13
-    CHECK(tunnelLossIsExternal(false, QStringLiteral("error"), false));
-    CHECK(!tunnelLossIsExternal(true, QStringLiteral("connected"), false)); // наша операция
 
     // A15: наш собственный стоп в свитче не отменяет свитч; пользовательский — отменяет.
     CHECK(!intentionalStopCancelsSwitch(QStringLiteral("expected_app_stop"), true));
@@ -366,9 +353,6 @@ static void a10a11Selection()
     CHECK(decideSelectionBudget(true, 2000) == SelectionBudget::Finish);
 
     // A11: без pin ICMP-раунд сразу (параллельно refresh), а не по таймеру 4 с.
-    CHECK(startRttRoundImmediately(false, true));
-    CHECK(!startRttRoundImmediately(true, true));
-    CHECK(!startRttRoundImmediately(false, false));
     // Прошлый RTT не очищается в начале раунда и не затирается «нет ответа».
     QHash<QString, int> cache{{QStringLiteral("9:awg"), 40}};
     mergeRttSample(cache, QStringLiteral("9:awg"), -1);
@@ -385,23 +369,16 @@ static void parityConnectDoesNotWaitForNetwork()
     // Журнал Mac владельца 26–28.09: все 11 ручных Connect ждали 5,7–6,4 с (selection_wait_fresh_pool
     // → selection_budget_expired), хотя локация была закреплена, а handshake занимает 0,7 с.
     // Пул есть + пригодный pin → подключаемся сразу.
-    CHECK(decideStartPreparation(true, /*pin=*/true, /*freshRtt=*/false) == StartPrep::ConnectNow);
     // Пул есть + свежий замер RTT, покрывающий все авто-ноды и сделанный после последней смены
     // сети → «Авто» выбирает по нему сразу.
-    CHECK(decideStartPreparation(true, false, true) == StartPrep::ConnectNow);
     // Волна-2 (ревью 5.1.95, находка 2): свежесть замера = после последней смены сети И покрытие
     // всех авто-нод; частичный замер или замер из прошлой сети → обычный раунд (≤ 1,5 с).
-    CHECK(rttCoverageFresh(/*eligible=*/3, /*measuredEligible=*/3, /*rttAgeMs=*/5000, /*sinceNetChangeMs=*/60000));
-    CHECK(!rttCoverageFresh(3, 2, 5000, 60000));   // частичный
-    CHECK(!rttCoverageFresh(3, 3, 70000, 60000));  // замер старше последней смены сети
-    CHECK(!rttCoverageFresh(3, 3, -1, 60000));     // замера нет
-    CHECK(!rttCoverageFresh(0, 0, 5000, 60000));   // авто-нод нет
-    CHECK(rttCoverageFresh(3, 3, 5000, -1));       // смены сети не было вовсе
     // Пул есть, pin нет, замера нет → только ICMP-раунд (≤ 1,5 с), без ожидания refresh.
-    CHECK(decideStartPreparation(true, false, false) == StartPrep::MeasureRtt);
     // Пула нет (свежая установка) → ждём bootstrap, как раньше (потолок 20 с).
-    CHECK(decideStartPreparation(false, true, true) == StartPrep::AwaitPool);
-    CHECK(decideStartPreparation(false, false, false) == StartPrep::AwaitPool);
+    // Path engine (design 2026-11-17 §7): a pool in hand starts at once - no ICMP round is waited for;
+    // no pool (a fresh install) waits for bootstrap as before.
+    CHECK(decideStartPreparation(true) == StartPrep::ConnectNow);
+    CHECK(decideStartPreparation(false) == StartPrep::AwaitPool);
     // Смена сети во время подготовки: refresh нужен только без пула.
     CHECK(!prepRefreshOnNetworkChange(true));
     CHECK(prepRefreshOnNetworkChange(false));
@@ -435,13 +412,7 @@ static void parityBackgroundPollingOnlyWhenActive()
 static void wave3StartAndLossPolicy()
 {
     // Волна-3 (2026-09-28): попытка старта без физического аплинка не считается — ждём сеть.
-    CHECK(judgeStartFailure(/*uplinkUp=*/true) == StartFailure::CountAndRetry);
-    CHECK(judgeStartFailure(false) == StartFailure::WaitUplink);
     // Исчерпание попыток при живой сети — не снятие намерения, а пауза с ростом 30/60/120 с.
-    CHECK(startRetryBackoffMs(0) == 30000);
-    CHECK(startRetryBackoffMs(1) == 60000);
-    CHECK(startRetryBackoffMs(2) == 120000);
-    CHECK(startRetryBackoffMs(9) == 120000);
     // Классификация обрыва (вместо голого «внешний / не внешний»).
     CHECK(classifyLoss(/*weOperate=*/true, QStringLiteral("connected"), false, false, true) == LossClass::Own);
     CHECK(classifyLoss(false, QStringLiteral("switching"), false, false, true) == LossClass::Own);
@@ -490,10 +461,6 @@ static void wave4UpstreamBehaviour()
     CHECK(QByteArray(orbTapName(OrbTap::StopAgain)) == "stop_again");
     CHECK(QByteArray(orbTapName(OrbTap::Ignore)) == "ignored");
     // P1-5: сторож старта ждёт натив, пока тот сообщает живую сессию, но не дольше 4 перевзводов.
-    CHECK(decideStartWatchdog(true, 0) == StartWatchdog::Defer);
-    CHECK(decideStartWatchdog(true, 1) == StartWatchdog::Defer);   // 3×15 с = бюджет рукопожатия натива
-    CHECK(decideStartWatchdog(true, 2) == StartWatchdog::Stop);
-    CHECK(decideStartWatchdog(false, 0) == StartWatchdog::Stop); // натив молчит (Unknown/Disconnected)
     // P2-2: классификация отказа API.
     const qint64 now = 1'000'000;
     CHECK(classifyApiOutcome(200, false, false, now - 100, -1, -1, now) == ApiOutcome::Success);
@@ -563,9 +530,6 @@ static void wave4UpstreamBehaviour()
     CHECK(restartRequestStale(now - kRestartRequestTtlMs - 1, now));
     CHECK(!restartRequestStale(-1, now));
     // P1-5: give-up свитча — поднятый/переходный туннель гасим (намерение держим), лежачий — бэкофф.
-    CHECK(switchGiveUpNeedsStop(false, false));
-    CHECK(!switchGiveUpNeedsStop(true, false));
-    CHECK(!switchGiveUpNeedsStop(false, true));
     // P2-6: своё событие сети.
     CHECK(networkChangeIsOwnTunnel(true, -1, now));
     CHECK(networkChangeIsOwnTunnel(false, now - 2000, now));
@@ -889,167 +853,6 @@ static void scannerCancelNeverDuringAppQuit()
     CHECK(QLatin1String(scanCancelName(ScanCancel::IgnoreAppQuit)) == QLatin1String("app_quit"));
 }
 
-// Build 142 (S5): the five starts of 16.11 23:20:32-23:21:51 on one Wi-Fi where AmneziaWG got no handshake
-// (rx=0, hs=never in every "Tribe stats"). Times from the journal: the extension came up (NE Connected),
-// the first native handshake timeout is due 12 s later (+ at most the 1 s status poll), the person's stop.
-static void awgNoHandshakeReplay()
-{
-    // xrayPick: with AmneziaWG out THIS start could take an Xray node - inside the pinned location when one is
-    // pinned (17's host has no Xray listener, 15's has 15:xray), else anywhere.
-    struct Attempt { const char *at; bool xrayPick; double neUpToStopS; NoHandshake expect; };
-    const Attempt five[] = {
-        {"23:20:32 orb, location of 17", false, 9.1, NoHandshake::IgnoreOwnStartGoesOn},   // NE up 34.28, stop 43.39
-        {"23:20:44 scanner open, 17", false, 11.8, NoHandshake::IgnoreOwnStartGoesOn},     // NE up 45.64, cancel 57.46
-        {"23:21:01 orb after Auto, 17", true, 12.0, NoHandshake::LeaveAwg},               // NE up 04.27, stop 16.27
-        {"23:21:19 orb, location of 15", true, 11.95, NoHandshake::LeaveAwg},             // NE up 20.95, stop 32.90
-        {"23:21:36 orb, location of 17", false, 7.3, NoHandshake::IgnoreOwnStartGoesOn},  // NE up 38.01, killed 45.33
-    };
-    int left = 0;
-    int reachedTimeout = 0;
-    for (const Attempt &a : five) {
-        if (a.neUpToStopS > 12.0) // the first timeout is checked on the reply after NE up + 12 s
-            ++reachedTimeout;
-        NoHandshakeInputs in;
-        in.fresh = true;
-        in.ownStartInFlight = true;
-        in.nodeIsAwg = true;
-        in.autoMode = true;          // transport mode «Авто» all evening
-        in.xrayPick = a.xrayPick;
-        const NoHandshake d = decideNoHandshake(in);
-        left += d == NoHandshake::LeaveAwg ? 1 : 0;
-        CHECK(d == a.expect);
-    }
-    CHECK(left == 2);           // the Auto start (best Xray) and 15's location (15:xray); 17 has no Xray
-    CHECK(reachedTimeout == 0); // and that evening nobody waited to the first timeout
-    NoHandshakeInputs in;
-    in.fresh = true;
-    in.ownStartInFlight = true;
-    in.nodeIsAwg = true;
-    in.autoMode = true;
-    in.xrayPick = true;
-    CHECK(decideNoHandshake(in) == NoHandshake::LeaveAwg);
-    NoHandshakeInputs x = in;
-    x.fresh = false;
-    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreStale);
-    x = in; x.autoMode = false;     // «AmneziaWG» chosen by hand: the own start's budget goes on
-    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreOwnStartGoesOn);
-    x = in; x.explicitNode = true;  // a Scanner row tap chose exactly this node
-    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreOwnStartGoesOn);
-    x = in; x.alreadyLeft = true;   // no flapping back inside the attempt
-    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreOwnStartGoesOn);
-    x = in; x.ownStartInFlight = false; // the person's stop: nothing of ours runs
-    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreNotOurs);
-    x = in; x.ownStartInFlight = false; x.tunnelHeldUp = true; // a held session: banned AmneziaWG, then restarted
-    CHECK(decideNoHandshake(x) == NoHandshake::LeaveAwg);
-    x.autoMode = false;                                       // manual mode / pinned without Xray: restarted as is
-    CHECK(decideNoHandshake(x) == NoHandshake::Restart);
-}
-
-// The handler as the facade runs it (DebugSnapshot.h::handleNoHandshakeFact), effects recorded. Every replay
-// below must END: exactly one end of the session (the ordinary restart / failed start) or none for a healthy one.
-struct NoHandshakeBench {
-    NoHandshakeInputs now;
-    QStringList journal;
-    int bans = 0;
-    int ends = 0;
-    bool lastEndOwn = false;
-    NoHandshakeOps ops()
-    {
-        NoHandshakeOps o;
-        o.facts = [this] { return now; };
-        o.journal = [this](const QString &l) { journal << l; };
-        o.banAwg = [this] { ++bans; now.alreadyLeft = true; };
-        o.endSession = [this](bool own) {
-            ++ends;
-            lastEndOwn = own;
-            // our guarded stop: nothing of ours holds the session any more; reconcile starts the next pick
-            now.tunnelHeldUp = false;
-            now.ownStartInFlight = false;
-        };
-        return o;
-    }
-    NoHandshake fact(int timeouts, bool fresh)
-    {
-        now.fresh = fresh;
-        return handleNoHandshakeFact(timeouts, QStringLiteral("17"), ops());
-    }
-};
-
-// S3, 16.11 23:20:26: the relaunch adopted a session on 17 (pinned location without Xray) that had no handshake
-// on the Wi-Fi. Before: «Подключено» with nothing judging it. Now the first fresh timeout ends it, ordinary restart.
-static void noHandshakeAdoptedRelaunch()
-{
-    NoHandshakeBench b;
-    b.now.tunnelHeldUp = true;   // adopted: engine Connected, nothing in flight, intent on
-    b.now.nodeIsAwg = true;
-    b.now.autoMode = true;
-    b.now.xrayPick = false;      // 17's location has no Xray
-    CHECK(b.fact(1, true) == NoHandshake::Restart);
-    CHECK(b.ends == 1 && !b.lastEndOwn && b.bans == 0);
-    CHECK(b.journal.size() == 1 && b.journal.first().contains(QLatin1String("-> restart")));
-    for (int t = 2; t <= 6; ++t) // the native keeps telling while the stop runs: not ours any more, silent
-        CHECK(b.fact(t, true) == NoHandshake::IgnoreNotOurs);
-    CHECK(b.ends == 1 && b.journal.size() == 1);
-    // Auto with an Xray pick: the same end, AmneziaWG banned first (the next pick of the restart is Xray)
-    NoHandshakeBench c;
-    c.now.tunnelHeldUp = true;
-    c.now.nodeIsAwg = true;
-    c.now.autoMode = true;
-    c.now.xrayPick = true;
-    CHECK(c.fact(1, true) == NoHandshake::LeaveAwg && c.bans == 1 && c.ends == 1);
-}
-
-// Review round 3, M1: the native flaps Reconnecting -> Connecting -> Reconnecting around a thaw (a status refresh
-// at the return to the screen re-observes the session). Round 2 cancelled the check on the Connecting and had
-// marked the session done. Here nothing is marked: the flap tells nothing (no fact while Connecting), a fact
-// queued across the freeze is stale, and the first fresh fact after the thaw ends the session.
-static void noHandshakeFlapAroundThaw()
-{
-    NoHandshakeBench b;
-    b.now.tunnelHeldUp = true;
-    b.now.nodeIsAwg = true;
-    b.now.autoMode = false;           // the worst case: no Xray move, a plain restart
-    CHECK(b.fact(1, /*fresh=*/false) == NoHandshake::IgnoreStale); // sent before the hide, delivered after the thaw
-    CHECK(b.ends == 0);
-    // ... native Connecting (re-observed), then Reconnecting again at its next timeout - sent after the thaw:
-    CHECK(b.fact(2, /*fresh=*/true) == NoHandshake::Restart);
-    CHECK(b.ends == 1);                // terminated: the ordinary restart
-    CHECK(b.fact(3, true) == NoHandshake::IgnoreNotOurs && b.ends == 1);
-}
-
-// Review round 3, M2: round 2 ran whoami for the adopted session; a request that lived through a freeze ended as
-// CheckLimited -> «Подключено» without data. Here there is no check of the adopted session at all: a fact that
-// lived through the freeze is stale (no verdict of any kind), the next fresh one ends the session.
-static void noHandshakeFactAcrossFreeze()
-{
-    NoHandshakeBench b;
-    b.now.tunnelHeldUp = true;
-    b.now.nodeIsAwg = true;
-    for (int t = 1; t <= 3; ++t)      // three replies queued while the app slept
-        CHECK(b.fact(t, false) == NoHandshake::IgnoreStale);
-    CHECK(b.ends == 0 && b.bans == 0);
-    CHECK(b.fact(4, true) == NoHandshake::Restart && b.ends == 1);
-}
-
-// The healthy tunnel across a thaw: the extension restored the path while the app slept. The only fact is the
-// stale one from before the freeze; after the thaw the native confirms the handshake and tells nothing more.
-static void noHandshakeHealthyThaw()
-{
-    NoHandshakeBench b;
-    b.now.tunnelHeldUp = true;
-    b.now.nodeIsAwg = true;
-    b.now.autoMode = true;
-    b.now.xrayPick = true;
-    CHECK(b.fact(1, /*fresh=*/false) == NoHandshake::IgnoreStale);
-    CHECK(b.ends == 0 && b.bans == 0); // the healthy session is kept (the stale fact is only journaled)
-    CHECK(b.journal.size() == 1 && b.journal.first().contains(QLatin1String("-> stale")));
-    // freshness itself: the P2-2 boundary (the later of the last hide and the last return)
-    const qint64 hidden = 13000, resumed = 600000;
-    CHECK(!nativeFactFresh(hidden - 500, std::max(resumed, hidden)));
-    CHECK(nativeFactFresh(resumed + 200, std::max(resumed, hidden)));
-    CHECK(nativeFactFresh(5, /*never frozen=*/-1));
-}
-
 // A row tap's chain as the coordinator sees it: the node the ladder left, the end, «Подключено».
 static void scannerRowChain()
 {
@@ -1083,23 +886,23 @@ static void scannerRowChain()
 static void scannerLiveView()
 {
     const QString none;
-    ScanLiveView v = scanLiveView(QStringLiteral("disconnected"), false, none, none, none, QStringLiteral("9"), false, false, false);
+    ScanLiveView v = scanLiveView(QStringLiteral("disconnected"), false, none, none, none, QStringLiteral("9"), false, false, false, /*attemptFailed=*/false);
     CHECK(!v.live && !v.connecting && v.nodeId.isEmpty() && v.attemptNodeId.isEmpty());
-    v = scanLiveView(QStringLiteral("connecting"), false, QStringLiteral("9"), none, none, QStringLiteral("9"), true, false, false);
+    v = scanLiveView(QStringLiteral("connecting"), false, QStringLiteral("9"), none, none, QStringLiteral("9"), true, false, false, /*attemptFailed=*/false);
     CHECK(!v.live && v.connecting && v.attemptNodeId == QLatin1String("9"));
-    v = scanLiveView(QStringLiteral("connected"), true, QStringLiteral("9"), none, none, QStringLiteral("9"), true, false, true);
+    v = scanLiveView(QStringLiteral("connected"), true, QStringLiteral("9"), none, none, QStringLiteral("9"), true, false, true, /*attemptFailed=*/false);
     CHECK(v.live && !v.connecting && v.nodeId == QLatin1String("9") && v.attemptNodeId.isEmpty());
     // The engine's own switch 9 -> 10, down phase: 9 is still live, 10 is the attempt.
-    v = scanLiveView(QStringLiteral("switching"), true, QStringLiteral("9"), QStringLiteral("10"), none, none, true, false, false);
+    v = scanLiveView(QStringLiteral("switching"), true, QStringLiteral("9"), QStringLiteral("10"), none, none, true, false, false, /*attemptFailed=*/false);
     CHECK(v.live && v.nodeId == QLatin1String("9") && v.attemptNodeId == QLatin1String("10"));
     // Up phase (current = target, the old runtime gone).
-    v = scanLiveView(QStringLiteral("switching"), false, QStringLiteral("10"), none, none, none, true, false, false);
+    v = scanLiveView(QStringLiteral("switching"), false, QStringLiteral("10"), none, none, none, true, false, false, /*attemptFailed=*/false);
     CHECK(!v.live && v.attemptNodeId == QLatin1String("10"));
     // A row tap on a live tunnel: the restart's target is the pinned row.
-    v = scanLiveView(QStringLiteral("connected"), true, QStringLiteral("9"), none, QStringLiteral("11"), QStringLiteral("11"), true, true, true);
+    v = scanLiveView(QStringLiteral("connected"), true, QStringLiteral("9"), none, QStringLiteral("11"), QStringLiteral("11"), true, true, true, /*attemptFailed=*/false);
     CHECK(v.live && v.nodeId == QLatin1String("9") && v.attemptNodeId == QLatin1String("11"));
     // VPN off with the intent on (start preparation / retry): the next connect's node.
-    v = scanLiveView(QStringLiteral("error"), false, none, none, none, QStringLiteral("12"), true, false, false);
+    v = scanLiveView(QStringLiteral("error"), false, none, none, none, QStringLiteral("12"), true, false, false, /*attemptFailed=*/true);
     CHECK(v.failed && !v.connecting && v.attemptNodeId == QLatin1String("12"));
 }
 
@@ -1378,7 +1181,7 @@ static void upstreamSeatFirstRule()
     CHECK(decideSeatFirstReply(noId, a, 0, 7, true) == SeatFirstStep::Ignore);
     // While the seat is being taken the Scanner sees the provider node as the attempt (never probed with its key).
     const ScanLiveView v = scanLiveView(QStringLiteral("connected"), true, QStringLiteral("12:xray"), QString(),
-                                        QStringLiteral("up:aaaaaaaaaaaaaaa0"), QString(), true, /*restartPending=*/true, true);
+                                        QStringLiteral("up:aaaaaaaaaaaaaaa0"), QString(), true, /*restartPending=*/true, true, /*attemptFailed=*/false);
     CHECK(v.live && v.nodeId == QLatin1String("12:xray") && v.attemptNodeId == QLatin1String("up:aaaaaaaaaaaaaaa0"));
 }
 
@@ -1394,11 +1197,14 @@ static void nodeFigureOneRule()
     CHECK(f.ms == 92 && f.bars == barsForNode(92));
     const NodeFigure row = nodeFigure(true, false, true, false, 47, 5, 92);
     CHECK(row.ms == f.ms && row.bars == f.bars);
-    // Our own node carrying the tunnel: the live probe; at least one bar before it answers, no figure then.
+    // Our own node carrying the tunnel: the live probe once it has a figure; before it answers - its list figure,
+    // never bars next to a dash.
     f = nodeFigure(false, true, true, false, 41, 4, 60);
     CHECK(f.ms == 41 && f.bars == 4);
     f = nodeFigure(false, true, false, false, -1, 0, 60);
-    CHECK(f.ms == -1 && f.bars == 1);
+    CHECK(f.ms == 60 && f.bars == barsForNode(60));
+    f = nodeFigure(false, true, false, false, -1, 0, -1);
+    CHECK(f.ms == -1 && f.bars == -1);
     // A dead probe on the node carrying the tunnel: red, whatever the kind.
     CHECK(nodeFigure(false, true, true, true, 41, 4, 60).failed);
     CHECK(nodeFigure(true, true, true, true, 41, 4, 92).failed);
@@ -1438,11 +1244,6 @@ int main()
     scannerCancelPendingConnect();
     scannerCancelAfterShownConnectedWithoutData();
     scannerCancelNeverDuringAppQuit();
-    awgNoHandshakeReplay();
-    noHandshakeAdoptedRelaunch();
-    noHandshakeFlapAroundThaw();
-    noHandshakeFactAcrossFreeze();
-    noHandshakeHealthyThaw();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();
