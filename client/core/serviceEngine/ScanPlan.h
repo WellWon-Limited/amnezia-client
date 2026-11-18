@@ -163,6 +163,32 @@ inline QString scanProbeIdOf(const ScanCandidate &c)
     return c.followUp ? c.id + QStringLiteral("#full") : c.id;
 }
 
+// The app host's order (owner's review 18.11: «большая часть нод наша, а не all vpn»): own and provider candidates
+// alternate, each side in its own D9 order, the last-known-good candidate first whatever its side - so a short scan
+// and the 8 s stop see both kinds. Only for the in-app iOS host (several full-profile probes at once); every other
+// host keeps the tier order.
+inline bool scanPlanInterleaves(const ScanHostCaps &caps) { return caps.platform == QLatin1String("ios-app"); }
+
+inline QList<ScanCandidate> scanInterleaveOrigins(const QList<ScanCandidate> &sorted)
+{
+    QList<ScanCandidate> own, up, out;
+    for (const ScanCandidate &c : sorted) {
+        if (c.lastKnownGood)
+            out << c;
+        else if (c.origin == ScanOrigin::Upstream)
+            up << c;
+        else
+            own << c;
+    }
+    for (int i = 0; i < qMax(own.size(), up.size()); ++i) {
+        if (i < own.size())
+            out << own.at(i);
+        if (i < up.size())
+            out << up.at(i);
+    }
+    return out;
+}
+
 inline ScanPlan buildScanPlan(const ScanPlanInput &in)
 {
     ScanPlan p;
@@ -317,6 +343,8 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
 
     std::stable_sort(p.probe.begin(), p.probe.end(), scanCandidateLess);
     std::stable_sort(p.orderOnly.begin(), p.orderOnly.end(), scanCandidateLess);
+    if (scanPlanInterleaves(caps))
+        p.probe = scanInterleaveOrigins(p.probe);
 
     // Reach offsets with the per-entry-IP spacing (R8). Provider full probes and AWG sessions have none
     // (a whole profile is dialled by its own routing; AmneziaWG is UDP: its handshake is its reach).

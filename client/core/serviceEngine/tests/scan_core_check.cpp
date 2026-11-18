@@ -508,6 +508,24 @@ static void plan()
     CHECK(findC(p.probe, up(1))->kind == ScanProbeKind::XrayFull && findC(p.probe, up(3))->kind == ScanProbeKind::XrayFull);
     CHECK(!excluded(p, QStringLiteral("3"), "manual_only")); // manual_only is probed (18.11); "3" is AmneziaWG: its own gates
     {
+        // the in-app iOS host alternates own and provider candidates (18.11); every other host keeps the tier order
+        ScanHostCaps app = hostMac();
+        app.platform = QStringLiteral("ios-app");
+        const ScanPlan pi = buildScanPlan(planInput(app));
+        const ScanPlan pt = buildScanPlan(planInput(hostMac()));
+        CHECK(pi.probe.size() == pt.probe.size() && pi.probe.size() >= 4);
+        bool alternates = true;
+        int own = 0, up = 0;
+        for (const ScanCandidate &c : pt.probe)
+            (c.origin == ScanOrigin::Upstream ? up : own) += 1;
+        for (int i = 0; i + 1 < qMin(own, up) * 2; ++i)
+            alternates = alternates && pi.probe.at(i).origin != pi.probe.at(i + 1).origin;
+        CHECK(alternates && pt.probe.first().origin == ScanOrigin::Own && pt.probe.last().origin == ScanOrigin::Upstream);
+        QList<ScanCandidate> lk = pt.probe;
+        lk.last().lastKnownGood = true;
+        CHECK(scanInterleaveOrigins(lk).first().id == pt.probe.last().id); // last-known-good leads whatever its side
+    }
+    {
         ScanPlanInput m = planInput(hostMac());
         m.ownNodes[4].manualOnly = true; // "4:xray", an own Xray node
         const ScanPlan pm = buildScanPlan(m);
