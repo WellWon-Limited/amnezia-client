@@ -159,7 +159,20 @@ void ScanPathProber::launch(quint64 key)
             finish(key, path::PathOutcome::Inconclusive, 0, "no_config");
             return;
         }
-        break;
+        c.costBytes = scanProbeCostBytes(c.kind, false, t);
+        const int burst = qBound(1, xrayBurst, 6);
+        it->parts = burst;
+        QList<ScanHostCandidate> parts{c};
+        for (int i = 1; i < burst; ++i) {
+            ScanHostCandidate b = c;
+            b.id = c.id + QStringLiteral(".%1").arg(i);
+            b.bytes = kXrayBurstBytes;
+            b.costBytes = qint64(t.warmBytes) + kXrayBurstBytes + 2 * kScanTlsOverheadBytes;
+            parts << b;
+        }
+        for (const ScanHostCandidate &part : parts)
+            sendCandidate(key, part);
+        return;
     }
     case path::PathKind::OwnAwg: {
         const auto mark = m_session.awgNodes.constFind(pc.id.id);
@@ -250,7 +263,8 @@ void ScanPathProber::sendCandidate(quint64 key, const ScanHostCandidate &c)
     auto it = m_probes.find(key);
     if (it == m_probes.end())
         return;
-    it->hostId = c.id;
+    if (it->hostId.isEmpty() || !c.id.contains(QLatin1Char('.')))
+        it->hostId = c.id;
     const quint64 race = it->stamp.race;
     if (m_scan.closed || m_scan.race != race) {
         openScan(race, {c});
@@ -403,8 +417,16 @@ void ScanPathProber::onPollReply(const QString &scanId, const QByteArray &reply)
         if (f.stage != ScanStage::Data)
             continue;
         const quint64 key = keyOfHostId(f.id);
-        if (m_probes.contains(key))
-            finish(key, scanPathOutcomeOf(f), f.spentBytes, f.shaOk ? "proven" : scanProbeErrorName(f.error));
+        auto it = m_probes.find(key);
+        if (it == m_probes.end())
+            continue;
+        it->partsDone += 1;
+        it->bytes += f.spentBytes;
+        const bool ok = scanPathOutcomeOf(f) == path::PathOutcome::ProbeOk;
+        it->allOk = it->allOk && ok;
+        if (it->partsDone >= it->parts)
+            finish(key, it->allOk ? path::PathOutcome::ProbeOk : path::PathOutcome::Inconclusive, it->bytes,
+                   it->allOk ? "proven" : (it->parts > 1 ? "burst_part_failed" : scanProbeErrorName(f.error)));
     }
     if (r.progress.done) {
         closeScan(scanId);
@@ -486,8 +508,9 @@ void ScanPathProber::finish(quint64 key, path::PathOutcome outcome, qint64 bytes
 
 quint64 ScanPathProber::keyOfHostId(const QString &hostId) const
 {
+    // "race<r>-<probe>" or a burst part "race<r>-<probe>.<n>"
     const int dash = hostId.lastIndexOf(QLatin1Char('-'));
-    return dash < 0 ? 0 : hostId.mid(dash + 1).toULongLong();
+    return dash < 0 ? 0 : hostId.mid(dash + 1).section(QLatin1Char('.'), 0, 0).toULongLong();
 }
 
 } // namespace avpn

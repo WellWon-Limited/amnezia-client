@@ -129,6 +129,28 @@ struct FakeHost : IScanHost {
                     return requests.at(i).value("scan_id").toString();
         return QString();
     }
+    QStringList partIdsOf(quint64 probe) const
+    {
+        QStringList out;
+        for (const QJsonObject &rq : requests)
+            for (const QJsonValue &v : rq.value("candidates").toArray()) {
+                const QString id = v.toObject().value("id").toString();
+                if ((id.endsWith(QStringLiteral("-%1").arg(probe)) || id.contains(QStringLiteral("-%1.").arg(probe))) && !out.contains(id))
+                    out << id;
+            }
+        return out;
+    }
+    void itemFor(const QString &id, const QString &scan, bool ok, qint64 spent)
+    {
+        QJsonObject it{{"id", id}, {"stage", "data"}, {"seq", double(++seq)}, {"error", ok ? "" : "dial"},
+                       {"http_status", ok ? 200 : 0}, {"sha_ok", ok}, {"bytes", ok ? 4096 : 0}, {"bytes_requested", 4096},
+                       {"duration_ms", 600}, {"ttfb1_ms", 300}, {"rtt_ms", 40}, {"t64_ms", 100}, {"spent_bytes", double(spent)},
+                       {"retries", 0}, {"start_ms", 10}, {"end_ms", 610}, {"egress_class", QJsonValue::Null},
+                       {"egress_node", QJsonValue::Null}, {"egress_asn", QJsonValue::Null}, {"net_token", QJsonValue::Null}};
+        QJsonArray a = pendingItems.value(scan);
+        a << it;
+        pendingItems.insert(scan, a);
+    }
     void item(quint64 probe, bool ok, qint64 spent = 85000)
     {
         QJsonObject it{{"id", hostIdOf(probe)}, {"stage", "data"}, {"seq", double(++seq)}, {"error", ok ? "" : "dial"},
@@ -250,6 +272,7 @@ struct World {
     {
         api.providerConfig = providerProfile();
         prober.pollIntervalMs = 5;
+        prober.xrayBurst = 1; // the single-connection cases; caseBurst checks the burst
         prober.onResult = [this](const path::ProbeStamp &s, path::PathOutcome o, qint64 b) {
             resultInsideStart = resultInsideStart || inStart;
             results << Result{s, o, b};
@@ -486,6 +509,38 @@ static void caseSession()
           "fresh until 60 s before the token expires");
 }
 
+
+static void caseBurst()
+{
+    g_case = "xray_burst";
+    for (const bool partFails : {false, true}) {
+        World w;
+        w.prober.xrayBurst = 4;
+        w.ready();
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(40);
+        const QStringList parts = w.host.partIdsOf(1);
+        check(parts.size() == 4, "own Xray goes out as 4 parallel connections");
+        int small = 0;
+        for (const QJsonObject &rq : w.host.requests)
+            for (const QJsonValue &v : rq.value("candidates").toArray())
+                small += v.toObject().value("bytes").toInt() == ScanPathProber::kXrayBurstBytes ? 1 : 0;
+        check(small == 3, "the burst's extra connections carry small bodies");
+        const QString scan = w.host.scanOf(1);
+        for (int i = 0; i < parts.size(); ++i) {
+            w.host.itemFor(parts.at(i), scan, !(partFails && i == 2), 10000);
+            spin(15);
+            if (i < parts.size() - 1)
+                check(w.results.isEmpty(), "no verdict before every part answered");
+        }
+        spin(30);
+        const World::Result *r = w.resultOf(1);
+        check(r && r->bytes == 40000, "the burst's bytes are summed");
+        check(r && r->outcome == (partFails ? path::PathOutcome::Inconclusive : path::PathOutcome::ProbeOk),
+              partFails ? "one part without its body: not proven (the tunnel's burst would stall)" : "every part through: proven");
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -496,6 +551,7 @@ int main(int argc, char **argv)
     caseCancel();
     caseScanReplaced();
     caseSession();
+    caseBurst();
     if (g_failures) {
         std::fprintf(stderr, "scan path prober check: %d of %d checks FAILED\n", g_failures, g_checks);
         return 1;

@@ -155,6 +155,12 @@ public:
     int liveProbes() const { return int(m_probes.size()); }
     QString openScanId() const { return m_scan.id; }
     int pollIntervalMs = 200;
+    // Own Xray is probed the way a tunnel opens it (device 18.11, the Estonia capture: the real tunnel opened ~9
+    // connections within a second and the network cut most of them, while a single probe connection passed): the
+    // data probe plus xrayBurst-1 small parallel ones (4 KB bodies) through the same listener; proven only if every
+    // one of them carried its body. 1 = the single connection of before.
+    int xrayBurst = 4;
+    static constexpr int kXrayBurstBytes = 4096;
 
 private:
     struct Probe {
@@ -166,6 +172,10 @@ private:
         bool cancelled = false;
         bool waitingSession = false;
         bool waitingSeat = false;
+        int parts = 1;          // host candidates of this probe (own Xray: the burst, see xrayBurst)
+        int partsDone = 0;
+        bool allOk = true;
+        qint64 bytes = 0;
     };
     struct HostScan {
         QString id;
