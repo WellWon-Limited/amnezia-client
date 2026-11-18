@@ -35,3 +35,9 @@ cd "$HERE"
 # the AmneziaWG ban and its readers are called at the expected places (source level; the rules are tested by
 # behaviour in facade_policy_check, tunnel_watch_check, transport_pick_check, upstream_engine_check, harness).
 "$HERE/check_lifecycle_142_wiring.sh"
+
+# Path engine, stage 1 core (design 2026-11-17 "one mechanism to choose a path"): PathId, NetworkKey, PathLedger,
+# PathSelect, AttemptOwner and the network scenarios of design §9 in the simulator; then the same headers through
+# the platform toolchains (IOS=1 / ANDROID=1 / WINDOWS_APPROX=1 add the passes).
+"$HERE/build_path_engine.sh"
+"$HERE/check_path_core_compile.sh"
