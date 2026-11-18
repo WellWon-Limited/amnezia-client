@@ -452,6 +452,10 @@ void TribeScanner::refreshView()
     j.insert(QStringLiteral("cooldown_ends_at_ms"), double(t < m_m.cooldownUntil() ? m_m.cooldownUntil() : 0));
     j.insert(QStringLiteral("next_change_at_ms"), double(v.nextChangeAtMs));
     j.insert(QStringLiteral("screen_open"), m_m.screenOpen());
+    // Support's check (variant B): whether a full check / report runs and how far (-1 = no stages to count)
+    j.insert(QStringLiteral("support_check"),
+             QJsonObject{{QStringLiteral("running"), m_m.reportCheckRunning()},
+                         {QStringLiteral("progress"), qRound(m_m.reportCheckProgress() * 100) / 100.0}});
     m_viewWake = v.nextChangeAtMs;
     if (j == m_viewJson)
         return;
@@ -1910,6 +1914,14 @@ void TribeScanner::gotIt() { dispatch(m_m.gotItTapped(now())); }
 void TribeScanner::chooseCountry(const QString &cc) { dispatch(m_m.filterChosen(cc, now())); }
 void TribeScanner::tapRow(const QString &id) { dispatch(m_m.rowTapped(id, now())); }
 void TribeScanner::tapCheck() { dispatch(m_m.checkTapped(now())); }
+void TribeScanner::checkFromSupport()
+{
+    emitLog(QStringLiteral("support_check tapped screen_open=%1").arg(m_m.screenOpen()));
+    // the machine may not have heard the live connection yet (the Scanner was never opened in this run): the
+    // check with or without a connection is decided from the engine's state at the tap
+    dispatch(m_m.vpnState(m_engine->current(), now()));
+    dispatch(m_m.supportCheckTapped(now()));
+}
 void TribeScanner::tapReportLink() { dispatch(m_m.reportLinkTapped(now())); }
 
 void TribeScanner::tapShade() { applyShadeStep(m_shade.tapped(now())); }

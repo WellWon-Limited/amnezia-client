@@ -1285,6 +1285,27 @@ public:
         return s;
     }
 
+    // Support's «Проверить подключение и отправить отчёт» (owner 18.11, variant B: the card and its button left the
+    // Scanner): the card's full check and report, started from the Support screen - no scan and no Scanner screen
+    // needed. With a live connection the stages check it (the view's card turns Checking, its progress is the
+    // coordinator's support_check); without one the report goes with the last scan's summary, like the empty
+    // state's link. A check or a report already running answers «Проверка уже идёт»; a row's connect in flight -
+    // nothing (the attempt decides first). The queue's backpressure is startReportCheck's (report_queue_full).
+    ScanStep supportCheckTapped(qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        if (!m_connectingId.isEmpty()) {
+            // the tapped row's attempt runs: its result first
+        } else if (m_checking || m_reportSending) {
+            s.actions << shade(ShadeTone::Info, QStringLiteral("report_check_busy"));
+        } else {
+            startReportCheck(s);
+        }
+        finishStep(s, now);
+        return s;
+    }
+
     // The link «Отправить отчёт в поддержку» (reportLinkOffered): the scan's summary goes to support through the
     // same report flow as the card's button (StartReportCheck without a connection; the queue's reservation and
     // backpressure apply) - also after a scan WITH rows when there is no live connection, so no card button
@@ -1677,6 +1698,10 @@ public:
     qint64 deadline() const { return m_deadline; }
     bool startedVpn() const { return m_startedVpn; }
     bool screenOpen() const { return m_screenOpen; }
+    // The full check / report in flight (Support's action and the card's button share it): running, and the
+    // share of the check's stages done (0..1; -1 = a report without a connection, no stages to count).
+    bool reportCheckRunning() const { return m_checking || m_reportSending; }
+    double reportCheckProgress() const { return m_checking ? double(m_checkStep) / qMax(1, m_checkTotal) : -1.0; }
     qint64 wifiIntentUntil() const { return m_wifiIntentUntil; }
     QString connectingId() const { return m_connectingId; }
     const ScanBudgetLedger &ledger() const { return m_ledger; }

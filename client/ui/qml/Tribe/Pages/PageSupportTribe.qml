@@ -84,6 +84,18 @@ PageType {
         mediaDialog.open()
     }
 
+    // AVPN (Scanner, variant B 18.11): the check with the report runs here, without the Scanner screen
+    // (TribeScanner.checkFromSupport); the Doctor entries of this page (run_diag card, «+» menu) take the same way
+    // through PageStart.onRequestDoctor. The thread is pinned to its end: the report message arrives there.
+    readonly property bool checkInSupport: ScanSwitches.replacesDoctor && typeof TribeScanner !== "undefined"
+                                           && typeof TribeScanner.checkFromSupport === "function"
+    function runCheck() {
+        if (!root.checkInSupport) { root.requestDoctor(); return }
+        TribeScanner.checkFromSupport()
+        list.stick = true
+        list.positionViewAtEnd()
+    }
+
     // AVPN (diag, Task 5 bff-3): отправить диагностику в тред (вызов ТОЛЬКО из diagConfirm —
     // пользователь видел, что уйдёт). Kill-switch продублирован и в C++ (sendDiagReport no-op).
     function sendDiag() {
@@ -222,6 +234,16 @@ PageType {
             }
         }
 
+        // AVPN (Scanner, variant B 18.11): «Проверить подключение и отправить отчёт» - the check with the report
+        // left the Scanner for here; pinned under the header, the report lands in this thread. Only with the
+        // Scanner on (`scanner` + not `doctor_legacy`); otherwise the «+» menu / run_diag keep the old Doctor sheet.
+        TribeSupportCheckBar {
+            Layout.fillWidth: true
+            visible: root.checkInSupport
+            check: (typeof TribeScanner !== "undefined" && TribeScanner.view) ? (TribeScanner.view.support_check || ({})) : ({})
+            onTapped: root.runCheck()
+        }
+
         ListView {
             id: list
             Layout.fillWidth: true
@@ -290,7 +312,7 @@ PageType {
                         list.positionViewAtEnd()
                     } else if (btn.action === "run_diag" || btn.action === "send_diag") {
                         if (root.hasEngine && TribeEngine.featureEnabled("diag_v2", true))
-                            root.requestDoctor()
+                            root.runCheck()
                         else if (btn.action === "send_diag" && root.diagEnabled)
                             diagConfirm.open()
                         else
@@ -684,7 +706,7 @@ PageType {
                             // AVPN (Доктор v1): полная диагностика; при выключенном diag_v2 —
                             // легаси-путь (лог+снапшот через конфирм)
                             if (root.hasEngine && TribeEngine.featureEnabled("diag_v2", true))
-                                root.requestDoctor()
+                                root.runCheck()
                             else
                                 diagConfirm.open()
                         }
