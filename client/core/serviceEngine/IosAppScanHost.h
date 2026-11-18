@@ -161,7 +161,9 @@ inline IosAppScanRoute iosAppScanRouteStart(const IosAppScanState &s, bool hasAw
 {
     if (s.mode == IosAppScanMode::Off)
         return IosAppScanRoute::Extension;
-    const bool appPath = s.bindIndex > 0 && s.pathSatisfied;
+    // With our own tunnel up the app's monitor (which prohibits the utun's type) sees the physical interface but
+    // reports the path unsatisfied (the default route is the utun): beside a tunnel the interface alone is enough.
+    const bool appPath = s.bindIndex > 0 && (s.pathSatisfied || !s.tunnelDown);
     if (s.tunnelDown) {
         if (!s.foreground && s.extensionRunning)
             return IosAppScanRoute::Extension; // cannot happen with the tunnel down; kept total

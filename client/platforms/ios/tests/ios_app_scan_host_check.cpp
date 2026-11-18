@@ -123,6 +123,9 @@ static void testRouting()
     s.mode = IosAppScanMode::Always;
     s.extensionRunning = true;
     check(iosAppScanRouteStart(s, false) == IosAppScanRoute::App, "always beside a tunnel, in front: in the app");
+    s.pathSatisfied = false; // device 18.11: with the tunnel up the monitor reports the physical path unsatisfied
+    check(iosAppScanRouteStart(s, false) == IosAppScanRoute::App, "beside a tunnel an unsatisfied physical path still binds");
+    s.pathSatisfied = true;
     check(iosAppScanRouteStart(s, true) == IosAppScanRoute::Extension,
           "always beside a tunnel with awg_mini: the extension (it knows the live peer)");
     s.awgBesideTunnelRefuse = true;
