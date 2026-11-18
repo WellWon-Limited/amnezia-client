@@ -49,6 +49,13 @@ PageType {
     // Connect audit 2026-11-04: the engine confirmed the live probe fails (red bars, no ms) while the
     // tunnel is up. The caption says so instead of promising a secure connection; orb unchanged.
     readonly property bool liveDeadNow: hasEngine && TribeEngine.liveDead === true
+    // Device test of 142 (second round): while one attempt walks its candidates the engine says how far it got
+    // (attemptChecked of attemptTotal; 0 / undefined = no walk - the caption stays «Подключаемся…»).
+    // the shown node is not the person's choice (a manual pick replaced by another node); undefined on older binaries
+    readonly property bool choiceElsewhere: curNode.choiceNodeId !== undefined && String(curNode.choiceNodeId) !== ""
+                                            && curNode.choiceIsShown === false
+    readonly property int attemptTotalNow: hasEngine && TribeEngine.attemptTotal !== undefined ? Number(TribeEngine.attemptTotal) : 0
+    readonly property int attemptCheckedNow: hasEngine && TribeEngine.attemptChecked !== undefined ? Number(TribeEngine.attemptChecked) : 0
 
     // AVPN awg31-xray-v1: фаза «туннель поднят, но трафик ещё не подтверждён» (xray: «Подключено»
     // только после DNS+HTTPS через туннель — инвариант волны). Гард `=== true` — старый бинарь без
@@ -851,7 +858,10 @@ PageType {
               // Device test of 142: while the orb said «Connecting…» the caption still asked to tap it. The
               // caption follows the orb's phase: our own stop, taking over a live session, connecting.
               : root.engineOwnStopping ? qsTr("Отключаемся…")
-              : root.showBusy ? (root.adopting ? qsTr("Проверяем…") : qsTr("Подключаемся…"))
+              : root.showBusy ? (root.adopting ? qsTr("Проверяем…")
+                                 : root.attemptTotalNow > 1 ? qsTr("Ищем рабочий сервер — проверено %1 из %2")
+                                                                  .arg(root.attemptCheckedNow).arg(root.attemptTotalNow)
+                                 : qsTr("Подключаемся…"))
               : root.isOn ? (root.liveDeadNow ? qsTr("Подключено, трафик не проходит")
                                               : qsTr("Защита активна — ваше соединение безопасно"))
                           : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
@@ -1064,14 +1074,27 @@ PageType {
                                 width: subRow.width - (protoBadge.visible ? protoBadge.width + subRow.spacing : 0)
                                 visible: text.length > 0
                                 elide: Text.ElideRight
-                                text: root.curNode.hasNode ? (root.curNode.auto === true ? qsTr("Авто") : "")
+                                text: root.curNode.hasNode ? (root.curNode.auto === true && !root.choiceElsewhere ? qsTr("Авто") : "")
                                       : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Повторяем автоматически")
                                                                                  : qsTr("Секунду…"))
-                                      : qsTr("Сервис запускает узел")
+                                      // one text in Auto, as the Auto card of the server list (U4/V5)
+                                      : qsTr("Сервис подберёт быстрейший узел")
                                 textFormat: Text.PlainText
                                 color: root.slate500
                                 font.family: Theme.font.mono; font.pixelSize: Theme.font.micro
                             }
+                        }
+                        // Device test of 142 (second round): the card names the node CONNECTED now; when it is not
+                        // the person's choice (a failover left it), its own line says what was chosen
+                        // (currentNode.choiceNodeId / choiceName / choiceIsShown from the engine)
+                        Text {
+                            width: parent.width
+                            visible: root.choiceElsewhere
+                            text: qsTr("Вы выбрали: %1").arg(String(root.curNode.choiceName || ""))
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            color: Theme.color.warning
+                            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                         }
                     }
                 }

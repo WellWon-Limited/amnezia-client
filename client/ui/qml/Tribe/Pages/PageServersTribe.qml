@@ -43,7 +43,13 @@ PageType {
     readonly property var pool: hasEngine ? (TribeEngine.nodePool || []) : []
     // гард undefined currentNode — как в PageLocationsTribe (страница до первой подписки)
     readonly property var cur: (hasEngine && TribeEngine.currentNode) ? TribeEngine.currentNode : ({})
-    readonly property bool autoMode: !cur.pinned
+    // Device test of 142 (second round): what the person CHOSE (Auto or a server) and what is CONNECTED now are two
+    // facts. The engine's currentNode.choiceNodeId ("" = Auto) names the choice; the row of the choice is the
+    // selected one (the Auto card's look), the connected row wears ONLINE. A binary without choiceNodeId: as before
+    // (the shown node is both).
+    readonly property bool hasChoice: cur.choiceNodeId !== undefined
+    readonly property string choiceId: hasChoice ? String(cur.choiceNodeId) : ""
+    readonly property bool autoMode: hasChoice ? choiceId === "" : !cur.pinned
     // ONLINE у строки текущей страны — то же свойство движка, что бейдж ONLINE на главной (5.1.108):
     // данные идут через туннель (живая проба или whoami works), от флага node_scan не зависит.
     readonly property bool onlineNow: hasEngine && TribeEngine.state === "connected"
@@ -173,9 +179,12 @@ PageType {
             if (q && !(name.toLowerCase().includes(q) || cc.toLowerCase().includes(q)
                        || String(best.region || "").toLowerCase().includes(q)))
                 continue
-            let isCur = false
-            for (let k = 0; k < nodes.length; ++k)
-                if (cur.nodeId && nodes[k].nodeId === cur.nodeId) { isCur = true; break }
+            let isCur = false, isChosen = false
+            for (let k = 0; k < nodes.length; ++k) {
+                if (cur.nodeId && nodes[k].nodeId === cur.nodeId) isCur = true
+                if (root.choiceId !== "" && nodes[k].nodeId === root.choiceId) isChosen = true
+            }
+            if (!root.hasChoice) isChosen = isCur
             // Бейджи транспортов локации: порядок — из движкового `transports` (== transport_rank),
             // версия/поддержка — из представителя каждого протокола. Активный (поднятый) транспорт
             // движок кладёт в activeProto строк ЭТОЙ локации (пусто, если туннель не здесь).
@@ -211,11 +220,17 @@ PageType {
                        order: isUp ? firstAt[key] : 0,
                        badges: badges,
                        disabled: disabled,
+                       // greyed only by the transport mode (the client can raise it): a tap switches to «Авто» (V7)
+                       modeOnly: disabled && anySupported,
                        // причина серой строки: транспорт есть, но не тот режим — или клиент его не умеет
                        reason: !disabled ? ""
                                : (anySupported ? qsTr("недоступно для этого режима")
                                                : qsTr("недоступно в этой версии")),
-                       isCurrent: isCur })
+                       // V6: the engine's per-network evidence (nodePool lastAttemptFailed, undefined on older
+                       // binaries): the last connect attempt through this row on THIS network failed
+                       attemptFailed: best.lastAttemptFailed === true,
+                       isCurrent: isCur,
+                       isChosen: isChosen })
         }
         out.sort(function(a, b) {
             if (a.disabled !== b.disabled) return a.disabled ? 1 : -1   // серые — вниз
@@ -229,6 +244,14 @@ PageType {
             return b.healthRank - a.healthRank
         })
         return out
+    }
+
+    // V7: the beat between the mode switching to «Авто» (visible on this page) and selecting the tapped server
+    Timer {
+        id: modePick
+        property string nodeId: ""
+        interval: Theme.motion.slow * 2
+        onTriggered: if (nodeId !== "") root.pickNode(nodeId)
     }
 
     onQueryChanged: rebuildCountries()
@@ -512,9 +535,9 @@ PageType {
                     radius: Theme.radius.lg
                     // AVPN awg31-xray-v1: локация без транспорта под текущий режим — серая
                     opacity: row.modelData.disabled ? 0.5 : 1.0
-                    color: row.modelData.isCurrent ? Theme.color.chipSelected : Theme.color.surface1
+                    color: row.modelData.isChosen ? Theme.color.chipSelected : Theme.color.surface1
                     border.width: 1
-                    border.color: row.modelData.isCurrent ? Theme.color.accent : Theme.color.border
+                    border.color: row.modelData.isChosen ? Theme.color.accent : Theme.color.border
                     Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
                     Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
 
@@ -603,7 +626,11 @@ PageType {
                             // own: the live probe, provider: its Scanner figure or none; other rows their figure
                             readonly property bool currentLive: row.modelData.isCurrent && root.hasEngine
                                                                 && TribeEngine.state === "connected"
-                            readonly property var fig: root.hasEngine
+                            // a row whose last attempt on this network failed shows no figure (an ICMP answer is not
+                            // a working path: device test of 142, «~34 мс» green on a node that never handshook)
+                            readonly property var fig: (row.modelData.attemptFailed && !sigCol.currentLive)
+                                ? ({ ms: -1, bars: -1, failed: false })
+                                : root.hasEngine
                                 ? TribeEngine.nodeFigure(row.modelData.upstream === true, sigCol.currentLive,
                                                          TribeEngine.liveReachable === true, TribeEngine.liveDead === true,
                                                          Number(TribeEngine.liveRttMs), Number(TribeEngine.liveBars),
@@ -632,14 +659,28 @@ PageType {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            // AVPN awg31-xray-v1: серая локация — честный тост, пин не трогаем
+                            // Device test of 142 (second round), owner: a row the mode cannot serve is not a dead
+                            // end. The tap switches the mode to «Авто» on this page first - the selector above moves,
+                            // the rows lose their grey, a short notice says why - then selects the server.
+                            if (row.modelData.modeOnly) {
+                                if (typeof PageController !== "undefined")
+                                    PageController.showNotificationMessage(
+                                        qsTr("Режим соединения — «Авто»: у этого сервера нет транспорта %1")
+                                            .arg(root.transportMode === "xray" ? "Xray" : "Amnezia"))
+                                Haptic.play("selection"); Haptic.arm()
+                                modePick.nodeId = row.modelData.nodeId
+                                root.pickTransport("auto")
+                                modePick.restart()
+                                return
+                            }
+                            // AVPN awg31-xray-v1: серая локация (клиент не умеет транспорт) — честный тост
                             if (row.modelData.disabled) {
                                 if (typeof PageController !== "undefined")
                                     PageController.showNotificationMessage(row.modelData.reason)
                                 return
                             }
                             // уже выбрана вручную — no-op (не дёргаем реконнект)
-                            if (row.modelData.isCurrent && !root.autoMode) { root.back(); return }
+                            if (row.modelData.isChosen && !root.autoMode) { root.back(); return }
                             Haptic.play("selection"); Haptic.arm() // AVPN (haptics): итог реконнекта отыграет PageConnectTribe
                             root.pickNode(row.modelData.nodeId)
                         }

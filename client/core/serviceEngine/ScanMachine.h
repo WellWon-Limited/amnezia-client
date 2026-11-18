@@ -1461,6 +1461,24 @@ public:
         return s;
     }
 
+    // The engine refused the tapped row before it touched the tunnel (device test of 142: the pin failed - the node
+    // left the subscription). Nothing was attempted, so nothing is marked failed and no outcome is sent: the row
+    // goes back to what it showed and the list takes taps again (before: m_connectingId stayed set, the row read
+    // «Подключение…» after reopening and rowTapped ignored every later tap).
+    ScanStep connectRefused(const QString &nodeId, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        if (!m_connectingId.isEmpty() && (nodeId.isEmpty() || nodeId == m_connectingId)) {
+            m_connectingId.clear();
+            m_chainOrder.clear();
+            m_chainLaterShown = false;
+            m_chain.begin(m_net.key);
+        }
+        finishStep(s, now);
+        return s;
+    }
+
     // The engine's attempt ended in an error (engine Error) while a tap's chain ran.
     ScanStep attemptEnded(qint64 now)
     {

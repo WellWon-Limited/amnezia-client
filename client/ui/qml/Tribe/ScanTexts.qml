@@ -29,14 +29,12 @@ QtObject {
     readonly property string markName: qsTr("Скан завершён")
 
     // ── rows ──
-    readonly property string rowWorks: qsTr("Работает")
+    readonly property string rowWorks: qsTr("Доступно")   // owner, device test of 142 (was «Работает»)
     readonly property string rowSlow: qsTr("Медленно")
     readonly property string rowNotVerified: qsTr("Не проверено")
     readonly property string rowConnecting: qsTr("Подключение…")
     readonly property string rowConnected: qsTr("Подключено")
     readonly property string rowFailed: qsTr("Не удалось")
-    readonly property string speedFast: qsTr("быстро")
-    readonly property string speedMedium: qsTr("средне")
     readonly property string rowCheckOnConnect: qsTr("Проверим при подключении")
     readonly property string ms: qsTr("%1 мс")
     readonly property string msApprox: qsTr("~%1 мс")

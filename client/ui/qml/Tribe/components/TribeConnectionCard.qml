@@ -18,6 +18,12 @@ Rectangle {
     property var card: ({})
     property string serverLabel: ""      // the live node: card.server_label, else the view's current row
     property string serverCc: ""
+    // The live state of the VPN, from the engine, in every Scanner state (owner, device test of 142: "I have to go
+    // to the home screen to see whether it is on"): "off" | "connecting" | "connected". The title line carries it as
+    // the same badge the connected row in the list wears (filled «Подключено»), the server line the protocol.
+    property string liveState: "off"
+    property string liveProto: ""          // "awg" | "xray" - the transport the tunnel runs on
+    property string liveProtoVersion: ""
     signal checkTapped()
 
     readonly property string mode: card.mode || "hidden"
@@ -54,7 +60,9 @@ Rectangle {
         return "ok"
     }
 
-    visible: mode !== "hidden"
+    // hidden by the coordinator (idle, before a scan): still the live state, title line only
+    readonly property bool compactOnly: mode === "hidden"
+    readonly property bool liveOn: liveState === "connected"
     implicitHeight: col.implicitHeight + 2 * 14
     radius: Theme.radius.lg
     color: Theme.color.surface1
@@ -159,13 +167,36 @@ Rectangle {
         anchors.topMargin: 14
         spacing: 10
 
-        Text {
-            text: ScanTexts.cardTitle
-            textFormat: Text.PlainText
-            color: Theme.color.text1
-            font.family: Theme.font.display
-            font.pixelSize: Theme.font.bodyS + 1
-            font.weight: Theme.font.wBold
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.space.sm
+            Text {
+                Layout.fillWidth: true
+                text: ScanTexts.cardTitle
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                color: Theme.color.text1
+                font.family: Theme.font.display
+                font.pixelSize: Theme.font.bodyS + 1
+                font.weight: Theme.font.wBold
+            }
+            // the live state: the same two badges the list's connected row wears (transport + filled «Подключено»)
+            TribeTransportBadge {
+                visible: root.liveOn && root.liveProto !== ""
+                transport: root.liveProto
+                version: root.liveProtoVersion
+                active: true
+            }
+            TribeLabelBadge {
+                // off: the card's own «VPN не подключён» row says it (the badge only on the compact card)
+                visible: root.liveState !== "off" || root.compactOnly
+                small: true
+                label: root.liveOn ? ScanTexts.rowConnected
+                       : root.liveState === "connecting" ? ScanTexts.rowConnecting : ScanTexts.cardOff
+                fg: root.liveOn ? Theme.color.bg800 : root.liveState === "connecting" ? Theme.color.warning : Theme.color.text3
+                fill: root.liveOn ? Theme.color.accent : root.liveState === "connecting" ? Theme.color.badgeWarn : Theme.color.glass
+                filled: root.liveOn
+            }
         }
 
         TribeProgressBar {
@@ -178,7 +209,7 @@ Rectangle {
 
         // ── off: one row «VPN не подключён» ──
         RowLayout {
-            visible: root.off
+            visible: root.off && !root.compactOnly
             Layout.fillWidth: true
             Layout.minimumHeight: Theme.scan.cardRow
             spacing: Theme.space.sm
@@ -195,7 +226,7 @@ Rectangle {
 
         // ── Сервер: flag + name + ms ──
         RowLayout {
-            visible: !root.off
+            visible: !root.off && !root.compactOnly
             Layout.fillWidth: true
             Layout.minimumHeight: Theme.scan.cardRow
             spacing: Theme.space.sm
@@ -227,7 +258,7 @@ Rectangle {
 
         // ── Сервисы: the four home chips, or «?» + «по кнопке» ──
         RowLayout {
-            visible: !root.off
+            visible: !root.off && !root.compactOnly
             Layout.fillWidth: true
             Layout.minimumHeight: Theme.scan.cardRow
             spacing: Theme.space.sm
@@ -254,7 +285,7 @@ Rectangle {
 
         // ── Сайты РФ: RU + «работают» / «не открываются» / «выключено» ──
         RowLayout {
-            visible: !root.off
+            visible: !root.off && !root.compactOnly
             Layout.fillWidth: true
             Layout.minimumHeight: Theme.scan.cardRow
             spacing: Theme.space.sm
@@ -301,7 +332,7 @@ Rectangle {
         }
 
         TribeButton {
-            visible: root.button !== "hidden" && !root.off
+            visible: root.button !== "hidden" && !root.off && !root.compactOnly
             Layout.fillWidth: true
             Layout.topMargin: 2
             variant: "glass"
