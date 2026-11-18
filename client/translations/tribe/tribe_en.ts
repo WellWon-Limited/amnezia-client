@@ -1134,7 +1134,12 @@
         <translation>Tired of turning the VPN off?</translation>
     </message>
     <message>
-        <location line="+7"/>
+        <location line="+12"/>
+        <source>Сайты РФ сейчас не открываются</source>
+        <translation>Russian sites are not opening right now</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Теперь VPN выключать не нужно.</source>
         <translation>Now you don&apos;t need to turn the VPN off.</translation>
     </message>
@@ -1186,7 +1191,7 @@
         <translation>Connected, but traffic is not getting through</translation>
     </message>
     <message>
-        <location line="-693"/>
+        <location line="-699"/>
         <source>Нет связи</source>
         <translation>No connection</translation>
     </message>
@@ -1196,7 +1201,7 @@
         <translation>Loading…</translation>
     </message>
     <message>
-        <location line="+690"/>
+        <location line="+696"/>
         <source>Ищем рабочий сервер — пробуем %1 из %2</source>
         <translation>Looking for a working server — trying %1 of %2</translation>
     </message>
@@ -1912,18 +1917,18 @@ A gift for every friend!</translation>
 <context>
     <name>PageSupportTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+117"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+129"/>
         <source>Не удалось загрузить вложение</source>
         <translation>Failed to load the attachment</translation>
     </message>
     <message>
         <location line="+9"/>
-        <location line="+504"/>
+        <location line="+514"/>
         <source>Фото или видео</source>
         <translation>Photo or video</translation>
     </message>
     <message>
-        <location line="-503"/>
+        <location line="-513"/>
         <source>Фото и видео</source>
         <translation>Photos and videos</translation>
     </message>
@@ -1948,7 +1953,7 @@ A gift for every friend!</translation>
         <translation>Account ID copied</translation>
     </message>
     <message>
-        <location line="+79"/>
+        <location line="+89"/>
         <source>Функция временно недоступна</source>
         <translation>This feature is temporarily unavailable</translation>
     </message>
@@ -2004,12 +2009,12 @@ You can attach a photo or video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+74"/>
+        <location line="+70"/>
         <source>Сканер</source>
         <translation>Scanner</translation>
     </message>
     <message>
-        <location line="-73"/>
+        <location line="-69"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2019,17 +2024,7 @@ You can attach a photo or video.</translation>
         <translation>Cellular</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Проверено только что</source>
-        <translation>Checked just now</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Проверено %1&#xa0;мин назад</source>
-        <translation>Checked %1&#xa0;min ago</translation>
-    </message>
-    <message>
-        <location line="+2"/>
+        <location line="+14"/>
         <source>Подключаемся…</source>
         <translation>Connecting…</translation>
     </message>
@@ -2110,68 +2105,8 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+3"/>
-        <source>Ваше подключение</source>
-        <translation>Your connection</translation>
-    </message>
-    <message>
-        <location line="+1"/>
         <source>VPN не подключён</source>
         <translation>VPN is not connected</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Сервер</source>
-        <translation>Server</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Сервисы</source>
-        <translation>Services</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Сайты РФ</source>
-        <translation>RU sites</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Скорость</source>
-        <translation>Speed</translation>
-    </message>
-    <message>
-        <location line="+2"/>
-        <source>работают</source>
-        <translation>open</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>не открываются</source>
-        <translation>do not open</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>выключено</source>
-        <translation>off</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>комфортно</source>
-        <translation>comfortable</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>медленно</source>
-        <translation>slow</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Проверить и отправить отчёт</source>
-        <translation>Check and send a report</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Проверяем…</source>
-        <translation>Checking…</translation>
     </message>
     <message>
         <location line="+3"/>
@@ -2197,11 +2132,6 @@ You can attach a photo or video.</translation>
         <location line="+1"/>
         <source>Повторить через %1&#xa0;мин</source>
         <translation>Retry in %1&#xa0;min</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Скан потратит до %1&#xa0;МБ</source>
-        <translation>The scan uses up to %1&#xa0;MB</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2245,11 +2175,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
+        <location line="+74"/>
         <source>Отправляем отчёт…</source>
         <translation>Sending the report…</translation>
     </message>
     <message>
-        <location line="+7"/>
+        <location line="-67"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>All seats are taken right now — connecting the next server</translation>
     </message>
@@ -2384,12 +2315,112 @@ You can attach a photo or video.</translation>
         <translation>Unsent reports: %1 — they will go with the logs</translation>
     </message>
     <message>
-        <location line="-15"/>
+        <location line="+4"/>
+        <source>Найти ещё</source>
+        <translation>Find more</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Ищем ещё…</source>
+        <translation>Searching for more…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Больше доступных нод в этой сети нет</source>
+        <translation>No more available nodes on this network</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сканировать</source>
+        <translation>Scan</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1: доступных нод сейчас нет</source>
+        <translation>%1: no available nodes right now</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Попробуйте другую страну или проверьте все страны.</source>
+        <translation>Try another country or scan all countries.</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Проверить подключение и отправить отчёт</source>
+        <translation>Check the connection and send a report</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Отчёт придёт сюда, в чат</source>
+        <translation>The report will arrive here, in the chat</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Проверяем подключение…</source>
+        <translation>Checking the connection…</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>До 20 секунд — отчёт сам придёт в чат</source>
+        <translation>Up to 20 seconds — the report will arrive in the chat</translation>
+    </message>
+    <message>
+        <location line="-30"/>
         <source>Запустить службу</source>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-100"/>
+        <location line="-97"/>
+        <source>только что</source>
+        <translation>just now</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1&#xa0;мин назад</source>
+        <translation>%1&#xa0;min ago</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1&#xa0;ч назад</source>
+        <translation>%1&#xa0;h ago</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>вчера</source>
+        <translation>yesterday</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1&#xa0;дн. назад</source>
+        <translation>%1&#xa0;days ago</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Проверено: %1</source>
+        <translation>Checked: %1</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>LTE</source>
+        <translation>LTE</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>5G</source>
+        <translation>5G</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>3G</source>
+        <translation>3G</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сеть: %1</source>
+        <translation>Network: %1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>ДОСТУПНЫ СЕЙЧАС</source>
         <translation>AVAILABLE NOW</translation>
     </message>
@@ -2404,12 +2435,7 @@ You can attach a photo or video.</translation>
         <translation>Available</translation>
     </message>
     <message>
-        <location line="+16"/>
-        <source>проверим кнопкой ниже</source>
-        <translation>check with the button below</translation>
-    </message>
-    <message>
-        <location line="+29"/>
+        <location line="+31"/>
         <source>Найдена 1 доступная нода</source>
         <translation>1 available server found</translation>
     </message>
@@ -3065,7 +3091,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4169"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4175"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3165,7 +3191,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-2949"/>
+        <location line="-2953"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3230,7 +3256,7 @@ You can attach a photo or video.</translation>
         <translation>Connection mode is now “Auto” to connect the selected server</translation>
     </message>
     <message>
-        <location line="+107"/>
+        <location line="+111"/>
         <source>«%1» в этой сети не работает — подключено через другой сервер</source>
         <translation>“%1” does not work on this network — connected via another server</translation>
     </message>
