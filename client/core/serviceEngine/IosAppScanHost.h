@@ -82,6 +82,11 @@ struct IosAppScanControl {
     bool noLegs = false;
     int autorunS = 0;
     int closeAfterS = 45;
+    // Device runs (contract 1.14.0): after the first scan, a scope scan of `autorun_scope` ("" = none, a country or
+    // "whitelist") and then `autorun_more` «Найти ещё» batches, one every `step_s` (above the manual cooldown).
+    QString autorunScope;
+    int autorunMore = 0;
+    int stepS = 32;
 };
 
 inline IosAppScanControl iosAppScanControlFrom(const QByteArray &json)
@@ -93,6 +98,9 @@ inline IosAppScanControl iosAppScanControlFrom(const QByteArray &json)
     c.noLegs = o.value(QLatin1String("legs")) == QJsonValue(false);
     c.autorunS = qBound(0, o.value(QLatin1String("autorun_s")).toInt(0), 600);
     c.closeAfterS = qBound(10, o.value(QLatin1String("close_after_s")).toInt(45), 600);
+    c.autorunScope = o.value(QLatin1String("autorun_scope")).toString();
+    c.autorunMore = qBound(0, o.value(QLatin1String("autorun_more")).toInt(0), 10);
+    c.stepS = qBound(5, o.value(QLatin1String("step_s")).toInt(32), 300);
     return c;
 }
 
