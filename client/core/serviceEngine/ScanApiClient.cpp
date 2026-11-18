@@ -139,6 +139,8 @@ void ScanQnamHttp::send(const Request &rq, DoneFn done)
                               || (status >= 300 && reply->error() != QNetworkReply::OperationCanceledError);
         r.cut = live->cut;
         r.status = (r.cut || !complete) ? 0 : status;
+        r.canceled = !r.cut && reply->error() == QNetworkReply::OperationCanceledError
+                     && !reply->property("avpn_timed_out").toBool();
         for (const auto &p : reply->rawHeaderPairs())
             r.headers.insert(p.first.toLower(), p.second);
         r.body = r.cut ? QByteArray() : live->body;
@@ -395,6 +397,7 @@ struct ScanApiClient::ManifestRun {
     Stored stored;
     Manifest result;
     bool refetched = false;
+    int canceledRetries = 0;
     std::function<void(const Manifest &)> done;
 
     qint64 left() const { return cost < 0 ? -1 : qMax<qint64>(0, cost - spent); }
@@ -435,10 +438,12 @@ void ScanApiClient::manifestGet(std::shared_ptr<ManifestRun> run, bool condition
         rq.headers << qMakePair(QByteArrayLiteral("If-None-Match"), run->stored.etag);
     rq.maxBytes = run->left();
     QPointer<ScanApiClient> self(this);
-    m_http->send(rq, [self, run](const IScanHttp::Response &r) {
+    m_http->send(rq, [self, run, conditional](const IScanHttp::Response &r) {
         if (!self)
             return;
         run->spent += r.bytes;
+        if (self->retryCanceled(run, r, [self, run, conditional]() { if (self) self->manifestGet(run, conditional); }))
+            return;
         run->result.statusManifest = r.status;
         if (r.status == 304 && run->stored.ok) {
             run->result.fromStore = true;
@@ -490,6 +495,15 @@ void ScanApiClient::manifestGet(std::shared_ptr<ManifestRun> run, bool condition
     });
 }
 
+bool ScanApiClient::retryCanceled(std::shared_ptr<ManifestRun> run, const IScanHttp::Response &r, std::function<void()> again)
+{
+    if (!scanRetryCanceledRequest(r.status, r.canceled, run->canceledRetries))
+        return false;
+    ++run->canceledRetries;
+    QTimer::singleShot(kScanCanceledRetryDelayMs, this, std::move(again));
+    return true;
+}
+
 void ScanApiClient::manifestToken(std::shared_ptr<ManifestRun> run)
 {
     IScanHttp::Request rq;
@@ -502,6 +516,8 @@ void ScanApiClient::manifestToken(std::shared_ptr<ManifestRun> run)
         if (!self)
             return;
         run->spent += r.bytes;
+        if (self->retryCanceled(run, r, [self, run]() { if (self) self->manifestToken(run); }))
+            return;
         const QJsonObject g = QJsonDocument::fromJson(r.body).object();
         const QString token = g.value(QLatin1String("scan_token")).toString();
         if (r.status != 200 || g.value(QLatin1String("type")).toString() != QLatin1String("scan_token") || token.isEmpty()) {

@@ -3705,9 +3705,22 @@ static void caseQnamCut()
     CHECK(done && !got.cut && got.status == 200 && got.body.size() == 200000);
 }
 
+// Coordinator 18.11: «Не удалось запустить проверку» while connected - POST /v1/scan/token cancelled by our own
+// tunnel switch (net_error 5) ended the scan as manifest_unavailable. Such a request is sent again (bounded);
+// a timeout, a byte cap or an HTTP answer ends as before.
+static void caseScanCanceledRetryRule()
+{
+    CHECK(scanRetryCanceledRequest(0, /*canceled=*/true, 0));
+    CHECK(scanRetryCanceledRequest(0, true, kScanCanceledRetries - 1));
+    CHECK(!scanRetryCanceledRequest(0, true, kScanCanceledRetries));
+    CHECK(!scanRetryCanceledRequest(0, /*canceled=*/false, 0)); // a timeout / transport error
+    CHECK(!scanRetryCanceledRequest(503, true, 0));             // an answer decides
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
+    caseScanCanceledRetryRule();
     caseFullScan();
     caseFullProbeProfileRule();
     caseLiveDigest();
