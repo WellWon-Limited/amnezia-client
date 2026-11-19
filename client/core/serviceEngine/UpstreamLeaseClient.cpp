@@ -212,7 +212,7 @@ void UpstreamLeaseClient::flushHeld(bool tunnelDown)
 }
 
 void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
-                                      const LeaseRoute &route, int attempt)
+                                      const LeaseRoute &route, int attempt, qint64 spacedMs)
 {
     const QString base = baseFor(route);
     const QString bearer = !route.renewToken.isEmpty() ? route.renewToken : (m_token ? m_token() : QString());
@@ -237,23 +237,30 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         });
         return;
     }
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt, spacedMs]() {
         r->deleteLater();
         // The release goes out just before the tunnel transition it belongs to, and that transition aborts every
-        // API request in flight (DebugSnapshot.h::transitionNetAction - owner's iPhone 16.11: both releases ended
-        // "net_error 5" within 40-80 ms and never reached the server). upstreamReleaseNext: a try cut by us is sent
-        // again; only an HTTP answer counts as released.
-        const bool answered = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid();
-        switch (upstreamReleaseNext(attempt, r->error() == QNetworkReply::OperationCanceledError,
-                                    r->property("avpn_timed_out").toBool(), answered)) {
+        // API request in flight (owner's iPhone 16.11: "net_error 5" within 40-80 ms); an API restart answers 502
+        // (device round 19.11). seatReleaseNext - the one rule of every seat release: no answer or 5xx is sent again
+        // on the shared growing spacing within its budget; any other HTTP answer is final.
+        const QVariant code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = code.isValid() ? code.toInt() : 0;
+        const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs);
+        switch (next.kind) {
         case UpstreamReleaseTry::Resend:
-            sendRelease(requestId, leaseId, meter, route, attempt + 1);
+            qInfo().noquote() << QStringLiteral("avpn upstream: seat release status=%1 net_error=%2 resend=%3 in %4 ms")
+                                     .arg(status).arg(int(r->error())).arg(attempt + 1).arg(next.delayMs);
+            QTimer::singleShot(next.delayMs, this, [this, requestId, leaseId, meter, route, attempt, spacedMs, next]() {
+                sendRelease(requestId, leaseId, meter, route, attempt + 1, spacedMs + next.delayMs);
+            });
             return;
         case UpstreamReleaseTry::Answered:
             if (onReleaseDone)
                 onReleaseDone(requestId, true);
             return;
         case UpstreamReleaseTry::NotConfirmed:
+            qWarning().noquote() << QStringLiteral("avpn upstream: seat release gave up status=%1 net_error=%2 tries=%3 - left to the server's TTL")
+                                        .arg(status).arg(int(r->error())).arg(attempt + 1);
             if (onReleaseDone)
                 onReleaseDone(requestId, false);
             return;

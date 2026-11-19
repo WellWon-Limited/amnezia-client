@@ -24,6 +24,7 @@
 #include <QHostAddress>
 
 #include <openssl/evp.h>
+#include <zlib.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -232,6 +233,16 @@ struct Server {
     int leaseSerial = 0;
     QStringList releasedLeases;
     int cancelReleases = 0; // the next N probe-seat releases are cut by our own tunnel transition (canceled, no answer)
+    QList<int> releaseStatuses; // the next probe-seat releases are answered with these statuses (nothing released)
+    int releaseTries = 0;
+    // Contract 1.15.0: a batch's operation id. The server's side of an operation: its answer items (a resend gets
+    // the same seats), the lease ids it granted (released by the id).
+    int cancelBatches = 0;  // the next N probe-batch sends are cut by our own transition AFTER the server granted
+    QString foreignOp;      // non-empty: the batch answer echoes this id instead of the request's
+    QHash<QString, QJsonArray> opItems;
+    QHash<QString, QStringList> opLeases;
+    QStringList batchOps;   // the operation id of every batch send, in order
+    QStringList releasedOps;
     int outcomeItems = 0;
     QList<IScanHttp::Request> calls;
 
@@ -309,8 +320,13 @@ struct Server {
         if (path == QLatin1String("/v1/upstream/lease/probe-batch")) {
             const QJsonObject req = QJsonDocument::fromJson(r.body).object();
             const bool cfg = req.value("include_config").toBool();
+            const QString op = req.value("operation_id").toString();
+            batchOps << op;
             QJsonArray items;
-            for (const QJsonValue &v : req.value("profile_ids").toArray()) {
+            const bool repeat = !op.isEmpty() && opItems.contains(op);
+            if (repeat)
+                items = opItems.value(op); // the same seats, no new ones
+            for (const QJsonValue &v : repeat ? QJsonArray() : req.value("profile_ids").toArray()) {
                 const QString pid = v.toString();
                 if (refuse.contains(pid)) {
                     items << QJsonObject{{"profile_id", pid}, {"granted", false}, {"code", refuse.value(pid)}};
@@ -327,8 +343,21 @@ struct Server {
                     it.insert("config", QString::fromLatin1(kProviderConfig));
                 }
                 items << it;
+                if (!op.isEmpty())
+                    opLeases[op] << it.value("lease_id").toString();
+            }
+            if (!op.isEmpty())
+                opItems.insert(op, items);
+            if (cancelBatches > 0) {
+                --cancelBatches;
+                out.canceled = true; // granted on the server, the answer never reached the app
+                return out;
             }
             QJsonObject body{{"type", "upstream_probe_batch"}, {"upstream_revision", double(revision)}, {"items", items}};
+            if (!foreignOp.isEmpty())
+                body.insert("operation_id", foreignOp);
+            else if (!op.isEmpty())
+                body.insert("operation_id", op);
             if (batchPad > 0)
                 body.insert("pad", QString(batchPad, QLatin1Char('x')));
             out.status = 200;
@@ -338,13 +367,27 @@ struct Server {
             return out;
         }
         if (path == QLatin1String("/v1/upstream/lease/probe-batch/release")) {
+            ++releaseTries;
+            if (!releaseStatuses.isEmpty()) {
+                out.status = releaseStatuses.takeFirst(); // e.g. 502 of an API restart: nothing released
+                return out;
+            }
             if (cancelReleases > 0) {
                 --cancelReleases;
                 out.canceled = true; // status 0: never reached the server
                 return out;
             }
-            for (const QJsonValue &v : QJsonDocument::fromJson(r.body).object().value("lease_ids").toArray())
-                releasedLeases << v.toString();
+            const QJsonObject rel = QJsonDocument::fromJson(r.body).object();
+            for (const QJsonValue &v : rel.value("lease_ids").toArray())
+                if (!releasedLeases.contains(v.toString()))
+                    releasedLeases << v.toString();
+            const QString op = rel.value("operation_id").toString();
+            if (!op.isEmpty()) {
+                releasedOps << op;
+                for (const QString &l : opLeases.value(op)) // every seat of the operation, also unseen ones
+                    if (!releasedLeases.contains(l))
+                        releasedLeases << l;
+            }
             out.status = 204;
             return out;
         }
@@ -1414,7 +1457,9 @@ static void caseBatchPartial()
     b.run(20000);
     CHECK_EQ(b.host.count("scan_add"), 0);
     CHECK(b.rowFlag(up0, "unverified"));
-    CHECK(b.server.releasedLeases.isEmpty());
+    // an unverified answer grants nothing; the seats the server did grant are released by the operation id at once
+    CHECK_EQ(b.server.releasedOps.size(), 1);
+    CHECK(b.server.releasedLeases == b.server.opLeases.value(b.server.releasedOps.value(0)) && b.server.releasedLeases.size() == 3);
 }
 
 // Cellular: the app slice is reserved first; the host's grant = the allowance minus the app slice; every app
@@ -1454,7 +1499,13 @@ static void caseCellularBudget()
     for (const FakeHost::Scan &sc : w.host.scans)
         hostFinal += sc.gate.spent();
     qint64 live = kLiveSpent;
-    CHECK_EQ(w.ledgerLast(), w.http.totalBytes + hostFinal + live);
+    // the cut batch's seats are released by its operation id at once: that request is charged outside the scan
+    qint64 outside = 0;
+    for (const FakeHttp::Sent &x : w.http.sent)
+        if (QUrl(x.req.url).path() == QLatin1String("/v1/upstream/lease/probe-batch/release") && x.req.body.contains("operation_id"))
+            outside += x.resp.bytes;
+    CHECK(outside > 0 && w.server.releasedOps.size() == 1 && w.ledgerEntriesOf(outside) == 1);
+    CHECK_EQ(w.ledgerLast(), w.http.totalBytes - outside + hostFinal + live);
     CHECK(w.logsClean());
 }
 
@@ -3686,6 +3737,84 @@ static void caseQnamCut()
     CHECK(done && !got.cut && got.status == 200 && got.body.size() == 200000);
 }
 
+// Review 19.11 (provider seat price): QNAM's own "Accept-Encoding: gzip, deflate" hands over the INFLATED body, so
+// every count and cut was the inflated size (a 7.5 KB provider config answer counted as 30-53 KB). The layer asks gzip
+// itself: the count and the cut are wire bytes, the body is inflated here.
+static QByteArray gzipOf(const QByteArray &plain)
+{
+    z_stream zs{};
+    deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, 16 + MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
+    QByteArray out(int(deflateBound(&zs, uLong(plain.size()))) + 32, '\0');
+    zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(plain.constData()));
+    zs.avail_in = uInt(plain.size());
+    zs.next_out = reinterpret_cast<Bytef *>(out.data());
+    zs.avail_out = uInt(out.size());
+    deflate(&zs, Z_FINISH);
+    out.resize(int(zs.total_out));
+    deflateEnd(&zs);
+    return out;
+}
+
+static void caseQnamGzip()
+{
+    g_case = QStringLiteral("qnam_gzip");
+    QByteArray plain;
+    for (int i = 0; plain.size() < 200000; ++i)
+        plain += QByteArray("{\"domain\":\"example") + QByteArray::number(i % 977) + ".com\",\"outboundTag\":\"proxy\"},";
+    const QByteArray gz = gzipOf(plain);
+    QByteArray back;
+    CHECK(gz.size() < plain.size() / 4 && scanGunzip(gz, kScanInflateMaxBytes, &back) && back == plain);
+    CHECK(!scanGunzip(gz, plain.size() - 1, &back) && back.isEmpty()); // the inflate bound
+    CHECK(!scanGunzip(gz.left(gz.size() / 2), kScanInflateMaxBytes, &back)); // a truncated stream
+    CHECK(!scanGunzip(plain, kScanInflateMaxBytes, &back));                   // not gzip
+
+    QTcpServer srv;
+    CHECK(srv.listen(QHostAddress::LocalHost, 0));
+    QByteArray seenEncoding;
+    bool corrupt = false;
+    QObject::connect(&srv, &QTcpServer::newConnection, [&]() {
+        QTcpSocket *c = srv.nextPendingConnection();
+        QObject::connect(c, &QTcpSocket::readyRead, c, [&, c]() {
+            for (const QByteArray &l : c->readAll().split('\n'))
+                if (l.toLower().startsWith("accept-encoding:"))
+                    seenEncoding = l.mid(16).trimmed();
+            const QByteArray body = corrupt ? gz.left(gz.size() / 2) : gz;
+            c->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: "
+                     + QByteArray::number(body.size()) + "\r\n\r\n");
+            c->write(body);
+        });
+    });
+    QNetworkAccessManager nam;
+    ScanQnamHttp http(&nam);
+    IScanHttp::Request rq;
+    rq.method = QByteArrayLiteral("POST");
+    rq.url = QStringLiteral("http://127.0.0.1:%1/v1/upstream/lease/probe-batch").arg(srv.serverPort());
+    rq.body = "{}";
+    rq.maxBytes = gz.size() + 16384; // far below the inflated size: a cut of the inflated count would abort it
+    rq.timeoutMs = 5000;
+    bool done = false;
+    IScanHttp::Response got;
+    const auto send = [&]() {
+        done = false;
+        http.send(rq, [&](const IScanHttp::Response &r) {
+            got = r;
+            done = true;
+        });
+        QElapsedTimer t;
+        t.start();
+        while (!done && t.elapsed() < 5000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    };
+    send();
+    CHECK(done);
+    CHECK_EQ(seenEncoding, QByteArray("gzip"));
+    CHECK(!got.cut && got.status == 200 && got.body == plain);
+    CHECK(got.bytes >= gz.size() && got.bytes <= rq.maxBytes); // wire bytes, not the inflated body
+    corrupt = true;
+    send();
+    CHECK(done && got.status == 0 && got.body.isEmpty() && !got.canceled); // a body that does not inflate is no answer
+}
+
 // Coordinator 18.11: «Не удалось запустить проверку» while connected - POST /v1/scan/token cancelled by our own
 // tunnel switch (net_error 5) ended the scan as manifest_unavailable. Such a request is sent again (bounded);
 // a timeout, a byte cap or an HTTP answer ends as before.
@@ -3699,45 +3828,182 @@ static void caseScanCanceledRetryRule()
 }
 
 
-// Device round of 19.11 (iPhone Air 06:31:22, 06:32:04): a probe-seat release our own tunnel transition cut (status 0,
-// canceled) is sent again after the transition; a timeout / network error is not. Before: one try, the seats stayed
-// until the server's probe TTL.
+// Device round of 19.11 (iPhone Air 06:31:22, 06:32:04: a release our own tunnel transition cut; 08:18:42: a 502 of a
+// prod API restart): a seat release with no HTTP answer or a 5xx is sent again on the shared spacing
+// (seatReleaseNext) until its budget is used, then given up and journalled; 2xx / 4xx are final.
 static void caseReleaseSurvivesTransition()
 {
     g_case = QStringLiteral("release_survives_transition");
-    World w;
-    w.start();
     const QStringList ids{QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID9001"), QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID9002")};
-    w.server.cancelReleases = 2;
-    bool done = false;
-    qint64 bytes = 0;
-    w.s->api()->releaseLeases(ids, 4096, [&](qint64 b) {
-        done = true;
-        bytes = b;
-    });
-    QElapsedTimer t;
-    t.start();
-    while (!done && t.elapsed() < 6000) {
-        w.run(50);
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    const auto release = [&ids](World &w) {
+        bool done = false;
+        qint64 bytes = 0;
+        w.s->api()->releaseLeases(ids, ScanTunables().costApiBytes, [&](qint64 b) {
+            done = true;
+            bytes = b;
+        });
+        QElapsedTimer t;
+        t.start();
+        while (!done && t.elapsed() < 9000) {
+            w.run(50);
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        }
+        CHECK(done);
+        return bytes;
+    };
+    const auto logged = [](const World &w, const char *what) {
+        for (const QString &l : w.logs)
+            if (l.contains(QLatin1String(what)))
+                return true;
+        return false;
+    };
+    { // cut twice by our own transition, then answered
+        World w;
+        w.start();
+        w.server.cancelReleases = 2;
+        CHECK(release(w) > 0);
+        CHECK_EQ(w.server.cancelReleases, 0);
+        CHECK_EQ(w.server.releasedLeases, ids); // released once, by the third try
     }
-    CHECK(done);
-    CHECK_EQ(w.server.cancelReleases, 0);
-    CHECK_EQ(w.server.releasedLeases, ids); // released once, by the third try
-    CHECK(bytes > 0);
-    // a cut that never ends: bounded by kScanCanceledRetries, then the seat is the server's TTL's
-    w.server.releasedLeases.clear();
-    w.server.cancelReleases = kScanCanceledRetries + 1;
-    done = false;
-    w.s->api()->releaseLeases(ids, 4096, [&](qint64) { done = true; });
-    t.restart();
-    while (!done && t.elapsed() < 9000) {
-        w.run(50);
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    { // 502 then 204 -> released
+        World w;
+        w.start();
+        w.server.releaseStatuses = {502};
+        release(w);
+        CHECK_EQ(w.server.releaseTries, 2);
+        CHECK_EQ(w.server.releasedLeases, ids);
     }
-    CHECK(done);
-    CHECK(w.server.releasedLeases.isEmpty());
-    CHECK_EQ(w.server.cancelReleases, 0);
+    { // 502 x N: resent until the spacing budget is used, then given up and journalled
+        World w;
+        w.start();
+        w.s->api()->releaseRetryBudgetMs = 2500; // 300 + 600 ms of spacing: three tries
+        w.server.releaseStatuses = {502, 502, 502, 502, 502, 502};
+        release(w);
+        CHECK_EQ(w.server.releaseTries, 3);
+        CHECK(w.server.releasedLeases.isEmpty() && logged(w, "gave_up=1"));
+        w.server.releaseStatuses.clear();
+        w.server.releaseTries = 0;
+        w.server.cancelReleases = 10; // a cut that never ends: the same bound
+        release(w);
+        CHECK_EQ(w.server.releaseTries, 3);
+        CHECK(w.server.releasedLeases.isEmpty());
+    }
+    { // 404 / 409: final, no resend
+        for (const int status : {404, 409}) {
+            World w;
+            w.start();
+            w.server.releaseStatuses = {status, 204};
+            release(w);
+            CHECK_EQ(w.server.releaseTries, 1);
+            CHECK(w.server.releasedLeases.isEmpty() && !logged(w, "gave_up=1"));
+        }
+    }
+}
+
+// Contract 1.15.0 (device round 19.11: the race's batch was cut as a tunnel came up, its seats stayed until their
+// TTL). The batch's operation id is made before the first send; a send our own transition cut goes again with the
+// same id and gets the same seats; only an answer echoing the id is used; whatever the owner never saw is released by
+// the id; a new batch has a new id.
+static void caseBatchOperation()
+{
+    g_case = QStringLiteral("batch_operation");
+    const auto runUntil = [](World &w, const std::function<bool()> &cond, int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (!cond() && t.elapsed() < ms) {
+            w.run(50);
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        }
+    };
+    const QStringList one{kPids.at(0)};
+    { // a cut send is resent with the same id; the answer gives the seat granted by the cut send
+        World w;
+        w.start();
+        w.server.cancelBatches = 1;
+        bool done = false;
+        ScanApiClient::Batch got;
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &b) {
+            got = b;
+            done = true;
+        });
+        const QString op = owner->operationId();
+        CHECK(scanOperationIdValid(op));
+        runUntil(w, [&]() { return done; }, 6000);
+        CHECK(done);
+        CHECK_EQ(w.server.batchOps.size(), 2);
+        CHECK(w.server.batchOps.value(0) == op && w.server.batchOps.value(1) == op); // the resend carries the same id
+        CHECK(got.ok && got.resends == 1 && got.items.size() == 1 && got.items.at(0).granted);
+        CHECK(got.items.value(0).leaseId == w.server.opLeases.value(op).value(0)); // the seat of the first (cut) send
+        CHECK(w.server.releasedOps.isEmpty());                                  // held while its owner holds it
+        std::unique_ptr<ScanSeatBatch> second = w.s->api()->probeBatch(one, false, 40000, [](const ScanApiClient::Batch &) {});
+        CHECK(second->operationId() != op); // a new batch = a new id
+        owner.reset();                       // the owner goes: its seat is released by the id
+        runUntil(w, [&]() { return w.server.releasedOps.contains(op); }, 3000);
+        CHECK(w.server.releasedOps.contains(op) && w.server.releasedLeases.contains(got.items.value(0).leaseId));
+    }
+    { // an answer with another operation's id grants nothing; the seats are released by OUR id at once
+        World w;
+        w.start();
+        w.server.foreignOp = QStringLiteral("ffffffffffffffffffffffffffffffff");
+        bool done = false;
+        ScanApiClient::Batch got;
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &b) {
+            got = b;
+            done = true;
+        });
+        const QString op = owner->operationId();
+        runUntil(w, [&]() { return done && w.server.releasedOps.contains(op); }, 3000);
+        CHECK(done && !got.ok && got.failCode == QLatin1String("transport") && !got.items.value(0).granted);
+        CHECK(w.server.releasedOps == QStringList{op}); // never the foreign id
+        CHECK(w.server.releasedLeases == w.server.opLeases.value(op));
+    }
+    { // the answer never came (every resend cut): the seats the server granted are released by the id
+        World w;
+        w.start();
+        w.server.cancelBatches = kScanCanceledRetries + 1;
+        bool done = false;
+        ScanApiClient::Batch got;
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 400000, [&](const ScanApiClient::Batch &b) {
+            got = b;
+            done = true;
+        });
+        const QString op = owner->operationId();
+        runUntil(w, [&]() { return done && w.server.releasedOps.contains(op); }, 9000);
+        CHECK(done && !got.ok && got.resends == kScanCanceledRetries);
+        CHECK_EQ(w.server.batchOps.size(), kScanCanceledRetries + 1);
+        CHECK(w.server.releasedOps == QStringList{op});
+        CHECK(!w.server.opLeases.value(op).isEmpty() && w.server.releasedLeases == w.server.opLeases.value(op));
+        owner.reset();
+        w.run(200);
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        CHECK_EQ(w.server.releasedOps.size(), 1); // released once
+    }
+    { // the owner goes while the request is in flight and that send is cut: no resend, released by the id
+        World w;
+        w.start();
+        w.server.cancelBatches = 1;
+        bool done = false;
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &) { done = true; });
+        const QString op = owner->operationId();
+        owner.reset();
+        runUntil(w, [&]() { return done && w.server.releasedOps.contains(op); }, 3000);
+        CHECK(done && w.server.batchOps.size() == 1 && w.server.releasedOps == QStringList{op});
+    }
+    { // lease_gone (a resend whose seat already ended): that profile has no seat - an item, not a batch failure
+        World w;
+        w.start();
+        w.server.refuse.insert(kPids.at(1), QStringLiteral("lease_gone"));
+        bool done = false;
+        ScanApiClient::Batch got;
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch({kPids.at(0), kPids.at(1)}, false, 40000,
+                                                                      [&](const ScanApiClient::Batch &b) {
+            got = b;
+            done = true;
+        });
+        runUntil(w, [&]() { return done; }, 3000);
+        CHECK(done && got.ok && got.items.size() == 2 && got.items.at(0).granted && !got.items.at(1).granted
+              && got.items.at(1).code == QLatin1String("lease_gone"));
+    }
 }
 
 // Contract 1.14.0 end to end: the pool feeds the scope menu when the screen opens; «Найти ещё» asks the server's
@@ -3860,6 +4126,7 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     caseScanCanceledRetryRule();
     caseReleaseSurvivesTransition();
+    caseBatchOperation();
     caseFullScan();
     caseFullProbeProfileRule();
     caseServerScope();
@@ -3907,6 +4174,7 @@ int main(int argc, char **argv)
     caseSpeedSample();
     caseScreenFields();
     caseQnamCut();
+    caseQnamGzip();
     if (g_fail) {
         std::fprintf(stderr, "scanner_facade_check: %d of %d checks FAILED\n", g_fail, g_checks);
         return 1;
