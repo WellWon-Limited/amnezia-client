@@ -419,6 +419,8 @@ struct ScanRowView {
     bool verifying = false;             // transport badge yellow while connecting
     bool current = false;
     bool verified = true;               // false = a «Не проверено» row
+    bool liveChecking = false;          // the connected, unproven row's check is under way («проверяем загрузку…»);
+                                        // false with !verified = nothing checks it now: plain «Подключено»
     bool crowdWorks = false;            // «работает у других в вашей сети» (a mark: never order, never verdict)
     quint64 arrival = 0;                // grows with every new fresh row (arrive animation once)
     QString notVerifiedReason;
@@ -1176,13 +1178,23 @@ public:
     // coordinator cuts a reply on the wire one transport chunk late at most): the ledger records what really
     // went. Reported after its scan's ledger entry (or for a request charged at once outside a scan), only
     // the excess over what was charged is added to the hour; less is never refunded.
-    ScanStep appRequestDone(const QString &requestId, qint64 bytes, qint64 now)
+    ScanStep appRequestDone(QString requestId, qint64 bytes, qint64 now) // by value: callers pass members it clears
     {
         now = clock(now);
         ScanStep s;
         const QString scanId = requestId.section(QLatin1Char('/'), 0, 0);
         Settle *st = settleOf(scanId);
         const auto it = st ? st->app.constFind(requestId) : QHash<QString, qint64>::const_iterator();
+        if (!m_liveReqId.isEmpty() && requestId == m_liveReqId) {
+            // The live proof's request ended without its result reaching the machine (dropped as stale, transport
+            // lost before an answer): the wait ends, the row stays unproven - plain «Подключено».
+            m_liveReqId.clear();
+            if (!m_liveProbeDone) {
+                m_liveProbeDone = true;
+                if (!m_liveProbeNode.isEmpty())
+                    m_liveReasons.insert(m_liveProbeNode, QStringLiteral("live_no_answer"));
+            }
+        }
         if (st && it != st->app.constEnd()) { // until the ledger entry is written
             st->gate.finish(requestId, bytes < 0 ? it.value() : bytes);
             st->app.remove(requestId);
@@ -2153,6 +2165,7 @@ private:
                 judge(x.c.id, ScanClass::NotVerified, QStringLiteral("awg_live"));
             }
         // The tap's chain: the engine moved to another node of the hint.
+        bool tapConnected = false;
         if (!m_connectingId.isEmpty()) {
             if (c.connecting && c.nodeId != m_connectingId && m_chainOrder.contains(c.nodeId) && !m_tapFailed.contains(c.nodeId))
                 m_connectingId = c.nodeId;
@@ -2160,6 +2173,7 @@ private:
                 addChainOutcome(c.nodeId, ScanClass::Works);
                 m_connectingId.clear();
                 endChain(s, false);
+                tapConnected = true;
             }
         }
         // S1: the pre-connect of a VPN-required host.
@@ -2180,8 +2194,18 @@ private:
             // rule (the freeze goes unanswered: the whole grant after scan_freeze_ack_ms).
             stopStage2(now, QStringLiteral("tunnel_stopped"), s);
         }
-        if (c.working() && m_phase != ScanPhase::Idle && m_phase != ScanPhase::Preparing && m_phase != ScanPhase::Connecting)
+        // The proof runs with a result on the screen (Done, Empty, NoScan) and for a row the person connected from the
+        // Scanner while it shows a cached result (Idle: device round air7, the row of a cached «Германия» result
+        // waited 15+ minutes for a check nobody asked for); never on merely opening the screen with a live VPN.
+        if (c.working() && m_phase != ScanPhase::Preparing && m_phase != ScanPhase::Connecting
+            && (m_phase != ScanPhase::Idle || tapConnected))
             maybeProbeLive(s);
+    }
+
+    // Whether the connected row's proof is under way: sent and not answered, or a running scan will send it.
+    bool liveProofPending(const QString &id) const
+    {
+        return m_liveProbeNode == id ? !m_liveProbeDone : scanPhaseScanning(m_phase);
     }
 
     // The connected row is «works» only after a sized, digest-checked download through the live tunnel (F2):
@@ -3740,6 +3764,7 @@ private:
                 // Connected, but not counted as verified until the sized check through the tunnel (F2).
                 v.verified = false;
                 v.notVerifiedReason = QStringLiteral("live_unverified");
+                v.liveChecking = liveProofPending(r.id);
                 v.bars = scanSpeedBars(v.speed);
             }
             if (m_tapFailed.contains(r.id)) {
@@ -4187,7 +4212,10 @@ inline QJsonObject scanRowViewToJson(const ScanRowView &r)
     if (!r.tappable) flags << QStringLiteral("not_tappable");
     if (r.verifying) flags << QStringLiteral("verifying");
     if (r.current) flags << QStringLiteral("current");
-    if (!r.verified) flags << (r.current ? QStringLiteral("live_unverified") : QStringLiteral("unverified"));
+    // «проверяем загрузку…» only while the check runs (device round air7: a row connected outside a scan waited for
+    // a check nobody had asked for, 15+ minutes); an unproven connection with no check is plain «Подключено»
+    if (!r.verified && (!r.current || r.liveChecking))
+        flags << (r.current ? QStringLiteral("live_unverified") : QStringLiteral("unverified"));
     if (r.crowdWorks) flags << QStringLiteral("crowd");
     o.insert(QStringLiteral("flags"), flags);
     return o;

@@ -3949,6 +3949,74 @@ static void refusedEndsScope()
     CHECK(!rc2.requestId.isEmpty() && rc2.ids.contains(s21.candidates.at(1).id));
 }
 
+static void liveProofHasAnEnd()
+{
+    // Device round air7 (19.11): a cached «Германия» result on the screen (Idle, after a network flip), a row tapped
+    // and connected in 2.2 s - then «проверяем загрузку…» for 15+ minutes: Idle never sent the proof, and the row
+    // said «checking» whatever was (not) running.
+    World w = baseWorld("live_end", hostMac(), ScanNetKind::Wifi);
+    Driver dd(w);
+    const auto flagsOf = [](const ScanView &v, const QString &id) {
+        for (const QJsonValue &r : scanViewToJson(v).value(QStringLiteral("rows")).toArray())
+            if (r.toObject().value(QStringLiteral("id")).toString() == id)
+                return r.toObject().value(QStringLiteral("flags")).toArray();
+        return QJsonArray();
+    };
+    const auto shownWithCache = [&](ScanMachine &m) {
+        ScanOpen o = openOf(w, QString(), false);
+        ScanCachedResult c;
+        c.networkKey = o.network.key;
+        c.fingerprint = o.network.fingerprint;
+        c.savedAtMs = kT0;
+        ScanCachedRow a;
+        a.id = QStringLiteral("1");
+        a.countryCode = QStringLiteral("DE");
+        a.label = QStringLiteral("Германия 1");
+        a.ms = 40;
+        ScanCachedRow b = a;
+        b.id = QStringLiteral("2");
+        b.label = QStringLiteral("Германия 2");
+        c.rows << a << b;
+        o.cached = c;
+        m.shown(o, kT0 + 1000);
+    };
+    {
+        ScanMachine m(w.caps);
+        shownWithCache(m);
+        CHECK(m.phase() == ScanPhase::Idle && m.view(kT0 + 1000).rows.size() == 2);
+        CHECK(m.rowTapped(QStringLiteral("2"), kT0 + 2000).has(ScanActionKind::ConnectRow));
+        const ScanStep up = m.vpnState(liveOf(w, QStringLiteral("2"), true), kT0 + 4000);
+        const ScanAction *lp = up.find(ScanActionKind::ProbeLiveTunnel);
+        CHECK(lp && lp->nodeId == QLatin1String("2")); // the row the person connected gets its proof
+        CHECK(flagsOf(m.view(kT0 + 4000), QStringLiteral("2")).contains(QStringLiteral("live_unverified")));
+        if (lp)
+            m.appRequestDone(lp->requestId, 70000, kT0 + 6000); // the answer was dropped as stale: no result comes
+        const QJsonArray f = flagsOf(m.view(kT0 + 6000), QStringLiteral("2"));
+        CHECK(f.contains(QStringLiteral("current")) && !f.contains(QStringLiteral("live_unverified")) && !f.contains(QStringLiteral("unverified")));
+        CHECK(m.view(kT0 + 6000).rows.size() == 2); // the result stays on the screen
+    }
+    {
+        ScanMachine m(w.caps);
+        shownWithCache(m);
+        m.rowTapped(QStringLiteral("1"), kT0 + 2000);
+        const ScanAction *lp = m.vpnState(liveOf(w, QStringLiteral("1"), true), kT0 + 4000).find(ScanActionKind::ProbeLiveTunnel);
+        CHECK(lp != nullptr);
+        m.liveProbeResult(QStringLiteral("1"), dd.liveFacts(QStringLiteral("1")), kT0 + 4700);
+        const ScanView v = m.view(kT0 + 4700);
+        bool proved = false;
+        for (const ScanRowView &r : v.rows)
+            proved = proved || (r.id == QLatin1String("1") && r.verified && r.state == ScanRowState::Connected);
+        CHECK(proved && v.rows.size() == 2);
+    }
+    {
+        // opening the screen with a live VPN: no proof is spent, and the row is no «проверяем загрузку…»
+        ScanMachine q(w.caps);
+        CHECK(!q.shown(openOf(w, QStringLiteral("1"), true), kT0).has(ScanActionKind::ProbeLiveTunnel));
+        const QJsonArray f = flagsOf(q.view(kT0), QStringLiteral("1"));
+        CHECK(f.contains(QStringLiteral("current")) && !f.contains(QStringLiteral("live_unverified")));
+    }
+}
+
 static void rowsAfter17Nov()
 {
     // the manifest's `kind`: absent = Unspecified, unknown = auto
@@ -4290,6 +4358,7 @@ int main(int argc, char **argv)
     rowsAfter17Nov();
     countrylessRows();
     refusedEndsScope();
+    liveProofHasAnEnd();
     xrayBurst();
     findMore();
     findMoreAppends();
