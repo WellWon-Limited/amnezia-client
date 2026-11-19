@@ -3947,6 +3947,20 @@ static void refusedEndsScope()
     m2.moreTapped(QString(), kT0 + 31000);
     const ScanAction rc2 = actionOf(m2.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050), ScanActionKind::RequestCandidates);
     CHECK(!rc2.requestId.isEmpty() && rc2.ids.contains(s21.candidates.at(1).id));
+    // the same when the HOST refuses the config (probe error `config`, device round air9: an xray_full profile)
+    ScanMachine m3(w.caps);
+    m3.opened(openOf(w, QString(), false), kT0);
+    const ScanAction s31 = actionOf(m3.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50), ScanActionKind::StartHostScan);
+    if (s31.candidates.size() < 3)
+        return;
+    ScanProbeFacts bad;
+    bad.id = s31.candidates.at(1).id;
+    bad.error = ScanProbeError::Config;
+    m3.hostProgress(progressOf(m3, {works(s31.candidates.at(0).id), bad}), kT0 + 900);
+    m3.tick(kT0 + 50 + 8100);
+    m3.moreTapped(QString(), kT0 + 31000);
+    const ScanAction rc3 = actionOf(m3.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050), ScanActionKind::RequestCandidates);
+    CHECK(!rc3.requestId.isEmpty() && rc3.ids.contains(s31.candidates.at(1).id));
 }
 
 static void liveProofHasAnEnd()

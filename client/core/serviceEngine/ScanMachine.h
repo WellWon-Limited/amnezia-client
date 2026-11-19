@@ -1039,11 +1039,7 @@ public:
             }
             c.finalDone = true;
             const QString r = reason.isEmpty() ? QStringLiteral("config") : reason;
-            // This host cannot probe it (its config cannot be built here): the next batch would offer it again and
-            // refuse it again, so «Найти ещё» never reached its end (device round air9, 19.11: «Германия» kept
-            // offering one refused profile). It joins the judged rows of the series, as the host's other limits do.
-            m_shownNet.insert(c.c.id);
-            addUnverified(c.c, r);
+            notProbeableHere(c.c, r);
             judge(c.c.id, ScanClass::NotVerified, r);
             pumpProviders(now, s);
             if (allFinal() && !hasLeasePending())
@@ -2788,6 +2784,16 @@ private:
         return m_accessStamp == currentStamp() && m_scanNet.generation() == m_net.generation() ? m_access : ScanAccess();
     }
 
+    // A candidate this host cannot probe - its config could not be built here (candidateRefused) or the host refused
+    // it (probe error `config`): «Не проверено», and judged for the series like the host's other limits. Otherwise
+    // the next batch offers it again, it is refused again, and «Найти ещё» never reaches its end (device round air9,
+    // 19.11: one «Германия» profile kept the scope open).
+    void notProbeableHere(const ScanCandidate &c, const QString &reason)
+    {
+        m_shownNet.insert(c.id);
+        addUnverified(c, reason);
+    }
+
     void removeUnverified(const QString &id)
     {
         for (int i = m_unverified.size() - 1; i >= 0; --i)
@@ -2877,6 +2883,8 @@ private:
             c.pendingVerdict = v;
             c.pendingFacts = f;
             addUnverified(isFollowUp ? c.fu : c.c, QStringLiteral("unverifiable"));
+        } else if (f.error == ScanProbeError::Config) {
+            notProbeableHere(c.c, QStringLiteral("config")); // the host refused its config: it will again
         } else if (f.error == ScanProbeError::Memory || f.error == ScanProbeError::Budget || f.error == ScanProbeError::BindFailed
                    || f.error == ScanProbeError::Cancelled || f.error == ScanProbeError::Deadline) {
             // the host could not run the probe (memory, budget, its own socket binding) or cut it before its
