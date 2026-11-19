@@ -329,6 +329,14 @@ path::SelectionContext ServiceEngine::ownerContext() const
     // proved nothing, and the walk then spent 6 s on each of the same three).
     for (const QString &id : m_raceFailed)
         c.crowd.insert(id, 0.0);
+    // Paths the race is probing right now: the walk prefers a candidate nobody is probing. Raising a path whose probe
+    // is in flight cancels that probe, and the host can only stop its whole scan - every other probe starts again
+    // from zero (device round 19.11, LTE: the blind leg at 2.8 s and the next one 3 s later each reset the scan, the
+    // race ended with nothing proven although a working server was being probed). An answer moves the path where it
+    // belongs: proven -> working (it leads), failed -> m_raceFailed.
+    if (m_race.running())
+        for (const QString &id : m_race.inFlightPathIds())
+            c.crowd.insert(id, 0.0);
     return c;
 }
 

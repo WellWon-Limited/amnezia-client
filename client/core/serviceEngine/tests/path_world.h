@@ -146,6 +146,9 @@ public:
         SelectionContext c{ m_pool, &ledger, wall(), crowd };
         for (const QString &id : raceFailed) // the engine's rule (ServiceEngine::ownerContext)
             c.crowd.insert(id, 0.0);
+        if (race.running())
+            for (const QString &id : race.inFlightPathIds())
+                c.crowd.insert(id, 0.0);
         return c;
     }
     QSet<QString> raceFailed; // paths whose probe failed in the race of this tap

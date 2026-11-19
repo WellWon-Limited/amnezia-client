@@ -1300,6 +1300,46 @@ static void scenarioHostileCellular1911()
     CHECK(s.lastTapWallMs() <= 9000); // the device took 17-24 s
 }
 
+// Device round 19.11 night (LTE, build b3381533f, empty ledger): the probes were out but none had answered when the
+// race's wait ended (dead first candidates answer only by their timeouts, the working provider waits its turn). The
+// blind leg went to node 16 - whose probe was in flight - so that probe was cancelled, the host scan was reset and
+// every other probe started again; 3 s later the next leg did the same, and the race ended with nothing proven:
+// 2 connects of 6 within 17 s. The walk now prefers a candidate nobody is probing.
+static void scenarioBlindLegBesideSlowProbes()
+{
+    const NetworkObservation lte = cell("", "lte");
+    const QString k = key(lte);
+    World w;
+    w.set(k, QStringLiteral("16"), Behaviour::noData(2000));
+    w.setProbe(k, QStringLiteral("16"), ProbeBehaviour::fail(3900));
+    w.set(k, QStringLiteral("11:xray"), Behaviour::noData(1900));
+    w.setProbe(k, QStringLiteral("11:xray"), ProbeBehaviour::fail(3900));
+    w.set(k, QStringLiteral("up:dead"), Behaviour::noData(800));
+    w.setProbe(k, QStringLiteral("up:dead"), ProbeBehaviour::fail(3900));
+    w.set(k, QStringLiteral("17"), Behaviour::works(2100, 1300, 400));
+    w.setProbe(k, QStringLiteral("17"), ProbeBehaviour::ok(3500, 30 * 1024)); // slower than the race's wait
+    w.set(k, QStringLiteral("15"), Behaviour::works(2100, 1300, 400));
+    w.setProbe(k, QStringLiteral("15"), ProbeBehaviour::ok(900, 30 * 1024));
+    const QList<PathCandidate> pool = { awg("16", "RS", false, 3.0), xray("11:xray", "FI"),
+                                        prov("up:dead", UpstreamKind::Country, "NL", 0), awg("17", "EE"), awg("15", "EE") };
+    Sim s(pool, w, lte);
+    s.caps = hostCaps();
+    s.stopMs = 850;
+    s.starveShareMs = 1000;
+    s.rule = Sim::Rule::Proposed;
+    s.bytesLeft = RaceTimings().cellularMaxBytes;
+    const AttemptResult r = s.raceTap(UserChoice::automatic());
+    const QStringList legs = legPaths(s);
+    g_rows.append({ QStringLiteral("LTE 19.11 night: no probe answers before the wait ends"),
+                    r.connected ? QStringLiteral("connected ") + r.path.id.id : QStringLiteral("failed"),
+                    s.lastTapWallMs(), r.paths, legs.join(QLatin1Char(' ')) });
+    CHECK(r.connected);
+    // the blind leg is not a path whose probe is in flight (16, 11:xray, up:dead and 17 are being probed)
+    CHECK(!legs.isEmpty() && legs.first() == QLatin1String("15"));
+    CHECK(legs.size() == 1);
+    CHECK(s.lastTapWallMs() <= 7500);
+}
+
 static void scenarioTrace1911()
 {
     struct Case {
@@ -1471,6 +1511,7 @@ static void scenarioRace()
     //    (Old), 5.59 s (Current). Pool in the device's order: Serbia 1 AmneziaWG (16) first, Finland 1 own Xray, Estonia.
     scenarioTrace1911();
     scenarioHostileCellular1911();
+    scenarioBlindLegBesideSlowProbes();
     // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when its projection fits; a probe that
     // reports MORE than its projection is charged the projection; a candidate the cap cannot pay does not block the
     // cheaper ones behind it.
