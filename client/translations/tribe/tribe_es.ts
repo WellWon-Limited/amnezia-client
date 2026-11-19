@@ -1084,7 +1084,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+202"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+195"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1150,12 +1150,12 @@
     </message>
     <message>
         <location line="+203"/>
-        <location line="+535"/>
+        <location line="+521"/>
         <source>Проверяем трафик…</source>
         <translation>Comprobando el tráfico…</translation>
     </message>
     <message>
-        <location line="-533"/>
+        <location line="-519"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>El tráfico iba por fuera de la VPN: probando otra ruta</translation>
     </message>
@@ -1171,12 +1171,12 @@
     </message>
     <message>
         <location line="+3"/>
-        <location line="+526"/>
+        <location line="+512"/>
         <source>Отключаемся…</source>
         <translation>Desconectando…</translation>
     </message>
     <message>
-        <location line="-525"/>
+        <location line="-511"/>
         <source>Проверяем…</source>
         <translation>Verificando…</translation>
     </message>
@@ -1221,7 +1221,12 @@
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+57"/>
+        <location line="+56"/>
+        <source>Открыть Сканер - найти работающий сервер</source>
+        <translation>Abrir el Escáner: encontrar un servidor que funcione</translation>
+    </message>
+    <message>
+        <location line="+30"/>
         <source>Сервер</source>
         <translation>Servidor</translation>
     </message>
@@ -1271,12 +1276,17 @@
         <translation>Un momento…</translation>
     </message>
     <message>
-        <location line="-59"/>
+        <location line="-88"/>
         <source> мс</source>
         <translation> ms</translation>
     </message>
     <message>
-        <location line="+161"/>
+        <location line="+101"/>
+        <source>%1 в этой сети не отвечает</source>
+        <translation>%1 no responde en esta red</translation>
+    </message>
+    <message>
+        <location line="+46"/>
         <source>Российский сервер: доступность сервисов — как внутри РФ</source>
         <translation>Servidor ruso: la disponibilidad de servicios es la misma que dentro de Rusia</translation>
     </message>
@@ -1303,7 +1313,7 @@
         <translation>¿Cómo renuevo el acceso?</translation>
     </message>
     <message>
-        <location line="-184"/>
+        <location line="-141"/>
         <source>Авто</source>
         <translation>Auto</translation>
     </message>
@@ -1318,27 +1328,7 @@
         <translation>El servicio elige el nodo más rápido</translation>
     </message>
     <message>
-        <location line="+21"/>
-        <source>Ваш выбор</source>
-        <translation>Tu elección</translation>
-    </message>
-    <message>
-        <location line="+11"/>
-        <source>Ваш выбор сейчас недоступен: %1</source>
-        <translation>Tu elección no está disponible ahora: %1</translation>
-    </message>
-    <message>
-        <location line="+10"/>
-        <source>Сбросить</source>
-        <translation>Restablecer</translation>
-    </message>
-    <message>
-        <location line="+6"/>
-        <source>Сбросить выбор сервера, вернуть умный выбор</source>
-        <translation>Restablecer la elección de servidor, volver a la elección inteligente</translation>
-    </message>
-    <message>
-        <location line="+250"/>
+        <location line="+255"/>
         <location line="+4"/>
         <source>Заменить сервер</source>
         <translation>Cambiar servidor</translation>
@@ -1349,8 +1339,8 @@
         <translation>Instalando…</translation>
     </message>
     <message>
-        <location line="-525"/>
-        <location line="+526"/>
+        <location line="-511"/>
+        <location line="+512"/>
         <source>Подключаемся…</source>
         <translation>Conectando…</translation>
     </message>
