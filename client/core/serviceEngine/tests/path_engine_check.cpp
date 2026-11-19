@@ -311,6 +311,63 @@ static PathView viewState(PathState s, bool quarantine = false, qint64 success =
     return v;
 }
 
+// F2 of device round 19.11 (iPhone Air, LTE, Auto): repeats kept landing on Estonia 3 AmneziaWG (connect + first
+// byte 2.7-4.6 s, median 5.0 s to data) because it connected last, while Finland 1 Xray had carried data on the same
+// network in 2.7-3.0 s (3.5-3.7 s to data). The measured, decayed time to data orders working paths; the preference
+// and the mode still come first.
+static void testSpeedOrder()
+{
+    const QString net = QStringLiteral("cell:-:lte");
+    const qint64 T = 1'800'000'000'000LL;
+    const PathCandidate ee = awg("17", "EE"), fi = xray("11:xray", "FI");
+    PathLedger l;
+    l.record(net, fi.id, PathOutcome::DataOk, T, 1858, 946);       // 06:34
+    l.record(net, fi.id, PathOutcome::DataOk, T + 60000, 2032, 813);
+    l.record(net, ee.id, PathOutcome::DataOk, T + 120000, 3029, 588);
+    l.record(net, ee.id, PathOutcome::DataOk, T + 180000, 4083, 549); // the newest proof
+    const PathView vfi = l.view(net, fi.id, T + 200000), vee = l.view(net, ee.id, T + 200000);
+    CHECK(vfi.speedMs > 2700 && vfi.speedMs < 2900 && vee.speedMs > 4000 && vee.speedMs < 4400);
+    SelectInput in;
+    in.pool = { ee, fi };
+    in.evidence = l.viewOf(net, in.pool, T + 200000);
+    CHECK(ids(selectPaths(in)) == QStringList({ "11:xray", "17" })); // before: 17 (newest proof first)
+    // a preferred country still wins over a faster path elsewhere
+    in.choice = UserChoice::preferCountry(QStringLiteral("EE"));
+    CHECK(selectPaths(in).first().path.id.id == QLatin1String("17"));
+    in.choice = UserChoice::automatic();
+    // the mode is stronger than speed
+    in.mode = TransportMode::Awg;
+    CHECK(ids(selectPaths(in)) == QStringList({ "17" }));
+    in.mode = TransportMode::Auto;
+    // within one speed step the newest proof leads (no flapping between equally fast paths)
+    PathLedger near;
+    near.record(net, fi.id, PathOutcome::DataOk, T, 2000, 800);
+    near.record(net, ee.id, PathOutcome::DataOk, T + 1000, 2100, 750);
+    in.evidence = near.viewOf(net, in.pool, T + 2000);
+    CHECK(selectPaths(in).first().path.id.id == QLatin1String("17"));
+    // decayed: a new slow sample moves the average halfway at once, an old value weighs less with age
+    PathLedger d;
+    d.record(net, ee.id, PathOutcome::DataOk, T, 2000, 0);
+    d.record(net, ee.id, PathOutcome::DataOk, T + 1000, 4000, 0);
+    CHECK(d.view(net, ee.id, T + 2000).speedMs == 3000);
+    PathLedger old;
+    old.record(net, ee.id, PathOutcome::DataOk, T, 2000, 0);
+    old.record(net, ee.id, PathOutcome::DataOk, T + 12LL * 3600 * 1000, 4000, 0); // two half-lives later
+    CHECK(old.view(net, ee.id, T + 12LL * 3600 * 1000).speedMs == 3600);
+    // an adopted tunnel (no start measured, connect 0) adds no sample
+    d.record(net, ee.id, PathOutcome::DataOk, T + 3000, 0, 300);
+    CHECK(d.view(net, ee.id, T + 4000).speedMs == 3000);
+    // probe proofs: the faster time to proof first (the race's winner before a later, slower proof)
+    PathLedger p;
+    p.record(net, fi.id, PathOutcome::ProbeOk, T, 990);
+    p.record(net, ee.id, PathOutcome::ProbeOk, T + 1400, 1390);
+    in.evidence = p.viewOf(net, in.pool, T + 2000);
+    CHECK(ids(selectPaths(in)) == QStringList({ "11:xray", "17" }));
+    // persisted
+    const PathLedger back = PathLedger::fromJson(l.toJson());
+    CHECK(back.view(net, fi.id, T + 200000).speedMs == vfi.speedMs && back.view(net, ee.id, T + 200000).speedMs == vee.speedMs);
+}
+
 static void testSelect()
 {
     SelectInput in;
@@ -1314,6 +1371,7 @@ int main()
     testNetworkKey();
     testLedger();
     testSelect();
+    testSpeedOrder();
     testOwnerStale();
     testOwnerLive();
     scenarioHomeWifi();

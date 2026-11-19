@@ -601,12 +601,13 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
             break;
         case path::RaceEffectType::Report:
             if (findNode(e.path.id.id) && m_net.isCurrent(e.networkGeneration)
-                && m_ledger.record(e.network, e.path.id, e.outcome, nowMs()))
+                && m_ledger.record(e.network, e.path.id, e.outcome, nowMs(), e.ms))
                 m_ledgerDirty = true;
-            attemptJournal(QStringLiteral("path_outcome net=%1 net_gen=%2 node=%3 rev=%4 outcome=%5 source=race state=%6")
+            attemptJournal(QStringLiteral("path_outcome net=%1 net_gen=%2 node=%3 rev=%4 outcome=%5 source=race probe_ms=%6 state=%7")
                                .arg(e.network).arg(e.networkGeneration).arg(e.path.id.id, e.path.id.revision,
-                                    QLatin1String(path::pathOutcomeName(e.outcome)),
-                                    QLatin1String(path::pathStateName(m_ledger.view(e.network, e.path.id, nowMs()).state))));
+                                    QLatin1String(path::pathOutcomeName(e.outcome)))
+                               .arg(e.ms)
+                               .arg(QLatin1String(path::pathStateName(m_ledger.view(e.network, e.path.id, nowMs()).state))));
             // a proof while a leg is in flight: a leg that has shown nothing of its own yields to it (the owner decides)
             if (m_owner.running())
                 feedOwner(path::AttemptEvent::proofReady(nowMs(), m_checkStarved));

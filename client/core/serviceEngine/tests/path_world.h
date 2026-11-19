@@ -397,7 +397,7 @@ private:
             case RaceEffectType::Report:
                 reports.append(OutcomeReport{ e.network, e.networkGeneration, e.path.id, e.outcome, -1, -1 });
                 if (tracker.isCurrent(e.networkGeneration))
-                    ledger.record(e.network, e.path.id, e.outcome, wall());
+                    ledger.record(e.network, e.path.id, e.outcome, wall(), e.ms);
                 if (owner.running()) // a proof while a leg is in flight (the engine's rule)
                     deliver(AttemptEvent::proofReady(now, false));
                 break;

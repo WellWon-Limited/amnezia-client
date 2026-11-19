@@ -102,6 +102,7 @@ struct RaceEffect {
     QString network;           // Report: local network key
     quint64 networkGeneration = 0;
     qint64 bytes = 0;          // Spent
+    int ms = -1;               // Report: the probe's time to proof (its start to its answer) - the ledger's probe speed
     RaceDoneReason reason = RaceDoneReason::None; // Done
 };
 
@@ -170,6 +171,7 @@ public:
         if (!m_running || s.race != m_race || s.network != m_net.generation || it == m_inFlight.end())
             return out; // stale: an older race, an older network, a cancelled or unknown probe
         const PathCandidate path = it.value().path;
+        const int tookMs = int(std::max<qint64>(0, m_awake - it.value().startedAt));
         m_inFlight.erase(it);
         if (bytes > 0) {
             RaceEffect e;
@@ -184,6 +186,7 @@ public:
             r.type = RaceEffectType::Report;
             r.path = path;
             r.outcome = PathOutcome::ProbeOk;
+            r.ms = tookMs;
             r.network = m_net.local;
             r.networkGeneration = m_net.generation;
             out << r;
@@ -291,6 +294,7 @@ private:
     struct Flight {
         PathCandidate path;
         qint64 deadline = 0;
+        qint64 startedAt = 0; // awake time of its start
     };
 
     void advance(qint64 now)
@@ -381,6 +385,7 @@ private:
             Flight f;
             f.path = c;
             f.deadline = m_awake + m_t.probeTimeoutMs + 1000; // the host's grace after its own bound
+            f.startedAt = m_awake;
             const quint64 probe = ++m_probeSeq;
             m_inFlight.insert(probe, f);
             if (m_bytesLeft >= 0)

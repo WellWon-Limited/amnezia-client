@@ -68,6 +68,10 @@ struct LedgerTunables {
     // A server refusal or "no free seat" keeps the path out of the first places for this long, without
     // touching the quarantine ladder (it says nothing about the network).
     long long refusalCooldownMs = 2LL * 60 * 1000;
+    // Speed of a working path (PathLedger.h "Speed"): the weight of a new time-to-data sample in the decayed average
+    // and the half-life of the older value's weight.
+    double speedWeight = 0.5;
+    long long speedHalfLifeMs = 6LL * 3600 * 1000;
     // Bound of the store (entries = network x path).
     int maxEntries = 512;
 };
