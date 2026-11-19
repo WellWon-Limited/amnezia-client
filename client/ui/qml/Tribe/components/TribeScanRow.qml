@@ -27,7 +27,7 @@ Rectangle {
     property bool liveUnverified: false   // «Подключено» before its own tunnel probe: «проверяем загрузку…»
     property bool unverified: false       // «Не проверено»
     property bool crowd: false            // «работает у других в вашей сети»
-    property Component fallbackFlag: null // provider row without a country: the servers page's globe tile
+    property bool whitelist: false        // a row without a country = the white-list scope: its own flag (white disc, black globe)
     signal tapped()
 
     readonly property bool live: rowState === "connecting" || rowState === "connected"
@@ -85,7 +85,7 @@ Rectangle {
             Layout.preferredWidth: Theme.scan.flag
             Layout.preferredHeight: Theme.scan.flag
             code: row.countryCode
-            fallback: row.fallbackFlag
+            whitelist: row.whitelist
         }
 
         ColumnLayout {

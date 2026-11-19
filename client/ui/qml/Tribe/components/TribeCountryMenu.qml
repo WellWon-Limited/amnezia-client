@@ -90,9 +90,10 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Theme.space.sm
             TribeFlag {
-                visible: root.selected !== "" && root.selected !== "whitelist"
+                visible: root.selected !== ""
                 Layout.preferredWidth: 18; Layout.preferredHeight: 18
                 code: root.selected
+                whitelist: root.selected === "whitelist"
             }
             Text {
                 id: btnLabel
@@ -209,9 +210,10 @@ Item {
                             anchors.rightMargin: 10
                             spacing: 10
                             TribeFlag {
-                                visible: (mrow.modelData.cc || "") !== "" && mrow.modelData.cc !== "whitelist"
+                                visible: (mrow.modelData.cc || "") !== ""
                                 Layout.preferredWidth: 22; Layout.preferredHeight: 22
                                 code: mrow.modelData.cc || ""
+                                whitelist: mrow.modelData.cc === "whitelist"
                             }
                             Text {
                                 id: mrowName

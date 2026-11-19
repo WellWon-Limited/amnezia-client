@@ -607,7 +607,7 @@ PageType {
                                 liveUnverified: rowWrap.model.liveUnverified
                                 unverified: rowWrap.model.unverified
                                 crowd: rowWrap.model.crowd
-                                fallbackFlag: globeTile
+                                whitelist: rowWrap.model.cc === ""
                                 onTapped: {
                                     if (root.hasScanner) TribeScanner.tapRow(rowWrap.model.rid)
                                 }
@@ -875,24 +875,6 @@ PageType {
             enabled: !link.sending
             cursorShape: Qt.PointingHandCursor
             onClicked: { Haptic.play("light"); link.tapped() }
-        }
-    }
-
-    // a provider row without a country: the servers page's globe tile
-    Component {
-        id: globeTile
-        Rectangle {
-            radius: width / 2
-            color: Theme.color.surface3
-            border.width: 1
-            border.color: Theme.color.border
-            TribeStrokeIcon {
-                anchors.centerIn: parent
-                width: parent.width * 0.5
-                height: parent.height * 0.5
-                icon: "globe"
-                tint: Theme.color.text3
-            }
         }
     }
 }

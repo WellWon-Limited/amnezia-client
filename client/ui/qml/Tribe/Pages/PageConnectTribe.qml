@@ -921,6 +921,8 @@ PageType {
                     width: 52; height: 52
                     anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
                     code: root.curNode.hasNode ? (root.curNode.countryCode || "") : ""
+                    // a white-list profile: the white disc with a black globe (currentNode.upstreamKind)
+                    whitelist: root.curNode.hasNode && root.curNode.upstream === true && root.curNode.upstreamKind === "whitelist"
                     fallback: Component {
                         Rectangle {
                             radius: width / 2
