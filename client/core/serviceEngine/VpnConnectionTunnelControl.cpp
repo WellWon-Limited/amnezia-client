@@ -596,7 +596,7 @@ void VpnConnectionTunnelControl::down()
     // A seat taken for a switch (prepareUpstream) outlives the old tunnel's stop: the up() after it brings it up.
     if (m_upOwner.active() && !m_upOwner.preparing()) {
         if (m_leaseClient)
-            m_leaseClient->holdReleasesForStop();
+            m_leaseClient->holdReleasesForStopIfRunning(); // no native tunnel: no Disconnected will come to free a hold
         applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
     }
     if (m_conn)
@@ -790,6 +790,8 @@ void VpnConnectionTunnelControl::applyUpstreamEvents(const QVector<UpstreamOwner
 
 void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)
 {
+    if (m_leaseClient)
+        m_leaseClient->tunnelStarted(); // the native start is asked for: a stop is from now something a release waits for
     // The bind of the local inbound with random session credentials (XrayProfileSanitizer; the runners
     // keep non-empty credentials and re-pick the port). Never logged.
     const auto randomHex = []() {

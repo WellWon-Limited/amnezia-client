@@ -2119,7 +2119,10 @@ static void lateGrantOwnership()
                     client.release(e.requestId, e.leaseId, UpstreamMeter{}, e.route);
                 }
         }
-        void begin() { apply(owner.begin(node, 1, std::nullopt, now(), 1)); }
+        void begin(const std::optional<StandbyCandidate> &standby = std::nullopt)
+        {
+            apply(owner.begin(node, 1, standby, now(), 1));
+        }
         // VpnConnectionTunnelControl::upstreamTunnelDown(endsSession = true)
         void disconnectedByTheSystem()
         {
@@ -2272,7 +2275,406 @@ static void lateGrantOwnership()
         pump(500);
         CHECK(r.edge.deletes == QStringList{ QLatin1String(kLease) } && !r.owner.active());
     }
+    // Row G1: the direct acquire exceeds its wait, the tunnel starts from the STANDBY pack (provisional); the original
+    // request then returns L late and is released; Connected -> tunnelUp() confirms the seat with an acquire of the
+    // same profile. That acquire must wait for the release (the server would hand back the L the DELETE is ending).
+    {
+        Rig r;
+        r.owner.setOptions({});
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"inbounds\":[]}");
+        sc.configSha256 = LeaseEdge::cfgSha();
+        sc.tunnelApiBase = r.edge.base();
+        sc.packRevision = 5;
+        r.begin(sc);
+        QElapsedTimer t;
+        t.start();
+        while (r.edge.posts.size() < 1 && t.elapsed() < 2000)
+            pump(10);
+        t.start();
+        while (!r.owner.provisionalPending() && t.elapsed() < 6000) // the wait ends: the standby start
+            pump(10);
+        CHECK(r.owner.active() && r.owner.provisionalPending() && r.edge.posts.size() == 1);
+        r.edge.holdDeletes = true; // the DELETE of the late grant is slow or being resent
+        r.edge.grant(0);
+        pump(300);
+        CHECK(r.edge.deletes.size() == 1);
+        r.client.tunnelStarted();
+        r.apply(r.owner.tunnelUp(r.now())); // Connected: the standby confirmation asks the server for the seat
+        pump(300);
+        CHECK(r.edge.posts.size() == 1); // gated: no acquire while the release of the same profile is pending
+        r.edge.releaseDeletes();
+        t.start();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 2000)
+            pump(10);
+        CHECK(r.edge.posts.size() == 2 && r.edge.log.indexOf(QStringLiteral("DELETE")) < r.edge.log.lastIndexOf(QStringLiteral("POST")));
+        // The session ends while its confirmation is still gated: nothing is left waiting for an answer that never comes.
+    }
+    // Row G2: granted, the native start was asked for, a Disconnected comes before any Connected (the iOS extension
+    // failed applying network settings / starting Xray and has no release handler): the app releases at once.
+    {
+        Rig r;
+        r.owner.setOptions({});
+        r.begin();
+        pump(200);
+        r.edge.grant(0);
+        pump(300);
+        CHECK(r.owner.active() && !r.edge.posts.isEmpty() && r.edge.deletes.isEmpty());
+        r.disconnectedByTheSystem(); // Disconnected, tunnel never reported up
+        pump(500);
+        CHECK(r.edge.deletes == QStringList{ QLatin1String(kLease) } && !r.owner.active());
+    }
     TuningStore::set({}, {}, {}, {});
+}
+
+// --- the lease id ledger as a random model (rounds 2 and 3 each found a table cell nobody had walked) --------------
+// The real UpstreamLeaseOwner against a model of the server (one device, one profile: an acquire of the profile it
+// holds is answered with THAT lease, DELETE ends it) and a model of the client's I/O (UpstreamLeaseClient: the late
+// answer path, the hold of releases for a stop, the release resend). Random sequences of: acquire asked (with and
+// without a standby pack), server processes / answers / times out an acquire, a late grant, tunnel up, Disconnected
+// (asked or not), a stop, a refused start, a tick (provisional re-acquire), a DELETE reaching the server / answered
+// ok / 5xx / cut. Invariants: (1) a seat a live session holds is never revoked (no DELETE hits a lease the owner holds;
+// the server's lease is the owner's), (2) no acquire of profile P is sent while a release of P is pending, (3) after
+// everything is answered and the session stopped no lease is left live on the server, (4) nothing waits for ever
+// (no start queued, no gated acquire, no release pending or held).
+struct LedgerWorld {
+    struct Acq { quint64 id; bool processed = false, delivered = false, timedOut = false, lateDone = false; QString lease; bool grant = false; };
+    struct Rel { quint64 id; QString lease; int unprocessed = 0, unanswered = 0, tries = 0; bool done = false, held = false; };
+    struct Io : IUpstreamLeaseIo {
+        LedgerWorld *w = nullptr;
+        void acquire(quint64 id, const QString &, LeaseKind, const QString &, const LeaseRoute &) override { w->onAcquireSent(id); }
+        void renew(quint64, const QString &, const UpstreamMeter &, const LeaseRoute &) override {}
+        void release(quint64 id, const QString &lease, const UpstreamMeter &, const LeaseRoute &) override { w->clientRelease(id, lease); }
+    };
+    Io io;
+    UpstreamLeaseOwner o;
+    SubscriptionNode node = stubOf();
+    QString live; // the server's lease of the profile
+    int serial = 0;
+    QList<Acq> acqs;
+    QList<Rel> rels;
+    bool stopPending = false, tunnelDown = true, nativeStarted = false;
+    qint64 now = 40000000;
+    QStringList violations, trace;
+    int deletesSent = 0;
+    LedgerWorld() : o(&io) { io.w = this; node.upstream->configSha256 = sha64('d'); }
+
+    QString profile() const { return node.upstream->profileId; }
+    bool releasePending() const
+    {
+        for (const Rel &r : rels)
+            if (!r.done)
+                return true;
+        return false;
+    }
+    void onAcquireSent(quint64 id)
+    {
+        if (releasePending())
+            violations << QStringLiteral("an acquire of the profile was sent while a release of it is pending");
+        acqs << Acq{id};
+    }
+    // UpstreamLeaseClient::release / sendRelease
+    void clientRelease(quint64 id, const QString &lease)
+    {
+        rels << Rel{id, lease};
+        if (stopPending) {
+            rels.last().held = true;
+            return;
+        }
+        rels.last().unprocessed = 1;
+        ++deletesSent;
+    }
+    void flushHeld()
+    {
+        if (!stopPending)
+            return;
+        stopPending = false;
+        for (Rel &r : rels)
+            if (r.held) {
+                r.held = false;
+                r.unprocessed = 1;
+                ++deletesSent;
+            }
+    }
+    void apply(const QVector<UpstreamOwnerEvent> &ev) // VpnConnectionTunnelControl::applyUpstreamEvents, in miniature
+    {
+        for (const UpstreamOwnerEvent &e : ev) {
+            if (e.kind == UpstreamOwnerEventKind::BringUp) {
+                nativeStarted = true;
+                tunnelDown = false; // the native state went to Connecting
+            } else if (e.kind == UpstreamOwnerEventKind::ReleaseAfterStop) {
+                if (!tunnelDown)
+                    stopPending = true; // holdReleasesForStopIfRunning
+                clientRelease(e.requestId, e.leaseId);
+            }
+        }
+    }
+    bool acquireOut() const
+    {
+        for (const Acq &a : acqs)
+            if (!a.delivered && !(a.timedOut && a.lateDone))
+                return true;
+        return false;
+    }
+    bool newerOut(int except) const
+    {
+        for (int i = 0; i < acqs.size(); ++i)
+            if (i != except && !acqs[i].delivered && !(acqs[i].timedOut && acqs[i].lateDone))
+                return true;
+        return false;
+    }
+    AcquireReply replyOf(const Acq &a) const
+    {
+        if (!a.grant)
+            return refused(UpstreamErrorCode::NoSeat);
+        AcquireReply r = granted(profile(), node.upstream->configSha256);
+        r.grant.leaseId = a.lease;
+        return r;
+    }
+    // the events
+    void begin(bool standby)
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("begin")) + (QLatin1String(""));
+        std::optional<StandbyCandidate> sc;
+        if (standby) {
+            StandbyCandidate c;
+            c.config = QByteArrayLiteral("{\"pack\":1}");
+            c.configSha256 = sha64('d');
+            c.tunnelApiBase = QStringLiteral("https://pack.example.net");
+            c.packRevision = 5;
+            sc = c;
+        }
+        apply(o.begin(node, 1, sc, now, 1));
+    }
+    void acqProcess(int i)
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("acqProcess")) + (QLatin1String("") + QString::number(i));
+        Acq &a = acqs[i];
+        a.processed = true;
+        a.grant = !live.isEmpty() || (serial % 5 != 4); // sometimes no seat
+        if (!live.isEmpty())
+            a.lease = live;
+        else if (a.grant) {
+            live = QStringLiteral("LeaseLedger%1").arg(++serial, 28, 10, QLatin1Char('0'));
+            a.lease = live;
+        }
+    }
+    void acqDeliver(int i)
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("acqDeliver")) + (QLatin1String("") + QString::number(i));
+        Acq &a = acqs[i];
+        a.delivered = true;
+        apply(o.onAcquireReply(a.id, replyOf(a), now));
+        apply(o.acquireEnded(profile(), a.grant ? a.lease : QString(), newerOut(i)));
+    }
+    void acqTimeout(int i)
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("acqTimeout")) + (QLatin1String("") + QString::number(i));
+        acqs[i].timedOut = true;
+        apply(o.onAcquireReply(acqs[i].id, failed("transport"), now));
+    }
+    void acqLate(int i)
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("acqLate")) + (QLatin1String("") + QString::number(i));
+        Acq &a = acqs[i];
+        a.lateDone = true;
+        // UpstreamLeaseClient: a late grant is reported as such; any other late end as the end of the request
+        if (a.grant)
+            apply(o.lateGrant(profile(), a.lease, LeaseRoute{}, newerOut(i)));
+        else
+            apply(o.acquireEnded(profile(), QString(), newerOut(i)));
+    }
+    void relHit(int i)
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("relHit")) + (QLatin1String("") + QString::number(i));
+        Rel &r = rels[i];
+        --r.unprocessed;
+        ++r.unanswered;
+        if (live == r.lease) {
+            if (o.holdsLease(r.lease))
+                violations << QStringLiteral("a DELETE hit the lease a live session holds");
+            live.clear();
+        }
+    }
+    void relAnswer(int i, int outcome) // 0 ok, 1 5xx / cut (resent while tries last)
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("relAnswer")) + (QLatin1String("") + QString::number(i));
+        Rel &r = rels[i];
+        --r.unanswered;
+        finishTry(r, outcome == 0);
+    }
+    void relCut(int i)
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("relCut")) + (QLatin1String("") + QString::number(i));
+        Rel &r = rels[i];
+        --r.unprocessed;
+        finishTry(r, false);
+    }
+    void finishTry(Rel &r, bool ok)
+    {
+        if (!ok && ++r.tries < 3) {
+            ++r.unprocessed; // seatReleaseNext: sent again
+            ++deletesSent;
+            return;
+        }
+        r.done = true;
+        apply(o.onReleaseDone(r.id, now));
+    }
+    void tunnelUp()
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("tunnelUp")) + (QLatin1String(""));
+        tunnelDown = false;
+        apply(o.tunnelUp(now));
+    }
+    void disconnected() // from the system or the answer to our stop: either way the same handling
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("disconnected")) + (QLatin1String(""));
+        nativeStarted = false;
+        tunnelDown = true;
+        flushHeld();
+        apply(o.tunnelLost(now));
+        // a seat's lifetime starts at the grant: after the native tunnel is gone no session that was brought up may
+        // stay active holding it (a start that failed before any Connected included)
+        if (o.active() && !o.preparing() && o.machine().phase() == LeasePhase::Active)
+            violations << QStringLiteral("a granted seat survived the Disconnected of its start");
+    }
+    void stop() // VpnConnectionTunnelControl::down()
+    {
+        trace << QStringLiteral("%1").arg(QLatin1String("stop")) + (QLatin1String(""));
+        if (o.active() && !o.preparing()) {
+            if (!tunnelDown)
+                stopPending = true; // holdReleasesForStopIfRunning
+            apply(o.disconnect(now));
+        }
+    }
+    void checkSeat(const char *where)
+    {
+        if (o.active() && !o.provisionalPending() && o.holdsLease(live) == false) {
+            // a live session whose machine holds a lease must have it live on the server
+        }
+        for (const Acq &a : acqs)
+            (void)a;
+        const QString held = o.machine().leaseId();
+        if (!held.isEmpty() && o.holdsLease(held) && live != held)
+            violations << QStringLiteral("the live session's seat is not live on the server (") + QLatin1String(where) + QLatin1Char(')');
+    }
+    // every sequence ends: everything answered, the tunnel confirmed down, the session stopped
+    void drain()
+    {
+        for (int guard = 0; guard < 400; ++guard) {
+            bool did = false;
+            for (int i = 0; i < acqs.size() && !did; ++i) {
+                Acq &a = acqs[i];
+                if (!a.processed) { acqProcess(i); did = true; }
+                else if (!a.delivered && !a.timedOut) { acqDeliver(i); did = true; }
+                else if (a.timedOut && !a.lateDone) { acqLate(i); did = true; }
+            }
+            for (int i = 0; i < rels.size() && !did; ++i) {
+                Rel &r = rels[i];
+                if (r.done || r.held)
+                    continue;
+                if (r.unprocessed > 0) { relHit(i); did = true; }
+                else if (r.unanswered > 0) { relAnswer(i, 0); did = true; }
+            }
+            if (did)
+                continue;
+            if (nativeStarted) {
+                disconnected(); // the confirmed stop frees what was held for it
+                continue;
+            }
+            if (o.active()) {
+                stop();
+                if (nativeStarted)
+                    disconnected(); // with no native tunnel there is no state change, so no Disconnected comes
+                continue;
+            }
+            break;
+        }
+    }
+};
+
+static void ledgerModel()
+{
+    int sequences = 0, steps = 0, failedSeqs = 0, deletes = 0;
+    QMap<QString, int> kinds;
+    for (int seed = 1; seed <= 6000; ++seed) {
+        quint32 rng = quint32(seed) * 2654435761u + 12345u;
+        const auto rnd = [&rng](int n) { rng = rng * 1664525u + 1013904223u; return int((rng >> 8) % quint32(n)); };
+        LedgerWorld w;
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = seed % 4 == 0; // the macOS GUI owner releases itself; elsewhere the tunnel owner does
+        w.o.setOptions(op);
+        for (int step = 0; step < 36; ++step, ++steps) {
+            w.now += 150;
+            switch (rnd(14)) {
+            case 0: case 1: w.begin(rnd(2) == 0); break;
+            case 2: case 3: { // the server processes an acquire
+                for (int i = 0; i < w.acqs.size(); ++i)
+                    if (!w.acqs[i].processed) { w.acqProcess(i); break; }
+                break;
+            }
+            case 4: case 5: { // an answer reaches the client (in time)
+                QList<int> c;
+                for (int i = 0; i < w.acqs.size(); ++i)
+                    if (w.acqs[i].processed && !w.acqs[i].delivered && !w.acqs[i].timedOut) c << i;
+                if (!c.isEmpty()) w.acqDeliver(c[rnd(c.size())]);
+                break;
+            }
+            case 6: { // the attempt stops waiting: a transport failure for the owner; the request lives on
+                QList<int> c;
+                for (int i = 0; i < w.acqs.size(); ++i)
+                    if (!w.acqs[i].delivered && !w.acqs[i].timedOut) c << i;
+                if (!c.isEmpty()) w.acqTimeout(c[rnd(c.size())]);
+                break;
+            }
+            case 7: { // a timed-out request's answer lands (late)
+                QList<int> c;
+                for (int i = 0; i < w.acqs.size(); ++i)
+                    if (w.acqs[i].timedOut && !w.acqs[i].lateDone && w.acqs[i].processed) c << i;
+                if (!c.isEmpty()) w.acqLate(c[rnd(c.size())]);
+                break;
+            }
+            case 8: if (w.nativeStarted && w.o.active()) w.tunnelUp(); break;
+            case 9: if (w.nativeStarted) w.disconnected(); break; // Disconnected, asked or not
+            case 10: w.stop(); break;
+            case 11: w.apply(w.o.abortStart(w.now)); break; // a start that never reached the native service
+            case 12: w.now += 4000; w.apply(w.o.tick(w.now)); break;
+            default: { // a DELETE reaches the server / is answered / is cut
+                QList<int> c;
+                for (int i = 0; i < w.rels.size(); ++i)
+                    if (!w.rels[i].done && !w.rels[i].held && (w.rels[i].unprocessed > 0 || w.rels[i].unanswered > 0)) c << i;
+                if (c.isEmpty()) break;
+                const int i = c[rnd(c.size())];
+                const int what = rnd(5);
+                if (w.rels[i].unprocessed > 0 && (what < 3 || w.rels[i].unanswered == 0))
+                    what == 4 ? w.relCut(i) : w.relHit(i);
+                else if (w.rels[i].unanswered > 0)
+                    w.relAnswer(i, what < 3 ? 0 : 1);
+                break;
+            }
+            }
+            w.checkSeat("step");
+            if (!w.violations.isEmpty() && std::getenv("LEDGER_TRACE")) { std::printf("seed %d:", seed); for (const QString &t : w.trace) std::printf(" %s", qPrintable(t)); std::printf(" => %s\n", qPrintable(w.violations[0])); break; }
+        }
+        w.drain();
+        // (3) no lease is left live on the server; (4) nothing waits for ever
+        if (!w.live.isEmpty())
+            w.violations << QStringLiteral("a granted seat was left live on the server after the stop");
+        if (w.o.startBlocked() || w.o.startQueued() || w.o.gatedAcquires() > 0 || w.o.requestsOutstanding() > 0 || w.releasePending())
+            w.violations << QStringLiteral("something still waits after everything was answered and stopped");
+        if (!w.violations.isEmpty() && std::getenv("LEDGER_TRACE")) { std::printf("seed %d:", seed); for (const QString &t : w.trace) std::printf(" %s", qPrintable(t)); std::printf(" => %s\n", qPrintable(w.violations[0])); }
+        ++sequences;
+        deletes += w.deletesSent;
+        if (!w.violations.isEmpty()) {
+            ++failedSeqs;
+            for (const QString &v : w.violations)
+                kinds[v] += 1;
+        }
+    }
+    for (auto it = kinds.constBegin(); it != kinds.constEnd(); ++it)
+        std::printf("ledger model violation x%d: %s\n", it.value(), qPrintable(it.key()));
+    std::printf("ledger model: %d sequences, %d steps, %d DELETEs sent, %d sequences broke an invariant\n", sequences, steps, deletes, failedSeqs);
+    CHECK(failedSeqs == 0 && deletes > 1000);
 }
 
 int main(int argc, char **argv)
@@ -2282,6 +2684,7 @@ int main(int argc, char **argv)
     providerLegStarvedCheck();
     sessionReleaseRetry();
     lateGrantOwnership();
+    ledgerModel();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();

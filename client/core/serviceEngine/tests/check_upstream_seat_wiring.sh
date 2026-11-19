@@ -118,7 +118,7 @@ has "$cup" 'applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));' || ba
 # upstream_lease_check releaseAfterStop); the facade tells the adapter that the stop is confirmed; the client
 # sends every release over the direct path (upstreamReleaseRoute).
 down="$(body_of "$ADP" 'void VpnConnectionTunnelControl::down()')"
-p1="$(first_line "$down" 'm_leaseClient->holdReleasesForStop();')"
+p1="$(first_line "$down" 'm_leaseClient->holdReleasesForStopIfRunning();')"
 p2="$(first_line "$down" 'applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));')"
 { [ -n "$p1" ] && [ -n "$p2" ] && [ "$p1" -lt "$p2" ]; } || bad "R1: down() must hold the release for the stop before it ends the lease"
 has "$down" 'QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedConnection);' && ! has "$down" 'm_stopAfterRelease' \
@@ -152,6 +152,21 @@ has "$(body_of "$SE/ServiceEngine.cpp" 'bool ServiceEngine::onPermissionDenied()
 lateb="$(body_of "$CLI" 'void UpstreamLeaseClient::reportLateGrant(')"
 has "$lateb" 'onLateGrant(' || bad "R4/F3: a late grant must be reported to the owner"
 ! has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'sendRelease(0' || bad "R4: acquire() must not release a late grant itself"
+
+# G1 of round 3: ONE gate for every acquire. The machine hands the owner SendAcquire actions (direct, standby
+# confirmation in tunnelUp(), provisional re-acquire in tick()); the only call that sends one is sendAcquire().
+OWN="$SE/UpstreamLeaseOwner.h"
+[ "$(grep -v '^[[:space:]]*//' "$OWN" | grep -c 'm_io->acquire(')" = "1" ] || bad "G1: UpstreamLeaseOwner.h must send an acquire from exactly one place (sendAcquire)"
+has "$(body_of "$OWN" '    void sendAcquire(const LeaseAction &a)')" 'releasePendingFor(a.profileId)' || bad "G1: sendAcquire must hold an acquire while a release of its profile is pending"
+! grep -v '^[[:space:]]*//' "$OWN" | grep -q 'dispatchLeaseIo(' || bad "G1: the owner must not dispatch machine steps around its gate (dispatchLeaseIo)"
+! grep -rn --include='*.cpp' --include='*.h' --include='*.mm' -E '(leaseClient|m_leaseClient)(->|\.)acquire\(' "$SE/.." | grep -v '/tests/' | grep -q . \
+    || bad "G1: nothing but the owner may ask the lease client for a seat"
+# G2 of round 3: a granted seat's lifetime starts at the grant - an attempt that ends before Connected, and a start the
+# native side refused or lost, give it back through the owner.
+[ "$(grep -c 'm_tunnel->startRefused();' "$SE/ServiceEngine.cpp")" -ge 2 ] \
+    || bad "G2: a failed attempt (Finish effect) and a refused permission must both tell the tunnel adapter (startRefused)"
+has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)')" 'm_leaseClient->tunnelStarted();' \
+    || bad "G2: asking for the native start must mark the tunnel as running for the release hold"
 
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"

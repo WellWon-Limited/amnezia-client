@@ -367,7 +367,7 @@ private:
         m_lastAcquire = AcquireReply();
         m_lastRenewal = UpstreamRenewal();
         m_hasRenewal = false;
-        m_active = m_bringUp = m_tunnelIsUp = m_handedOver = m_adopted = m_rebasePending = false;
+        m_active = m_bringUp = m_tunnelIsUp = m_handedOver = m_adopted = m_rebasePending = m_bringUpSent = false;
         m_prepareOnly = m_prepared = false;
         m_releaseSent = false;
         m_configChanged = false;
@@ -390,7 +390,12 @@ private:
         // profile the machine stayed Active, so the next start() was ignored - "acquiring a seat", no request,
         // the 15 s start watchdog - and its dead lease was "released" only at the following stop). Who sends the
         // release is upstreamAppReleasesSeat: a lease that never reached a running tunnel is still this process's.
-        const quint64 out = m_machine.acquireInFlight();
+        quint64 out = m_machine.acquireInFlight();
+        for (int i = m_gatedAcquires.size() - 1; i >= 0; --i) // never sent: nothing will answer it
+            if (m_gatedAcquires[i].requestId == out) {
+                m_gatedAcquires.removeAt(i);
+                out = 0;
+            }
         if (out != 0) {
             m_orphanAcquire = out; // stays this owner's until its answer (startBlocked)
             m_orphanProfile = m_machine.profileId();
@@ -401,7 +406,7 @@ private:
             m_releaseSent = s.has(LeaseActionKind::SendRelease);
             noteReleasesSent(s);
             if (m_io)
-                dispatchLeaseIo(s, *m_io);
+                dispatchStep(s);
         } else if (const LeaseAction *a = s.find(LeaseActionKind::SendRelease)) {
             // The tunnel owner releases first, on its own stop, with the final report; this process again once
             // that stop is confirmed (the adapter holds it until then).
@@ -463,7 +468,7 @@ private:
         }
         QVector<LeaseAction> rest;
         if (m_io)
-            rest = dispatchLeaseIo(s, *m_io);
+            rest = dispatchStep(s);
         else
             for (const LeaseAction &a : s.actions)
                 if (a.kind != LeaseActionKind::SendAcquire && a.kind != LeaseActionKind::SendRenew
@@ -484,6 +489,7 @@ private:
                         b.configSha256 = m_standby->configSha256;
                     }
                     ev << b;
+                    m_bringUpSent = true;
                     break;
                 }
                 if (m_prepareOnly) {
@@ -598,6 +604,7 @@ private:
         if (!m_opt.keepOwnership)
             m_handedOver = true; // renewals belong to the tunnel owner from now (its envelope carries the lease)
         ev << b;
+        m_bringUpSent = true;
         if (m_opt.keepOwnership)
             ev << persistEvent(nowMs, 0);
     }
@@ -661,8 +668,17 @@ public:
     //   a grant nobody waits for (late/orphan)    L held by a live session: stays. Another acquire  lateGrant / acquireEnded
     //                                             of the profile alive: judged at its end.
     //                                             Otherwise: release pending at once.
-    //   an acquire of profile P                   goes out only when no release of P is pending     startBlocked (queued, sent by
-    //                                                                                               onReleaseDone)
+    //   granted, tunnel never came up (G2):       the seat's lifetime starts at the GRANT. A native Disconnected after
+    //     Disconnected / start error / leg        the start was asked for (tunnelLost), a start that never reached the
+    //     timeout / attempt ended before          native service or an attempt that ended before Connected (abortStart,
+    //     Connected                               via ITunnelControl::startRefused), a stop (disconnect): -> release
+    //                                             pending at once - the extension has no release handler yet, so the app
+    //                                             releases (upstreamAppReleasesSeat)
+    //   ANY acquire of profile P (direct, standby confirmation in tunnelUp(), provisional re-acquire in tick() - all
+    //     come out of the machine as SendAcquire and leave through sendAcquire, the one gate (G1))
+    //                                             goes out only when no release of P is pending     sendAcquire (held, sent by
+    //                                                                                               onReleaseDone; dropped
+    //                                                                                               with its session)
     // Every row registers its request id in m_releasesOut BEFORE the DELETE leaves; the wait is bounded by the
     // release rule (seatReleaseNext) and never on an event that already happened.
 
@@ -678,7 +694,7 @@ public:
             return ev;
         }
         releaseThroughLedger(profileId, leaseId, route);
-        return ev;
+        return acquireEnded(profileId, leaseId, false); // nothing else is out: a deferred seat of an earlier request is judged now
     }
 
     // An acquire request of the profile ended (any outcome).
@@ -700,7 +716,10 @@ public:
     // system, iOS Settings): the session ends now; its release is not waited for any later stop.
     QVector<UpstreamOwnerEvent> tunnelLost(qint64 nowMs)
     {
-        if (!m_active || m_prepareOnly || !m_tunnelIsUp)
+        // A seat's lifetime starts at the GRANT: a Disconnected after the native start was asked for, before any
+        // Connected (iOS: network settings or Xray failed in the extension, which has no release handler yet), ends
+        // it too - the app releases (upstreamAppReleasesSeat: the tunnel never reported up). Review G2 of round 3.
+        if (!m_active || m_prepareOnly || !(m_tunnelIsUp || m_bringUpSent))
             return {};
         return endSession(nowMs);
     }
@@ -737,21 +756,65 @@ public:
     // The live session holds this lease id (a late or orphan answer of the same id must not release it).
     bool holdsLease(const QString &leaseId) const
     {
-        return m_active && !leaseId.isEmpty() && m_machine.leaseId() == leaseId;
+        return m_active && !leaseId.isEmpty() && m_machine.phase() == LeasePhase::Active && m_machine.leaseId() == leaseId;
     }
     bool startQueued() const { return m_active && m_startQueued; }
+    int gatedAcquires() const { return int(m_gatedAcquires.size()); }
     int requestsOutstanding() const { return (m_orphanAcquire ? 1 : 0) + int(m_releasesOut.size()); }
 
     // A release this owner sent ended (UpstreamLeaseClient::onReleaseDone: answered, timed out or given up).
     QVector<UpstreamOwnerEvent> onReleaseDone(quint64 requestId, qint64 nowMs)
     {
         QVector<UpstreamOwnerEvent> ev;
-        if (m_releasesOut.remove(requestId))
+        if (m_releasesOut.remove(requestId)) {
+            flushGatedAcquires();
             startQueuedIfFree(nowMs, ev);
+        }
         return ev;
     }
 
 private:
+
+    // THE one place where an acquire leaves this owner (review G1 of round 3: the direct acquire, the standby
+    // confirmation of tunnelUp() and the provisional re-acquire of tick() all come out of the machine as SendAcquire
+    // and all pass this gate). The gate: no release of the same profile is pending - the server would answer with
+    // the lease that release is about to end. A gated acquire is sent by onReleaseDone, or dropped with its session.
+    bool releasePendingFor(const QString &profileId) const
+    {
+        for (auto it = m_releasesOut.constBegin(); it != m_releasesOut.constEnd(); ++it)
+            if (it.value() == profileId)
+                return true;
+        return false;
+    }
+    void sendAcquire(const LeaseAction &a)
+    {
+        if (releasePendingFor(a.profileId)) {
+            m_gatedAcquires.append(a);
+            return;
+        }
+        if (m_io)
+            m_io->acquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route);
+    }
+    void flushGatedAcquires()
+    {
+        const QVector<LeaseAction> gated = std::exchange(m_gatedAcquires, {});
+        for (const LeaseAction &a : gated)
+            sendAcquire(a); // still blocked ones queue again
+    }
+    // Like dispatchLeaseIo (UpstreamLeaseMachine.h) but acquires go through the gate; returns the other actions.
+    QVector<LeaseAction> dispatchStep(const LeaseStep &step)
+    {
+        QVector<LeaseAction> rest;
+        for (const LeaseAction &a : step.actions) {
+            switch (a.kind) {
+            case LeaseActionKind::SendAcquire: sendAcquire(a); break;
+            case LeaseActionKind::SendRenew: m_io->renew(a.requestId, a.leaseId, a.meter, a.route); break;
+            case LeaseActionKind::SendRelease: m_io->release(a.requestId, a.leaseId, a.meter, a.route); break;
+            default: rest << a; break;
+            }
+        }
+        return rest;
+    }
 
     // A release of this owner outside the machine's own actions: registered first, then sent (the request id is in
     // the high range so it never meets the machine's counter).
@@ -804,6 +867,7 @@ private:
     quint64 m_lastAcquireRequest = 0;
     qint64 m_lastAcquireSentMs = 0, m_grantSentMs = 0, m_wallAtStart = 0, m_monoAtStart = 0;
     qint64 m_adoptedStartedWallMs = 0;
+    bool m_bringUpSent = false; // the native start was asked for (BringUp event): a Disconnected can now be this session's
     bool m_active = false, m_bringUp = false, m_tunnelIsUp = false, m_handedOver = false, m_adopted = false;
     bool m_rebasePending = false, m_releaseSent = false, m_configChanged = false, m_haveBytes = false;
     quint64 m_sessionSerial = 0; // never reset: one value per begin()/prepare()
@@ -816,6 +880,7 @@ private:
     };
     QHash<QString, DeferredSeat> m_deferredSeat; // profile -> a late grant judged when the newer acquire ends
     quint64 m_ownSerial = 0;
+    QVector<LeaseAction> m_gatedAcquires; // acquires held back by releasePendingFor (sendAcquire)
     QHash<quint64, QString> m_releasesOut; // releases sent (request id -> profile), until onReleaseDone
     bool m_startQueued = false;            // this session's acquire waits (startBlocked)
     qint64 m_queuedRevision = 0;

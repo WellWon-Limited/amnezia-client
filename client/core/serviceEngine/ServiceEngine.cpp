@@ -453,6 +453,8 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                                .arg(r.connected ? r.path.id.id : QStringLiteral("-"))
                                .arg(r.paths).arg(r.elapsedMs).arg(int(r.fallbackNotice)));
             m_lastResult = r;
+            if (!r.connected && m_tunnel)
+                m_tunnel->startRefused(); // an attempt that ends before Connected holds no seat (G2): idempotent, no StopPath needed
             if (m_race.running()) // the attempt has its result: the spares are not needed any more
                 m_ownerQueueRaceStop = true;
             if (r.connected) {
