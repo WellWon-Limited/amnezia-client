@@ -187,6 +187,8 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
         reply->deleteLater();
         if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()) {
             m_edgeAnswered = true;
+            if (m_sessionEdge.isEmpty())
+                setReach(ApiReach::Reachable); // a direct request was answered
             leaveWalkPause(); // an answer: the network reaches the API, the walk's back-off is over
         }
         if (reply->property("avpn_fast_edge").toBool() && seq == m_configSeq) {
@@ -201,7 +203,13 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             // R9: one full round of silent edges = the network cannot reach the API now. Back off instead of
             // walking for ever; each edge still gets its quick first try inside a round.
             const int edges = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges).size();
-            if (edges >= 2 && ++m_walkSilent >= edges) {
+            // Lane C: every edge silent on its quick first try = the direct control plane cannot be reached here.
+            const bool allSilent = edges >= 1 && ++m_walkSilent >= edges;
+            if (allSilent)
+                setReach(ApiReach::Unreachable);
+            if (allSilent && edges < 2)
+                m_walkSilent = 0;
+            if (edges >= 2 && allSilent) {
                 m_walkSilent = 0;
                 ++m_walkRounds;
                 const qint64 base = m_pauseBaseTest >= 0 ? m_pauseBaseTest
@@ -361,6 +369,8 @@ void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64, 
 bool ConfigService::reportNetworkSuccess()
 {
     m_failStreak = 0;
+    if (m_sessionEdge.isEmpty())
+        setReach(ApiReach::Reachable); // a request on the direct route was answered (not one through a tunnel)
     rejudgeCachedXray();
     // R9/F7: any API answer ends the edge walk's back-off; the config the walk was after is asked for at once.
     if (leaveWalkPause()) {
@@ -440,6 +450,37 @@ bool ConfigService::leaveWalkPause()
 void ConfigService::resumeEdgeWalk()
 {
     leaveWalkPause(); // a new round now
+}
+
+void ConfigService::noteNetworkChanged()
+{
+    const bool sent = leaveWalkPause();
+    if (m_pinned || !m_sessionEdge.isEmpty())
+        return;
+    m_edgeAnswered = false; // the new network gets the quick first try
+    m_walkSilent = 0;
+    if (!sent && !m_configInFlight && m_nam)
+        fetchConfig();
+}
+
+// Lane C: the single owner of "can the direct control plane be reached on this network now". A fact observed under an
+// older network generation is forgotten (Unknown), whatever it said.
+ApiReach ConfigService::directApiReach() const
+{
+    if (m_reach == ApiReach::Unknown)
+        return ApiReach::Unknown;
+    if (m_generationFn && m_reachGen != m_generationFn())
+        return ApiReach::Unknown;
+    return m_reach;
+}
+
+void ConfigService::setReach(ApiReach r)
+{
+    const ApiReach before = directApiReach();
+    m_reach = r;
+    m_reachGen = m_generationFn ? m_generationFn() : 0;
+    if (before != r)
+        emit directApiReachChanged(r);
 }
 
 void ConfigService::setSessionEdge(const QString &edge)

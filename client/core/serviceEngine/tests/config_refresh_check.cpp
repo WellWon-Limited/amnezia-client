@@ -383,6 +383,57 @@ private slots:
         QCOMPARE(edgeA.configRequests, 1);
         QCOMPARE(edgeB.configRequests, 2); // exactly one request went out: no duplicate from the second exit
     }
+    // Lane C: the one fact "can the direct control plane be reached on this network" (ApiReach.h): Unreachable after one
+    // full round of silent edges, Reachable at the first direct answer, forgotten (Unknown) on a network change; an
+    // answer through a tunnel (session edge) proves nothing about the direct route.
+    void directApiReachFollowsTheWalkPerNetworkGeneration()
+    {
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int n) { return n < 2 ? QByteArray() : httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        quint64 generation = 1;
+        service.setNetworkGenerationSource([&generation] { return generation; });
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.setEdgeWalkTimingForTest(50, 5000, 5000);
+        QSignalSpy flips(&service, &avpn::ConfigService::directApiReachChanged);
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Unreachable, 2000); // a full round, both silent
+        QCOMPARE(edgeA.configRequests + edgeB.configRequests, 2);
+        generation = 2; // another network: the fact is not about it
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+        service.setSessionEdge(b);
+        service.reportNetworkSuccess(); // an answer through a tunnel: nothing about the direct route
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+        service.setSessionEdge(QString());
+        service.noteNetworkChanged(); // the new network is asked at once (the pause is over)
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 1000);
+        QCOMPARE(flips.count(), 2); // Unreachable, Reachable
+        generation = 3;
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+    }
+    // A network change while the walk is not paused still asks the new network (an edge that answered on the old one
+    // proves nothing): the fact converges without waiting for the next refresh.
+    void networkChangeAsksTheNewNetworkAndFlipsTheFact()
+    {
+        ConfigServer edgeA([](int) { return httpAnswer("200 OK", R"({"features":{}})"); });
+        ConfigServer edgeB([](int) { return httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        quint64 generation = 1;
+        service.setNetworkGenerationSource([&generation] { return generation; });
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000);
+        const int before = edgeA.configRequests;
+        generation = 2;
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+        service.noteNetworkChanged();
+        QTRY_COMPARE_WITH_TIMEOUT(edgeA.configRequests, before + 1, 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000);
+    }
     // Decision 2026-11-05: small calls succeed on the edge (they reset the edge walk), but two
     // /v1/subscription transport failures in a row on it switch the active edge; a delivered
     // subscription in between resets that streak.

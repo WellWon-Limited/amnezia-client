@@ -1247,6 +1247,15 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 emit changed();
             });
 
+    // Lane C (device round 10): the ONE fact "can the direct control plane be reached on this network" lives in
+    // ConfigService (the edge walk); the engine reads it per network generation and keeps no copy. "This provider
+    // can start without the API" = the usable standby-pack entry the bring-up itself uses.
+    m_configSvc->setNetworkGenerationSource([this]() { return m_engine.network().generation; });
+    connect(m_configSvc, &avpn::ConfigService::directApiReachChanged, this, [this](avpn::ApiReach r) {
+        reliabilityEvent(QStringLiteral("control_plane reach=%1 net_gen=%2")
+                             .arg(QLatin1String(avpn::apiReachName(r))).arg(m_engine.network().generation));
+    });
+
     // AVPN server-driven АнтиВПН (Task 10): сервис серверных bypass-списков (/v1/bypass-lists —
     // ru_cidrs/bypass_extra/cn_liauto_cidrs/split_dns, подпись+LKG). Тот же m_nam/kConfigPubKeyHex,
     // что у ConfigService — dev-эндпоинт ⇒ dev-ключ, prod ⇒ prod-ключ. baseUrl берём из
@@ -1745,8 +1754,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                             reliabilityEvent(QStringLiteral("network_change_ignored own_tunnel"));
                         } else {
                             invalidateNetworkMeasurements();
-                            if (m_configSvc)
-                                m_configSvc->resumeEdgeWalk(); // R9: a new network - a backed-off edge walk retries now
+                            if (m_configSvc && r == QNetworkInformation::Reachability::Online)
+                                m_configSvc->noteNetworkChanged(); // R9 + lane C: a new network - the walk starts over now
                         }
                         if (r == QNetworkInformation::Reachability::Online) {
                             kickBootstrap();
@@ -1883,7 +1892,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         connect(ni, &QNetworkInformation::transportMediumChanged, this, [this]() {
             if (m_configSvc && !networkChangeIsOwnTunnel(m_op != Op::None, m_lastOwnOpMs,
                                                          QDateTime::currentMSecsSinceEpoch()))
-                m_configSvc->resumeEdgeWalk(); // R9: Wi-Fi <-> cellular
+                m_configSvc->noteNetworkChanged(); // R9 + lane C: Wi-Fi <-> cellular
         });
         connect(ni, &QNetworkInformation::transportMediumChanged, this, [this]() { scanNotifyNetwork(); }); // AVPN Scanner
     }

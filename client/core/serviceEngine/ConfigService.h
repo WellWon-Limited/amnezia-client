@@ -2,6 +2,7 @@
 // AVPN: оркестратор серверного remote-config (/v1/config + /v1/edges): fetch, verify(ed25519),
 // LKG-кеш, edge-фолбэк. Async (armTimeout) — UI не блокируется.
 #pragma once
+#include "ApiReach.h"
 #include "ConfigCachePolicy.h"
 #include "ConfigTypes.h"
 #include "EdgeWalk.h"
@@ -58,6 +59,15 @@ public:
     // unsuccessful round (EdgeWalk.h::edgeRoundPauseMs), the back-off is forgotten and a new round starts now.
     // Touches nothing tunnel-related (an edge switch never does).
     void resumeEdgeWalk();
+    // The physical network changed (not our own tunnel): resume as above, and ask the new network at once - the walk
+    // starts over with the quick first try (an edge that answered on the old network proves nothing here), so
+    // directApiReach() converges in a few seconds instead of waiting for the next config refresh. Not under a
+    // session edge (a tunnel carries the requests) and not on a pinned dev backend.
+    void noteNetworkChanged();
+    // Lane C: can the direct control plane be reached on this network now (see ApiReach.h). Unknown when nothing was
+    // observed under the CURRENT generation of the network (the source below). The one owner of this fact.
+    ApiReach directApiReach() const;
+    void setNetworkGenerationSource(std::function<quint64()> generation) { m_generationFn = std::move(generation); }
     // Test hook: the first-try limit and the round pause numbers (replace the defaults and the server's numbers).
     void setEdgeWalkTimingForTest(int fastFirstTryMs, qint64 pauseBaseMs, qint64 pauseCapMs)
     {
@@ -79,6 +89,7 @@ public:
     void refreshIfStale(qint64 maxAgeMs);
 
 signals:
+    void directApiReachChanged(avpn::ApiReach reach); // every flip of directApiReach() as observed here
     void configApplied(const avpn::RemoteConfig &cfg);
     void activeEdgeChanged(const QString &base);
     // AVPN (белые списки): транспортный фейл/успех фетча конфига — второй (после bootstrap)
@@ -111,6 +122,10 @@ private:
     int          m_walkSilent = 0;
     int          m_walkRounds = 0;
     QTimer       m_walkPause;
+    void setReach(ApiReach r);
+    ApiReach       m_reach = ApiReach::Unknown;
+    quint64        m_reachGen = 0;                    // the network generation the fact was observed under
+    std::function<quint64()> m_generationFn;
     void walkPauseElapsed();
     bool leaveWalkPause();
     QString      m_pubKeyHex;
