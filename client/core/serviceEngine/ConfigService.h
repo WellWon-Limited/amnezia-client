@@ -134,6 +134,7 @@ private:
     int          m_walkSilent = 0;
     int          m_walkRounds = 0;
     QTimer       m_walkPause;
+    QTimer       m_askLater;                         // the one deferred direct ask (askDirectOnce's spacing)
     void setReach(ApiReach r);
     bool tunnelUp() const { return m_tunnelUpFn && m_tunnelUpFn(); }
     quint64 generationNow() const { return m_generationFn ? m_generationFn() : 0; }

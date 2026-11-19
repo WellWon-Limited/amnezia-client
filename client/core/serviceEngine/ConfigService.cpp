@@ -20,7 +20,7 @@ namespace avpn {
 ConfigService::ConfigService(QNetworkAccessManager *nam, const QString &baseUrl,
                              const QString &pubKeyHex, const QStringList &bakedEdges,
                              QObject *parent, bool pinned)
-    : QObject(parent), m_nam(nam), m_pubKeyHex(pubKeyHex), m_bakedEdges(bakedEdges), m_refreshTimer(this), m_walkPause(this),
+    : QObject(parent), m_nam(nam), m_pubKeyHex(pubKeyHex), m_bakedEdges(bakedEdges), m_refreshTimer(this), m_walkPause(this), m_askLater(this),
       m_pinned(pinned && !baseUrl.isEmpty())
 {
     // 5.1.108: a pinned control plane (AVPN_API_URL) is used as is. Before, the stored active edge of
@@ -39,6 +39,8 @@ ConfigService::ConfigService(QNetworkAccessManager *nam, const QString &baseUrl,
     m_walkPause.setObjectName(QStringLiteral("edgeRoundPause"));
     m_walkPause.setSingleShot(true);
     connect(&m_walkPause, &QTimer::timeout, this, &ConfigService::walkPauseElapsed);
+    m_askLater.setSingleShot(true);
+    connect(&m_askLater, &QTimer::timeout, this, &ConfigService::askDirectOnce);
 }
 
 void ConfigService::start()
@@ -488,8 +490,13 @@ void ConfigService::askDirectOnce()
     if (directApiReach() != ApiReach::Unknown)
         return;
     const qint64 now = nowMs();
-    if (m_lastAskMs >= 0 && now >= m_lastAskMs && now - m_lastAskMs < kAskSpacingMs)
+    if (m_lastAskMs >= 0 && now >= m_lastAskMs && now - m_lastAskMs < kAskSpacingMs) {
+        // The spacing bounds the rate, it does not cancel the ask this network is owed: one deferred ask when the
+        // spacing allows (it re-checks everything above, so a tunnel, a known fact or a newer ask ends it).
+        if (!m_askLater.isActive())
+            m_askLater.start(int(kAskSpacingMs - (now - m_lastAskMs)));
         return;
+    }
     m_askedAny = true;
     m_askedGen = gen;
     m_lastAskMs = now;
