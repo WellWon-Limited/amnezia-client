@@ -3987,6 +3987,18 @@ static void caseBatchOperation()
         runUntil(w, [&]() { return w.server.releasedOps.contains(op); }, 3000);
         CHECK(w.server.releasedOps.contains(op) && w.server.releasedLeases.contains(got.items.value(0).leaseId));
     }
+    { // ninth review (R7): a LOCAL refusal (no device token: the auth recovery cleared it) queued by probeBatch; the seat is retired
+      // before the refusal is processed - the idle callback must still fire once, after done (bytes first), never before
+        World w;
+        w.start();
+        w.s->api()->configure([]() { return QStringLiteral("https://api.example"); }, []() { return QString(); }, []() { return QString(); });
+        int order = 0, doneAt = 0, idleAt = 0;
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &) { doneAt = ++order; });
+        owner->retire([&]() { idleAt = ++order; });
+        CHECK(idleAt == 0); // the refusal is still queued: the request is in flight
+        runUntil(w, [&]() { return idleAt != 0; }, 2000);
+        CHECK(doneAt == 1 && idleAt == 2 && w.server.batchOps.isEmpty()); // nothing was sent; done, then idle, once
+    }
     { // an answer with another operation's id grants nothing; the seats are released by OUR id at once
         World w;
         w.start();

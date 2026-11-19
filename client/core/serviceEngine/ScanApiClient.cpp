@@ -326,6 +326,16 @@ struct ScanSeatBatch::State {
     std::function<void(qint64)> releaseBytes;
     int releasesOut = 0;            // release requests not answered yet
     std::function<void()> idle;     // retire(): called once when nothing of the batch can spend any more
+    // THE way a batch request ends - the network answer, a local refusal (queued or immediate), a client that is gone: the request
+    // is over (endRequest), then the result is handed on and a waiting retire() callback fires (deliver, after the bytes of the
+    // result were counted). No other place clears inFlight.
+    static void endRequest(const std::shared_ptr<State> &st) { st->inFlight = false; }
+    static void deliver(const std::shared_ptr<State> &st, const ScanApiClient::Batch &out)
+    {
+        if (st->done)
+            st->done(out);
+        noteIdle(st);
+    }
     static void noteIdle(const std::shared_ptr<State> &st)
     {
         if (st->inFlight || st->releasesOut > 0 || !st->idle)
@@ -875,13 +885,12 @@ std::unique_ptr<ScanSeatBatch> ScanApiClient::probeBatch(const QStringList &prof
     const QString token = m_deviceToken ? m_deviceToken() : QString();
     if (ids.isEmpty() || !configured() || b.isEmpty() || token.isEmpty()) {
         QTimer::singleShot(0, this, [st]() {
-            st->inFlight = false; // nothing was sent: no seat can exist
+            ScanSeatBatch::State::endRequest(st); // nothing was sent: no seat can exist
             Batch r;
             r.failCode = QStringLiteral("transport");
             for (const QString &p : st->profileIds)
                 r.items << BatchItem{p, false, QString(), QString(), QStringLiteral("transport"), QString()};
-            if (st->done)
-                st->done(r);
+            ScanSeatBatch::State::deliver(st, r);
         });
         return owner;
     }
@@ -922,14 +931,13 @@ void ScanApiClient::sendBatch(std::shared_ptr<ScanSeatBatch::State> st, IScanHtt
             self->finishBatch(st, r);
             return;
         }
-        st->inFlight = false; // the client went with the app: nothing can be released
+        ScanSeatBatch::State::endRequest(st); // the client went with the app: nothing can be released
         Batch out;
         out.failCode = QStringLiteral("transport");
         out.bytes = st->spent;
         for (const QString &p : st->profileIds)
             out.items << BatchItem{p, false, QString(), QString(), QStringLiteral("transport"), QString()};
-        if (st->done)
-            st->done(out);
+        ScanSeatBatch::State::deliver(st, out);
     });
 }
 
@@ -1000,7 +1008,7 @@ void ScanApiClient::finishBatch(std::shared_ptr<ScanSeatBatch::State> st, const 
     } else {
         failAll(QStringLiteral("transport"));
     }
-    st->inFlight = false;
+    ScanSeatBatch::State::endRequest(st);
     int granted = 0;
     for (const BatchItem &bi : out.items)
         granted += bi.granted ? 1 : 0;
@@ -1018,9 +1026,7 @@ void ScanApiClient::finishBatch(std::shared_ptr<ScanSeatBatch::State> st, const 
         emitLog(QStringLiteral("probe_batch release op=%1 reason=%2").arg(st->op.left(6), unseen ? QStringLiteral("unseen") : QStringLiteral("owner_gone")));
         releaseBatch(st);
     }
-    if (st->done)
-        st->done(out);
-    ScanSeatBatch::State::noteIdle(st); // (a retired batch: the answer's bytes and any release are counted by now)
+    ScanSeatBatch::State::deliver(st, out); // (a retired batch: the answer's bytes and any release are counted by now)
 }
 
 void ScanApiClient::releaseLeases(const QStringList &leaseIds, qint64 costBytes, std::function<void(qint64)> done,
