@@ -609,7 +609,8 @@ private:
     bool raceAllowed() const;
     void beginRaceForTap();
     void applyRaceEffects(const QList<path::RaceEffect> &effects);
-    void startOwnerAfterRace(const char *why);
+    // lead: the race's first proof - the owner's first leg goes to that path (AttemptOwner.h "Lead").
+    void startOwnerAfterRace(const char *why, const QString &lead = {});
     path::PathLedger m_ledger;
     bool m_ledgerDirty = false;
     path::NetworkTracker m_net;

@@ -39,6 +39,8 @@
 #include <QList>
 #include <QSet>
 
+#include <algorithm>
+
 namespace avpn::path {
 
 // The race's numbers (server-tunable through TuningStore, ConnectTunables.h::raceTimingsTuned); to be calibrated
@@ -53,14 +55,29 @@ struct RaceTimings {
     int raceBudgetMs = 8000;    // awake time of one race; then the owner walks without it
     int probeTimeoutMs = 4000;  // one probe's own bound (the host answers by then)
     int providerPerRace = 3;    // provider probes per race (probe seats a lost batch answer can strand)
-    // B3 (race measurement 18.11):
-    // The owner starts its first choice when nothing is proven by then, the race runs beside it. 0 = at once: the
-    // "first candidate works" case is never slower than without the race; a proof arriving while that leg has not
-    // come up is the owner's next choice at the leg's own deadline.
-    int hedgeMs = 0;
+    // The race runs only when the ledger holds no working path for this network (ServiceEngine::beginRaceForTap: a
+    // known path starts at once and the race runs beside it). With no evidence the first leg is not a blind bet: the
+    // owner waits for the race's FIRST proof and starts that path (the proof is its lead, AttemptOwner.h). Only when
+    // nothing is proven by hedgeAfterMs() does the owner start its first choice blind, the race running on beside it.
+    // Device round 19.11 (iPhone Air, empty ledger, Auto): with the blind leg at once (0) and a leg that yields to a
+    // proof, the Wi-Fi start dropped a working leg ~1 s in and took 5.56 s (3.7-3.9 s before); a blind leg that is kept
+    // costs 7.5-8.2 s on LTE where it carries nothing; the race's first proof came 1.0-1.7 s after the tap on both.
+    // -1 (default) = derived from the race's own numbers (hedgeAfterMs); 0 = at once (the old hedge); > 0 = this many ms.
+    int hedgeMs = -1;
     int spareProofs = 1;        // proofs kept after the winner, then the race stops (no probing on)
     int knownFreshMin = 30;     // a known path that carried data here this recently: no race at all
     int cellularMaxBytes = 262144; // bytes one race may spend on cellular (the Scanner's hour budget stays its own)
+
+    // How long the owner waits for a first proof before it starts blind: the last probe of the first parallel wave has
+    // started (stagger x (parallelism - 1)) and has had half of a probe's own bound to answer. Defaults: 750 + 2000 =
+    // 2750 ms - a working candidate answered in 0.6-1.5 s on every network measured (provider profiles up to 3.7 s),
+    // and it is about a third of the race budget, so a network where nothing proves still walks most of it.
+    int hedgeAfterMs() const
+    {
+        if (hedgeMs >= 0)
+            return hedgeMs;
+        return staggerMs * std::max(0, parallelism - 1) + probeTimeoutMs / 2;
+    }
 };
 
 // What the platform's probe host can run at once (IScanHost caps of the spike: 6 legs, 1 full Xray, 2 AmneziaWG).
@@ -94,7 +111,7 @@ inline const char *raceDoneReasonName(RaceDoneReason r)
     return "";
 }
 
-// Hedge: nothing proven within hedgeMs - the engine starts the owner on its first choice, the race runs on beside it.
+// Hedge: nothing proven within hedgeAfterMs() - the engine starts the owner on its first choice, the race runs on beside it.
 enum class RaceEffectType { StartProbe, CancelProbe, Report, Spent, Winner, Done, Hedge };
 
 struct RaceEffect {
@@ -154,11 +171,13 @@ public:
         m_nextStartAt = 0;
         // Hedge at once: the first candidate (the owner's first choice, the same order) is the leg the engine raises
         // now - it is never probed beside it (legStarted); a different first choice of the owner is excluded when
-        // its leg starts.
-        if (m_t.hedgeMs <= 0)
+        // its leg starts. Otherwise the first choice is probed like any candidate (no tunnel runs yet) and leaves the
+        // race when the owner raises it.
+        const bool atOnce = m_t.hedgeAfterMs() <= 0;
+        if (atOnce)
             m_legs.insert(order.first().id.id);
         pump(out);
-        if (m_running && m_t.hedgeMs <= 0) {
+        if (m_running && atOnce) {
             m_hedged = true;
             RaceEffect h;
             h.type = RaceEffectType::Hedge;
@@ -212,6 +231,8 @@ public:
     // The engine confirms a Winner the ledger accepted (it is "working" there); a refused one leaves the race open.
     void acceptWinner(const QString &pathId) { m_winner = pathId; }
     bool hasWinner() const { return !m_winner.isEmpty(); }
+    // The first proof of this race the ledger accepted (empty: none yet) - the lead of a leg that yields later.
+    const QString &winner() const { return m_winner; }
 
     QList<RaceEffect> tick(qint64 now)
     {
@@ -219,7 +240,7 @@ public:
         advance(now);
         if (!m_running)
             return out;
-        if (!m_hedged && m_winner.isEmpty() && m_awake >= m_t.hedgeMs) {
+        if (!m_hedged && m_winner.isEmpty() && m_awake >= m_t.hedgeAfterMs()) {
             m_hedged = true;
             RaceEffect h;
             h.type = RaceEffectType::Hedge;

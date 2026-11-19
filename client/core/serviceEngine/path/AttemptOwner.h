@@ -43,14 +43,23 @@
 // are simply "working" paths of the current network and come first; a path the race found dead drops back.
 // "Known path at once + race of the spares" (design §4 step 2) is: the facade sends UserStart at once (the
 // known path is the first choice) and starts the race beside it; "no known path" is: the facade lets the race
-// run first and sends UserStart when it has a winner or its own time is up.
-// A proof while a leg is in flight (ProofReady, design §4 "hedged start"): the leg yields to the proven path when
-// it has shown nothing of its own - it is not up yet and not proven itself (the hedge was a blind bet), or it is up
-// and its one data check got no first byte within its share (`starved`). The proven path must be the owner's next
-// choice (mode, preference and tried paths all apply); nothing is recorded for the leg that yields. Device round of
-// 19.11 (iPhone Air, LTE, Auto): the hedged leg (Serbia 1, AmneziaWG) shook hands at 1.95-2.15 s and carried no
-// data, the race proved Finland 1 Xray at 1.44-1.69 s, and the leg was left only by its starving check at 3.8-4.2 s.
-// On the same phone's Wi-Fi the hedged leg was up at 2.15 s, before any other proof (2.6 s): it keeps its check.
+// run first and sends UserStart with the race's first proof as its LEAD, or without one when the race's wait is
+// over (PathRace.h hedgeAfterMs) - only then is a first leg a blind bet.
+// Lead: the path a proof named (AttemptEvent::lead). The next leg goes to THAT path, not to whatever ranks first
+// by an unrelated key a moment later (device round 19.11: the leg after a proof of Finland 1 Xray was chosen after
+// the ~1 s stop, when two AmneziaWG probe proofs had landed and outranked it by probe time). The lead is taken only
+// when the ordinary choice could take it: it is in the order (mode, tried) as a working path of this network and
+// no preferred path is ahead of it; otherwise the order decides as always. It is consumed by the next choice.
+// A proof while a leg is in flight (ProofReady): the leg yields to the proven path (the proof's own, else the first
+// working path of the order; nothing is recorded for the leg) only when it has shown nothing of its own:
+//  - it is up and its one data check got no first byte within its share (`starved`), or
+//  - it is not up yet and was raised without evidence. With a probe host that happens only after the race had its
+//    wait (PathRace.h hedgeAfterMs) and proved nothing - the blind path's own probe included - or after the race
+//    ended: a bet against a network that already proved hostile, and a proof is better evidence than that bet.
+// A lead, a known path and a leg up and receiving bytes are never ended by a proof. Device round of 19.11 (iPhone
+// Air, Auto, empty ledger): the blind leg raised AT ONCE beside the race yielded to the first proof ~1 s in and
+// dropped a working Serbia 1 AmneziaWG leg on Wi-Fi (5.56 s to data, 3.7-3.9 s before); with the race first that leg
+// is never raised blind - on both traces no leg yields (tests/path_engine_check.cpp, "trace 19.11").
 #pragma once
 
 #include "NetworkKey.h"
@@ -63,6 +72,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <utility>
 
 namespace avpn::path {
 
@@ -137,6 +147,8 @@ struct AttemptEffect {
     PathCandidate path;
     int timeoutMs = 0;        // StartPath: start deadline; RunDataCheck: the check's own limit (it answers by then)
     bool recheck = false;     // RunDataCheck: run the check again on the same tunnel (the previous one is void)
+    bool lead = false;        // StartPath: the path a proof named (not the head of the order)
+    QString toPath;           // Yield: the proven path the leg gives way to
     OutcomeReport report;     // Report: write into the ledger
     AttemptPhase phase = AttemptPhase::Idle; // Show
     AttemptResult result;     // Finish
@@ -152,8 +164,8 @@ enum class EventType {
     // A live tunnel this process did not raise (found at launch, re-bound): it becomes the leg of a new attempt
     // with `choice` / `mode` / `network`, already up - one in-tunnel data check decides like for any leg.
     Adopted,
-    // The race proved a path of this network, or the running data check starves (`starved`: no first byte within
-    // its share). The leg in flight may yield (see the header).
+    // The race proved a path of this network (`lead`: that path), or the running data check starves (`starved`: no
+    // first byte within its share). A starving leg yields (see the header).
     ProofReady,
 };
 
@@ -170,13 +182,16 @@ struct AttemptEvent {
     bool tunnelGone = false;                         // LiveLost, PathFailed
     bool restart = false;                            // LiveLost
     bool starved = false;                            // ProofReady: the running data check has no first byte yet
+    QString lead;                                    // UserStart, ProofReady: the path a proof named (see the header)
 
-    static AttemptEvent userStart(qint64 now, const UserChoice &c, TransportMode m, const NetworkKey &net)
+    static AttemptEvent userStart(qint64 now, const UserChoice &c, TransportMode m, const NetworkKey &net,
+                                  const QString &lead = {})
     {
         AttemptEvent e = at(EventType::UserStart, now);
         e.choice = c;
         e.mode = m;
         e.network = net;
+        e.lead = lead;
         return e;
     }
     static AttemptEvent userStop(qint64 now) { return at(EventType::UserStop, now); }
@@ -199,10 +214,11 @@ struct AttemptEvent {
         return e;
     }
     static AttemptEvent tick(qint64 now) { return at(EventType::Tick, now); }
-    static AttemptEvent proofReady(qint64 now, bool starved)
+    static AttemptEvent proofReady(qint64 now, bool starved, const QString &lead = {})
     {
         AttemptEvent e = at(EventType::ProofReady, now);
         e.starved = starved;
+        e.lead = lead;
         return e;
     }
     static AttemptEvent networkChanged(qint64 now, const NetworkKey &net)
@@ -511,6 +527,7 @@ private:
     void onUserStart(const AttemptEvent &ev, const SelectionContext &ctx, QList<AttemptEffect> &out)
     {
         beginAttempt(ev, out);
+        m_lead = ev.lead;
         if (legActive() || m_phase == AttemptPhase::Connected)
             stopLeg(out); // what the previous attempt raised goes down first
         else if (m_phase != AttemptPhase::Stopping)
@@ -535,6 +552,7 @@ private:
         if (net.generation <= m_net.generation)
             return; // an older observation
         m_net = net;
+        m_lead.clear(); // a proof of the old network says nothing about this one
         if (!m_running)
             return;
         restartOnNetwork();
@@ -560,6 +578,7 @@ private:
             m_net = ev.network;
         m_pathsTotal = 0;
         m_preferredTried = false;
+        m_lead.clear();
         m_attemptStart = m_awake;
         restartOnNetwork();
     }
@@ -603,6 +622,21 @@ private:
         return selectPaths(in);
     }
 
+    // The lead if the ordinary choice could take it (see the header), else -1. `ranked` = order(ctx).
+    static int leadIndex(const QList<RankedPath> &ranked, const QString &lead)
+    {
+        if (lead.isEmpty() || ranked.isEmpty())
+            return -1;
+        for (int i = 0; i < ranked.size(); ++i) {
+            if (ranked.at(i).path.id.id != lead)
+                continue;
+            if (ranked.at(i).view.state != PathState::Working)
+                return -1;
+            return ranked.first().preferred && !ranked.at(i).preferred ? -1 : i;
+        }
+        return -1;
+    }
+
     void onProofReady(const AttemptEvent &ev, const SelectionContext &ctx, QList<AttemptEffect> &out)
     {
         if (!m_running || !legActive() || exact())
@@ -614,11 +648,15 @@ private:
         if (!blind && !starved)
             return;
         const QList<RankedPath> next = order(ctx);
-        if (next.isEmpty() || next.first().view.state != PathState::Working)
+        const int li = leadIndex(next, ev.lead);
+        if (li < 0 && (next.isEmpty() || next.first().view.state != PathState::Working))
             return;
+        const PathCandidate &to = next.at(li < 0 ? 0 : li).path;
         AttemptEffect y = effect(EffectType::Yield);
         y.phase = m_phase;
+        y.toPath = to.id.id;
         out << y;
+        m_lead = to.id.id; // the next leg goes to the path it yields to, whatever lands while it stops
         failLeg(PathOutcome::Inconclusive, out); // its check did not complete: nothing recorded
     }
 
@@ -667,7 +705,8 @@ private:
             const bool nothingEver = m_pathsTotal == 0 && !exact();
             return finish(failure(nothingEver ? FailReason::NoCandidate : FailReason::NothingProven), out);
         }
-        const PathCandidate next = ranked.first().path;
+        const int li = leadIndex(ranked, std::exchange(m_lead, QString()));
+        const PathCandidate next = ranked.at(li < 0 ? 0 : li).path;
         m_preferredTried = m_preferredTried || isPreferred(m_choice, next);
         m_tried.insert(next.id.id);
         ++m_pathsThisNet;
@@ -678,7 +717,9 @@ private:
         m_leg.startedAt = m_awake;
         m_leg.deadline = m_awake + startTimeoutMs(next.kind);
         m_phase = AttemptPhase::Starting;
-        out << effect(EffectType::StartPath, startTimeoutMs(next.kind)) << show(AttemptPhase::Starting);
+        AttemptEffect start = effect(EffectType::StartPath, startTimeoutMs(next.kind));
+        start.lead = li >= 0;
+        out << start << show(AttemptPhase::Starting);
     }
 
     AttemptTimings m_t;
@@ -703,6 +744,7 @@ private:
     int m_progressTotal = 0;
     bool m_checkSuspended = false; // the running data check spanned a suspension
     bool m_preferredTried = false; // a preferred path was brought up in this attempt
+    QString m_lead;                // the path a proof named: the next choice takes it (see the header)
 };
 
 } // namespace avpn::path
