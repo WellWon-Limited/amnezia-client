@@ -100,7 +100,9 @@ inline const char *attemptPhaseName(AttemptPhase p)
     return "";
 }
 
-enum class FailReason { None, NothingProven, ExactNodeFailed, StoppedByUser, NoCandidate, NoNetwork };
+// PermissionDenied: the person refused (or dismissed) the system's "allow VPN configuration" dialog (Android
+// VpnService.prepare). Not a path outcome: the attempt ends once, nothing is recorded, no other leg is raised.
+enum class FailReason { None, NothingProven, ExactNodeFailed, StoppedByUser, NoCandidate, NoNetwork, PermissionDenied };
 
 inline const char *failReasonName(FailReason r)
 {
@@ -111,6 +113,7 @@ inline const char *failReasonName(FailReason r)
     case FailReason::StoppedByUser: return "stopped_by_user";
     case FailReason::NoCandidate: return "no_candidate";
     case FailReason::NoNetwork: return "no_network";
+    case FailReason::PermissionDenied: return "permission_denied";
     }
     return "";
 }
@@ -167,6 +170,10 @@ enum class EventType {
     // The race proved a path of this network (`lead`: that path), or the running data check starves (`starved`: no
     // first byte within its share). A starving leg yields (see the header).
     ProofReady,
+    // The person refused the system's VPN permission dialog while this leg was starting (stamp = the leg). The
+    // tunnel never started: the attempt ends PermissionDenied at once - nothing recorded, no other leg. (While the
+    // dialog is pending the host delivers no ticks, so no deadline runs; see "Clock" above.)
+    PermissionDenied,
 };
 
 struct AttemptEvent {
@@ -214,6 +221,7 @@ struct AttemptEvent {
         return e;
     }
     static AttemptEvent tick(qint64 now) { return at(EventType::Tick, now); }
+    static AttemptEvent permissionDenied(qint64 now, const PathStamp &s) { return cb(EventType::PermissionDenied, now, s); }
     static AttemptEvent proofReady(qint64 now, bool starved, const QString &lead = {})
     {
         AttemptEvent e = at(EventType::ProofReady, now);
@@ -317,6 +325,14 @@ public:
         case EventType::LiveLost: onLiveLost(ev, ctx, out); break;
         case EventType::Adopted: onAdopted(ev, out); break;
         case EventType::ProofReady: onProofReady(ev, ctx, out); break;
+        case EventType::PermissionDenied:
+            if (m_running && isLiveLeg(ev.stamp) && m_phase == AttemptPhase::Starting) {
+                // nothing was raised and nothing is judged: no report, no stop, no next choice
+                m_phase = AttemptPhase::Idle;
+                m_leg = Leg{};
+                finish(failure(FailReason::PermissionDenied), out);
+            }
+            break;
         }
         // A check that was running across a suspension and has not answered yet: void, run it again.
         if (m_checkSuspended && m_phase == AttemptPhase::Checking)

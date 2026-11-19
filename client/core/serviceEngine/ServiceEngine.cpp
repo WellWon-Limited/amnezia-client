@@ -1556,6 +1556,17 @@ bool ServiceEngine::onTunnelDisconnected() // AVPN
     return true;
 }
 
+bool ServiceEngine::onPermissionDenied()
+{
+    if (m_owner.phase() != path::AttemptPhase::Starting)
+        return false;
+    const EngineState before = m_state;
+    attemptJournal(QStringLiteral("permission_denied node=%1 (the attempt ends, nothing recorded)")
+                       .arg(m_owner.currentPath().id.id));
+    feedOwner(path::AttemptEvent::permissionDenied(nowMs(), m_owner.currentLeg()));
+    return m_state != before;
+}
+
 // The facade takes the tunnel down (the user's stop, a restart for another choice): the owner's attempt ends
 // StoppedByUser once the stop is confirmed (onTunnelDisconnected); the ledger is not touched.
 void ServiceEngine::requestStop() // AVPN
