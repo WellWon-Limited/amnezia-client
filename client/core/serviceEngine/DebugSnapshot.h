@@ -612,24 +612,48 @@ inline bool ownStopInFlight(bool wantConnected, bool opStopping, bool awaitingSt
 {
     return !wantConnected && (opStopping || awaitingStopConfirm);
 }
+// G3 (round 3): an owner's result belongs to the intent in force only when its attempt began AFTER the person's last
+// action on the intent (`intentAttempt` = the owner's attempt count at that action). A result of an older attempt -
+// one still running when the person acted - ends no request and neither drops nor keeps the newer intent.
+inline bool resultBelongsToIntent(quint64 resultAttempt, quint64 intentAttempt) { return resultAttempt > intentAttempt; }
+
 // F2 (round 2): a Scanner row's one request - the exact row and what to restore after it are ONE object with one
 // lifetime. It is non-empty from the row's tap until the request ends (connected, failed, stopped by the person,
 // superseded by any other action on the intent); nothing else holds "the row is exact" or "a restore is armed".
 struct ExactRowRequest {
     QString row;        // the exact node; empty = no request
     QString restorePin; // the choice before the tap ("" = Auto)
+    QString restoreCountry; // the country kept with that choice (a vanished server stays a preferred country)
     bool reconnect = false; // a live session before the tap comes back if the row fails
     bool active() const { return !row.isEmpty(); }
     bool exactFor(const QString &pin) const { return active() && pin == row; }
     void clear() { *this = ExactRowRequest(); }
     // A row tapped while another request still runs keeps that one's "before": the choice to come back to is the
     // person's, not the earlier row.
+    // G4 (round 3): what the restore leaves as THE choice, in the engine and in settings alike. The previous pin
+    // applies -> pinned again. It cannot apply (the server left the pool, the mode excludes it) -> the engine's pin
+    // is cleared and the saved choice stays the previous pin with its country (review E8 of 18.11: a vanished server
+    // stays a preferred country). Never the refused row, which the engine would otherwise keep.
+    struct RestorePlan {
+        bool clearEnginePin = false;
+        QString savedPin;
+        QString savedCountry;
+    };
+    RestorePlan restorePlan(bool previousPinApplied) const
+    {
+        RestorePlan p;
+        p.savedPin = restorePin;
+        p.savedCountry = restorePin.isEmpty() ? QString() : restoreCountry;
+        p.clearEnginePin = restorePin.isEmpty() || !previousPinApplied;
+        return p;
+    }
     static ExactRowRequest begin(const ExactRowRequest &held, const QString &row, const QString &savedPin,
-                                 bool liveSessionBefore)
+                                 const QString &savedCountry, bool liveSessionBefore)
     {
         ExactRowRequest r;
         r.row = row;
         r.restorePin = held.active() ? held.restorePin : savedPin;
+        r.restoreCountry = held.active() ? held.restoreCountry : savedCountry;
         r.reconnect = held.active() ? held.reconnect : liveSessionBefore;
         return r;
     }

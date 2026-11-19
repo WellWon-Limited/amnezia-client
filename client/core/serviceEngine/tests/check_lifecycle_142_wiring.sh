@@ -132,6 +132,17 @@ d3="$(printf '%s\n' "$stop_fn2" | grep -nF 'restoreChoiceBeforeRow(cancelledRow)
 { [ -n "$d1" ] && [ -n "$d2" ] && [ -n "$d3" ] && [ "$d1" -lt "$d2" ] && [ "$d2" -lt "$d3" ]; } \
     || bad "F2: a stop must read the request, then end it, then restore the choice from before the tap"
 
+# G3 (round 3): a result of an attempt begun before the person's last action on the intent is of a superseded
+# intent - noteIntentChange records the owner's attempt count and syncAttempt hands only matching results on.
+printf '%s\n' "$ni_fn" | grep -qF 'm_intentAttempt = m_engine.attemptNumber();' || bad "G3: noteIntentChange must record the owner's attempt count"
+sa_fn="$(code "$FACADE" | awk '/^bool AvpnEngineQml::syncAttempt\(\)/{f=1} f{print} f&&/^}/{exit}')"
+printf '%s\n' "$sa_fn" | grep -qF 'avpn::resultBelongsToIntent(result->attempt, m_intentAttempt)' || bad "G3: syncAttempt must match a result to the intent"
+printf '%s\n' "$sa_fn" | grep -qF 'if (const std::optional<avpn::path::AttemptResult> &r = current) {' || bad "G3: the request, the intent rule and the notices read only the current result"
+# G4 (round 3): the restore asks the pure plan and clears the engine pin when the previous pin was refused.
+rs_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::restoreChoiceBeforeRow/{f=1} f{print} f&&/^}/{exit}')"
+printf '%s\n' "$rs_fn" | grep -qF 'req.restorePlan(applied)' && printf '%s\n' "$rs_fn" | grep -qF 'm_engine.clearPin();' \
+    && printf '%s\n' "$rs_fn" | grep -qF 'm_savedPinCountry = plan.savedCountry;' || bad "G4: the restore must follow restorePlan (engine pin cleared when refused, country kept)"
+
 # T1 (one starving rule): both data checks - own (whoami) and provider (the probe) - feed the engine through the one
 # first-byte watch and the one sink (behaviour: upstream_engine_check providerLegStarvedCheck).
 has "$(body "$FACADE" 'void AvpnEngineQml::whoamiAttempt(int epoch)')" 'avpn::watchFirstByte(r, avpn::kWhoamiFirstByteShareMs, checkStarvedSink(epoch));' \

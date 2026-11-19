@@ -3360,12 +3360,14 @@ void AvpnEngineQml::endExactRowRequest(bool connected)
 void AvpnEngineQml::restoreChoiceBeforeRow(const avpn::ExactRowRequest &req)
 {
     QString err;
-    if (req.restorePin.isEmpty())
-        m_engine.clearPin();
-    else
-        m_engine.setPinnedNode(req.restorePin, err);
-    m_savedPin = req.restorePin;
+    const bool applied = !req.restorePin.isEmpty() && m_engine.setPinnedNode(req.restorePin, err);
+    const avpn::ExactRowRequest::RestorePlan plan = req.restorePlan(applied);
+    if (plan.clearEnginePin)
+        m_engine.clearPin(); // G4: a refused previous pin must not leave the engine on the row (syncChoice prefers it)
+    m_savedPin = plan.savedPin;
+    m_savedPinCountry = plan.savedCountry;
     QSettings().setValue(QStringLiteral("avpn/pinnedNode"), m_savedPin);
+    QSettings().setValue(QStringLiteral("avpn/pinnedCountry"), m_savedPinCountry);
 }
 
 // Review E1 of 18.11: the one place a finished operation releases the facade's latches (the operation in
@@ -3417,7 +3419,18 @@ bool AvpnEngineQml::syncAttempt()
         && whitelistTriggerFromAttempt(legStartFailures, result && !result->connected
                                                              && result->reason == avpn::path::FailReason::NothingProven))
         m_whitelistDetector->noteConnectFailure(); // the detector gates its round (cellular, tunnel down, debounce)
-    if (const std::optional<avpn::path::AttemptResult> &r = result) {
+    // G3: a result of an attempt that began before the person's last action on the intent (a connect still running when
+    // a Scanner row was tapped, a stop, another choice) says nothing about the newer intent: it ends no request, neither
+    // drops nor keeps the intent, and tells the person nothing.
+    const bool resultIsCurrent = result && avpn::resultBelongsToIntent(result->attempt, m_intentAttempt);
+    if (result && !resultIsCurrent) {
+        changedAny = true;
+        reliabilityEvent(QStringLiteral("attempt_result_superseded attempt=%1 intent_attempt=%2 connected=%3 reason=%4")
+                             .arg(result->attempt).arg(m_intentAttempt).arg(int(result->connected))
+                             .arg(QLatin1String(avpn::path::failReasonName(result->reason))));
+    }
+    const std::optional<avpn::path::AttemptResult> current = resultIsCurrent ? result : std::optional<avpn::path::AttemptResult>();
+    if (const std::optional<avpn::path::AttemptResult> &r = current) {
         changedAny = true;
         if (m_exactReq.active() && r->reason != avpn::path::FailReason::StoppedByUser)
             endExactRowRequest(r->connected);
@@ -6389,6 +6402,7 @@ void AvpnEngineQml::noteUserStart()
 void AvpnEngineQml::noteIntentChange()
 {
     ++m_intentSerial;
+    m_intentAttempt = m_engine.attemptNumber(); // G3: a result of an attempt begun before this is of a superseded intent
     m_resumeOnNewNetwork = false; // the person acted: a pending resume of a lost session is theirs no more
     // R3: a Scanner row's restore belongs to that one request: any other action on the intent (stop, Auto, another
     // choice, a connect) ends it without restoring - the person's newer choice is never overwritten later. The row's
@@ -7953,7 +7967,7 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
     // and on success the row stays as an ordinary preferred server (never an exact home choice).
     // S6 (device round 5): a live session before the tap comes back if the row fails
     const avpn::ExactRowRequest req = avpn::ExactRowRequest::begin(
-        held, nodeId, m_savedPin, m_wantConnected && m_engine.state() == avpn::EngineState::Connected);
+        held, nodeId, m_savedPin, m_savedPinCountry, m_wantConnected && m_engine.state() == avpn::EngineState::Connected);
     // a Scanner row is one exact path (never a fallback to another row or server); armed inside pinAndReconnectImpl
     // right after its intent move (which ends an older request), before the start reads the choice
     pinAndReconnectImpl(nodeId, pinOriginPersists(PinOrigin::UserChoice), rc.forceConnect,

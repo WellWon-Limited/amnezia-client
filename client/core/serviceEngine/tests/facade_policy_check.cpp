@@ -864,12 +864,28 @@ static void exactRowRequestObject()
     using avpn::ExactRowRequest;
     ExactRowRequest none;
     CHECK(!none.active() && !none.exactFor(QStringLiteral("B")));
-    const ExactRowRequest a = ExactRowRequest::begin(none, QStringLiteral("B"), QStringLiteral("A"), true);
+    const ExactRowRequest a = ExactRowRequest::begin(none, QStringLiteral("B"), QStringLiteral("A"), QStringLiteral("DE"), true);
     CHECK(a.active() && a.exactFor(QStringLiteral("B")) && !a.exactFor(QStringLiteral("A")));
     CHECK(a.restorePin == QLatin1String("A") && a.reconnect);
     // a second row while the first runs: the person's choice before the FIRST tap stays the one to come back to
-    const ExactRowRequest c = ExactRowRequest::begin(a, QStringLiteral("C"), QStringLiteral("B"), false);
+    const ExactRowRequest c = ExactRowRequest::begin(a, QStringLiteral("C"), QStringLiteral("B"), QStringLiteral("FR"), false);
     CHECK(c.row == QLatin1String("C") && c.restorePin == QLatin1String("A") && c.reconnect);
+    CHECK(c.restoreCountry == QLatin1String("DE")); // the country of the choice before the FIRST tap
+    // G4: the restore leaves one choice. Applied: pinned again. Refused (server gone): the engine's pin is cleared and
+    // the saved choice stays A with its country - never the row the engine would keep.
+    {
+        const ExactRowRequest::RestorePlan ok = a.restorePlan(true);
+        CHECK(!ok.clearEnginePin && ok.savedPin == QLatin1String("A") && ok.savedCountry == QLatin1String("DE"));
+        const ExactRowRequest::RestorePlan gone = a.restorePlan(false);
+        CHECK(gone.clearEnginePin && gone.savedPin == QLatin1String("A") && gone.savedCountry == QLatin1String("DE"));
+        const ExactRowRequest::RestorePlan autoBefore = ExactRowRequest::begin(none, QStringLiteral("B"), QString(), QString(), false)
+                                                             .restorePlan(false);
+        CHECK(autoBefore.clearEnginePin && autoBefore.savedPin.isEmpty() && autoBefore.savedCountry.isEmpty());
+    }
+    // G3: only a result of an attempt begun after the last action on the intent belongs to it
+    CHECK(avpn::resultBelongsToIntent(5, 4));
+    CHECK(!avpn::resultBelongsToIntent(4, 4)); // the attempt still running when the person tapped the row
+    CHECK(!avpn::resultBelongsToIntent(3, 4));
     // an ended request holds nothing: no exact choice, no restore, no reconnect (before: the row outlived the flag)
     ExactRowRequest e = c;
     e.clear();
