@@ -263,7 +263,9 @@ if(IOS)
     if(DEFINED ENV{AVPN_IOS_APP_SCAN_HOST})
         set(AVPN_IOS_APP_SCAN_HOST "$ENV{AVPN_IOS_APP_SCAN_HOST}" CACHE BOOL "In-app Scanner probe host (env override)")
     endif()
-    option(AVPN_IOS_APP_SCAN_HOST "iOS: run the Scanner's probe engine in the app process (stage-0 spike)" OFF)
+    # Default ON for iOS (19.11): a release made by the canonical scripts ships the in-app probe host (the race, the
+    # country scan, «Найти ещё»); OFF only by an explicit -D / environment override. This block is iOS-only.
+    option(AVPN_IOS_APP_SCAN_HOST "iOS: run the Scanner's probe engine in the app process" ON)
     if(AVPN_IOS_APP_SCAN_HOST)
         add_compile_definitions(AVPN_IOS_APP_SCAN_HOST=1)
         list(APPEND HEADERS ${AVPN_SE}/IosAppScanHost.h)
