@@ -641,6 +641,10 @@ private:
     {
         if (!m_running || !legActive() || exact())
             return;
+        // The person's own choice gets its full try (device round 19.11: a chosen provider server was left 1 s
+        // into its check for a proven path of another country). A fallback follows only its real failure.
+        if (isPreferred(m_choice, m_leg.path))
+            return;
         const bool proven = ctx.ledger
             && ctx.ledger->view(m_net.local, m_leg.path.id, ctx.wallNowMs).state == PathState::Working;
         const bool blind = m_phase == AttemptPhase::Starting && !proven;

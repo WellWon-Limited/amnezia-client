@@ -1314,8 +1314,8 @@
     </message>
     <message>
         <location line="+12"/>
-        <source>Вы выбрали: %1</source>
-        <translation>You chose: %1</translation>
+        <source>Ваш выбор сейчас недоступен: %1</source>
+        <translation>Your choice is unavailable now: %1</translation>
     </message>
     <message>
         <location line="+244"/>
@@ -2025,8 +2025,8 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+14"/>
-        <source>Подключаемся…</source>
-        <translation>Connecting…</translation>
+        <source>Подбираем сервер…</source>
+        <translation>Picking a server…</translation>
     </message>
     <message>
         <location line="+1"/>

@@ -2795,7 +2795,14 @@ QVariantMap AvpnEngineQml::currentNode() const
     // picks randomly among equal weights - no badge rather than a flickering one.
     QString nextProto, nextProtoVersion;
     if (!pinned.isEmpty() || m_engine.transportMode() != avpn::TransportMode::Auto) {
-        if (const avpn::SubscriptionNode *next = m_engine.nextCandidate()) {
+        const avpn::SubscriptionNode *next = m_engine.nextCandidate();
+        if (pick && !connectedNow && (!next || next->nodeId != pick->nodeId)) {
+            // The card shows the chosen node while the order would start elsewhere (the choice failed here before):
+            // the badge describes the node it stands under, not the next candidate (device round 19.11: a chosen
+            // provider server carried the «Amnezia» badge of another country's node).
+            nextProto = pick->upstream ? QStringLiteral("xray") : (pick->proto.isEmpty() ? QStringLiteral("awg") : pick->proto);
+            nextProtoVersion = avpn::isXrayProto(nextProto) ? QString() : pick->protoVersion;
+        } else if (next) {
             nextProto = avpn::protoOf(*next);
             nextProtoVersion = avpn::isXrayProto(nextProto) ? QString() : next->awg.protocolMajor();
         }

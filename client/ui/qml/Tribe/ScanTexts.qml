@@ -27,7 +27,7 @@ QtObject {
     readonly property string net3g: qsTr("3G")
     readonly property string netName: qsTr("Сеть: %1")           // screen reader name of the chip
     readonly property string sectionNow: qsTr("ДОСТУПНЫ СЕЙЧАС")
-    readonly property string stageConnecting: qsTr("Подключаемся…")
+    readonly property string stageConnecting: qsTr("Подбираем сервер…")
     readonly property string stageReach: qsTr("Проверяем доступность · %1 из %2")
     readonly property string stageReachShort: qsTr("Проверяем доступность")
     readonly property string stageData: qsTr("Проверяем передачу данных · доступно %1 из %2")

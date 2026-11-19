@@ -1096,7 +1096,7 @@ PageType {
                         Text {
                             width: parent.width
                             visible: root.choiceElsewhere
-                            text: qsTr("Вы выбрали: %1").arg(String(root.curNode.choiceName || ""))
+                            text: qsTr("Ваш выбор сейчас недоступен: %1").arg(String(root.curNode.choiceName || ""))
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                             color: Theme.color.warning
