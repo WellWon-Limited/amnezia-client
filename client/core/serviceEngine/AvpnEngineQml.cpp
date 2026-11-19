@@ -7637,7 +7637,9 @@ void AvpnEngineQml::finishScannerSvc(bool ok, const QString &err)
 // Coordinator 18.11 (c): the Scanner and the attempt owner see the same network - the generation of the path
 // engine's NetworkTracker (the physical medium, gateway and subnet; our own utun is not a network). The app's
 // network monitor fires on every up/down of our own tunnel; such a notice is compared once the tunnel settled and
-// reaches the Scanner only when the network key really changed (no «Сеть сменилась» on a row tap).
+// reaches the Scanner only when the network generation or the network's key as the Scanner reads it moved
+// (scanNetworkNoticeDue; no «Сеть сменилась» on a row tap). Device round air9 (19.11, 10:08): the key completed with
+// the same generation and the cached result of that Wi-Fi never came back while only the generation was compared.
 void AvpnEngineQml::scanNotifyNetwork()
 {
     if (!m_scanner || !m_scanSwitches.scanner)
@@ -7655,10 +7657,16 @@ void AvpnEngineQml::scanNotifyNetwork()
     }
     const quint64 before = m_engine.network().generation;
     m_engine.observeNetwork(currentNetworkObservation());
-    if (m_engine.network().generation != before)
-        m_scanner->networkChanged();
-    else
+    const ScanNetFacts f = m_scanAdapter->network();
+    const QString key = QLatin1String(scanNetKindName(f.kind)) + QLatin1Char('|') + f.reportingKey + QLatin1Char('|') + f.gatewayHash;
+    if (!scanNetworkNoticeDue(before, m_engine.network().generation, m_scanNetKeyTold, key)) {
         reliabilityEvent(QStringLiteral("scan_network_unchanged net_gen=%1").arg(before));
+        return;
+    }
+    if (m_engine.network().generation == before)
+        reliabilityEvent(QStringLiteral("scan_network_key_changed net_gen=%1").arg(before)); // the same generation, a new key
+    m_scanNetKeyTold = key;
+    m_scanner->networkChanged();
 }
 
 // The live status for the coordinator (deduplicated), the own connect's «Подключено» latch and a row tap's

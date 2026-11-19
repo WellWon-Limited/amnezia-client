@@ -1596,6 +1596,50 @@ static void caseDrain()
 // Network change mid-scan (the app's path monitor counts a change): the scan is cancelled and restarted on the
 // new tuple; a host element that CHANGES is a network change too; a host element first seen inside a scan is
 // folded in at the next open.
+// Device round air9 (19.11, 10:08): back on Wi-Fi the Scanner adopted the network before its facts were complete;
+// the facts then changed with the SAME generation (the engine published its key, the gateway became known) and the
+// engine forwarded nothing, so the cached Germany result of that Wi-Fi never came back. The Scanner's own identity
+// (kind, reporting key, fingerprint, generation - ScanNetwork) is the one judge of a change: every notice reaches it
+// (AvpnEngineQml::scanNotifyNetwork: scanNetworkNoticeDue, facade_policy_check) and a key-only change with the same generation
+// adopts that network and its cached result; a notice with nothing new changes nothing.
+static void caseNetworkKeySameGeneration()
+{
+    g_case = QStringLiteral("network_key_same_generation");
+    World w;
+    w.engine.net.gatewayHash = QStringLiteral("a1b2c3d4e5f60718"); // the VPN off: no live row on any list
+    w.start();
+    w.s->open();
+    w.run(20000);
+    CHECK_EQ(w.phase(), QStringLiteral("done"));
+    const ScanNetFacts wifi = w.engine.net;
+    // cellular
+    w.engine.net.kind = ScanNetKind::Cellular;
+    w.engine.net.reportingKey = QStringLiteral("cell:250-02:4g");
+    w.engine.net.gatewayHash.clear();
+    w.engine.net.appSources[0].counter = 2;
+    w.s->networkChanged();
+    CHECK(w.s->view().value(QStringLiteral("rows")).toList().isEmpty());
+    // back on Wi-Fi: the first notice comes before the gateway is known (another fingerprint: no cached result) ...
+    w.engine.net = wifi;
+    w.engine.net.gatewayHash.clear();
+    w.engine.net.appSources[0].counter = 3;
+    w.s->networkChanged();
+    CHECK(w.s->view().value(QStringLiteral("rows")).toList().isEmpty());
+    const QString gen = w.s->lastNetwork().generation();
+    // ... then the facts complete with the same generation: the Scanner adopts them, the result comes back as cache
+    w.engine.net.gatewayHash = wifi.gatewayHash;
+    w.s->networkChanged();
+    CHECK_EQ(w.s->lastNetwork().generation(), gen);
+    CHECK_EQ(w.s->lastNetwork().fingerprint, scanNetFingerprint(QStringLiteral("wifi"), wifi.reportingKey, wifi.gatewayHash));
+    const QVariantList rows = w.s->view().value(QStringLiteral("rows")).toList();
+    CHECK(!rows.isEmpty() && rows.first().toMap().value(QStringLiteral("flags")).toStringList().contains(QStringLiteral("cache")));
+    // a notice with nothing new: the same view, no scan
+    const int starts = w.host.count("scan_start");
+    const QVariant before = w.s->view().value(QStringLiteral("list_build"));
+    w.s->networkChanged();
+    CHECK(w.s->view().value(QStringLiteral("list_build")) == before && w.host.count("scan_start") == starts);
+}
+
 static void caseNetworkChange()
 {
     g_case = QStringLiteral("network_change_app");
@@ -4136,6 +4180,7 @@ int main(int argc, char **argv)
     caseCellularBudget();
     caseDrain();
     caseNetworkChange();
+    caseNetworkKeySameGeneration();
     caseCooldown();
     caseAbandonedManifest();
     caseAccessScope();

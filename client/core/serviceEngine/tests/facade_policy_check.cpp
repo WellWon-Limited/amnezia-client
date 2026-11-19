@@ -535,6 +535,15 @@ static void wave4UpstreamBehaviour()
     CHECK(networkChangeIsOwnTunnel(false, now - 2000, now));
     CHECK(!networkChangeIsOwnTunnel(false, now - 6000, now));
     CHECK(!networkChangeIsOwnTunnel(false, -1, now));
+    // Scanner notices (coordinator 18.11 (c) + device round air9 19.11 10:08): a new generation, or the Scanner's
+    // network key completing with the same generation; nothing new - no notice.
+    {
+        const QString wifiBare = QStringLiteral("wifi|wifi|"), wifiFull = QStringLiteral("wifi|wifi:asn:64500|a1b2c3d4e5f60718");
+        CHECK(scanNetworkNoticeDue(3, 4, wifiBare, wifiBare));        // the engine's generation moved
+        CHECK(scanNetworkNoticeDue(4, 4, wifiBare, wifiFull));        // the key completed, the same generation (air9)
+        CHECK(!scanNetworkNoticeDue(4, 4, wifiFull, wifiFull));       // nothing moved: our own tunnel settling, a row tap
+        CHECK(scanNetworkNoticeDue(4, 4, QString(), wifiFull));       // the Scanner never got a notice
+    }
     // P2-4: координатор выхода на экран.
     CHECK(foregroundIsReturn(true, 0));                       // была заморозка/скрытие
     CHECK(!foregroundIsReturn(false, 3000));                  // Пункт управления: 3 с Inactive

@@ -1072,6 +1072,7 @@ private:
     void syncControlPlaneEdge(bool tunnelUp); // E10: the provider session's control-plane edge
     QString m_sessionEdge;                    // E10: the session edge in force ("" = the stored edge)
     bool m_scanNetCompareArmed = false;
+    QString m_scanNetKeyTold; // the network key (kind|reporting key|gateway hash) of the Scanner's last notice
     bool m_exactRestoreArmed = false;  // R3: a Scanner row's request is running
     QString m_exactRestorePin;         // R3: the choice before it
     bool m_exactRestoreReconnect = false;    // S6: the VPN was connected when the row was tapped
