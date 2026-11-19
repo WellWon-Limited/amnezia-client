@@ -750,6 +750,30 @@ public:
         return s;
     }
 
+    // The screen shows WITHOUT starting a scan (owner 19.11, device test of the iPhone Air: opening the Scanner never
+    // scans by itself; the Scan button does - retryTapped / connectAndScanTapped). The network and the live
+    // connection are adopted as in opened(); with nothing on the screen the last result of this network comes back
+    // as the cache (drawn with its age); a scan already running keeps running; the cooldown is untouched.
+    ScanStep shown(const ScanOpen &o, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        m_screenOpen = true;
+        m_connectOnOpen = o.connectOnOpen;
+        m_net.radio = o.network.radio; // display only, never part of the identity
+        if (o.network != m_net || m_rowsKey != o.network.key) {
+            if (scanPhaseScanning(m_phase))
+                applyNetworkChange(o.network, o.cached, now, s); // reopened on another network mid-scan
+            else
+                adoptNetwork(o.network, o.cached, now);
+        }
+        setCurrent(o.current, now, s);
+        if (!scanPhaseScanning(m_phase) && m_rows.isEmpty())
+            loadCached(o.cached, now);
+        finishStep(s, now);
+        return s;
+    }
+
     ScanStep closed(qint64 now)
     {
         now = clock(now);
