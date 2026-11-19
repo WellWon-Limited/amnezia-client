@@ -17,6 +17,9 @@ object QtAndroidController {
     external fun onServiceError()
 
     external fun onVpnPermissionRejected()
+    // AVPN (Android permission prompt): 0 = the system "allow VPN configuration" dialog is on screen, 1 = closed and
+    // granted, 2 = closed, denied or cancelled. Registered by AndroidController::initialize as an optional native.
+    external fun onVpnPermissionPrompt(state: Int)
     external fun onNotificationStateChanged()
     external fun onVpnStateChanged(stateCode: Int)
     external fun onStatisticsUpdate(rxBytes: Long, txBytes: Long, lastHandshakeSec: Long) // AVPN: + handshake

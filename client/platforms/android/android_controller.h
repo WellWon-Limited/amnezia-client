@@ -81,6 +81,10 @@ signals:
     void serviceDisconnected();
     void serviceError();
     void vpnPermissionRejected();
+    // AVPN (Android permission prompt): the system's "allow VPN configuration" dialog. 0 = on screen (pending),
+    // 1 = closed, granted, 2 = closed, denied or cancelled. The engine pauses its clock while 0 (the same rule as
+    // IosController::permissionPromptPending) and ends the attempt on 2. Optional native: see initialize().
+    void vpnPermissionPrompt(int state);
     void notificationStateChanged();
     void vpnStateChanged(ConnectionState state);
     void statisticsUpdated(quint64 rxBytes, quint64 txBytes);
@@ -129,6 +133,7 @@ private:
     static void onServiceDisconnected(JNIEnv *env, jobject thiz);
     static void onServiceError(JNIEnv *env, jobject thiz);
     static void onVpnPermissionRejected(JNIEnv *env, jobject thiz);
+    static void onVpnPermissionPrompt(JNIEnv *env, jobject thiz, jint state); // AVPN, optional native
     static void onNotificationStateChanged(JNIEnv *env, jobject thiz);
     static void onVpnStateChanged(JNIEnv *env, jobject thiz, jint stateCode);
     static void onStatisticsUpdate(JNIEnv *env, jobject thiz, jlong rxBytes, jlong txBytes,

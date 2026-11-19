@@ -1298,7 +1298,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
 #else
         Q_UNUSED(since)
 #endif
-#if defined(Q_OS_IOS) || defined(MACOS_NE)
+#if defined(Q_OS_IOS) || defined(MACOS_NE) || defined(Q_OS_ANDROID)
         if (m_permissionPromptPending)
             return; // the person reads the system's VPN dialog: no deadline runs meanwhile
 #endif
@@ -1550,6 +1550,30 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 } else if (st == AndroidController::ConnectionState::DISCONNECTED && thinkConnected) {
                     onConnectionStateChanged(Vpn::Disconnected);
                 }
+            },
+            Qt::QueuedConnection);
+
+    // Android permission prompt (the same rule as iOS above, one mechanism): the system's "allow VPN configuration"
+    // dialog (VpnService.prepare) stands between the tap and the tunnel. While it is on screen the attempt owner's
+    // clock does not run (the transition timer skips its tick: neither the leg's start deadline nor the attempt
+    // budget counts the person's reading time); "granted" lets the leg go on, and the first tick after it counts
+    // at most clockJumpMs (a suspension, AttemptOwner::advance). "Denied or cancelled" is the person's own answer,
+    // not a server's failure: the owner ends the ATTEMPT (PermissionDenied) - no walk to another server, nothing in
+    // the evidence ledger, no second dialog until the next tap on Connect.
+    connect(AndroidController::instance(), &AndroidController::vpnPermissionPrompt, this, [this](int promptState) {
+        m_permissionPromptPending = (promptState == 0);
+        reliabilityEvent(QStringLiteral("permission_prompt pending=%1 state=%2 op=%3")
+                             .arg(m_permissionPromptPending).arg(promptState).arg(int(m_op)));
+        if (promptState == 2 && m_engine.onPermissionDenied()) {
+            if (syncAttempt())
+                QTimer::singleShot(0, this, [this]() { reconcile(); });
+        }
+    }, Qt::QueuedConnection);
+    // Safety: a tunnel state past the dialog (the service is connecting or up) means the dialog is gone.
+    connect(AndroidController::instance(), &AndroidController::connectionStateChanged, this,
+            [this](Vpn::ConnectionState st) {
+                if (m_permissionPromptPending && (st == Vpn::Connecting || st == Vpn::Connected || st == Vpn::Reconnecting))
+                    m_permissionPromptPending = false;
             },
             Qt::QueuedConnection);
 #endif
@@ -3414,6 +3438,9 @@ bool AvpnEngineQml::syncAttempt()
                 break;
             case avpn::path::FailReason::NoNetwork:
                 emit error(tr("Нет сети — подключитесь, когда она появится"));
+                break;
+            case avpn::path::FailReason::PermissionDenied:
+                emit error(tr("Без разрешения на VPN подключиться нельзя — нажмите «Подключить» и разрешите настройку VPN"));
                 break;
             default:
                 emit error(tr("В этой сети не удалось найти рабочий сервер — проверьте сеть и попробуйте снова"));
