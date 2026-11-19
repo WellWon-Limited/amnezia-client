@@ -1296,6 +1296,41 @@ static void machineRules()
         CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 2100).actions.isEmpty()); // failed row
         CHECK(m.attemptEnded(kT0 + 2200).actions.isEmpty());                      // chain already over
     }
+    // R6 (review of 141): the tapped row is an exact request. Its failure ends the chain at once: the old pair
+    // connectFailed + attemptEnded moved the chain to the next row and marked THAT row failed, untried.
+    for (const bool exact : {false, true}) {
+        ScanMachine m(w.caps);
+        m.opened(openOf(w, QStringLiteral("1"), true), kT0);
+        m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+        ScanHostProgress p;
+        p.scanId = m.scanId();
+        p.phase = QStringLiteral("data");
+        ScanProbeFacts f = goodData();
+        f.id = QStringLiteral("2:xray");
+        f.egressNode = QStringLiteral("2");
+        f.seq = 1;
+        p.items << withBurst(f);
+        m.hostProgress(p, kT0 + 600);
+        m.rowTapped(QStringLiteral("2:xray"), kT0 + 700);
+        CHECK(!m.connectingId().isEmpty());
+        QString other;
+        if (exact) {
+            for (const ScanRowView &r : m.view(kT0 + 800).rows)
+                if (r.id != QLatin1String("2:xray") && !r.current && r.tappable && !r.unavailable)
+                    other = r.id;
+            m.exactRowFailed(QStringLiteral("2:xray"), kT0 + 2000);
+        } else {
+            m.connectFailed(QStringLiteral("2:xray"), kT0 + 2000);
+            other = m.connectingId();
+            CHECK(!other.isEmpty() && other != QLatin1String("2:xray")); // the old ladder moved on
+            m.attemptEnded(kT0 + 2001);                                  // ... and failed that row, never tried
+        }
+        CHECK(m.connectingId().isEmpty());
+        CHECK(!other.isEmpty());
+        // the other row is tappable only when nothing failed it
+        CHECK(m.rowTapped(other, kT0 + 2200).has(ScanActionKind::ConnectRow) == exact);
+        CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 2300).actions.isEmpty()); // the tapped row failed
+    }
     // no step checks the live connection (owner 18.11, variant B): the stop ends the scan at once, also for a
     // connection that came up late
     {

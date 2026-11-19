@@ -3320,8 +3320,9 @@ void AvpnEngineQml::endScanRowRequest(const QString &node, const char *why)
                 {{QStringLiteral("event"), QStringLiteral("row_failed")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                  {QStringLiteral("node"), n}, {QStringLiteral("why"), QLatin1String(why)}});
     if (m_scanner) {
+        // R6: an exact row never falls back - its failure ends the chain, no step to a row that was never tried
         if (!n.isEmpty() && !m_scanRow.reported.contains(n))
-            m_scanner->connectFailed(n);
+            m_scanner->exactRowFailed(n);
         m_scanner->attemptEnded();
     }
 }
@@ -6347,6 +6348,14 @@ void AvpnEngineQml::noteUserStart()
 void AvpnEngineQml::noteIntentChange()
 {
     ++m_intentSerial;
+    // R3: a Scanner row's restore belongs to that one request: any other action on the intent (stop, Auto, another
+    // choice, a connect) ends it without restoring - the person's newer choice is never overwritten later. The row's
+    // own tap arms it again right after its own call (scanConnectRow).
+    if (m_exactRestoreArmed) {
+        reliabilityEvent(QStringLiteral("exact_row_restore_dropped row=%1").arg(m_exactRow));
+        m_exactRestoreArmed = false;
+        m_exactRestoreReconnect = false;
+    }
     // Every action on the intent (stop, start, Auto, another pick, ...) ends a seat taken for a switch that has not
     // brought it up yet - before any operation guard (review F1 of 17.11: Stop during the switch's own teardown
     // skipped guardedStop, and the held seat was never given back).
@@ -6410,7 +6419,10 @@ void AvpnEngineQml::stop()
 #else
     const bool stoppable = m_lastTunnelState != Vpn::Disconnected && m_lastTunnelState != Vpn::Unknown;
 #endif
-    if (stoppable && m_op != Op::Stopping) {
+    // R1: also a start that never reached a native leg (the race prelude: tunnel Disconnected, no leg held) -
+    // no native event will settle it, guardedStop settles it at once (stop_nothing_native).
+    if (avpn::stopNeedsGuardedStop(stoppable, m_op == Op::Stopping, m_opInFlight, observedTunnelOf(m_lastTunnelState),
+                                   m_engine.ownerHoldsNativeLeg())) {
         m_stopRetries = 0;
         guardedStop("user");
         return;
@@ -7757,7 +7769,10 @@ void AvpnEngineQml::scanSyncState()
             scanJournal(QStringLiteral("scan_row_failed reason=scan_row node=%1").arg(n),
                         {{QStringLiteral("event"), QStringLiteral("row_failed")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                          {QStringLiteral("node"), n}});
-            m_scanner->connectFailed(n);
+            if (st.ended)
+                m_scanner->exactRowFailed(n); // R6: the row the owner gave up on; nothing to try after it
+            else
+                m_scanner->connectFailed(n);
         }
         if (st.ended) {
             scanJournal(QStringLiteral("scan_row_ended reason=scan_row"),
@@ -7876,21 +7891,28 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
                 {{QStringLiteral("event"), QStringLiteral("connect")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                  {QStringLiteral("node"), nodeId}, {QStringLiteral("up"), upOrComing},
                  {QStringLiteral("order"), int(attemptOrder.size())}});
+    // A second row tapped while the first still runs keeps the first one's "before" (the choice to come back to);
+    // read before noteUserStart(), which drops an older arming.
+    const bool restoreHeld = m_exactRestoreArmed;
+    const QString heldPin = m_exactRestorePin;
+    const bool heldReconnect = m_exactRestoreReconnect;
     if (rc.userStartBookkeeping)
         noteUserStart();
     Q_UNUSED(attemptOrder)
     Q_UNUSED(hintTtlMs)
     // R3 (device round 4): the exact row applies to this one request - the previous choice comes back if it fails,
     // and on success the row stays as an ordinary preferred server (never an exact home choice).
-    if (!m_exactRestoreArmed) {
-        m_exactRestoreArmed = true;
-        m_exactRestorePin = m_savedPin;
-        // S6 (device round 5): a live session before the tap comes back if the row fails
-        m_exactRestoreReconnect = m_wantConnected && m_engine.state() == avpn::EngineState::Connected;
-    }
+    const QString restorePin = restoreHeld ? heldPin : m_savedPin;
+    // S6 (device round 5): a live session before the tap comes back if the row fails
+    const bool restoreReconnect = restoreHeld ? heldReconnect
+                                              : (m_wantConnected && m_engine.state() == avpn::EngineState::Connected);
     m_exactRow = nodeId; // a Scanner row is one exact path (never a fallback to another row or server)
     pinAndReconnectImpl(nodeId, pinOriginPersists(PinOrigin::UserChoice), rc.forceConnect,
                         rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap, &pinBefore);
+    // R3: armed AFTER the intent calls above (noteIntentChange drops an older arming) - this request's own.
+    m_exactRestoreArmed = true;
+    m_exactRestorePin = restorePin;
+    m_exactRestoreReconnect = restoreReconnect;
     scanRowAttemptBegin(m_scanRow, nodeId, m_intentSerial);
 }
 

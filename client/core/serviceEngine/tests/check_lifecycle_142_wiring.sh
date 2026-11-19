@@ -112,6 +112,15 @@ l3="$(printf '%s\n' "$stop_fn" | grep -nF 'm_tunnel.down();' | head -1 | cut -d:
 { [ -n "$l1" ] && [ -n "$l2" ] && [ -n "$l3" ] && [ "$l1" -lt "$l2" ] && [ "$l2" -lt "$l3" ]; } \
     || bad "B1: a stop with nothing native must settle before any native stop is asked"
 
+# R3 (review of 141): a Scanner row's restore dies with its request. noteIntentChange drops it (stop, Auto, another
+# choice, a connect all pass through it) and the row's own tap arms it again only AFTER its intent calls.
+ni_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::noteIntentChange\(\)/{f=1} f{print} f&&/^}/{exit}')"
+printf '%s\n' "$ni_fn" | grep -qF 'm_exactRestoreArmed = false;' || bad "R3: noteIntentChange must drop an armed Scanner-row restore"
+a1="$(code "$FACADE" | grep -nF 'm_exactRestoreArmed = true;' | head -1 | cut -d: -f1)"
+a2="$(code "$FACADE" | grep -nF 'rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap, &pinBefore);' | head -1 | cut -d: -f1)"
+{ [ -n "$a1" ] && [ -n "$a2" ] && [ "$a1" -gt "$a2" ]; } || bad "R3: the row's restore must be armed after its pinAndReconnectImpl (which drops an older one)"
+[ "$(count "$FACADE" 'm_exactRestoreArmed = true;')" = 1 ] || bad "R3: one place arms the restore"
+
 # T1 (one starving rule): both data checks - own (whoami) and provider (the probe) - feed the engine through the one
 # first-byte watch and the one sink (behaviour: upstream_engine_check providerLegStarvedCheck).
 has "$(body "$FACADE" 'void AvpnEngineQml::whoamiAttempt(int epoch)')" 'avpn::watchFirstByte(r, avpn::kWhoamiFirstByteShareMs, checkStarvedSink(epoch));' \

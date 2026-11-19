@@ -859,6 +859,14 @@ static void stopNothingNative()
     CHECK(!avpn::stopFindsNothingNative(avpn::ObservedTunnel::Disconnected, true));  // a leg is starting
     CHECK(!avpn::stopFindsNothingNative(avpn::ObservedTunnel::Unknown, false));      // not observed yet: maybe up
     CHECK(!avpn::stopFindsNothingNative(avpn::ObservedTunnel::Connected, false));    // an adopted session
+    // R1: the stop during the race prelude (Starting, native Disconnected, no leg) must reach guardedStop to settle.
+    using avpn::ObservedTunnel;
+    CHECK(avpn::stopNeedsGuardedStop(false, false, true, ObservedTunnel::Disconnected, false)); // the prelude
+    CHECK(!avpn::stopNeedsGuardedStop(false, false, false, ObservedTunnel::Disconnected, false)); // idle: nothing open
+    CHECK(!avpn::stopNeedsGuardedStop(false, false, true, ObservedTunnel::Disconnected, true));  // a leg: owner stops it
+    CHECK(!avpn::stopNeedsGuardedStop(false, false, true, ObservedTunnel::Unknown, false));      // maybe up: not ours
+    CHECK(avpn::stopNeedsGuardedStop(true, false, true, ObservedTunnel::Connected, true));       // native work: as before
+    CHECK(!avpn::stopNeedsGuardedStop(true, true, true, ObservedTunnel::Connected, true));       // a stop already runs
 }
 
 static void checkBlameRule()
