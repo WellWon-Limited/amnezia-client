@@ -299,6 +299,9 @@ public:
     QHash<QString, int> listFigures() const;
 
     Q_INVOKABLE void open(bool withCheck = false);
+    // The Scanner screen opens WITHOUT a scan (owner 19.11): the page calls this; the Scan button is retry().
+    // open() stays for the coordinator's own paths and the engine's tests (it starts a scan).
+    Q_INVOKABLE void show();
     Q_INVOKABLE void close();
     Q_INVOKABLE void stop();
     Q_INVOKABLE void retry();
@@ -600,6 +603,7 @@ private:
     bool m_serverOff = false;   // a scan endpoint answered 404 (the server's switch): nothing requested until the switches change
 
     ScanNetwork m_lastNet;
+    qint64 m_shownCacheAt = -1;      // show(): when the cached result it put on the screen was saved (its age chip)
     qint64 m_poolAt = -1;            // when /v1/scan/pool last answered (or was asked); the server allows 60 per hour
     bool m_poolUnsupported = false;  // an older server: no pool endpoint
     bool m_fetchPoolOnOpen = true;

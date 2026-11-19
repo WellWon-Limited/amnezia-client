@@ -463,10 +463,15 @@ void TribeScanner::refreshView()
     }
     if (!scope.isEmpty())
         bar.insert(QStringLiteral("scope_countries"), scope);
+    // the chosen scope of the next scan (owner 19.11: the menu shows the scope, not the filter of found rows)
+    bar.insert(QStringLiteral("scope"), v.bar.scope);
     j.insert(QStringLiteral("bar"), bar);
     j.insert(QStringLiteral("cooldown_ends_at_ms"), double(t < m_m.cooldownUntil() ? m_m.cooldownUntil() : 0));
     j.insert(QStringLiteral("next_change_at_ms"), double(v.nextChangeAtMs));
     j.insert(QStringLiteral("screen_open"), m_m.screenOpen());
+    // show() put the last result of this network on the screen without a scan: its age for the clock chip
+    if (v.phase == ScanPhase::Idle && !v.rows.isEmpty() && m_shownCacheAt > 0 && j.value(QLatin1String("checked_ago_min")).toInt(-1) < 0)
+        j.insert(QStringLiteral("checked_ago_min"), int(qMax<qint64>(0, t - m_shownCacheAt) / 60000));
     // Support's check (variant B): whether a full check / report runs and how far (-1 = no stages to count)
     j.insert(QStringLiteral("support_check"),
              QJsonObject{{QStringLiteral("running"), m_m.reportCheckRunning()},
@@ -1974,6 +1979,35 @@ void TribeScanner::open(bool withCheck)
     fetchPoolIfStale();
     dispatch(m_m.reportQueueState(m_engine->reportQueueFull(), now()));
     dispatch(m_m.opened(o, now()));
+}
+
+void TribeScanner::show()
+{
+    if (!m_enabled) {
+        emitLog(QStringLiteral("show ignored: scanner switch off"));
+        return;
+    }
+    if (m_serverOff) {
+        emitLog(QStringLiteral("show: scanner off on the server, nothing requested"));
+        afterStep();
+        return;
+    }
+    ScanNetSource g;
+    if (!m_hostGenFolded && hostGenerationNow(g)) {
+        m_hostGenFolded = true;
+        setHostGen(g);
+    }
+    ScanOpen o;
+    o.network = buildNetwork();
+    o.current = m_engine->current();
+    o.cached = cachedFor(o.network);
+    o.connectOnOpen = m_connectOnOpen;
+    m_lastNet = o.network;
+    m_shownCacheAt = o.cached.present() ? o.cached.savedAtMs : -1;
+    emitLog(QStringLiteral("show (no scan) cached=%1").arg(o.cached.present()));
+    fetchPoolIfStale(); // the scope menu lists the whole pool before any scan
+    dispatch(m_m.reportQueueState(m_engine->reportQueueFull(), now()));
+    dispatch(m_m.shown(o, now()));
 }
 
 void TribeScanner::close() { dispatch(m_m.closed(now())); }

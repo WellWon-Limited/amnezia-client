@@ -54,9 +54,6 @@ QtObject {
     // ── bottom bar ──
     readonly property string allCountries: qsTr("Все страны")
     readonly property string stop: qsTr("Остановить")
-    readonly property string retry: qsTr("Повторить")
-    readonly property string retryInS: qsTr("Повторить через %1 с")
-    readonly property string retryInMin: qsTr("Повторить через %1 мин")
     readonly property string hourLimit: qsTr("Лимит сканов в мобильной сети на этот час")
 
     // ── empty result ──
@@ -135,7 +132,18 @@ QtObject {
     readonly property string moreRunning: qsTr("Ищем ещё…")                                // the same button while the next batch runs
     readonly property string moreInMin: qsTr("Найти ещё через %1 мин")                     // the same button, disabled: the cellular hour's limit (view.more.blocked "budget"; the bar says hourLimit)
     readonly property string moreExhausted: qsTr("Больше доступных нод в этой сети нет")   // replaces the button: nothing left to check
-    readonly property string scanScope: qsTr("Сканировать")                               // bar button: a country chosen that the shown result does not cover
+    readonly property string scanScope: qsTr("Сканировать")                               // THE Scan button (owner 19.11: one button, one meaning - scan the chosen scope)
+    readonly property string scanInS: qsTr("Сканировать через %1 с")                      // the same button during the 30 s pause between scans
+    readonly property string scanInMin: qsTr("Сканировать через %1 мин")                  // the same button while the cellular hour's budget is spent
+    // owner 19.11: page open without results / a scope the shown result does not cover - its summary
+    readonly property string scopeTitle: qsTr("%1 · %2")                                 // «Германия · 12 серверов» (%1 = country or «Все страны», %2 = servers())
+    readonly property string serverOne: qsTr("%1 сервер")
+    readonly property string serverFew: qsTr("%1 сервера")
+    readonly property string serverMany: qsTr("%1 серверов")
+    readonly property string scopeText: qsTr("Нажмите «Сканировать» — проверим, какие из них работают в этой сети.")
+    readonly property string startTitle: qsTr("Найдём, через что подключиться")          // no pool counts yet
+    readonly property string startText: qsTr("Нажмите «Сканировать» — проверим серверы в этой сети.")
+    readonly property string moreExhaustedScope: qsTr("%1: проверены все серверы")        // «Найти ещё» has nothing left in a country scope
     readonly property string emptyScopeTitle: qsTr("%1: доступных нод сейчас нет")         // empty result of a country scan (%1 = the country)
     readonly property string emptyScopeText: qsTr("Попробуйте другую страну или проверьте все страны.") // text, the same state
     // variant B (owner decision 18.11): the check with the report lives in Support - the bar under the chat header
@@ -236,6 +244,7 @@ QtObject {
         const a = n % 10, b = n % 100
         return a === 1 && b !== 11 ? one : ((a >= 2 && a <= 4 && (b < 12 || b > 14)) ? few : many)
     }
+    function servers(n) { return t.plural(n, t.serverOne, t.serverFew, t.serverMany).arg(n) }
     function found(n) {
         return n === 1 ? t.foundOne : t.plural(n, t.foundFormOne, t.foundFormFew, t.foundFormMany).arg(n)
     }

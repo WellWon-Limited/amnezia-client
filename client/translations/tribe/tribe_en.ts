@@ -2009,12 +2009,12 @@ You can attach a photo or video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+70"/>
+        <location line="+67"/>
         <source>Сканер</source>
         <translation>Scanner</translation>
     </message>
     <message>
-        <location line="-69"/>
+        <location line="-66"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2120,21 +2120,6 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <source>Повторить</source>
-        <translation>Retry</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Повторить через %1&#xa0;с</source>
-        <translation>Retry in %1&#xa0;s</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Повторить через %1&#xa0;мин</source>
-        <translation>Retry in %1&#xa0;min</translation>
-    </message>
-    <message>
-        <location line="+1"/>
         <source>Лимит сканов в мобильной сети на этот час</source>
         <translation>Cellular scan limit for this hour</translation>
     </message>
@@ -2175,12 +2160,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+75"/>
+        <location line="+86"/>
         <source>Отправляем отчёт…</source>
         <translation>Sending the report…</translation>
     </message>
     <message>
-        <location line="-68"/>
+        <location line="-79"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>All seats are taken right now — connecting the next server</translation>
     </message>
@@ -2341,6 +2326,56 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
+        <source>Сканировать через %1 с</source>
+        <translation>Scan in %1 s</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сканировать через %1 мин</source>
+        <translation>Scan in %1 min</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>%1 · %2</source>
+        <translation>%1 · %2</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 сервер</source>
+        <translation>%1 server</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 сервера</source>
+        <translation>%1 servers</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 серверов</source>
+        <translation>%1 servers</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Нажмите «Сканировать» — проверим, какие из них работают в этой сети.</source>
+        <translation>Tap «Scan» — we will check which of them work on this network.</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Найдём, через что подключиться</source>
+        <translation>Let&apos;s find what you can connect through</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Нажмите «Сканировать» — проверим серверы в этой сети.</source>
+        <translation>Tap «Scan» — we will check the servers on this network.</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1: проверены все серверы</source>
+        <translation>%1: all servers checked</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>%1: доступных нод сейчас нет</source>
         <translation>%1: no available nodes right now</translation>
     </message>
@@ -2370,12 +2405,12 @@ You can attach a photo or video.</translation>
         <translation>Up to 20 seconds — the report will arrive in the chat</translation>
     </message>
     <message>
-        <location line="-31"/>
+        <location line="-42"/>
         <source>Запустить службу</source>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-97"/>
+        <location line="-94"/>
         <source>только что</source>
         <translation>just now</translation>
     </message>
@@ -2440,7 +2475,7 @@ You can attach a photo or video.</translation>
         <translation>Available</translation>
     </message>
     <message>
-        <location line="+31"/>
+        <location line="+28"/>
         <source>Найдена 1 доступная нода</source>
         <translation>1 available server found</translation>
     </message>
