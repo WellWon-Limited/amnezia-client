@@ -1634,6 +1634,7 @@ static void scenarioRace()
         };
         CHECK(spentOf(xray("x1", "NL"), 20000) == 25000);        // host bytes + the host's own access bytes
         CHECK(spentOf(prov("up:p", UpstreamKind::Country, "NL", 0), 20000) == 25000); // + access only: seat/config/release are charged by the API calls
+        CHECK(spentOf(xray("x1", "NL"), -1) == 0);               // H6: nothing reached the host: nothing charged
         CHECK(spentOf(xray("x1", "NL"), 0) == 8 * 1024); // the floor (PathRace::kMinProbeChargeBytes): a host that reported nothing still used the network (the floor)
     }
 

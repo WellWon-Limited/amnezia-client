@@ -48,6 +48,7 @@ struct FakeHost : IScanHost {
     QHash<QString, bool> doneNext;
     QHash<QString, bool> unknownScan;
     bool refuseAdds = false;
+    qint64 cancelFinalBytes = -1;              // >= 0: the cancel ack carries this final byte total
     bool refuseStarts = false;                 // scan_start is answered with an error
     bool holdAdds = false;                     // scan_add answers wait in `heldAdds` until releaseAdds()
     QList<std::function<void()>> heldAdds;
@@ -108,7 +109,8 @@ struct FakeHost : IScanHost {
             }
         } else if (a == "scan_cancel") {
             scanOpen.insert(id, false);
-            r = QJsonObject{{"type", "scan_ack"}, {"scan_id", id}, {"accepted", 0}, {"mem_mb", 40}};
+            r = cancelFinalBytes >= 0 ? scanEncodeCancelAck(id, cancelFinalBytes, 40)
+                                      : QJsonObject{{"type", "scan_ack"}, {"scan_id", id}, {"accepted", 0}, {"mem_mb", 40}};
         } else {
             r = QJsonObject{{"error", "unknown_action"}};
         }
@@ -596,7 +598,8 @@ static void caseReopenRound3()
                     ++inS2;
                     seen << v.toObject().value("id").toString();
                 }
-        check(inS2 == 4 && QSet<QString>(seen.begin(), seen.end()).size() == 4, "all four parts reach the new scan, each exactly once");
+        // the AmneziaWG probe the old scan had accepted moves too: five jobs, each exactly once
+        check(inS2 == 5 && QSet<QString>(seen.begin(), seen.end()).size() == 5, "all four parts (and the neighbour) reach the new scan, each exactly once");
         for (const QString &id : parts)
             w.host.itemFor(id, s2, true, 5000);
         spin(40);
@@ -635,6 +638,52 @@ static void caseReopenRound3()
         spin(40);
         w.prober.cancel(p);
         check(charged == 5000 && w.results.isEmpty(), "cancel: the 5000 bytes it reported are charged, no result");
+    }
+}
+
+// Round 4 (H4, H5, H6).
+static void caseRound4()
+{
+    g_case = "round4";
+    { // H4: a part the old scan had accepted is moved with the refused one; both are proven from the new scan
+        World w;
+        w.ready();
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        const QString s1 = w.host.scanOf(1);
+        w.host.refuseAdds = true; // the engine closed the scan the first part sits in
+        w.start(1, 2, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(40);
+        const QString s2 = w.host.scanOf(1);
+        check(s2 != s1 && w.host.scanOf(2) == s2, "the accepted part and the refused one go into one new scan");
+        w.host.refuseAdds = false;
+        w.host.item(1, true);
+        w.host.item(2, true);
+        spin(40);
+        check(w.resultOf(1) && w.resultOf(1)->outcome == path::PathOutcome::ProbeOk && w.resultOf(2)
+                  && w.resultOf(2)->outcome == path::PathOutcome::ProbeOk,
+              "both probes are proven (before: the accepted part stayed tied to the closed scan)");
+    }
+    { // H5: the cancel ack's final total is charged (what no poll had reported), once
+        World w;
+        qint64 charged = 0;
+        w.ready();
+        w.prober.chargeApiBytes = [&charged](qint64 b) { charged += b; };
+        w.host.cancelFinalBytes = 9000;
+        const path::ProbeStamp a = w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.start(1, 2, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(30);
+        w.prober.cancel(a);
+        spin(40);
+        check(charged == 9000, "the final total of the cancelled scan reaches the ledger");
+    }
+    { // H6: a candidate refused locally never reached the host: negative bytes (nothing to charge)
+        World w;
+        w.ready();
+        w.start(1, 1, QStringLiteral("19"), path::PathKind::OwnAwg); // no peer in the manifest: refused locally
+        spin(30);
+        check(w.resultOf(1) && w.resultOf(1)->bytes < 0, "a probe that sent nothing reports no bytes at all");
     }
 }
 
@@ -722,10 +771,14 @@ static void caseScanReplaced()
     x.ready();
     x.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
     spin(30);
+    const QString firstScan = x.host.scanOf(1);
     x.host.refuseAdds = true; // the engine took no candidate (its scan closed meanwhile)
     x.start(1, 2, QStringLiteral("16"), path::PathKind::OwnAwg);
     spin(30);
-    check(x.host.of("scan_start").size() == 2 && x.host.scanOf(2) != x.host.scanOf(1), "a refused add goes into a new scan");
+    check(x.host.of("scan_start").size() == 2 && x.host.scanOf(2) != firstScan && x.host.scanOf(1) == x.host.scanOf(2),
+          "a refused add retires the scan: the refused part and the part the old scan had accepted go into one new scan");
+    check(x.host.of("scan_cancel").size() == 1 && x.host.of("scan_cancel").first().value("scan_id").toString() == firstScan,
+          "and the old scan is stopped at the host");
 
     World y;
     y.ready();
@@ -877,6 +930,7 @@ int main(int argc, char **argv)
     caseCancel();
     caseReopen();
     caseReopenRound3();
+    caseRound4();
     caseScanReplaced();
     caseSession();
     caseBurst();

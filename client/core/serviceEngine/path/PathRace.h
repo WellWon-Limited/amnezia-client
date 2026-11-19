@@ -227,17 +227,25 @@ public:
         // Device round 19.11 (LTE, three dead first candidates): 11 KB were spent, 327 KB stayed reserved, the race
         // ended "bytes" with nothing proven and the working servers were never probed.
         // One number: what the cap is charged is what the hour ledger gets (less what the API calls already put there).
-        const qint64 raw = std::max<qint64>(0, bytes) + fixedOf(path);
-        const qint64 charge = reserved > 0 ? std::clamp<qint64>(raw, std::min(kMinProbeChargeBytes, reserved), reserved) : raw;
-        if (m_bytesLeft >= 0)
-            m_bytesLeft += reserved - charge;
-        // (a probe that went past its reservation - the host cuts at cost_bytes, so rarely - is charged what it used)
-        const qint64 ledger = std::max<qint64>(0, std::max(charge, raw) - outsideOf(path));
-        if (ledger > 0) { // the Scanner's ledger
-            RaceEffect e;
-            e.type = RaceEffectType::Spent;
-            e.bytes = ledger;
-            out << e;
+        // bytes < 0: no byte of this probe reached the host (a candidate refused locally, a start the host refused): the
+        // host side costs nothing - the charge follows what was sent, not the kind - only the API part (seat batch,
+        // config, release: `outside`, already in the hour ledger by its real bytes) stays on the cap.
+        if (bytes < 0) {
+            if (m_bytesLeft >= 0)
+                m_bytesLeft += reserved - std::min(reserved, outsideOf(path));
+        } else {
+            const qint64 raw = bytes + fixedOf(path);
+            const qint64 charge = reserved > 0 ? std::clamp<qint64>(raw, std::min(kMinProbeChargeBytes, reserved), reserved) : raw;
+            if (m_bytesLeft >= 0)
+                m_bytesLeft += reserved - charge;
+            // (a probe that went past its reservation - the host cuts at cost_bytes, so rarely - is charged what it used)
+            const qint64 ledger = std::max<qint64>(0, std::max(charge, raw) - outsideOf(path));
+            if (ledger > 0) { // the Scanner's ledger
+                RaceEffect e;
+                e.type = RaceEffectType::Spent;
+                e.bytes = ledger;
+                out << e;
+            }
         }
         if (outcome == PathOutcome::ProbeOk) {
             RaceEffect r;
