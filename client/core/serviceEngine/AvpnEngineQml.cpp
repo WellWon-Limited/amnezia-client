@@ -3240,10 +3240,16 @@ void AvpnEngineQml::syncIntent()
     const QString pin = m_engine.pinnedNodeId().isEmpty() ? m_savedPin : m_engine.pinnedNodeId();
     const avpn::SubscriptionNode *n = m_engine.nodeById(pin);
     avpn::path::UserChoice c;
+    QString identity = avpn::intentChoiceIdentity(avpn::IntentChoiceKind::Auto, QString(), QString(), QString());
     if (m_exactReq.exactFor(pin)) {
         c = avpn::path::UserChoice::exactPath(pin); // a Scanner row: the one exact node, an honest error if it fails
+        identity = avpn::intentChoiceIdentity(avpn::IntentChoiceKind::Exact, pin, QString(), QString());
     } else if (!n && !pin.isEmpty() && !m_savedPinCountry.isEmpty()) {
         c = avpn::path::UserChoice::preferCountry(m_savedPinCountry); // the server is gone: its country stays preferred
+        identity = avpn::intentChoiceIdentity(avpn::IntentChoiceKind::Country, QString(), QString(), m_savedPinCountry);
+        // J1: a refresh that removes the chosen server is not a choice of the person - the value stays the server's
+        if (pin == m_intentServerPin && !m_intentServerIdentity.isEmpty())
+            identity = m_intentServerIdentity;
     } else if (n) {
         // A server of the list (tapped now or saved by an earlier run): a preferred server - its transports first,
         // then the best available path with a notice; the preference is kept (owner decision of 17.11).
@@ -3253,14 +3259,17 @@ void AvpnEngineQml::syncIntent()
             if (avpn::locationKeyOf(o) == loc)
                 paths << o.nodeId;
         c = avpn::path::UserChoice::preferServer(n->countryCode, paths);
+        identity = avpn::intentChoiceIdentity(avpn::IntentChoiceKind::Server, QString(), loc, QString());
+        m_intentServerPin = pin;
+        m_intentServerIdentity = identity;
     }
     // I1/I2/I7: THE one place the intent value is set: wanted + the choice as the owner reads it + the transport mode.
     // The epoch moves here and only here, compared with the value held here (not with the engine's choice, which a pin
     // or clearPin already replaced). The engine gets the choice and the epoch together - at launch and adoption too.
     avpn::IntentValue v;
     v.wanted = m_wantConnected;
-    v.choice = QStringLiteral("%1|%2|%3").arg(int(c.kind)).arg(c.country, c.pathIds.join(QLatin1Char(',')));
-    v.mode = avpn::transportModeToString(m_engine.transportMode());
+    v.choice = identity; // J1: the expanded path list is pushed below but is not part of the value
+    v.mode = avpn::transportModeToString(m_engine.chosenTransportMode()); // J2: what the person selected, not the mode in force
     const bool moved = m_intentEpoch.set(v);
     m_engine.setUserChoice(c);
     m_engine.setIntentEpoch(m_intentEpoch.epoch);
