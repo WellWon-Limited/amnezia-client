@@ -113,6 +113,7 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         return;
     }
     auto answered = std::make_shared<bool>(false);
+    m_acquiresOut.insert(requestId, profileId); // until its HTTP request ends (it outlives the attempt's wait)
     QTimer::singleShot(waitMs, r, [this, requestId, answered]() {
         if (*answered)
             return;
@@ -122,8 +123,9 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         if (onAcquire)
             onAcquire(requestId, classifyAcquireReply(0, {}, {}, m_pubKeyHex));
     });
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId, answered, route]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, answered, route, profileId]() {
         r->deleteLater();
+        m_acquiresOut.remove(requestId);
         const int status = answerStatus(r); // 0 = no complete HTTP answer (transport, timeout)
         const QByteArray body = r->read(kMaxLeaseAnswerBytes);
         const QByteArray sig = r->rawHeader(QByteArrayLiteral("X-Tribe-Sig"));
@@ -131,16 +133,56 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         const bool fromTribeApi = upstreamFromTribeApi(r->rawHeader(QByteArray(kUpstreamTribeApiHeader)));
         const AcquireReply reply = classifyAcquireReply(status, body, sig, m_pubKeyHex, fromTribeApi);
         if (*answered) {
-            if (reply.kind == LeaseReplyKind::Granted && upstreamLeaseIdValid(reply.grant.leaseId)) {
-                qWarning() << "avpn upstream: a late grant arrived after the attempt moved on - releasing it";
-                sendRelease(0, reply.grant.leaseId, UpstreamMeter{}, upstreamReleaseRoute(route), /*attempt=*/0);
-            }
+            if (reply.kind == LeaseReplyKind::Granted && upstreamLeaseIdValid(reply.grant.leaseId))
+                settleLateSeat(profileId, reply.grant.leaseId, route);
+            else
+                resolveDeferredSeat(profileId, QString(), route);
             return;
         }
         *answered = true;
         if (onAcquire)
             onAcquire(requestId, reply);
+        resolveDeferredSeat(profileId, reply.kind == LeaseReplyKind::Granted ? reply.grant.leaseId : QString(), route);
     });
+}
+
+// ONE ownership rule for a lease id (review R4 / R5 of 19.11): the server answers an acquire of the profile the
+// device already holds with the EXISTING lease (upstream_pool.acquire_lease: "Idempotent re-acquire of the same
+// profile: same lease, extended"), and DELETE ends that lease whoever asks (release_lease: _end(lease, "released")).
+// So a late or orphan answer may release its lease only while nobody can be using that id: no live owner holds it
+// (leaseHeld) and no newer acquire of the same profile is still out (its answer may carry the same id). In the
+// second case the seat waits (m_lateSeat) and is judged again when that acquire ends.
+void UpstreamLeaseClient::settleLateSeat(const QString &profileId, const QString &leaseId, const LeaseRoute &route)
+{
+    if (leaseHeld && leaseHeld(leaseId)) {
+        qInfo() << "avpn upstream: a late grant is the seat of the live session - kept";
+        return;
+    }
+    for (auto it = m_acquiresOut.constBegin(); it != m_acquiresOut.constEnd(); ++it) {
+        if (it.value() == profileId) {
+            qInfo() << "avpn upstream: a late grant while a newer request of the same profile is out - judged at its end";
+            m_lateSeat.insert(profileId, {leaseId, route});
+            return;
+        }
+    }
+    qWarning() << "avpn upstream: a late grant arrived after the attempt moved on - releasing it";
+    sendRelease(0, leaseId, UpstreamMeter{}, upstreamReleaseRoute(route), /*attempt=*/0);
+}
+
+void UpstreamLeaseClient::resolveDeferredSeat(const QString &profileId, const QString &grantedLeaseId, const LeaseRoute &)
+{
+    const auto it = m_lateSeat.find(profileId);
+    if (it == m_lateSeat.end())
+        return;
+    for (auto o = m_acquiresOut.constBegin(); o != m_acquiresOut.constEnd(); ++o)
+        if (o.value() == profileId)
+            return; // still another one out: its end decides
+    const DeferredSeat d = it.value();
+    m_lateSeat.erase(it);
+    if (d.leaseId == grantedLeaseId || (leaseHeld && leaseHeld(d.leaseId)))
+        return; // the newer request took the same seat over (its owner, or the machine, answers for it)
+    qWarning() << "avpn upstream: a deferred late grant has no owner - releasing it";
+    sendRelease(0, d.leaseId, UpstreamMeter{}, upstreamReleaseRoute(d.route), /*attempt=*/0);
 }
 
 void UpstreamLeaseClient::renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,

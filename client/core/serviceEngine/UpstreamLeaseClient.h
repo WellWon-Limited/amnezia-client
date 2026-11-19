@@ -17,6 +17,7 @@
 #include "UpstreamEngine.h"
 #include "UpstreamLeaseMachine.h"
 
+#include <QHash>
 #include <QObject>
 #include <QPointer>
 #include <QString>
@@ -49,6 +50,9 @@ public:
     // resends of seatReleaseNext (no answer / 5xx past its budget, not sendable) - the seat is then left to the
     // server's TTL.
     std::function<void(quint64, bool confirmed)> onReleaseDone;
+    // Who can be using this lease id right now (the app-side owner holds it). A late or orphan grant of a held
+    // id is never released here (settleLateSeat). Unset = nobody.
+    std::function<bool(const QString &leaseId)> leaseHeld;
     // The spacing budget of a release's resends (UpstreamLeaseWire.h::seatReleaseNext; tests shorten it).
     qint64 releaseRetryBudgetMs = kSeatReleaseRetryBudgetMs;
 
@@ -108,6 +112,8 @@ private:
     QString baseFor(const LeaseRoute &route) const;
     void sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route,
                      int attempt, qint64 spacedMs = 0, quint64 bgKey = 0);
+    void settleLateSeat(const QString &profileId, const QString &leaseId, const LeaseRoute &route);
+    void resolveDeferredSeat(const QString &profileId, const QString &grantedLeaseId, const LeaseRoute &route);
     QNetworkReply *post(const QString &url, const QByteArray &body, const QString &bearer, int timeoutMs);
 
     QPointer<QNetworkAccessManager> m_nam;
@@ -123,6 +129,12 @@ private:
         LeaseRoute route;
     };
     QList<HeldRelease> m_held;
+    struct DeferredSeat {
+        QString leaseId;
+        LeaseRoute route;
+    };
+    QHash<quint64, QString> m_acquiresOut; // acquire request id -> profile, until its HTTP request ends
+    QHash<QString, DeferredSeat> m_lateSeat; // profile -> a late grant waiting for the newer request's end
     bool m_stopPending = false;
     qint64 m_heldSinceMs = 0;
     void flushHeld(bool tunnelDown);
