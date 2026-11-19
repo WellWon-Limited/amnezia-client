@@ -612,10 +612,19 @@ inline bool ownStopInFlight(bool wantConnected, bool opStopping, bool awaitingSt
 {
     return !wantConnected && (opStopping || awaitingStopConfirm);
 }
-// G3 (round 3): an owner's result belongs to the intent in force only when its attempt began AFTER the person's last
-// action on the intent (`intentAttempt` = the owner's attempt count at that action). A result of an older attempt -
-// one still running when the person acted - ends no request and neither drops nor keeps the newer intent.
-inline bool resultBelongsToIntent(quint64 resultAttempt, quint64 intentAttempt) { return resultAttempt > intentAttempt; }
+// G3 + H3 (rounds 3-4): which attempt serves which intent. The epoch moves only when the person's intent changes in a
+// way the running attempt cannot serve: a Stop, or another choice (a different pick, Auto, a Scanner row). A repeated
+// start, a refused pick or any other action that leaves the choice as it was does NOT move it. Every attempt is
+// stamped with the epoch in force when it began (the facade's connect and the engine's own failover after a live
+// loss alike); a result belongs to the current intent unless its attempt serves an older epoch - then a newer intent
+// exists and its start is pending, and the old result ends nothing of it.
+struct IntentEpoch {
+    quint64 epoch = 1;
+    void onStop() { ++epoch; }
+    void onChoice(bool changed) { if (changed) ++epoch; }
+    quint64 stampForNewAttempt() const { return epoch; }
+    bool resultBelongs(quint64 resultEpoch) const { return resultEpoch >= epoch; }
+};
 
 // F2 (round 2): a Scanner row's one request - the exact row and what to restore after it are ONE object with one
 // lifetime. It is non-empty from the row's tap until the request ends (connected, failed, stopped by the person,

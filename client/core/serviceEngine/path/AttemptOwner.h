@@ -120,6 +120,7 @@ inline const char *failReasonName(FailReason r)
 
 struct AttemptResult {
     quint64 attempt = 0;
+    quint64 intentEpoch = 0;     // filled by the engine: the facade's intent epoch the attempt was begun under (H3)
     bool connected = false;
     FailReason reason = FailReason::None;
     PathCandidate path;          // Connected: the path that carried data

@@ -3251,7 +3251,10 @@ void AvpnEngineQml::syncChoice()
                 paths << o.nodeId;
         c = avpn::path::UserChoice::preferServer(n->countryCode, paths);
     }
+    // H3: another choice than the one the engine holds is a newer intent the running attempt cannot serve
+    m_intentEpoch.onChoice(!(c == m_engine.userChoice()));
     m_engine.setUserChoice(c);
+    m_engine.setIntentEpoch(m_intentEpoch.epoch);
 }
 
 QString AvpnEngineQml::choiceJournal() const
@@ -3422,12 +3425,15 @@ bool AvpnEngineQml::syncAttempt()
     // G3: a result of an attempt that began before the person's last action on the intent (a connect still running when
     // a Scanner row was tapped, a stop, another choice) says nothing about the newer intent: it ends no request, neither
     // drops nor keeps the intent, and tells the person nothing.
-    const bool resultIsCurrent = result && avpn::resultBelongsToIntent(result->attempt, m_intentAttempt);
+    const bool resultIsCurrent = result && m_intentEpoch.resultBelongs(result->intentEpoch);
     if (result && !resultIsCurrent) {
         changedAny = true;
-        reliabilityEvent(QStringLiteral("attempt_result_superseded attempt=%1 intent_attempt=%2 connected=%3 reason=%4")
-                             .arg(result->attempt).arg(m_intentAttempt).arg(int(result->connected))
+        reliabilityEvent(QStringLiteral("attempt_result_superseded attempt=%1 attempt_epoch=%2 intent_epoch=%3 connected=%4 reason=%5")
+                             .arg(result->attempt).arg(result->intentEpoch).arg(m_intentEpoch.epoch).arg(int(result->connected))
                              .arg(QLatin1String(avpn::path::failReasonName(result->reason))));
+        // the newer intent's start was waiting for this attempt to end: nothing else would start it
+        if (m_wantConnected)
+            QTimer::singleShot(0, this, [this]() { reconcile(); });
     }
     const std::optional<avpn::path::AttemptResult> current = resultIsCurrent ? result : std::optional<avpn::path::AttemptResult>();
     if (const std::optional<avpn::path::AttemptResult> &r = current) {
@@ -6402,7 +6408,6 @@ void AvpnEngineQml::noteUserStart()
 void AvpnEngineQml::noteIntentChange()
 {
     ++m_intentSerial;
-    m_intentAttempt = m_engine.attemptNumber(); // G3: a result of an attempt begun before this is of a superseded intent
     m_resumeOnNewNetwork = false; // the person acted: a pending resume of a lost session is theirs no more
     // R3: a Scanner row's restore belongs to that one request: any other action on the intent (stop, Auto, another
     // choice, a connect) ends it without restoring - the person's newer choice is never overwritten later. The row's
@@ -6451,6 +6456,8 @@ void AvpnEngineQml::stop()
     // (restored below, after the owner is told to stop). Any other action on the intent just drops the request.
     const avpn::ExactRowRequest cancelledRow = m_exactReq;
     noteIntentChange(); // AVPN Scanner
+    m_intentEpoch.onStop(); // H3: the attempt that runs now cannot serve what the person wants after this stop
+    m_engine.setIntentEpoch(m_intentEpoch.epoch);
     Avpn_recordGuiIntent(false);
     m_userIntentKnown = true;
     cancelStartPreparation();
@@ -6738,6 +6745,7 @@ void AvpnEngineQml::guardedStart()
     bool ok;
     {
         QScopedValueRollback<bool> syncGuard(m_inSyncNetCall, true);
+        m_engine.setIntentEpoch(m_intentEpoch.stampForNewAttempt()); // H3: the attempt begun by this connect serves this epoch
         ok = (m_engine.hasSubscription() || !m_engine.candidateNodes().isEmpty()) && m_engine.connect(err);
     }
     if (!ok) {

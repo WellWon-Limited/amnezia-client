@@ -882,10 +882,35 @@ static void exactRowRequestObject()
                                                              .restorePlan(false);
         CHECK(autoBefore.clearEnginePin && autoBefore.savedPin.isEmpty() && autoBefore.savedCountry.isEmpty());
     }
-    // G3: only a result of an attempt begun after the last action on the intent belongs to it
-    CHECK(avpn::resultBelongsToIntent(5, 4));
-    CHECK(!avpn::resultBelongsToIntent(4, 4)); // the attempt still running when the person tapped the row
-    CHECK(!avpn::resultBelongsToIntent(3, 4));
+    // G3 + H3: which attempt serves which intent (IntentEpoch: moves on a Stop or another choice only)
+    {
+        using avpn::IntentEpoch;
+        // G3: a connect to A runs; the person taps the row B (another choice) -> A's result is superseded
+        IntentEpoch e;
+        const quint64 attemptA = e.stampForNewAttempt();
+        e.onChoice(true);
+        CHECK(!e.resultBelongs(attemptA));
+        CHECK(e.resultBelongs(e.stampForNewAttempt())); // the attempt that serves B is current
+        // H3: a repeated start() during a running attempt moves nothing: its failure is current (error shown, rule applied)
+        IntentEpoch r;
+        const quint64 running = r.stampForNewAttempt();
+        r.onChoice(false); // noteIntentChange() alone does not move the epoch
+        CHECK(r.resultBelongs(running));
+        // H3: a pick refused after noteIntentChange(): the choice is as it was -> current
+        r.onChoice(false);
+        CHECK(r.resultBelongs(running));
+        // a Stop, then a new start: the old attempt's result is superseded, the new one's is current
+        IntentEpoch s2;
+        const quint64 old = s2.stampForNewAttempt();
+        s2.onStop();
+        const quint64 fresh = s2.stampForNewAttempt();
+        CHECK(!s2.resultBelongs(old) && s2.resultBelongs(fresh));
+        // the failover attempt after a live loss is begun by the engine under the epoch in force: current
+        IntentEpoch f;
+        const quint64 live = f.stampForNewAttempt();
+        const quint64 failover = f.stampForNewAttempt(); // no intent change between the session and its failover
+        CHECK(f.resultBelongs(live) && f.resultBelongs(failover));
+    }
     // an ended request holds nothing: no exact choice, no restore, no reconnect (before: the row outlived the flag)
     ExactRowRequest e = c;
     e.clear();

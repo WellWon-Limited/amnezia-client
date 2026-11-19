@@ -237,7 +237,9 @@ public:
     // Stage 2: a race that runs before the owner's first leg is part of the attempt (the orb is busy, reconcile waits).
     bool attemptRunning() const { return m_owner.running() || m_raceFirst; }
     // B1: the owner has a leg the platform may be running (starting, checking, connected or being stopped).
-    quint64 attemptNumber() const { return m_owner.attempt(); } // the owner's running count of attempts begun
+    // H3: the facade's intent epoch (DebugSnapshot.h IntentEpoch); every attempt the owner begins is stamped with the
+    // one in force at that moment and its result carries the stamp.
+    void setIntentEpoch(quint64 e) { m_intentEpoch = e; }
     bool ownerHoldsNativeLeg() const { return m_owner.phase() != path::AttemptPhase::Idle; }
 
     // ---- Stage 2: the probe race in front of the owner (path/PathRace.h) ----
@@ -628,6 +630,9 @@ private:
     std::optional<path::AttemptResult> m_lastResult;
     QStringList m_attemptJournal;
     QList<path::AttemptEvent> m_ownerQueue;
+    quint64 m_intentEpoch = 0;
+    quint64 m_stampedAttempt = 0;                  // the highest attempt number already stamped
+    QHash<quint64, quint64> m_attemptEpochs;       // attempt number -> intent epoch it was begun under
     bool m_inOwner = false;
     int m_legStartFailures = 0;
     bool m_checkRerun = false;
