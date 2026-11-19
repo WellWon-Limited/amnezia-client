@@ -1308,16 +1308,21 @@ static void ownerRefusedBringUp()
         o.disconnect(T + 2000);
         CHECK(io.calls.size() == calls);
     }
-    // iOS / Android after the tunnel came up: the tunnel owner releases on its stop, not the app; the machine's
-    // session still ends, so a following start acquires.
+    // iOS / Android after the tunnel came up: the tunnel owner releases first, on its stop, with the final report -
+    // nothing goes out from here at once; the app gives the seat back again after the confirmed stop
+    // (ReleaseAfterStop, device round 19.11: a provider seat stopped right after Connected stayed 15 minutes). The
+    // machine's session still ends, so a following start acquires.
     {
         FakeIo io;
         UpstreamLeaseOwner o(&io);
         o.begin(a, 1, std::nullopt, T, 1);
         o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, a.upstream->configSha256), T + 300);
         o.tunnelUp(T + 2000);
-        o.disconnect(T + 60000);
+        const QVector<UpstreamOwnerEvent> ev = o.disconnect(T + 60000);
         CHECK(!io.last("release") && !o.releaseSent());
+        const UpstreamOwnerEvent *after = findEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop);
+        CHECK(after && after->leaseId == QLatin1String(kLease));
+        CHECK(!findEv(o.disconnect(T + 61000), UpstreamOwnerEventKind::ReleaseAfterStop)); // once per session
         o.begin(b, 1, std::nullopt, T + 61000, 1);
         CHECK(io.calls.last().what == QLatin1String("acquire") && io.calls.last().profileOrLease == b.upstream->profileId);
     }
@@ -1334,7 +1339,20 @@ static void ownerRefusedBringUp()
     CHECK(upstreamAppReleasesSeat(true, true, true));    // macOS GUI owner: always
     CHECK(upstreamAppReleasesSeat(false, false, false)); // not handed over (prepared, provisional)
     CHECK(upstreamAppReleasesSeat(false, true, false));  // in the envelope, the tunnel never came up
-    CHECK(!upstreamAppReleasesSeat(false, true, true));  // the tunnel owner has it
+    CHECK(!upstreamAppReleasesSeat(false, true, true));  // the tunnel owner has it (and ReleaseAfterStop after it)
+    // A seat the app ends before the tunnel came up goes at once, never as ReleaseAfterStop.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, std::nullopt, T, 1);
+        o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, a.upstream->configSha256), T + 300);
+        const QVector<UpstreamOwnerEvent> ev = o.disconnect(T + 1000);
+        CHECK(io.last("release") && !findEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop));
+    }
+    // The release body: a report only when there is one (seq >= 1); seq 0 (a late grant, the app's release after
+    // the tunnel owner's) goes without a body - the server refuses a report with seq 0 (422) and the seat stayed.
+    CHECK(upstreamReleaseBody(UpstreamMeter{}).isEmpty());
+    CHECK(!upstreamReleaseBody(UpstreamMeter{1, 10, 20, MeterScope::Tunnel, 0}).isEmpty());
 }
 
 // --- D4 of 16.11: seat first - a provider pick while another node's tunnel works -----------------------------

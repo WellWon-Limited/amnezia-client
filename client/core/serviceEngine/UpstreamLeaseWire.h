@@ -315,6 +315,14 @@ inline QByteArray upstreamMeterBody(const UpstreamMeter &m)
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 
+// The release's body: the final report, or nothing when there is none to give (seq < 1: a late grant released
+// unused, a seat released again after its tunnel owner's own release). The server reads a release without a
+// body as "no report" and refuses a report with seq 0 (422) - such a release never freed the seat.
+inline QByteArray upstreamReleaseBody(const UpstreamMeter &m)
+{
+    return m.seq < 1 ? QByteArray() : upstreamMeterBody(m);
+}
+
 // renew_token: an opaque header-safe token (visible ASCII, 1..1024 characters).
 inline bool upstreamRenewTokenValid(const QString &t)
 {

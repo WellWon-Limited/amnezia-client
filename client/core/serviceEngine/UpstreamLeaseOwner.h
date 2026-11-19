@@ -52,6 +52,10 @@ enum class UpstreamOwnerEventKind {
     ConfigChanged,    // the profile changed on the server: applies at the next connect, never interrupts
     Prepared,         // config: a seat taken BEFORE the switch (prepare) is in hand - check the profile, then switch
     PrepareFailed,    // code: the seat taken before the switch was not granted - the live tunnel stays
+    // leaseId + route: the seat of a session the tunnel owner held (handed over, the tunnel came up). The tunnel
+    // owner releases it first, inside its own stop, with the final byte report; this process gives it back again
+    // once the stop is confirmed, without a report (upstreamAppReleasesSeat below).
+    ReleaseAfterStop,
 };
 
 // Who gives a session's seat back when the session ends (D3 of the owner's iPhone 16.11, build 140: refused seats
@@ -59,7 +63,13 @@ enum class UpstreamOwnerEventKind {
 // does. Elsewhere the lease travels in the tunnel's envelope and the tunnel owner (iOS extension, Android Xray
 // service) releases it on its own stop - but only a tunnel that came up has it: a session that ends before the
 // tunnel reported up (the profile refused, the bridge refused, the start watchdog, a stop while connecting) is
-// still this process's to release. A release sent twice is harmless: the server's DELETE is idempotent.
+// still this process's to release at once, with its report.
+// The seat is ALSO this process's when the tunnel owner had it (device round of 19.11, iPhone Air: a provider
+// session stopped 0.6 s after Connected kept its seat until the 15-minute expiry; the extension's one release is
+// bounded to 1.5 s after its core stopped and 17 of 30 stops ran into that bound). This process acquired the seat
+// and owns it until the stop is confirmed: endSession() hands out ReleaseAfterStop, sent after the confirmed
+// teardown, i.e. after the extension's own release. A release sent twice is harmless: the server's DELETE is
+// idempotent and a report at or below the last seq applies nothing.
 inline bool upstreamAppReleasesSeat(bool keepOwnership, bool handedOver, bool tunnelReportedUp)
 {
     return keepOwnership || !handedOver || !tunnelReportedUp;
@@ -74,6 +84,8 @@ struct UpstreamOwnerEvent {
     QString configSha256;    // BringUp
     QJsonObject lease;       // BringUp (absent on provisional) / HandOver: upstream_lease
     quint64 prepareId = 0;   // Prepared / PrepareFailed: the prepare() they answer (prepareSerial at its start)
+    QString leaseId;         // ReleaseAfterStop (secret: never logged)
+    LeaseRoute route;        // ReleaseAfterStop: the lease's bearer (the release goes over the direct path)
     UpstreamLeaseRecord record;
     qint64 revision = 0;
 };
@@ -389,9 +401,15 @@ private:
             noteReleasesSent(s);
             if (m_io)
                 dispatchLeaseIo(s, *m_io);
+        } else if (const LeaseAction *a = s.find(LeaseActionKind::SendRelease)) {
+            // The tunnel owner releases first, on its own stop, with the final report; this process again once
+            // that stop is confirmed (the adapter holds it until then).
+            UpstreamOwnerEvent r;
+            r.kind = UpstreamOwnerEventKind::ReleaseAfterStop;
+            r.leaseId = a->leaseId;
+            r.route = a->route;
+            ev << r;
         }
-        // A lease handed over to a tunnel that came up belongs to its owner (iOS extension, Android service): it
-        // releases on its own stop - nothing is sent from here.
         if (m_opt.keepOwnership) {
             UpstreamOwnerEvent c;
             c.kind = UpstreamOwnerEventKind::ClearRecord;

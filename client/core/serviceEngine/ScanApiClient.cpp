@@ -843,13 +843,40 @@ void ScanApiClient::releaseLeases(const QStringList &leaseIds, qint64 costBytes,
     rq.body = QJsonDocument(QJsonObject{{QStringLiteral("lease_ids"), arr}}).toJson(QJsonDocument::Compact);
     rq.maxBytes = costBytes;
     rq.timeoutMs = 5000;
+    sendRelease(rq, arr.size(), 0, 0, std::move(done));
+}
+
+// Device round of 19.11 (iPhone Air, 06:31:22 and 06:32:04): the race's release went out as its winner's tunnel came
+// up, that transition aborted it (net_error 5, status 0) and nothing sent it again - both probe seats stayed until
+// the server's probe TTL. The rule of every Scanner request our own transition cuts (scanRetryCanceledRequest): sent
+// again after the transition; only an HTTP answer counts as released; a timeout or a network error leaves the seat
+// to the server's TTL.
+void ScanApiClient::sendRelease(const IScanHttp::Request &rq, int leases, int attempt, qint64 spent,
+                                std::function<void(qint64)> done)
+{
     QPointer<ScanApiClient> self(this);
-    const int n = arr.size();
-    m_http->send(rq, [self, done, n](const IScanHttp::Response &r) {
-        if (self)
-            self->emitLog(QStringLiteral("probe_release status=%1 leases=%2 bytes=%3").arg(r.status).arg(n).arg(r.bytes));
-        if (done)
-            done(r.bytes);
+    m_http->send(rq, [self, rq, leases, attempt, spent, done](const IScanHttp::Response &r) {
+        const qint64 total = spent + r.bytes;
+        const bool again = scanRetryCanceledRequest(r.status, r.canceled, attempt);
+        if (!self) {
+            if (done)
+                done(total);
+            return;
+        }
+        self->emitLog(QStringLiteral("probe_release status=%1 leases=%2 bytes=%3%4")
+                          .arg(r.status).arg(leases).arg(r.bytes)
+                          .arg(again ? QStringLiteral(" canceled=1 resend=%1").arg(attempt + 1) : QString()));
+        if (!again) {
+            if (done)
+                done(total);
+            return;
+        }
+        QTimer::singleShot(kScanCanceledRetryDelayMs, self.data(), [self, rq, leases, attempt, total, done]() {
+            if (self)
+                self->sendRelease(rq, leases, attempt + 1, total, done);
+            else if (done)
+                done(total);
+        });
     });
 }
 

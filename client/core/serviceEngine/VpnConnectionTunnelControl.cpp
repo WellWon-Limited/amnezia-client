@@ -760,6 +760,14 @@ void VpnConnectionTunnelControl::applyUpstreamEvents(const QVector<UpstreamOwner
             emit upstreamPrepared(m_upStub.nodeId, e.prepareId, false,
                                   e.detail.isEmpty() ? e.code : e.code + QLatin1Char('/') + e.detail);
             break;
+        case UpstreamOwnerEventKind::ReleaseAfterStop:
+            // The seat this process acquired, held by the tunnel owner: given back again after the confirmed stop
+            // (the owner's own release with the final report goes first). Without a report (meter seq 0).
+            if (m_leaseClient) {
+                m_leaseClient->holdReleasesForStop();
+                m_leaseClient->release(0, e.leaseId, UpstreamMeter{}, e.route);
+            }
+            break;
         }
     }
 }
