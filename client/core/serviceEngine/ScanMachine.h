@@ -4113,7 +4113,9 @@ private:
             m_listScope = scanning ? m_scannedScope : m_scope;
             const QString shownScope = m_completed || scanning ? m_scannedScope : cachedShown(now) ? m_cachedScope : QString();
             m_listPending = !scanning && !scopeList().isEmpty() && m_scope != shownScope;
-            for (const ScanRowView &v : m_listPending ? QList<ScanRowView>() : resultRows(now)) {
+            for (const ScanRowView &v : resultRows(now)) {
+                if (m_listPending && !v.current)
+                    continue; // another scope's result: only the live connection's row is shown above the summary
                 if ((!v.verified && !v.current && scanning) || !listAdmits(v))
                     continue; // «Не проверено» only once final
                 ListEntry e;
@@ -4181,8 +4183,9 @@ private:
                 overlayTap(e.row);
             }
         }
-        if (m_listPending)
-            return; // the chosen scope is not the shown result's: nothing joins until a scan of it builds the list
+        // The chosen scope is not the shown result's: nothing joins until a scan of it builds the list - except the live
+        // connection's row (owner 19.11: wherever there is an active connection it is shown, as the first row).
+        const bool pending = m_listPending;
         // 2. Fresh rows join the end, in the order they arrived.
         const int cap = qMax(1, m_t.listTargetWorks);
         QList<const Row *> fresh;
@@ -4192,7 +4195,7 @@ private:
         std::stable_sort(fresh.begin(), fresh.end(), [](const Row *a, const Row *b) { return a->arrival < b->arrival; });
         for (const Row *r : fresh) {
             const ScanRowView v = rowViewOf(*r);
-            if (!listAdmits(v))
+            if ((pending && !v.current) || !listAdmits(v))
                 continue;
             const int b = rowBatch(*r);
             const bool forced = v.current || r->id == m_connectingId;
@@ -4205,7 +4208,7 @@ private:
             m_list << e;
         }
         // 3. «Не проверено» rows once their outcome is final: the scan or batch has ended.
-        if (!scanning) {
+        if (!scanning && !pending) {
             const int b = qMax(1, m_batch);
             int n = 0;
             for (const ListEntry &e : m_list)
