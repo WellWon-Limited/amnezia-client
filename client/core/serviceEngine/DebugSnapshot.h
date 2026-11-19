@@ -619,10 +619,26 @@ inline bool ownStopInFlight(bool wantConnected, bool opStopping, bool awaitingSt
 // attempt is stamped with the epoch in force when it began (the facade's connect, the engine's own failover, an adopted
 // session); a result belongs to the current intent unless its attempt serves an older epoch - then a newer intent
 // exists and its start is pending, and the old result ends nothing of it.
+// J1 (round 6): the person's choice by its STABLE identity - kind plus the exact node, the server's location key or the
+// country - never by the list of path ids the engine expands a preferred server into (a pool refresh renames a
+// transport or reorders the paths without the person choosing anything).
+enum class IntentChoiceKind { Auto, Exact, Server, Country };
+inline QString intentChoiceIdentity(IntentChoiceKind k, const QString &exactNode, const QString &locationKey,
+                                    const QString &country)
+{
+    switch (k) {
+    case IntentChoiceKind::Auto: return QStringLiteral("auto");
+    case IntentChoiceKind::Exact: return QStringLiteral("exact|") + exactNode;
+    case IntentChoiceKind::Server: return QStringLiteral("server|") + locationKey;
+    case IntentChoiceKind::Country: return QStringLiteral("country|") + country.trimmed().toUpper();
+    }
+    return QString();
+}
+
 struct IntentValue {
     bool wanted = false;
-    QString choice; // kind|country|paths of the engine's UserChoice
-    QString mode;   // transport mode in force
+    QString choice; // intentChoiceIdentity(): what the person chose, not how the engine expands it
+    QString mode;   // the transport mode the person SELECTED (the saved setting), not the one in force (J2)
     bool operator==(const IntentValue &o) const { return wanted == o.wanted && choice == o.choice && mode == o.mode; }
 };
 struct IntentEpoch {

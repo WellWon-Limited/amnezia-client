@@ -137,7 +137,8 @@ d3="$(printf '%s\n' "$stop_fn2" | grep -nF 'restoreChoiceBeforeRow(cancelledRow)
 # only the results that serve the intent in force.
 sc_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::syncIntent\(\)/{f=1} f{print} f&&/^}/{exit}')"
 printf '%s\n' "$sc_fn" | grep -qF 'm_intentEpoch.set(v)' || bad "I1: syncIntent must set the intent value and move the epoch"
-printf '%s\n' "$sc_fn" | grep -qF 'v.mode = avpn::transportModeToString(m_engine.transportMode());' || bad "I2: the transport mode is part of the intent value"
+printf '%s\n' "$sc_fn" | grep -qF 'v.mode = avpn::transportModeToString(m_engine.chosenTransportMode());' || bad "I2/J2: the intent value holds the mode the person selected, not the mode in force"
+printf '%s\n' "$sc_fn" | grep -qF 'v.choice = identity;' && ! printf '%s\n' "$sc_fn" | grep -qF 'pathIds.join' || bad "J1: the intent value holds the choice identity, never the expanded path list"
 printf '%s\n' "$sc_fn" | grep -qF 'v.wanted = m_wantConnected;' || bad "I1: wanted is part of the intent value"
 [ "$(count "$FACADE" 'm_intentEpoch.set(')" = 1 ] || bad "I1: the epoch moves in one place only"
 [ "$(count "$FACADE" 'm_engine.setUserChoice(')" = 1 ] && [ "$(count "$FACADE" 'm_engine.setIntentEpoch(')" = 1 ] \
