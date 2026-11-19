@@ -324,6 +324,11 @@ path::SelectionContext ServiceEngine::ownerContext() const
     c.pool = pathPool();
     c.ledger = &m_ledger;
     c.wallNowMs = nowMs();
+    // Paths whose probe failed in the race of this tap: the worst prior for this attempt, so the walk tries the
+    // servers the race has not seen fail first (device round 19.11, LTE: the race saw three first candidates fail,
+    // proved nothing, and the walk then spent 6 s on each of the same three).
+    for (const QString &id : m_raceFailed)
+        c.crowd.insert(id, 0.0);
     return c;
 }
 
@@ -514,6 +519,7 @@ bool ServiceEngine::raceAllowed() const
 
 void ServiceEngine::beginRaceForTap()
 {
+    m_raceFailed.clear(); // per tap
     m_prober->prepare(m_net.current()); // idempotent: a fresh session is kept
     m_race.setTimings(m_raceTimingsForTest ? *m_raceTimingsForTest : raceTimingsTuned());
     const path::SelectionContext ctx = ownerContext();
@@ -628,6 +634,11 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
             // a proof while a leg is in flight: a leg whose check starves yields to it (the owner decides)
             if (m_owner.running())
                 feedOwner(path::AttemptEvent::proofReady(nowMs(), m_checkStarved, e.path.id.id));
+            break;
+        case path::RaceEffectType::Failed:
+            m_raceFailed.insert(e.path.id.id);
+            attemptJournal(QStringLiteral("race_probe_failed node=%1 outcome=%2")
+                               .arg(e.path.id.id, QLatin1String(path::pathOutcomeName(e.outcome))));
             break;
         case path::RaceEffectType::Spent:
             if (m_chargeProbeBytes)

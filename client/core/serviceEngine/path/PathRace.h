@@ -66,10 +66,11 @@ struct RaceTimings {
     int hedgeMs = -1;
     int spareProofs = 1;        // proofs kept after the winner, then the race stops (no probing on)
     int knownFreshMin = 30;     // a known path that carried data here this recently: no race at all
-    // bytes one race may spend on cellular (the Scanner's hour budget stays its own): one probe of each kind fits -
-    // AmneziaWG 54,572 + our Xray with its burst 116,736 + a provider profile 107,520 = 278,828 (upper bounds;
-    // measured races spent 98-165 KB)
-    int cellularMaxBytes = 327680;
+    // bytes one race may spend on cellular (the Scanner's hour budget stays its own). A probe RESERVES its upper bound
+    // while it runs (AmneziaWG 54,572, our Xray with its burst 116,736, a provider profile 107,520) and is charged
+    // what it really spent when it ends, so dead paths (a few KB each) do not use the cap up. The first window fits
+    // one probe of each kind plus a second AmneziaWG server (333,400); measured races spent 11-165 KB.
+    int cellularMaxBytes = 393216;
 
     // How long the owner waits for a first proof before it starts blind: the last probe of the first parallel wave has
     // started (stagger x (parallelism - 1)) and has had half of a probe's own bound to answer. Defaults: 750 + 2000 =
@@ -115,7 +116,9 @@ inline const char *raceDoneReasonName(RaceDoneReason r)
 }
 
 // Hedge: nothing proven within hedgeAfterMs() - the engine starts the owner on its first choice, the race runs on beside it.
-enum class RaceEffectType { StartProbe, CancelProbe, Report, Spent, Winner, Done, Hedge };
+// Failed: a probe ended without a proof (path, outcome) - not a ledger outcome (a probe is weaker than a tunnel), only
+// a hint for the order of this attempt: the walk does not start with a server the race has just seen fail.
+enum class RaceEffectType { StartProbe, CancelProbe, Report, Spent, Winner, Done, Hedge, Failed };
 
 struct RaceEffect {
     RaceEffectType type = RaceEffectType::Done;
@@ -160,6 +163,7 @@ public:
         m_order = order;
         m_next = 0;
         m_pending.clear();
+        m_deferred.clear();
         m_providersQueued = 0;
         m_inFlight.clear();
         m_winner.clear();
@@ -198,8 +202,15 @@ public:
             return out; // stale: an older race, an older network, a cancelled or unknown probe
         const PathCandidate path = it.value().path;
         const int tookMs = int(std::max<qint64>(0, m_awake - it.value().startedAt));
+        const qint64 reserved = it.value().reserved;
         m_inFlight.erase(it);
-        if (bytes > 0) { // the Scanner's ledger; this race's cap was paid by the projection at the start
+        // The cap: the probe reserved its upper bound at the start; now it is charged what it spent (never less than
+        // kMinProbeChargeBytes - a host that reports nothing still used the network; never more than it reserved).
+        // Device round 19.11 (LTE, three dead first candidates): 11 KB were spent, 327 KB stayed reserved, the race
+        // ended "bytes" with nothing proven and the working servers were never probed.
+        if (m_bytesLeft >= 0)
+            m_bytesLeft += reserved - std::clamp<qint64>(bytes, std::min(kMinProbeChargeBytes, reserved), reserved);
+        if (bytes > 0) { // the Scanner's ledger
             RaceEffect e;
             e.type = RaceEffectType::Spent;
             e.bytes = bytes;
@@ -226,6 +237,12 @@ public:
                 w.path = path;
                 out << w;
             }
+        } else {
+            RaceEffect f;
+            f.type = RaceEffectType::Failed;
+            f.path = path;
+            f.outcome = outcome;
+            out << f;
         }
         pump(out);
         return out;
@@ -321,7 +338,10 @@ private:
         PathCandidate path;
         qint64 deadline = 0;
         qint64 startedAt = 0; // awake time of its start
+        qint64 reserved = 0;  // bytes of the cap it holds while it runs (0 = no cap)
     };
+    // The least a finished probe is charged against the cap, whatever the host reports.
+    static constexpr qint64 kMinProbeChargeBytes = 8 * 1024;
 
     void advance(qint64 now)
     {
@@ -387,9 +407,24 @@ private:
             finish(RaceDoneReason::Budget, out);
             return;
         }
-        // the cap only shrinks: a candidate it cannot pay is dropped (the owner's walk) and the window refills
+        // a candidate the cap cannot pay now waits (m_deferred) for a probe to end under its reservation; the window
+        // refills with the ones behind it, so an expensive kind never blocks a cheaper one
         for (bool dropped = true; dropped;) {
             dropped = false;
+            for (int i = 0; i < m_deferred.size() && int(m_pending.size() + m_inFlight.size()) < m_t.waveSize;) {
+                const PathCandidate c = m_deferred.at(i);
+                if (m_legs.contains(c.id.id)) {
+                    m_deferred.removeAt(i);
+                    continue;
+                }
+                if (!affordable(c) || (c.kind == PathKind::Provider && m_providersQueued >= m_t.providerPerRace)) {
+                    ++i;
+                    continue;
+                }
+                m_deferred.removeAt(i);
+                m_providersQueued += c.kind == PathKind::Provider ? 1 : 0;
+                m_pending << c;
+            }
             while (m_next < int(m_order.size()) && int(m_pending.size() + m_inFlight.size()) < m_t.waveSize) {
                 const PathCandidate &c = m_order.at(m_next++);
                 if (m_legs.contains(c.id.id))
@@ -398,6 +433,7 @@ private:
                     continue; // over the probe-seat bound of this race: left to the owner's walk
                 if (!affordable(c)) {
                     m_unpaid = true;
+                    m_deferred << c;
                     continue;
                 }
                 m_providersQueued += c.kind == PathKind::Provider ? 1 : 0;
@@ -407,6 +443,8 @@ private:
                 const PathCandidate c = m_pending.at(i);
                 if (!affordable(c)) { // the probes started since it was queued took what it needed
                     m_pending.removeAt(i);
+                    m_providersQueued -= c.kind == PathKind::Provider ? 1 : 0;
+                    m_deferred << c;
                     m_unpaid = dropped = true;
                     continue;
                 }
@@ -420,9 +458,11 @@ private:
                 f.deadline = m_awake + m_t.probeTimeoutMs + 1000; // the host's grace after its own bound
                 f.startedAt = m_awake;
                 const quint64 probe = ++m_probeSeq;
+                if (m_bytesLeft >= 0) {
+                    f.reserved = costOf(c); // held while it runs; probeDone charges what it spent
+                    m_bytesLeft -= f.reserved;
+                }
                 m_inFlight.insert(probe, f);
-                if (m_bytesLeft >= 0)
-                    m_bytesLeft -= costOf(c); // paid: the projection is the cap's charge, never refunded
                 if (c.kind == PathKind::Provider)
                     ++m_providersStarted;
                 RaceEffect e;
@@ -445,6 +485,7 @@ private:
             out << cancelEffect(it.key(), it.value().path);
         m_inFlight.clear();
         m_pending.clear();
+        m_deferred.clear();
         m_running = false;
         RaceEffect e;
         e.type = RaceEffectType::Done;
@@ -468,6 +509,7 @@ private:
     qint64 m_nextStartAt = 0;
     int m_next = 0;
     QList<PathCandidate> m_pending; // the window's candidates not started yet
+    QList<PathCandidate> m_deferred; // candidates the cap could not pay yet, in the owner's order
     QSet<QString> m_legs;           // paths the owner raised during this race (legStarted): never probed
     int m_providersQueued = 0;
     int m_providersStarted = 0;

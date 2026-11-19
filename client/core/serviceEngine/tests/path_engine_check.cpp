@@ -1258,6 +1258,48 @@ static TraceRun runTrace1911(bool lteNet, Sim::Rule rule)
     return t;
 }
 
+// Device round 19.11 evening (LTE, build 6bdda3644): the first server of every kind was dead at that hour - Serbia 1
+// AmneziaWG and our Xray entry carried no data, the first provider profile neither; Estonia 3 AmneziaWG and the second
+// provider profile worked. The race probed the three first candidates, its cap was used up by their reservations
+// (11 KB really spent), it ended with nothing proven, and the walk then spent about 6 s on each of the same three:
+// first connect 17-24 s, or none within the tester's 17 s.
+static void scenarioHostileCellular1911()
+{
+    const NetworkObservation lte = cell("", "lte");
+    const QString k = key(lte);
+    World w;
+    w.set(k, QStringLiteral("16"), Behaviour::noData(2000));
+    w.setProbe(k, QStringLiteral("16"), ProbeBehaviour::fail(1500));
+    w.set(k, QStringLiteral("11:xray"), Behaviour::noData(1900));
+    w.setProbe(k, QStringLiteral("11:xray"), ProbeBehaviour::fail(3000));
+    w.set(k, QStringLiteral("up:dead"), Behaviour::noData(800));
+    w.setProbe(k, QStringLiteral("up:dead"), ProbeBehaviour::fail(3000));
+    w.set(k, QStringLiteral("17"), Behaviour::works(2100, 1300, 400));
+    w.setProbe(k, QStringLiteral("17"), ProbeBehaviour::ok(950, 30 * 1024));
+    w.set(k, QStringLiteral("up:good"), Behaviour::works(800, 1200, 500));
+    w.setProbe(k, QStringLiteral("up:good"), ProbeBehaviour::ok(1400, 45 * 1024));
+    const QList<PathCandidate> pool = { awg("16", "RS", false, 3.0), xray("11:xray", "FI"),
+                                        prov("up:dead", UpstreamKind::Country, "NL", 0), awg("17", "EE"),
+                                        prov("up:good", UpstreamKind::Country, "PL", 1) };
+    Sim s(pool, w, lte);
+    s.caps = hostCaps();
+    s.stopMs = 850;
+    s.starveShareMs = 1000;
+    s.rule = Sim::Rule::Proposed;
+    s.bytesLeft = RaceTimings().cellularMaxBytes;
+    const AttemptResult r = s.raceTap(UserChoice::automatic());
+    const QStringList legs = legPaths(s);
+    g_rows.append({ QStringLiteral("hostile LTE 19.11: first of every kind dead"),
+                    r.connected ? QStringLiteral("connected ") + r.path.id.id : QStringLiteral("failed"),
+                    s.lastTapWallMs(), r.paths, legs.join(QLatin1Char(' ')) });
+    CHECK(r.connected);
+    CHECK(r.path.id.id == QLatin1String("17") || r.path.id.id == QLatin1String("up:good"));
+    // the walk does not go through the three servers the race has just seen fail
+    CHECK(!legs.contains(QStringLiteral("11:xray")) && !legs.contains(QStringLiteral("up:dead")));
+    CHECK(legs.size() <= 2);
+    CHECK(s.lastTapWallMs() <= 9000); // the device took 17-24 s
+}
+
 static void scenarioTrace1911()
 {
     struct Case {
@@ -1428,8 +1470,10 @@ static void scenarioRace()
     //    share of the data check 1 s (WhoamiVerdict.h). Device: Wi-Fi 3.7-3.9 s (Old), 5.56 s (Current); LTE 7.5-8.2 s
     //    (Old), 5.59 s (Current). Pool in the device's order: Serbia 1 AmneziaWG (16) first, Finland 1 own Xray, Estonia.
     scenarioTrace1911();
-    // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when its projection fits; real bytes
-    // never refund the cap; a candidate the cap cannot pay is left to the owner's walk and the cheaper ones still start.
+    scenarioHostileCellular1911();
+    // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when its projection fits; a probe that
+    // reports MORE than its projection is charged the projection; a candidate the cap cannot pay does not block the
+    // cheaper ones behind it.
     {
         NetworkTracker tr;
         tr.observe(cell("", "lte"));
@@ -1466,6 +1510,69 @@ static void scenarioRace()
         CHECK(started == QStringList({ "x1", "x2" }) && bytesDone && !race.running());
         CHECK(!started.contains(QStringLiteral("up:p"))); // 320 000 B never fits a 256 KiB race
         CHECK(started.contains(QStringLiteral("x2")));    // the provider that cannot be paid does not block the next
+    }
+
+    // Device round 19.11 (LTE at an hour when the first server of every kind was dead): the three first probes spent
+    // about 11 KB together, but their projections stayed charged, the race ended "bytes" with nothing proven and the
+    // working servers behind them were never probed (first connect 17-24 s). A probe reserves its projection while
+    // it runs and is charged what it spent when it ends: dead paths free the cap for the next candidates.
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.awg = 54572;
+        costs.xray = 116736;
+        costs.provider = 107520;
+        const QList<PathCandidate> list = { awg("a16", "RS"), xray("x11", "FI"), prov("up:dead", UpstreamKind::Country, "NL", 0),
+                                            awg("a17", "EE"), xray("x12", "DE"), prov("up:good", UpstreamKind::Country, "PL", 0) };
+        RaceTimings rt;
+        rt.hedgeMs = 5000;
+        PathRace race(rt);
+        const qint64 cap = 327680; // the cap of that round: the fourth probe did not fit the reservations
+        QStringList started, proven;
+        qint64 reservedNow = 0, reservedPeak = 0, spent = 0;
+        QHash<quint64, qint64> reservedOf;
+        bool bytesDone = false;
+        QList<RaceEffect> fx = race.begin(0, list, tr.current(), hostCaps(), cap, costs);
+        QList<std::pair<qint64, RaceEffect>> answers; // (when, the StartProbe it answers)
+        for (qint64 t = 0; t <= 7000; t += 250) {
+            if (t > 0)
+                fx << race.tick(t);
+            for (int i = 0; i < answers.size();) {
+                if (answers.at(i).first > t) {
+                    ++i;
+                    continue;
+                }
+                const RaceEffect st = answers.takeAt(i).second;
+                const bool works = st.path.id.id == QLatin1String("a17") || st.path.id.id == QLatin1String("up:good");
+                const qint64 used = works ? 45000 : 4000; // a dead path costs a few KB
+                spent += used;
+                reservedNow -= reservedOf.take(st.stamp.probe);
+                fx << race.probeDone(t, st.stamp, works ? PathOutcome::ProbeOk : PathOutcome::Inconclusive, used);
+            }
+            while (!fx.isEmpty()) {
+                const RaceEffect e = fx.takeFirst();
+                bytesDone = bytesDone || (e.type == RaceEffectType::Done && e.reason == RaceDoneReason::Bytes);
+                if (e.type == RaceEffectType::Report)
+                    proven << e.path.id.id;
+                if (e.type == RaceEffectType::Winner)
+                    race.acceptWinner(e.path.id.id);
+                if (e.type != RaceEffectType::StartProbe)
+                    continue;
+                started << e.path.id.id;
+                const qint64 r = e.path.kind == PathKind::OwnXray ? costs.xray : e.path.kind == PathKind::OwnAwg ? costs.awg
+                                                                                                           : costs.provider;
+                reservedOf.insert(e.stamp.probe, r);
+                reservedNow += r;
+                reservedPeak = std::max(reservedPeak, reservedNow + spent);
+                answers.append({ t + 1500, e }); // every probe answers 1.5 s after its start
+            }
+        }
+        CHECK(started.contains(QStringLiteral("a17")) && started.contains(QStringLiteral("up:good"))); // before: never started
+        CHECK(proven.contains(QStringLiteral("a17")));
+        CHECK(!bytesDone);                 // the race does not end "bytes" with 11 KB spent
+        CHECK(reservedPeak <= cap);        // what is held plus what was spent never passes the cap
+        CHECK(spent <= cap);
     }
 
     // B3a: the first candidate works. With no evidence the race goes first: the first leg waits for the first proof

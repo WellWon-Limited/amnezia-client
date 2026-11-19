@@ -141,7 +141,14 @@ public:
     qint64 now = 0;
 
     qint64 wall() const { return kWallBase + now; }
-    SelectionContext ctx() const { return SelectionContext{ m_pool, &ledger, wall(), crowd }; }
+    SelectionContext ctx() const
+    {
+        SelectionContext c{ m_pool, &ledger, wall(), crowd };
+        for (const QString &id : raceFailed) // the engine's rule (ServiceEngine::ownerContext)
+            c.crowd.insert(id, 0.0);
+        return c;
+    }
+    QSet<QString> raceFailed; // paths whose probe failed in the race of this tap
     void setPool(const QList<PathCandidate> &pool) { m_pool = pool; }
     World &world() { return m_world; }
     int checksRun = 0;   // RunDataCheck effects (rechecks included)
@@ -178,6 +185,7 @@ public:
         ownerStartedMs = -1;
         const quint64 before = owner.attempt();
         raceFirst = false;
+        raceFailed.clear();
         if (caps.available && c.kind != UserChoice::Kind::ExactPath) {
             SelectInput in;
             in.pool = m_pool;
@@ -189,6 +197,8 @@ public:
             QList<PathCandidate> list;
             for (int i = known ? 1 : 0; i < order.size(); ++i)
                 list << order.at(i).path;
+            if (rule == Rule::Proposed)
+                list = raceSpread(list); // the engine's rule (ServiceEngine::beginRaceForTap)
             m_raceChoice = c;
             m_raceMode = mode;
             if (rule != Rule::Proposed) {
@@ -422,6 +432,10 @@ private:
                 break;
             }
             case RaceEffectType::CancelProbe: break;
+            case RaceEffectType::Failed:
+                raceFailed.insert(e.path.id.id); // the engine's rule: the worst prior for this attempt
+                raceLog << QStringLiteral("failed:%1").arg(e.path.id.id);
+                break;
             case RaceEffectType::Report:
                 reports.append(OutcomeReport{ e.network, e.networkGeneration, e.path.id, e.outcome, -1, -1 });
                 if (tracker.isCurrent(e.networkGeneration))

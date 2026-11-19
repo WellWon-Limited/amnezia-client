@@ -611,6 +611,7 @@ private:
     bool m_raceStartedOwner = false; // this tap's owner was started by the race (never a second UserStart)
     bool m_checkStarved = false;   // T1: the running check has no first byte past its share
     bool m_raceFirst = false; // the race runs and the owner waits for its first proven path (or its end)
+    QSet<QString> m_raceFailed; // paths whose probe failed in the race of this tap: last in this attempt's order
     bool raceAllowed() const;
     void beginRaceForTap();
     void applyRaceEffects(const QList<path::RaceEffect> &effects);
