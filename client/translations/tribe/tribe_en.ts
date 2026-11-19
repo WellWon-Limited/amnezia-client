@@ -1084,7 +1084,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+202"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+195"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1150,12 +1150,12 @@
     </message>
     <message>
         <location line="+203"/>
-        <location line="+535"/>
+        <location line="+521"/>
         <source>Проверяем трафик…</source>
         <translation>Checking traffic…</translation>
     </message>
     <message>
-        <location line="-533"/>
+        <location line="-519"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>Traffic went around the VPN — trying another route</translation>
     </message>
@@ -1171,12 +1171,12 @@
     </message>
     <message>
         <location line="+3"/>
-        <location line="+526"/>
+        <location line="+512"/>
         <source>Отключаемся…</source>
         <translation>Disconnecting…</translation>
     </message>
     <message>
-        <location line="-525"/>
+        <location line="-511"/>
         <source>Проверяем…</source>
         <translation>Checking…</translation>
     </message>
@@ -1221,7 +1221,12 @@
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+57"/>
+        <location line="+56"/>
+        <source>Открыть Сканер - найти работающий сервер</source>
+        <translation>Open the Scanner - find a working server</translation>
+    </message>
+    <message>
+        <location line="+30"/>
         <source>Сервер</source>
         <translation>Server</translation>
     </message>
@@ -1271,12 +1276,17 @@
         <translation>One moment…</translation>
     </message>
     <message>
-        <location line="-59"/>
+        <location line="-88"/>
         <source> мс</source>
         <translation> ms</translation>
     </message>
     <message>
-        <location line="+161"/>
+        <location line="+101"/>
+        <source>%1 в этой сети не отвечает</source>
+        <translation>%1 is not responding on this network</translation>
+    </message>
+    <message>
+        <location line="+46"/>
         <source>Российский сервер: доступность сервисов — как внутри РФ</source>
         <translation>Russian server: service availability matches what you get inside Russia</translation>
     </message>
@@ -1303,7 +1313,7 @@
         <translation>How do I renew my access?</translation>
     </message>
     <message>
-        <location line="-184"/>
+        <location line="-141"/>
         <source>Авто</source>
         <translation>Auto</translation>
     </message>
@@ -1318,27 +1328,7 @@
         <translation>The service picks the fastest node</translation>
     </message>
     <message>
-        <location line="+21"/>
-        <source>Ваш выбор</source>
-        <translation>Your choice</translation>
-    </message>
-    <message>
-        <location line="+11"/>
-        <source>Ваш выбор сейчас недоступен: %1</source>
-        <translation>Your choice is unavailable now: %1</translation>
-    </message>
-    <message>
-        <location line="+10"/>
-        <source>Сбросить</source>
-        <translation>Reset</translation>
-    </message>
-    <message>
-        <location line="+6"/>
-        <source>Сбросить выбор сервера, вернуть умный выбор</source>
-        <translation>Reset the server choice, return to smart choice</translation>
-    </message>
-    <message>
-        <location line="+250"/>
+        <location line="+255"/>
         <location line="+4"/>
         <source>Заменить сервер</source>
         <translation>Change server</translation>
@@ -1349,8 +1339,8 @@
         <translation>Installing…</translation>
     </message>
     <message>
-        <location line="-525"/>
-        <location line="+526"/>
+        <location line="-511"/>
+        <location line="+512"/>
         <source>Подключаемся…</source>
         <translation>Connecting…</translation>
     </message>
