@@ -109,6 +109,22 @@ public:
     int  badCycles() const { return m_bad; }
     bool isDead() const { return m_dead; }
 
+    // The live probe's part of the AmneziaWG DEAD rule (device round 19.11; fourth review of 141, H1/H2). The
+    // in-tunnel probe failing `cycles` times in a row ends the session only when the tunnel's own evidence agrees:
+    // its handshake is older than `maxHandshakeAgeSec` (a healthy session rekeys every 120 s, so about 135 s means
+    // rekeys are failing), and no network change opened the grace window (the extension is healing the path).
+    // An unknown handshake time cannot corroborate anything: no verdict. rx/tx are NOT used here - every handshake
+    // the server starts adds bytes to rx, which is what kept a dead session "alive" for the byte-based rule.
+    static bool probeDeadCorroborated(int failStreak, int cycles, bool inGrace, qint64 latestHandshakeEpoch,
+                                      qint64 nowEpoch, int maxHandshakeAgeSec)
+    {
+        if (cycles <= 0 || failStreak < cycles || inGrace || latestHandshakeEpoch <= 0)
+            return false;
+        return nowEpoch - latestHandshakeEpoch > maxHandshakeAgeSec;
+    }
+    // The newest handshake time the loop has seen (0 = none since the last reset).
+    qint64 latestHandshakeEpoch() const { return m_hasPrev ? m_prev.latestHandshakeEpoch : 0; }
+
 private:
     void resetSampling()
     {

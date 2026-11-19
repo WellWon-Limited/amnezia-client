@@ -244,6 +244,12 @@ inline int awgProbeFailCyclesTuned()
 {
     return qBound(0, int(TuningStore::numberOr(QStringLiteral("awg_probe_fail_cycles"), 4)), 10);
 }
+// The handshake age that corroborates the failing probe (HealthLoop::probeDeadCorroborated): a healthy AmneziaWG
+// session rekeys every 120 s; older than this = rekeys are failing.
+inline int awgProbeDeadHandshakeAgeSTuned()
+{
+    return qBound(60, int(TuningStore::numberOr(QStringLiteral("awg_probe_dead_hs_age_s"), 135)), 600);
+}
 
 // AVPN awg31-xray-v1 (независимое ревью волны, MAJOR-3; инвариант §22.5 «Подключено по xray —
 // только после реального трафика ЧЕРЕЗ туннель»). Успешный HEAD generate_204 доказывает ИНТЕРНЕТ,

@@ -353,6 +353,15 @@ int main(int argc, char **argv)
         CHECK(!h.feed(mkStats(0, 100, 300), 1009));
         CHECK(!h.feed(mkStats(0, 100, 400), 1013));                // 4 «плохих» цикла в окне — не DEAD
         CHECK(h.badCycles() == 0);
+        // The live probe's part of the AmneziaWG DEAD rule (device round 19.11, review H1/H2).
+        using avpn::HealthLoop;
+        CHECK(HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 140, 135));   // probe dead + rekeys failing
+        CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 60, 135));   // H1: the tunnel rekeys - healthy
+        CHECK(!HealthLoop::probeDeadCorroborated(9, 4, false, 1000, 1000 + 20, 135));   // probe addresses down for long
+        CHECK(!HealthLoop::probeDeadCorroborated(4, 4, true, 1000, 1000 + 140, 135));   // H2: a network change is healing
+        CHECK(!HealthLoop::probeDeadCorroborated(3, 4, false, 1000, 1000 + 140, 135));  // not enough failures yet
+        CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 0, 1000 + 140, 135));     // handshake time unknown
+        CHECK(!HealthLoop::probeDeadCorroborated(9, 0, false, 1000, 1000 + 999, 135));  // switched off
         CHECK(!h.feed(mkStats(0, 100, 500), 1021));                // первый плохой после окна
         CHECK(h.feed(mkStats(0, 100, 600), 1025));                 // второй → DEAD
         h.reset();

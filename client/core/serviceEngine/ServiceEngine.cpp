@@ -1265,6 +1265,7 @@ void ServiceEngine::noteHealthyTick(const TunnelStats &stats, qint64 nowEpoch)
 
 void ServiceEngine::noteNetworkChange(qint64 nowEpoch)
 {
+    m_probeFailStreak = 0; // failures of the old path say nothing about the new one (fourth review of 141, H2)
     m_health.noteNetworkChange(nowEpoch >= 0 ? nowEpoch : QDateTime::currentSecsSinceEpoch());
 }
 
@@ -1329,13 +1330,20 @@ bool ServiceEngine::feedProbeResult(bool ok)
         m_probeFailStreak = 0;
         return false;
     }
-    // Xray has no handshake: the live probe is its DEAD criterion. AmneziaWG keeps its handshake/rx criterion in the
-    // health loop AND ends on the same probe (ConnectTunables.h awgProbeFailCyclesTuned: device round 19.11).
-    const int cycles = currentNodeIsXray() ? xrayProbeFailCyclesTuned() : awgProbeFailCyclesTuned();
-    if (cycles <= 0)
-        return false;
-    if (++m_probeFailStreak < cycles)
-        return false;
+    // Xray has no handshake: the live probe alone is its DEAD criterion. An AmneziaWG session ends on the probe only
+    // when its own handshake agrees and no network change is being healed (HealthLoop::probeDeadCorroborated): a
+    // healthy tunnel whose probe addresses are unreachable is never torn down.
+    ++m_probeFailStreak;
+    if (currentNodeIsXray()) {
+        if (m_probeFailStreak < xrayProbeFailCyclesTuned())
+            return false;
+    } else {
+        const qint64 nowEpoch = QDateTime::currentSecsSinceEpoch();
+        if (!HealthLoop::probeDeadCorroborated(m_probeFailStreak, awgProbeFailCyclesTuned(),
+                                               m_health.inNetworkGrace(nowEpoch), m_health.latestHandshakeEpoch(),
+                                               nowEpoch, awgProbeDeadHandshakeAgeSTuned()))
+            return false;
+    }
     m_probeFailStreak = 0;
     return onDead(/*tunnelStillUp=*/true, QStringLiteral("probe failed (failover)"));
 }
