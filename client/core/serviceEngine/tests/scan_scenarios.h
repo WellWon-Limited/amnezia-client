@@ -1573,12 +1573,12 @@ inline QList<Scenario> scenarios()
                       std::sort(b.begin(), b.end());
                       f.check(a == b && rowIds(scanned) != rowIds(reopened), QStringLiteral("the same rows, now in speed order"));
                   }};
-    // R2. A new scan over a shown result («Сканировать» with last result on the screen): the shown rows stay in their
-    // places and are judged again there - proven again (fresh), or «Не удалось» when their reach fails now; rows the
-    // result did not have join the end. The list is not built again.
+    // R2. A new scan over a shown result («Сканировать» with the last result on the screen) starts a NEW list: the shown
+    // rows are cleared at the tap and the scan builds the list from empty, append-only - a row proven again is a new
+    // fresh row, a dead one is simply not there (no «Не удалось» ghost, no dimmed cache rows of the old result).
     l << Scenario{QStringLiteral("rescan_over_shown_result"),
-                  {QStringLiteral("shown rows judged again in place"), QStringLiteral("a failed row stays, «Не удалось»"),
-                   QStringLiteral("new rows join the end")},
+                  {QStringLiteral("«Сканировать» clears the previous result's rows"), QStringLiteral("the scan builds the list from empty"),
+                   QStringLiteral("a dead row is not on the new list")},
                   [] {
                       World w = baseWorld("rescan_over_shown_result", hostMac(), ScanNetKind::Wifi);
                       w.nodes = ownOnly(w.nodes);
@@ -1596,18 +1596,25 @@ inline QList<Scenario> scenarios()
                       const QJsonObject shown = d.steps.value(0).view;
                       const QJsonObject end = lastView(d);
                       const QStringList before = rowIds(shown), after = rowIds(end);
-                      f.check(before.size() == 4 && after.mid(0, 4) == before && after.size() > 4, QStringLiteral("shown rows first, new rows after"));
-                      f.check(d.steps.last().listBuilds == d.steps.value(0).listBuilds, QStringLiteral("the scan kept the list"));
-                      for (const char *id : {"4:xray", "9:xray"}) {
-                          const QJsonObject r = rowOf(end, QLatin1String(id));
-                          f.check(r.value(QLatin1String("state")).toString() == QLatin1String("failed")
-                                      && r.value(QLatin1String("flags")).toArray().contains(QStringLiteral("not_tappable")),
-                                  QStringLiteral("dead row «Не удалось» in place: ") + QLatin1String(id));
+                      f.check(before.size() == 4, QStringLiteral("the result was on the screen"));
+                      int tap = -1;
+                      for (int i = 0; i < d.steps.size(); ++i)
+                          if (d.steps.at(i).event.value(QLatin1String("event")).toString() == QLatin1String("retry")) {
+                              tap = i;
+                              break;
+                          }
+                      f.check(tap >= 0 && rowIds(d.steps.at(tap).view).isEmpty(), QStringLiteral("the first view after the tap has no old rows"));
+                      f.check(tap >= 0 && d.steps.at(tap).listBuilds == d.steps.value(0).listBuilds + 1, QStringLiteral("the scan built the list"));
+                      f.check(d.steps.last().listBuilds == d.steps.at(tap).listBuilds, QStringLiteral("built once, appended after"));
+                      f.check(after.size() > 0 && !after.contains(QStringLiteral("4:xray")) && !after.contains(QStringLiteral("9:xray")),
+                              QStringLiteral("the dead rows are not on the new list"));
+                      for (const QJsonValue &v : end.value(QLatin1String("rows")).toArray()) {
+                          const QJsonObject r = v.toObject();
+                          f.check(!r.value(QLatin1String("flags")).toArray().contains(QStringLiteral("cache"))
+                                      && r.value(QLatin1String("state")).toString() != QLatin1String("failed"),
+                                  QStringLiteral("only fresh rows: ") + r.value(QLatin1String("id")).toString());
                       }
-                      for (const char *id : {"2:xray", "5:xray"})
-                          f.check(!rowOf(end, QLatin1String(id)).value(QLatin1String("flags")).toArray().contains(QStringLiteral("cache")),
-                                  QStringLiteral("proven again: fresh in place: ") + QLatin1String(id));
-                      f.check(end.value(QLatin1String("verified")).toInt() == after.size() - 2, QStringLiteral("failed rows never counted"));
+                      f.check(end.value(QLatin1String("verified")).toInt() == after.size(), QStringLiteral("every row is a proven one"));
                   }};
     // R3. A provider leg answers first with «Не проверено» (its DNS plan unproven) and its full follow-up then fails:
     // the row never appears - a «Не проверено» row joins only once final, a failed one never joins. A leg whose

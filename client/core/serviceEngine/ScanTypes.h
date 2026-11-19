@@ -22,6 +22,8 @@
 #include <QString>
 #include <QStringList>
 
+#include <vector>
+
 namespace avpn {
 
 // --- enums and their wire names -------------------------------------------------------------------------
@@ -822,8 +824,14 @@ struct ScanCachedResult {
     QString scope;            // the scope that scan covered ("" = all countries, a country code, "whitelist")
     QList<ScanCachedRow> rows;
     QList<ScanCachedFailure> failures;
+    // The results of this network's OTHER scopes, newest first (one slot per scope scanned; a cached result is shown
+    // only for the scope it covered). Never nested deeper; at most kScanCacheScopeSlots - 1 of them.
+    std::vector<ScanCachedResult> otherScopes;
     bool present() const { return savedAtMs > 0 && !networkKey.isEmpty(); }
 };
+
+// How many scopes' results one network keeps (this one and the others): a small bound, the TTL applies to each.
+inline constexpr int kScanCacheScopeSlots = 4;
 
 inline QJsonObject scanCachedRowToJson(const ScanCachedRow &r)
 {
@@ -869,6 +877,9 @@ inline bool scanCachedRowFromJson(const QJsonObject &o, ScanCachedRow &r)
     return scanClassWorking(r.cls);
 }
 
+inline QJsonObject scanCachedResultToJson(const ScanCachedResult &c);
+inline ScanCachedResult scanCachedResultFromJson(const QJsonObject &o);
+
 inline QJsonObject scanCachedResultToJson(const ScanCachedResult &c)
 {
     QJsonObject o;
@@ -889,6 +900,15 @@ inline QJsonObject scanCachedResultToJson(const ScanCachedResult &c)
     }
     o.insert(QStringLiteral("rows"), rows);
     o.insert(QStringLiteral("failures"), fails);
+    if (!c.otherScopes.empty()) {
+        QJsonArray others;
+        for (const ScanCachedResult &x : c.otherScopes) {
+            ScanCachedResult flat = x;
+            flat.otherScopes.clear();
+            others << scanCachedResultToJson(flat);
+        }
+        o.insert(QStringLiteral("other_scopes"), others);
+    }
     return o;
 }
 
@@ -912,6 +932,15 @@ inline ScanCachedResult scanCachedResultFromJson(const QJsonObject &o)
         f.atMs = qint64(fo.value(QLatin1String("at_ms")).toDouble(0));
         if (!f.id.isEmpty() && scanClassFailure(f.cls))
             c.failures << f;
+    }
+    const QJsonArray others = o.value(QLatin1String("other_scopes")).toArray();
+    for (int i = 0; i < others.size() && int(c.otherScopes.size()) < kScanCacheScopeSlots - 1; ++i) {
+        const QJsonObject oo = others.at(i).toObject();
+        if (oo.contains(QLatin1String("other_scopes")))
+            continue; // never nested
+        ScanCachedResult x = scanCachedResultFromJson(oo);
+        if (x.present())
+            c.otherScopes.push_back(x);
     }
     return c;
 }

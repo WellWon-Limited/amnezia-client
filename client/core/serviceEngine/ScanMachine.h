@@ -116,7 +116,12 @@
 //  - Network change during a scan: the scan is cancelled (its finished results still reported under the old
 //    key) and restarted on the new network; after a finished result: the new network's cached result with its
 //    age and scope, else the open page without a result (phase Idle) - never a scan by itself.
-//  - A persisted result keeps the scope it covered (ScanCachedResult.scope): shown again under that scope.
+//  - A persisted result keeps the scope it covered (ScanCachedResult.scope): shown again under that scope only. A
+//    network keeps one result per scope scanned (ScanCachedResult.otherScopes, kScanCacheScopeSlots = 4 in all, each
+//    within its show window): choosing a scope shows that scope's result, else the empty scope state - never another
+//    scope's rows as if they were its result.
+//  - «Сканировать» always starts a NEW list: the previous result's rows are cleared at the tap (the live connection's row
+//    stays), the scan builds the list from empty, append-only. «Найти ещё» appends to the list it continues.
 //  - Outcomes (ScanOutcomes.h): one batch per scan (also for a cancelled one: what was measured is true),
 //    one per tap's connect chain. Budget actuals go to the ledger at every scan end (PersistBudget).
 //  - Doctor summary (lab seam S4, 16.11): every planned candidate ends in exactly one bucket - works, slow, a
@@ -709,8 +714,11 @@ public:
         now = clock(now);
         ScanStep s;
         if (!scanPhaseScanning(m_phase) && now >= m_cooldownUntil && now >= m_lastManifestAt + kScanManifestBackoffMs
-            && !budgetBlocked(now).hourly)
+            && !budgetBlocked(now).hourly) {
+            m_tapScan = true;
             beginScan(now, s);
+            m_tapScan = false;
+        }
         finishStep(s, now);
         return s;
     }
@@ -721,8 +729,11 @@ public:
         now = clock(now);
         ScanStep s;
         if (!scanPhaseScanning(m_phase) && m_caps.needsVpn && !m_current.working() && now >= m_cooldownUntil
-            && now >= m_lastManifestAt + kScanManifestBackoffMs && !budgetBlocked(now).hourly)
+            && now >= m_lastManifestAt + kScanManifestBackoffMs && !budgetBlocked(now).hourly) {
+            m_tapScan = true;
             beginScan(now, s, true);
+            m_tapScan = false;
+        }
         finishStep(s, now);
         return s;
     }
@@ -789,6 +800,13 @@ public:
                 inPool = inPool || c.countryCode == scope;
             if (inPool || present)
                 m_scope = scope;
+            if (m_scope != scopeBefore) {
+                // A result is shown only for the scope it covered: the new scope shows its own slot, else nothing.
+                if (!m_completed)
+                    showCachedScope(m_scope, now);
+                else if (m_scope != m_scannedScope && slotShown(m_scope, now))
+                    retireResult(now); // the finished result stays in its slot; this scope's cached result takes the screen
+            }
             if (m_filter != filterBefore || m_scope != scopeBefore)
                 m_listRebuild = true; // a scope change builds the list from empty (syncList)
         }
@@ -831,6 +849,7 @@ private:
             m_net = n;
             m_scanNet = n;
             m_rowsKey = n.key;
+            m_slots.clear();
             loadCached(cached, now);
             m_outcomes.begin(n.key);
             m_cur.cellular = n.kind == ScanNetKind::Cellular;
@@ -2041,6 +2060,7 @@ private:
     {
         m_net = n;
         m_listRebuild = true; // the list belongs to its network (syncList)
+        const bool cachedGiven = cached.present() && cached.networkKey == n.key;
         // Fresh rows of the old generation are no longer current evidence: they stay only as cache rows of
         // their own fingerprint (shown with their age if it matches); unproven live rows go.
         for (int i = m_rows.size() - 1; i >= 0; --i) {
@@ -2050,11 +2070,21 @@ private:
                 continue;
             }
             if (!r.cached) {
-                r.cached = true;
-                r.cachedAt = m_finishedAt > 0 ? m_finishedAt : now;
-                r.fromLive = false;
+                // A finished result lives in its scope's slot (persisted: the cache that comes with the network): it comes
+                // back from there. Without a persisted result it stays in memory as the cache of its own scope.
+                if (cachedGiven) {
+                    m_rows.removeAt(i);
+                } else {
+                    r.cached = true;
+                    r.cachedAt = m_finishedAt > 0 ? m_finishedAt : now;
+                    r.fromLive = false;
+                    m_cachedScope = m_scannedScope;
+                }
             }
         }
+        for (int i = m_slots.size() - 1; i >= 0; --i)
+            if (m_slots.at(i).networkKey != n.key)
+                m_slots.removeAt(i);
         m_unverified.clear();
         m_tapFailed.clear();
         m_filter.clear();
@@ -2089,8 +2119,22 @@ private:
         Q_UNUSED(now);
         if (!cached.present() || cached.networkKey != m_net.key)
             return;
-        m_cachedFailures = cached;
+        // One slot per scope this network was scanned in (the persisted result and its other scopes): a cached result
+        // is shown only for the scope it covered. The newest is what the page opens on.
+        m_slots.clear();
+        ScanCachedResult latest = cached;
+        latest.otherScopes.clear();
+        m_slots << latest;
+        for (const ScanCachedResult &o : cached.otherScopes)
+            if (o.present() && o.networkKey == m_net.key)
+                m_slots << o;
+        m_cachedFailures = latest;
         m_cachedScope = scanScopeOf(cached.scope);
+        loadSlotRows(latest);
+    }
+
+    void loadSlotRows(const ScanCachedResult &cached)
+    {
         for (const ScanCachedRow &cr : cached.rows) {
             if (rowIndex(cr.id) >= 0)
                 continue;
@@ -2113,6 +2157,65 @@ private:
             r.fingerprint = cached.fingerprint;
             m_rows << r;
         }
+    }
+
+    // The slot of a scope that can be shown now: this network's fingerprint, within the show window (without a scan:
+    // scan_cache_works_ttl_s), with rows. Judged when a list is built, never while shown.
+    const ScanCachedResult *slotShown(const QString &scope, qint64 now) const
+    {
+        for (const ScanCachedResult &c : m_slots) {
+            if (scanScopeOf(c.scope) != scope || c.rows.isEmpty() || c.fingerprint.isEmpty() || c.fingerprint != m_net.fingerprint)
+                continue;
+            const qint64 age = now - c.savedAtMs;
+            if (age >= -60000 && age <= kScanCacheShowMaxMs && age <= qint64(m_t.cacheWorksTtlS) * 1000)
+                return &c;
+        }
+        return nullptr;
+    }
+
+    // The cached rows on the screen become the ones of `scope`'s slot (none when the network has no result of that scope).
+    void showCachedScope(const QString &scope, qint64 now)
+    {
+        for (int i = m_rows.size() - 1; i >= 0; --i)
+            if (m_rows.at(i).cached)
+                m_rows.removeAt(i);
+        if (const ScanCachedResult *c = slotShown(scope, now)) {
+            loadSlotRows(*c);
+            m_cachedScope = scope;
+        }
+    }
+
+    // A finished result's slot: this scope's result replaces the scope's older one; the others are kept newest first,
+    // at most kScanCacheScopeSlots in all, none older than the show window (it could never be shown).
+    void addSlot(ScanCachedResult &c, qint64 now)
+    {
+        ScanCachedResult own = c;
+        own.otherScopes.clear();
+        QList<ScanCachedResult> kept;
+        kept << own;
+        for (const ScanCachedResult &o : m_slots)
+            if (scanScopeOf(o.scope) != scanScopeOf(own.scope) && o.networkKey == own.networkKey && !o.rows.isEmpty()
+                && now - o.savedAtMs <= kScanCacheShowMaxMs && kept.size() < kScanCacheScopeSlots)
+                kept << o;
+        c.otherScopes.clear();
+        for (int i = 1; i < kept.size(); ++i)
+            c.otherScopes.push_back(kept.at(i));
+        m_slots = kept;
+    }
+
+    // A finished result is put away (it lives in its scope's slot) for another scope's cached result: the page then shows
+    // it as the cache of this network, as when it opens.
+    void retireResult(qint64 now)
+    {
+        for (int i = m_rows.size() - 1; i >= 0; --i)
+            if (!m_rows.at(i).cached && !isCurrentId(m_rows.at(i).id))
+                m_rows.removeAt(i);
+        m_unverified.clear();
+        m_tapFailed.clear();
+        m_completed = false;
+        if (m_phase == ScanPhase::Done || m_phase == ScanPhase::Empty)
+            m_phase = ScanPhase::Idle;
+        showCachedScope(m_scope, now);
     }
 
     // The live connection: its row (materialized from the live tunnel), the connect chain, S1.
@@ -2386,10 +2489,13 @@ private:
         m_cands.clear();
         m_unverified.clear();
         m_tapFailed.clear();
+        const QString prevScannedScope = m_scannedScope; // the scope of the result still on the screen, if any
         m_scannedScope = m_continuation ? m_moreCountry : m_scope;
-        // A scan over a shown result keeps that list: its rows are judged again in their places, new rows join its
-        // end. Only a list of another scope, or none, is built from empty (syncList).
-        if (m_list.isEmpty() || m_listScope != m_scannedScope)
+        // «Сканировать» always starts a NEW list (owner 19.11, device test: the previous country's rows stayed on top,
+        // dark, the new ones below): the previous result's rows are cleared below and this scan builds the list from
+        // empty, append-only. «Найти ещё» appends to the list it continues; only a list of another scope, or none, is built
+        // from empty then (syncList).
+        if (!m_continuation || m_list.isEmpty() || m_listScope != m_scannedScope)
             m_listRebuild = true;
         m_fromServer = false;
         m_serverExhausted = false;
@@ -2416,8 +2522,9 @@ private:
         m_planCandidates = 0;
         m_scanStartAt = now;
         m_outcomes.begin(m_net.key);
-        // Rows of the previous result become cached rows of this network (a continuation keeps them fresh: same
-        // network, same generation - the rows of the batches before stay this series' evidence).
+        // The rows of the previous result are cleared (a continuation keeps them fresh: same network, same generation -
+        // the rows of the batches before stay this series' evidence). The result stays in its scope's slot (m_slots,
+        // persisted), and comes back from it when its scope is chosen; the live connection's row is the one that stays.
         for (int i = keepRows ? -1 : m_rows.size() - 1; i >= 0; --i) {
             Row &r = m_rows[i];
             if (m_current.working() && r.id == m_current.nodeId) {
@@ -2428,6 +2535,13 @@ private:
                 r.base = ScanClass::Works;
                 r.speed = scanSpeedOfLive(m_current.liveRttMs, m_t);
                 r.sortMs = m_current.liveRttMs;
+                continue;
+            }
+            // «Сканировать» (m_tapScan) clears the lot. The page that opens WITH a scan (opened, a network change that restarts
+            // it) keeps the history of this network under the first rows (fig. 18) - only its own scope's cached result,
+            // within its show window, never a finished result of another scope.
+            if (m_tapScan || (r.cached ? m_cachedScope : prevScannedScope) != m_scannedScope) {
+                m_rows.removeAt(i);
                 continue;
             }
             if (!r.cached) {
@@ -3413,6 +3527,7 @@ private:
                 cache.rows << cr;
             }
         cache.failures = m_failuresThisScan;
+        addSlot(cache, now);
         if (!connectStep)
             recordSummary(rows, now);
         if (!connectStep) {
@@ -3654,7 +3769,7 @@ private:
         }
     }
 
-    ScanCachedResult buildCache(const QList<ScanRowView> &rows, qint64 now) const
+    ScanCachedResult buildCache(const QList<ScanRowView> &rows, qint64 now)
     {
         ScanCachedResult cache;
         cache.networkKey = m_scanNet.key;
@@ -3685,6 +3800,7 @@ private:
             cache.rows << cr;
         }
         cache.failures = m_failuresThisScan;
+        addSlot(cache, now);
         return cache;
     }
 
@@ -4227,6 +4343,7 @@ private:
     qint64 m_lastManifestAt = LLONG_MIN / 2; // the last manifest request (the buttons' back-off)
     qint64 m_finishedAt = 0;
     // «Найти ещё» (moreTapped)
+    bool m_tapScan = false;          // the scan being begun is the person's «Сканировать» tap: it clears the previous rows
     bool m_continuation = false;     // the scan being begun is a continuation
     bool m_moreKeepRows = false;     // ... on the same network: rows stay fresh, judged ids skipped
     QString m_moreCountry;
@@ -4238,6 +4355,7 @@ private:
     QString m_scope;                 // the chosen country: the scope of the next scan ("" = all)
     QString m_scannedScope;          // the scope of the running / last scan
     QString m_cachedScope;           // the scope of the cached result of this network (loadCached)
+    QList<ScanCachedResult> m_slots; // this network's results, one per scope scanned, newest first (addSlot, loadCached)
     QList<ScanCountryView> m_scopeCountries; // the pool's countries of the last manifest
     QList<ScanCountryView> m_poolCountries;  // the server's pool (/v1/scan/pool), preferred when known
     int m_poolWhitelist = -1;
