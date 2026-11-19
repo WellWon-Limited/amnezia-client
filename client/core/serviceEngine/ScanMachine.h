@@ -1545,6 +1545,22 @@ public:
         return s;
     }
 
+    // R6 (review of 141): the tapped row is an exact request - the engine never falls back to another row, so its
+    // failure marks THAT row, sends its one outcome and ends the chain. connectFailed() moves on to the next row of
+    // the old ladder and the attemptEnded() after it then marked a row that was never tried.
+    ScanStep exactRowFailed(const QString &nodeId, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        if (!m_connectingId.isEmpty()) {
+            m_tapFailed.insert(nodeId.isEmpty() ? m_connectingId : nodeId);
+            addChainOutcome(nodeId.isEmpty() ? m_connectingId : nodeId, ScanClass::NoData);
+            endChain(s, true);
+        }
+        finishStep(s, now);
+        return s;
+    }
+
     // The engine refused the tapped row before it touched the tunnel (device test of 142: the pin failed - the node
     // left the subscription). Nothing was attempted, so nothing is marked failed and no outcome is sent: the row
     // goes back to what it showed and the list takes taps again (before: m_connectingId stayed set, the row read

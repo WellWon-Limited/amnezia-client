@@ -341,6 +341,7 @@ public:
     // cannot cover it. `done` exactly once.
     void sampleSpeed(qint64 bytes, int timeoutMs, std::function<void(const ScanSpeedSample &)> done);
     void connectFailed(const QString &nodeId);
+    void exactRowFailed(const QString &nodeId); // R6: the exact row failed - no next row, the chain ends
     void attemptEnded();
     // The engine refused a ConnectRow before touching the tunnel (the pin failed, the row's node is gone): the row
     // returns to its normal state and the list takes taps again. Safe to call from inside connectRow (queued).

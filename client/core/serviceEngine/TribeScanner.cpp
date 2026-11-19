@@ -2279,6 +2279,7 @@ void TribeScanner::sampleSpeed(qint64 bytes, int timeoutMs, std::function<void(c
 }
 
 void TribeScanner::connectFailed(const QString &nodeId) { dispatch(m_m.connectFailed(nodeId, now())); }
+void TribeScanner::exactRowFailed(const QString &nodeId) { dispatch(m_m.exactRowFailed(nodeId, now())); }
 void TribeScanner::attemptEnded() { dispatch(m_m.attemptEnded(now())); }
 void TribeScanner::connectRefused(const QString &nodeId)
 {

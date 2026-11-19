@@ -3289,8 +3289,9 @@ void AvpnEngineQml::endScanRowRequest(const QString &node, const char *why)
                 {{QStringLiteral("event"), QStringLiteral("row_failed")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                  {QStringLiteral("node"), n}, {QStringLiteral("why"), QLatin1String(why)}});
     if (m_scanner) {
+        // R6: an exact row never falls back - its failure ends the chain, no step to a row that was never tried
         if (!n.isEmpty() && !m_scanRow.reported.contains(n))
-            m_scanner->connectFailed(n);
+            m_scanner->exactRowFailed(n);
         m_scanner->attemptEnded();
     }
 }
@@ -7726,7 +7727,10 @@ void AvpnEngineQml::scanSyncState()
             scanJournal(QStringLiteral("scan_row_failed reason=scan_row node=%1").arg(n),
                         {{QStringLiteral("event"), QStringLiteral("row_failed")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                          {QStringLiteral("node"), n}});
-            m_scanner->connectFailed(n);
+            if (st.ended)
+                m_scanner->exactRowFailed(n); // R6: the row the owner gave up on; nothing to try after it
+            else
+                m_scanner->connectFailed(n);
         }
         if (st.ended) {
             scanJournal(QStringLiteral("scan_row_ended reason=scan_row"),
