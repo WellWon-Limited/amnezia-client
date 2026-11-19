@@ -622,6 +622,9 @@ struct ListSteps {
                 if (!current)
                     lastMs = ms;
             }
+            // owner 19.11 (device round 13, A7/A8): wherever the VPN is connected the connected server is the first row
+            for (int i = 1; i < b.size(); ++i)
+                check(!flagged(b.at(i).toObject(), "current"), where + QStringLiteral(": a built list has the live connection's row below the first"));
             check(verified <= t->listTargetWorks * batch, where + QStringLiteral(": a built list above the cap of verified rows"));
             check(unverified <= t->unverifiedRowsMax, where + QStringLiteral(": a built list above the cap of «Не проверено» rows"));
         }

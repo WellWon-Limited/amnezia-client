@@ -3874,6 +3874,76 @@ static int stepAfter(const Driver &d, const char *event, qint64 offsetMs)
     return -1;
 }
 
+// Device round 13 (A7, A8): in EVERY state where the VPN is connected the connected server is the first row. A list
+// built from a cached result, or again after the person tapped a row of a later batch, puts the live connection's
+// row first; a row that becomes connected by a tap stays in place for the list on the screen.
+static void connectedFirstInEveryList()
+{
+    World w = baseWorld("cf", hostMac(), ScanNetKind::Wifi);
+    w.nodes = ownOnly(w.nodes);
+    w.numbers.insert(QStringLiteral("scan_stop_works"), 1);
+    const auto candidatesOf = [](const ScanStep &s) {
+        QList<ScanCandidate> out;
+        for (const ScanAction &a : s.actions)
+            if (a.kind == ScanActionKind::StartHostScan)
+                out << a.candidates;
+        return out;
+    };
+    const auto afterManifest = [&](ScanMachine &mm, qint64 at) {
+        ScanStep st = mm.manifestReady(manifestInputFrom(manifestArgs(w)), at);
+        for (const ScanAction &a : st.actions)
+            if (a.kind == ScanActionKind::RequestCandidates) {
+                const ScanStep f = mm.candidatesUnavailable(a.requestId, QStringLiteral("scanner_off"), 300, at + 1);
+                st.actions << f.actions;
+            }
+        return st;
+    };
+    const auto works = [](const QString &id) {
+        ScanProbeFacts f = goodData();
+        f.id = id;
+        f.egressNode = id.section(QLatin1Char(':'), 0, 0);
+        return f;
+    };
+    const auto firstRow = [](ScanMachine &mm, qint64 at) {
+        const ScanView v = mm.view(at);
+        return v.rows.isEmpty() ? QString() : v.rows.first().id;
+    };
+    ScanMachine m(w.caps);
+    m.opened(openOf(w, QString(), false), kT0);
+    const QList<ScanCandidate> first = candidatesOf(afterManifest(m, kT0 + 50));
+    CHECK(first.size() >= 3);
+    if (first.size() < 3)
+        return;
+    m.hostProgress(progressOf(m, {works(first.at(0).id)}), kT0 + 900);
+    m.tick(kT0 + 50 + 8000);
+    m.moreTapped(QString(), kT0 + 31000);
+    const QList<ScanCandidate> second = candidatesOf(afterManifest(m, kT0 + 31050));
+    CHECK(!second.isEmpty());
+    if (second.isEmpty())
+        return;
+    m.hostProgress(progressOf(m, {works(second.at(0).id)}), kT0 + 32000);
+    m.tick(kT0 + 31050 + 8100);
+    const QString tapped = second.at(0).id;
+    CHECK(m.view(kT0 + 40000).rows.size() >= 2);
+    // the tap: the row connects and stays where it is on the list on the screen
+    const QStringList before = [&]() { QStringList o; for (const ScanRowView &r : m.view(kT0 + 40000).rows) o << r.id; return o; }();
+    CHECK(m.rowTapped(tapped, kT0 + 40100).has(ScanActionKind::ConnectRow));
+    m.vpnState(openOf(w, tapped, true).current, kT0 + 42000);
+    {
+        QStringList after;
+        for (const ScanRowView &r : m.view(kT0 + 42100).rows)
+            after << r.id;
+        CHECK(after == before); // no jump
+    }
+    // the next time a list is built (the page is closed and opened again) the connected row is the first one
+    m.closed(kT0 + 43000);
+    m.opened(openOf(w, tapped, true), kT0 + 44000);
+    CHECK(firstRow(m, kT0 + 44100) == tapped);
+    // a scope change builds a list from the cache: the live connection's row is first there too
+    m.filterChosen(QString(), kT0 + 45000);
+    CHECK(firstRow(m, kT0 + 45100) == tapped);
+}
+
 static void scanStartsNewList()
 {
     const QString de = QStringLiteral("DE");
@@ -4654,6 +4724,7 @@ int main(int argc, char **argv)
     findMoreAppends();
     findMoreTruncatedSeen();
     scanStartsNewList();
+    connectedFirstInEveryList();
     serverBatches();
     overruns();
     properties();

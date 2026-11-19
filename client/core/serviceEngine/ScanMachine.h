@@ -3996,6 +3996,7 @@ private:
             bool forced;
             bool cached;
             int batch;
+            bool current = false;
         };
         QList<Item> verified;
         for (const Row &r : m_rows) {
@@ -4009,9 +4010,15 @@ private:
             it.forced = isCurrentId(r.id) || r.id == m_connectingId || m_tapFailed.contains(r.id);
             it.cached = r.cached;
             it.batch = rowBatch(r);
+            it.current = isCurrentId(r.id);
             verified << it;
         }
+        // The live connection's row is the first one of every list that is built (owner 19.11: wherever there is an
+        // active connection it is the first row) - whatever batch it joined in (a row of a later batch, tapped and
+        // connected, was the 10th of the cached list built after it).
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
+            if (a.current != b.current)
+                return a.current;
             if (a.batch != b.batch)
                 return a.batch < b.batch;
             if (a.forced != b.forced)
@@ -4033,8 +4040,10 @@ private:
             ++n;
             ++i;
         }
-        // The batches in their order, each by speed.
+        // The batches in their order, each by speed; the live connection's row before them all.
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
+            if (a.current != b.current)
+                return a.current;
             if (a.batch != b.batch)
                 return a.batch < b.batch;
             return displayLess(a.v, a.tier, a.rank, b.v, b.tier, b.rank, a.sort, b.sort);
