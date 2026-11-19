@@ -10,6 +10,7 @@
 #include "../TribeScanner.h"
 
 #include <QCoreApplication>
+#include <QMetaProperty>
 #include <QElapsedTimer>
 #include <QTimeZone>
 #include <QCryptographicHash>
@@ -167,6 +168,11 @@ struct FakeEngine : IScanEngine {
     QString liveBase;
     bool queueFull = false;
 
+    bool names = false; // providerRowName: the app's naming of provider rows (false = none, the server's label)
+    QString providerRowName(const ScanManifestUpstream &u) const override
+    {
+        return names ? QStringLiteral("Имя ") + u.profileId : QString();
+    }
     ScanCurrent current() const override { return cur; }
     ScanNetFacts network() const override { return net; }
     void fillManifestInput(ScanManifestInput &in) const override
@@ -1145,6 +1151,15 @@ struct World {
         return QVariantMap();
     }
     bool rowFlag(const QString &id, const char *flag) const { return row(id).value("flags").toStringList().contains(QLatin1String(flag)); }
+    // the live row stays unproven after its check ended badly: not verified, and no longer «проверяем загрузку…»
+    bool liveUnprovenSettled(const QString &id) const
+    {
+        bool unproven = false;
+        for (const ScanRowView &r : s->machine().view(clock.t).rows)
+            if (r.id == id)
+                unproven = r.current && !r.verified;
+        return unproven && rowFlag(id, "current") && !rowFlag(id, "live_unverified");
+    }
     qint64 ledgerLast() const
     {
         const auto &e = s->machine().ledger().entries();
@@ -1340,7 +1355,7 @@ static void caseLiveDigest()
     w.run(20000);
     CHECK_EQ(w.phase(), QStringLiteral("done"));
     CHECK_EQ(w.liveProbes.size(), 2);
-    CHECK(w.rowFlag(QStringLiteral("4:xray"), "live_unverified"));
+    CHECK(w.liveUnprovenSettled(QStringLiteral("4:xray")));
 }
 
 // 304: the stored copy is revalidated with its exact ETag; the scan uses the token of POST /v1/scan/token.
@@ -3497,7 +3512,7 @@ static void caseStaleLiveProbe()
     w.run(20000);
     CHECK(w.s->machine().scanId() != a);
     CHECK_EQ(w.liveProbes.size(), 4);
-    CHECK(w.rowFlag(QStringLiteral("4:xray"), "live_unverified")); // only B's own (bad) result counts
+    CHECK(w.liveUnprovenSettled(QStringLiteral("4:xray"))); // only B's own (bad) result counts
     CHECK(w.logsClean());
 }
 
@@ -3997,6 +4012,30 @@ static void caseServerScope()
 {
     g_case = QStringLiteral("server_scope");
     {
+        // Device round air7 (19.11): opening the Scanner showed no «Все страны · N серверов» and no country menu
+        // although GET /v1/scan/pool answered - the page checks Array.isArray(bar.scope_countries), and a list
+        // inside a QVariantMap reaches QML as a sequence that is no Array (Qt 6.11). The QML property is JSON.
+        const QMetaObject &mo = TribeScanner::staticMetaObject;
+        const int pi = mo.indexOfProperty("view");
+        CHECK(pi >= 0 && mo.property(pi).metaType() == QMetaType::fromType<QJsonObject>());
+        World w;
+        w.server.scopeApi = true;
+        w.poolOnOpen = true;
+        w.start();
+        w.s->show(); // opening the screen: no scan, only the pool
+        w.run(5000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), 1);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 0);
+        const QJsonObject bar = w.s->viewJson().value(QStringLiteral("bar")).toObject();
+        CHECK(bar.value("scope_countries").isArray() && !bar.value("scope_countries").toArray().isEmpty());
+        CHECK(bar.value("scope").isString() && bar.value("scope").toString().isEmpty());
+        bool logged = false;
+        for (const QString &l : w.logs)
+            logged = logged || l.startsWith(QLatin1String("pool fetched countries="));
+        CHECK(logged);
+        w.s->close();
+    }
+    {
         World w;
         w.server.scopeApi = true;
         w.poolOnOpen = true;
@@ -4005,6 +4044,7 @@ static void caseServerScope()
         extra.insert("profile_id", "abcdefabcdefabcd");
         w.server.extraUpstream << extra;
         w.host.outcomes.insert(QStringLiteral("up:abcdefabcdefabcd"), Outcome{true, 90, 500});
+        w.engine.names = true;
         w.start();
         w.s->open();
         w.run(20000);
@@ -4035,6 +4075,27 @@ static void caseServerScope()
                 extraProbed = extraProbed || (c.toObject().value("id").toString() == QLatin1String("up:abcdefabcdefabcd")
                                               && !c.toObject().value("config").toString().isEmpty());
         CHECK(extraProbed);
+        // the batch's row is named by the app's naming function when it is born, not by the server's label, and
+        // keeps that name with no stub in the engine's pool (device round air7: «SE 1» after the 6th batch)
+        bool rowNamed = false;
+        for (const QVariant &rv : w.s->view().value(QStringLiteral("rows")).toList()) {
+            const QVariantMap r = rv.toMap();
+            if (r.value("id").toString() == QLatin1String("up:abcdefabcdefabcd"))
+                rowNamed = r.value("label").toString() == QStringLiteral("Имя abcdefabcdefabcd");
+        }
+        CHECK(rowNamed);
+        // a batch row is tapped after its stub may have left the engine's newest-48 offered pool: the facade offers it
+        // again right before the connect, so the engine knows the node it is asked to connect
+        {
+            const int offeredBefore = w.engine.offered.size();
+            const int callsBefore = w.engine.rowCalls.size();
+            w.s->tapRow(QStringLiteral("up:abcdefabcdefabcd"));
+            CHECK(w.engine.rowCalls.size() == callsBefore + 1);
+            // the tapped row is offered LAST (the engine keeps its newest 48), and the re-offer is bounded
+            CHECK(w.engine.offered.size() > offeredBefore && w.engine.offered.size() - offeredBefore <= 24
+                  && w.engine.offered.last().toObject().value("node_id").toString() == QLatin1String("up:abcdefabcdefabcd"));
+        }
+
         const QString state = QJsonObject::fromVariantMap(w.s->view().value(QStringLiteral("more")).toMap()).value("state").toString();
         CHECK(state == "exhausted" || state == "available");
         w.s->close();

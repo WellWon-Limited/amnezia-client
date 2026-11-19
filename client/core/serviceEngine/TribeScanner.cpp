@@ -3,6 +3,8 @@
 #include "DoctorReport.h"    // doctor::countryDisplayName: the app's country names (ru / es tables, QLocale)
 #include "ScanPlan.h"        // scanAwgMiniFlag
 #include "TuningStore.h"
+
+#include <algorithm>
 #include "UpstreamVerdict.h" // upstreamUnverifiableStrictTuned
 #include "XrayProfileSanitizer.h" // upstreamProfileCheck: the connect's profile rule
 
@@ -349,13 +351,32 @@ void TribeScanner::execute(const ScanAction &a)
         emitLog(QStringLiteral("action cancel_pending_connect"));
         m_engine->cancelPendingConnect();
         break;
-    case ScanActionKind::ConnectRow:
-        emitLog(QStringLiteral("action connect_row order=%1 user_origin=%2 force=%3")
+    case ScanActionKind::ConnectRow: {
+        // A batch row's stub may have left the engine's offered pool (newest 48 only): offer the tapped row and its
+        // chain again first, so the connect knows every node it may try.
+        // At most kScanReofferMax, the tapped row LAST: the engine keeps its newest offered stubs (48), so a long chain
+        // offered first-to-last evicted the tapped row again (device round air9: «Финляндия 20» of batch ~20, chain
+        // of 193 rows -> scan_connect_ignored why=pin).
+        QJsonArray again;
+        QStringList ids;
+        for (const QString &id : a.ids)
+            if (id != a.nodeId && m_batchStubs.contains(id) && !ids.contains(id) && ids.size() < kScanReofferMax - 1)
+                ids << id;
+        std::reverse(ids.begin(), ids.end()); // the nearest fallback ends up newer than the far ones
+        if (m_batchStubs.contains(a.nodeId))
+            ids << a.nodeId;
+        for (const QString &id : ids)
+            again << m_batchStubs.value(id);
+        if (!again.isEmpty())
+            m_engine->offerScanNodes(again);
+        emitLog(QStringLiteral("action connect_row order=%1 user_origin=%2 force=%3 reoffered=%4")
                     .arg(a.ids.size())
                     .arg(a.userOrigin)
-                    .arg(a.forceConnect));
+                    .arg(a.forceConnect)
+                    .arg(again.size()));
         m_engine->connectRow(a.nodeId, a.ids, a.hintTtlMs, a.userOrigin, a.forceConnect);
         break;
+    }
     }
 }
 
@@ -462,9 +483,8 @@ void TribeScanner::refreshView()
     if (j == m_viewJson)
         return;
     m_viewJson = j;
-    QJsonObject withNow = j;
-    withNow.insert(QStringLiteral("now_ms"), double(t));
-    m_viewMap = withNow.toVariantMap();
+    m_viewQml = j;
+    m_viewQml.insert(QStringLiteral("now_ms"), double(t));
     emit viewChanged();
 }
 
@@ -530,7 +550,10 @@ void TribeScanner::notifyNetwork()
     if (n == m_lastNet)
         return;
     m_lastNet = n;
-    emitLog(QStringLiteral("network kind=%1 sources=%2").arg(QLatin1String(scanNetKindName(n.kind))).arg(n.sources.size()));
+    emitLog(QStringLiteral("network kind=%1 key=%2 gen=%3 sources=%4 cached=%5")
+                .arg(QLatin1String(scanNetKindName(n.kind)), n.key, n.generation())
+                .arg(n.sources.size())
+                .arg(cachedFor(n).present()));
     const ScanPhase before = m_m.phase();
     dispatch(m_m.networkChanged(n, cachedFor(n), now()));
     // «Сеть сменилась — проверяем заново» (artboard): only for the person's running scan the change restarted on
@@ -1014,8 +1037,10 @@ void TribeScanner::doStartHost(const ScanAction &a)
     if (m_nextPollAt < 0)
         m_nextPollAt = t + m_m.tunables().pollMs;
     // A probe whose config could not be built never reached the host: «Не проверено» with the builder's reason.
-    for (const auto &x : refused)
+    for (const auto &x : refused) {
+        emitLog(QStringLiteral("candidate refused id=%1 reason=%2").arg(x.first, x.second));
         dispatch(m_m.candidateRefused(x.first, x.second, now()));
+    }
 }
 
 // --- host exchanges: the context of a message is captured when it is SENT (invariant 1) ---------------------------
@@ -1201,8 +1226,10 @@ void TribeScanner::doAddHost(const ScanAction &a)
     const QList<ScanHostCandidate> cands = withXrayBursts(a.candidates, scanBuildHostCandidates(
         withoutWithheldAwg(a, &refused).candidates, [this](const ScanCandidate &c) { return configOf(c); },
         [this](const ScanCandidate &c) { return awgInputOf(c); }, &refused));
-    for (const auto &x : refused)
+    for (const auto &x : refused) {
+        emitLog(QStringLiteral("candidate refused id=%1 reason=%2").arg(x.first, x.second));
         dispatch(m_m.candidateRefused(x.first, x.second, now()));
+    }
     if (cands.isEmpty())
         return;
     emitLog(QStringLiteral("action add_host_candidates n=%1").arg(cands.size()));
@@ -1853,7 +1880,20 @@ void TribeScanner::doCandidates(const ScanAction &a)
             self->m_active.body.insert(QStringLiteral("upstream"), ups);
             if (!r.view.providerNodes.isEmpty())
                 self->m_engine->offerScanNodes(r.view.providerNodes);
-            self->dispatch(self->m_m.candidatesReady(id, r.view, r.bytes, self->now()));
+            for (const QJsonValue &n : r.view.providerNodes) {
+                const QString nid = n.toObject().value(QLatin1String("node_id")).toString();
+                if (nid.isEmpty())
+                    continue;
+                if (!self->m_batchStubs.contains(nid))
+                    self->m_batchStubOrder << nid;
+                self->m_batchStubs.insert(nid, n.toObject());
+            }
+            while (self->m_batchStubOrder.size() > kScanBatchStubsMax)
+                self->m_batchStubs.remove(self->m_batchStubOrder.takeFirst());
+            ScanCandidatesView v = r.view;
+            for (const ScanManifestUpstream &u : v.upstream)
+                v.upstreamNames.insert(u.profileId, self->m_engine->providerRowName(u));
+            self->dispatch(self->m_m.candidatesReady(id, v, r.bytes, self->now()));
         } else {
             const QString reason = r.status == 404 ? QStringLiteral("unsupported") : r.reason; // the manifest answered: 404 = no endpoint
             self->dispatch(self->m_m.candidatesUnavailable(id, reason, r.bytes, self->now()));
@@ -1880,8 +1920,19 @@ void TribeScanner::fetchPoolIfStale()
         if (!self)
             return;
         self->chargeOutsideScan(p.bytes, cellular);
-        if (p.ok)
+        if (p.ok) {
+            int own = 0, provider = 0;
+            QStringList per;
+            for (const ScanPoolView::Country &c : p.view.countries) {
+                own += c.own;
+                provider += c.provider;
+                per << QStringLiteral("%1:%2+%3").arg(c.countryCode).arg(c.own).arg(c.provider);
+            }
+            self->emitLog(QStringLiteral("pool fetched countries=%1 total=%2 own=%3 provider=%4 whitelist=%5 by_country=%6")
+                              .arg(p.view.countries.size()).arg(own + provider).arg(own).arg(provider).arg(p.view.whitelist)
+                              .arg(per.join(QLatin1Char(','))));
             self->dispatch(self->m_m.poolReady(p.view, self->now()));
+        }
         else if (p.status == 404)
             self->m_poolUnsupported = true;
         else

@@ -323,6 +323,11 @@ public:
         return m_e->m_engine.failedInTunnelHere(node);
     }
 
+    QString providerRowName(const ScanManifestUpstream &u) const override
+    {
+        return m_e->upstreamRowName(u.label, u.labelCustom, u.ordinal, upstreamRowKind(u.kind, u.countryCode), u.countryCode);
+    }
+
     QString rowDisplayName(const QString &rowId) const override
     {
         // one snapshot per view refresh (the rows of one refresh ask within the same event-loop turn)
@@ -530,8 +535,7 @@ void ScanEngineAdapter::fillManifestInput(ScanManifestInput &in) const
     // <n>») - also one outside the pool, which otherwise fell back to the server's label ("NL 3").
     for (const ScanManifestUpstream &u : in.manifest.upstream)
         if (!in.upstreamNames.contains(u.profileId))
-            in.upstreamNames.insert(u.profileId, m_e->upstreamRowName(u.label, u.labelCustom, u.ordinal,
-                                                                       upstreamRowKind(u.kind, u.countryCode), u.countryCode));
+            in.upstreamNames.insert(u.profileId, providerRowName(u));
     in.freshFailures = m_e->m_engine.pathsFailedHere(); // the ledger of this network (path engine)
     in.lastKnownGood = m_e->m_engine.bestWorkingPathHere();
     in.restrictCountry.clear();

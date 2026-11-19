@@ -151,6 +151,17 @@ public:
         Q_UNUSED(rowId)
         return QString();
     }
+    // The one naming function of a provider row (UpstreamNode.h::upstreamDisplayName through the app's language:
+    // the admin's label, «<страна> <n>», «Белые списки <n>»), from the row's own fields - for the manifest's rows
+    // (fillManifestInput) and for every /v1/scan/candidates batch alike, so a row is named once when it is born and
+    // keeps that name for its life, also after its stub left the engine's offered pool (device round air7: rows of
+    // early batches turned into the server's raw labels «SE 1», «EE 4» after the 6th batch). "" = no name: the
+    // server's label stays.
+    virtual QString providerRowName(const ScanManifestUpstream &u) const
+    {
+        Q_UNUSED(u)
+        return QString();
+    }
     // The AWG mini-session input of an own AWG node (nodeId as in the manifest, e.g. "9"); false = the engine has
     // no config for that node (it is then «Не проверено»). The default (no AWG input: every AWG row «Не
     // проверено» awg_no_address) keeps an engine that does not implement it yet building; L6b overrides it.
@@ -253,7 +264,10 @@ class TribeScanner : public QObject
     Q_PROPERTY(bool doctorLegacy READ doctorLegacy NOTIFY switchesChanged)
     Q_PROPERTY(bool connectOnOpen READ connectOnOpen NOTIFY switchesChanged)
     Q_PROPERTY(bool returnHome READ returnHome NOTIFY switchesChanged)
-    Q_PROPERTY(QVariantMap view READ view NOTIFY viewChanged)
+    // The view goes to QML as JSON (device round air7, 19.11): a QJsonArray reaches QML as a real JS array, while a
+    // QVariantList inside a QVariantMap reaches it as a sequence for which Array.isArray() is false (Qt 6.11) - the
+    // page then never saw bar.scope_countries and fell back to the filter of found rows.
+    Q_PROPERTY(QJsonObject view READ viewJson NOTIFY viewChanged)
     Q_PROPERTY(bool screenOpen READ screenOpen NOTIFY viewChanged)
     Q_PROPERTY(QVariantMap shade READ shade NOTIFY shadeChanged)
 public:
@@ -280,7 +294,8 @@ public:
     bool doctorLegacy() const { return m_doctorLegacy; }
     bool connectOnOpen() const { return m_connectOnOpen; }
     bool returnHome() const { return m_returnHome; }
-    QVariantMap view() const { return m_viewMap; }
+    QJsonObject viewJson() const { return m_viewQml; }
+    QVariantMap view() const { return m_viewQml.toVariantMap(); } // C++ callers (tests); QML reads viewJson
     bool screenOpen() const { return m_m.screenOpen(); }
     QVariantMap shade() const { return m_shadeMap; }
     // The server list's figures (owner 17.11, provider rows): engine node id -> ms of the latest Scanner result of
@@ -567,8 +582,8 @@ private:
     qint64 m_viewWake = -1;
     qint64 m_shadeWake = -1;
     qint64 m_nextPollAt = -1;
-    QJsonObject m_viewJson;
-    QVariantMap m_viewMap;
+    QJsonObject m_viewJson;  // the view without its clock (the change test)
+    QJsonObject m_viewQml;   // what QML reads: m_viewJson + now_ms
     QVariantMap m_shadeMap;
 
     bool m_enabled = false;
@@ -580,6 +595,13 @@ private:
     ScanNetwork m_lastNet;
     qint64 m_poolAt = -1;            // when /v1/scan/pool last answered (or was asked); the server allows 60 per hour
     bool m_poolUnsupported = false;  // an older server: no pool endpoint
+    // The stub node of every /v1/scan/candidates provider row seen in this run (node id -> SubscriptionNode JSON, no
+    // config): the engine keeps only its newest offered stubs (ServiceEngine::kMaxScanOffered), so a row of an early
+    // batch is offered again right before its connect (ConnectRow) - a row on the screen can always be tapped.
+    QHash<QString, QJsonObject> m_batchStubs;
+    QStringList m_batchStubOrder;    // oldest first; bounded by kScanBatchStubsMax
+    static constexpr int kScanBatchStubsMax = 512; // the `seen` cap of one series
+    static constexpr int kScanReofferMax = 24;     // stubs offered again per row connect: half the engine's 48
     bool m_fetchPoolOnOpen = true;
     bool m_hostGenFolded = false;
     ScanNetSource m_hostGen;

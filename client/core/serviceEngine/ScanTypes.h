@@ -588,6 +588,7 @@ struct ScanCandidatesView {
     QList<ScanManifestUpstream> upstream;
     QJsonArray providerNodes;      // the provider rows' `node` objects (SECRET-free stub nodes: no config)
     QHash<int, int> freeSeats;     // provider tier -> probe seats free now
+    QMap<QString, QString> upstreamNames; // profile_id -> display name (the coordinator's, IScanEngine::providerRowName)
 };
 
 inline bool scanCandidatesFromJson(const QJsonObject &o, ScanCandidatesView &out, QString *error = nullptr)

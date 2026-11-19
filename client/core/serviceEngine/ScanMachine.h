@@ -419,6 +419,8 @@ struct ScanRowView {
     bool verifying = false;             // transport badge yellow while connecting
     bool current = false;
     bool verified = true;               // false = a «Не проверено» row
+    bool liveChecking = false;          // the connected, unproven row's check is under way («проверяем загрузку…»);
+                                        // false with !verified = nothing checks it now: plain «Подключено»
     bool crowdWorks = false;            // «работает у других в вашей сети» (a mark: never order, never verdict)
     quint64 arrival = 0;                // grows with every new fresh row (arrive animation once)
     QString notVerifiedReason;
@@ -923,6 +925,9 @@ public:
             m_serverExhausted = c.exhausted || fresh == 0;
             m_manifest.manifest.nodes = c.nodes;
             m_manifest.manifest.upstream = c.upstream;
+            for (auto it = c.upstreamNames.constBegin(); it != c.upstreamNames.constEnd(); ++it)
+                if (!it.value().isEmpty())
+                    m_manifest.upstreamNames.insert(it.key(), it.value());
             startHost(now, s);
         }
         finishStep(s, now);
@@ -1034,7 +1039,7 @@ public:
             }
             c.finalDone = true;
             const QString r = reason.isEmpty() ? QStringLiteral("config") : reason;
-            addUnverified(c.c, r);
+            notProbeableHere(c.c, r);
             judge(c.c.id, ScanClass::NotVerified, r);
             pumpProviders(now, s);
             if (allFinal() && !hasLeasePending())
@@ -1169,13 +1174,23 @@ public:
     // coordinator cuts a reply on the wire one transport chunk late at most): the ledger records what really
     // went. Reported after its scan's ledger entry (or for a request charged at once outside a scan), only
     // the excess over what was charged is added to the hour; less is never refunded.
-    ScanStep appRequestDone(const QString &requestId, qint64 bytes, qint64 now)
+    ScanStep appRequestDone(QString requestId, qint64 bytes, qint64 now) // by value: callers pass members it clears
     {
         now = clock(now);
         ScanStep s;
         const QString scanId = requestId.section(QLatin1Char('/'), 0, 0);
         Settle *st = settleOf(scanId);
         const auto it = st ? st->app.constFind(requestId) : QHash<QString, qint64>::const_iterator();
+        if (!m_liveReqId.isEmpty() && requestId == m_liveReqId) {
+            // The live proof's request ended without its result reaching the machine (dropped as stale, transport
+            // lost before an answer): the wait ends, the row stays unproven - plain «Подключено».
+            m_liveReqId.clear();
+            if (!m_liveProbeDone) {
+                m_liveProbeDone = true;
+                if (!m_liveProbeNode.isEmpty())
+                    m_liveReasons.insert(m_liveProbeNode, QStringLiteral("live_no_answer"));
+            }
+        }
         if (st && it != st->app.constEnd()) { // until the ledger entry is written
             st->gate.finish(requestId, bytes < 0 ? it.value() : bytes);
             st->app.remove(requestId);
@@ -1636,8 +1651,11 @@ public:
             v.checkedAgoMin = int(qMax<qint64>(0, now - m_finishedAt) / 60000);
         else if ((m_phase == ScanPhase::NoScan || m_phase == ScanPhase::Idle) && cachedAt > 0)
             v.checkedAgoMin = int(qMax<qint64>(0, now - cachedAt) / 60000);
-        // Bottom bar.
+        // Bottom bar. A row without a country (the provider's white-list rows) is no country of the menu: it was
+        // drawn as a second «Все страны» entry (device round air7, 19.11); it counts in the total only.
         for (const ScanRowView &r : all) {
+            if (r.countryCode.isEmpty())
+                continue;
             bool hit = false;
             for (ScanCountryView &c : v.bar.countries)
                 if (c.countryCode == r.countryCode) {
@@ -2143,6 +2161,7 @@ private:
                 judge(x.c.id, ScanClass::NotVerified, QStringLiteral("awg_live"));
             }
         // The tap's chain: the engine moved to another node of the hint.
+        bool tapConnected = false;
         if (!m_connectingId.isEmpty()) {
             if (c.connecting && c.nodeId != m_connectingId && m_chainOrder.contains(c.nodeId) && !m_tapFailed.contains(c.nodeId))
                 m_connectingId = c.nodeId;
@@ -2150,6 +2169,7 @@ private:
                 addChainOutcome(c.nodeId, ScanClass::Works);
                 m_connectingId.clear();
                 endChain(s, false);
+                tapConnected = true;
             }
         }
         // S1: the pre-connect of a VPN-required host.
@@ -2170,8 +2190,18 @@ private:
             // rule (the freeze goes unanswered: the whole grant after scan_freeze_ack_ms).
             stopStage2(now, QStringLiteral("tunnel_stopped"), s);
         }
-        if (c.working() && m_phase != ScanPhase::Idle && m_phase != ScanPhase::Preparing && m_phase != ScanPhase::Connecting)
+        // The proof runs with a result on the screen (Done, Empty, NoScan) and for a row the person connected from the
+        // Scanner while it shows a cached result (Idle: device round air7, the row of a cached «Германия» result
+        // waited 15+ minutes for a check nobody asked for); never on merely opening the screen with a live VPN.
+        if (c.working() && m_phase != ScanPhase::Preparing && m_phase != ScanPhase::Connecting
+            && (m_phase != ScanPhase::Idle || tapConnected))
             maybeProbeLive(s);
+    }
+
+    // Whether the connected row's proof is under way: sent and not answered, or a running scan will send it.
+    bool liveProofPending(const QString &id) const
+    {
+        return m_liveProbeNode == id ? !m_liveProbeDone : scanPhaseScanning(m_phase);
     }
 
     // The connected row is «works» only after a sized, digest-checked download through the live tunnel (F2):
@@ -2754,6 +2784,16 @@ private:
         return m_accessStamp == currentStamp() && m_scanNet.generation() == m_net.generation() ? m_access : ScanAccess();
     }
 
+    // A candidate this host cannot probe - its config could not be built here (candidateRefused) or the host refused
+    // it (probe error `config`): «Не проверено», and judged for the series like the host's other limits. Otherwise
+    // the next batch offers it again, it is refused again, and «Найти ещё» never reaches its end (device round air9,
+    // 19.11: one «Германия» profile kept the scope open).
+    void notProbeableHere(const ScanCandidate &c, const QString &reason)
+    {
+        m_shownNet.insert(c.id);
+        addUnverified(c, reason);
+    }
+
     void removeUnverified(const QString &id)
     {
         for (int i = m_unverified.size() - 1; i >= 0; --i)
@@ -2843,6 +2883,8 @@ private:
             c.pendingVerdict = v;
             c.pendingFacts = f;
             addUnverified(isFollowUp ? c.fu : c.c, QStringLiteral("unverifiable"));
+        } else if (f.error == ScanProbeError::Config) {
+            notProbeableHere(c.c, QStringLiteral("config")); // the host refused its config: it will again
         } else if (f.error == ScanProbeError::Memory || f.error == ScanProbeError::Budget || f.error == ScanProbeError::BindFailed
                    || f.error == ScanProbeError::Cancelled || f.error == ScanProbeError::Deadline) {
             // the host could not run the probe (memory, budget, its own socket binding) or cut it before its
@@ -2917,11 +2959,14 @@ private:
     }
 
     // Working rows per tier among fresh rows (for the list-target rule of lower tiers).
+    // The list's fill below a tier (D9) in THIS batch: the list admits scan_list_target_works rows per batch of a
+    // series (displayRows), so the rows of earlier «Найти ещё» batches never fill it (device round air9, 19.11: a
+    // higher-tier provider was given back as list_full in every later batch and offered again forever).
     int workingBelowTier(int tier) const
     {
         int n = 0;
         for (const Row &r : m_rows)
-            if (!r.cached && scanClassWorking(r.base) && rowVerified(r) && r.tier < tier)
+            if (!r.cached && scanClassWorking(r.base) && rowVerified(r) && r.tier < tier && rowBatch(r) == qMax(1, m_batch))
                 ++n;
         return n;
     }
@@ -3730,6 +3775,7 @@ private:
                 // Connected, but not counted as verified until the sized check through the tunnel (F2).
                 v.verified = false;
                 v.notVerifiedReason = QStringLiteral("live_unverified");
+                v.liveChecking = liveProofPending(r.id);
                 v.bars = scanSpeedBars(v.speed);
             }
             if (m_tapFailed.contains(r.id)) {
@@ -4177,7 +4223,10 @@ inline QJsonObject scanRowViewToJson(const ScanRowView &r)
     if (!r.tappable) flags << QStringLiteral("not_tappable");
     if (r.verifying) flags << QStringLiteral("verifying");
     if (r.current) flags << QStringLiteral("current");
-    if (!r.verified) flags << (r.current ? QStringLiteral("live_unverified") : QStringLiteral("unverified"));
+    // «проверяем загрузку…» only while the check runs (device round air7: a row connected outside a scan waited for
+    // a check nobody had asked for, 15+ minutes); an unproven connection with no check is plain «Подключено»
+    if (!r.verified && (!r.current || r.liveChecking))
+        flags << (r.current ? QStringLiteral("live_unverified") : QStringLiteral("unverified"));
     if (r.crowdWorks) flags << QStringLiteral("crowd");
     o.insert(QStringLiteral("flags"), flags);
     return o;
