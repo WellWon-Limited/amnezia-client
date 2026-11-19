@@ -2951,11 +2951,14 @@ private:
     }
 
     // Working rows per tier among fresh rows (for the list-target rule of lower tiers).
+    // The list's fill below a tier (D9) in THIS batch: the list admits scan_list_target_works rows per batch of a
+    // series (displayRows), so the rows of earlier «Найти ещё» batches never fill it (device round air9, 19.11: a
+    // higher-tier provider was given back as list_full in every later batch and offered again forever).
     int workingBelowTier(int tier) const
     {
         int n = 0;
         for (const Row &r : m_rows)
-            if (!r.cached && scanClassWorking(r.base) && rowVerified(r) && r.tier < tier)
+            if (!r.cached && scanClassWorking(r.base) && rowVerified(r) && r.tier < tier && rowBatch(r) == qMax(1, m_batch))
                 ++n;
         return n;
     }

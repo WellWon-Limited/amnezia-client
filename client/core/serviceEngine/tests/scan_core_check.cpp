@@ -4017,6 +4017,48 @@ static void liveProofHasAnEnd()
     }
 }
 
+static void listFullPerBatch()
+{
+    // Device round air9 (19.11), «Германия», «Найти ещё»: a provider of a higher tier was granted its seat and given
+    // back at once (list_full) in every later batch - the list's fill was counted over the whole series while the
+    // list admits scan_list_target_works rows PER BATCH; the row never got a verdict, was offered again, forever.
+    World w = baseWorld("list_batch", hostMac(), ScanNetKind::Wifi);
+    w.numbers.insert(QStringLiteral("scan_list_target_works"), 1);
+    w.numbers.insert(QStringLiteral("scan_stop_works"), 1);
+    ScanMachine m(w.caps);
+    m.opened(openOf(w, QString(), false), kT0);
+    const ScanStep first = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+    const ScanAction *st = first.find(ScanActionKind::StartHostScan);
+    CHECK(st && !st->candidates.isEmpty());
+    if (!st || st->candidates.isEmpty())
+        return;
+    ScanProbeFacts f = goodData();
+    f.id = st->candidates.at(0).id; // an own row (tier 0) works: batch 1's list is full
+    f.egressNode = f.id.section(QLatin1Char(':'), 0, 0);
+    m.hostProgress(progressOf(m, {f}), kT0 + 900);
+    m.tick(kT0 + 50 + 8100);
+    CHECK(!m.view(kT0 + 8200).scanning);
+    m.moreTapped(QString(), kT0 + 40000);
+    const ScanStep ms = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 40050);
+    const ScanAction *rc = ms.find(ScanActionKind::RequestCandidates);
+    CHECK(rc != nullptr);
+    if (!rc)
+        return;
+    ScanManifestView mv;
+    scanManifestViewFromJson(manifestBody(w), mv);
+    ScanCandidatesView cv;
+    cv.exhausted = true;
+    for (const ScanManifestUpstream &u : mv.upstream)
+        if (upstreamNodeIdFor(u.profileId) == up(1))
+            cv.upstream << u;
+    CHECK(cv.upstream.size() == 1);
+    const ScanStep cs = m.candidatesReady(rc->requestId, cv, 4000, kT0 + 40100);
+    const ScanAction *b = cs.find(ScanActionKind::RequestProbeBatch);
+    CHECK(b && b->ids.contains(up(1)));
+    const ScanStep g = m.probeLeaseGranted(up(1), ScanAccess(), kT0 + 40200);
+    CHECK(g.has(ScanActionKind::AddHostCandidates)); // the new batch's list is empty: the provider is probed
+}
+
 static void rowsAfter17Nov()
 {
     // the manifest's `kind`: absent = Unspecified, unknown = auto
@@ -4359,6 +4401,7 @@ int main(int argc, char **argv)
     countrylessRows();
     refusedEndsScope();
     liveProofHasAnEnd();
+    listFullPerBatch();
     xrayBurst();
     findMore();
     findMoreAppends();
