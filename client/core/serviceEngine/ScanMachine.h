@@ -96,7 +96,8 @@
 //    the scan, which has its reservation. Refused: no_seat / rate_limited / transport -> «Не проверено»
 //    (never «Не работает»); disabled / not_entitled / over_quota / lease_gone -> dropped. Seats asked go to
 //    the Doctor summary (seats_requested, contract 1.7.0) and lastStats().
-//  - Rows: at most scan_list_target_works verified rows (the live connection, the connecting row and rows
+//  - Rows («Найти ещё» series: per batch, the batches in their order - rowBatch): at most scan_list_target_works
+//    verified rows (the live connection, the connecting row and rows
 //    whose connect failed always kept; the rest admitted by tier first, fresh before cached, then speed),
 //    shown by speed class (fast, medium, slow), then ms, then tier, rank, id - a total order, so a row moves
 //    only when its own facts change; the live connection sits where its live ms puts it (artboard). Then
@@ -585,6 +586,9 @@ struct ScanView {
     int batch = 0;
     QString moreCountry;             // the country of the running / last continuation ("" = whole pool)
     QString moreState;               // view.more.state: available | running | exhausted ("" = none yet)
+    QString moreBlocked;             // view.more.blocked: why «Найти ещё» cannot run now ("" = it can; "budget" =
+                                     // the cellular hour, moreRetryMin = view.more.retry_min)
+    int moreRetryMin = 0;
     QString netRadio;                // view.net_radio: the cellular radio generation ("" = unknown / not cellular)
 };
 
@@ -815,21 +819,18 @@ public:
 
     // «Найти ещё» (the continuation): the next batch over the whole pool on this network - every candidate this
     // network has not judged yet (a row with a verdict, a failure; «Не проверено» rows are tried again), restricted
-    // to one country when `country` is given (a country scan). Rows already found stay fresh; the batch stops at
-    // scan_stop_works NEW working rows, scan_stop_ms or the byte budget (unchanged). The manual cooldown does not
-    // apply (other candidates). A network that changed since the last scan, or no finished scan yet, runs an
-    // ordinary scan (restricted to the country when given). Nothing left: the scan ends at once,
-    // nothing_to_probe, and moreAvailable stays false - the «nothing more» signal of the view.
+    // to one country when `country` is given (a country scan). Rows already found stay fresh and in their places,
+    // the new batch's rows join after them; the batch stops at scan_stop_works NEW working rows, scan_stop_ms or
+    // the byte budget (unchanged). The manual cooldown of «Повторить» does not apply: «Найти ещё» probes other
+    // candidates, not the same ones again (owner, 19.11). Its one gate is moreBlockedBy(): a reason the view
+    // shows on the button (view.more.blocked), never a silent no-op. A network that changed since the last scan,
+    // or no finished scan yet, runs an ordinary scan (restricted to the country when given). Nothing left: the
+    // scan ends at once, nothing_to_probe, and moreAvailable stays false - the «nothing more» signal of the view.
     ScanStep moreTapped(const QString &country, qint64 now)
     {
         now = clock(now);
         ScanStep s;
-        if (scanPhaseScanning(m_phase)) {
-            finishStep(s, now);
-            return s;
-        }
-        // The normal rules apply (UI spec 18.11): the manual cooldown and the budget (beginScan) hold a batch too.
-        if (now < m_cooldownUntil) {
+        if (scanPhaseScanning(m_phase) || !moreBlockedBy(now).isEmpty()) {
             finishStep(s, now);
             return s;
         }
@@ -1004,9 +1005,16 @@ public:
             m_candReqId.clear();
         s.actions << appRequestDone(requestId, apiBytes, now).actions;
         if (current) {
+            // A batch with nothing outside the `seen` it was asked with cannot bring a new row: the scope is done,
+            // whatever its `exhausted` says (the client never offers the same rows again under «Найти ещё»).
+            int fresh = 0;
+            for (const ScanManifestNode &n : c.nodes)
+                fresh += m_candSeen.contains(n.nodeId) ? 0 : 1;
+            for (const ScanManifestUpstream &u : c.upstream)
+                fresh += m_candSeen.contains(upstreamNodeIdFor(u.profileId)) ? 0 : 1;
             m_serverBatch = ServerBatch::Yes;
             m_fromServer = true;
-            m_serverExhausted = c.exhausted;
+            m_serverExhausted = c.exhausted || fresh == 0;
             m_manifest.manifest.nodes = c.nodes;
             m_manifest.manifest.upstream = c.upstream;
             startHost(now, s);
@@ -1689,6 +1697,11 @@ public:
                       : !m_completed  ? QString()
                       : m_moreAvailable ? QStringLiteral("available")
                                         : QStringLiteral("exhausted");
+        if (v.moreState == QLatin1String("available")) {
+            v.moreBlocked = moreBlockedBy(now);
+            if (!v.moreBlocked.isEmpty())
+                v.moreRetryMin = scanRetryMinutes(budgetBlocked(now).retryInMs);
+        }
         v.netRadio = m_net.kind == ScanNetKind::Cellular ? m_net.radio : QString();
         v.bar.scopeCountries = scopeList();
         v.bar.scopeWhitelist = m_poolWhitelist;
@@ -1973,9 +1986,22 @@ private:
         QString fingerprint;       // weak local fingerprint of a CACHED row's network
         QString evidence;          // "exclusion" when proven by exclusion (plan v2.2)
         quint64 arrival = 0;
+        int batch = 0;             // the batch of this series («Найти ещё») that made the row fresh; 0 = none yet
     };
 
     bool rowVerified(const Row &r) const { return !r.fromLive || r.liveVerified; }
+
+    // A row becomes fresh evidence of this scan: its arrival and the batch of the series it joins.
+    void stampArrival(Row &r)
+    {
+        r.arrival = ++m_arrival;
+        r.batch = m_batch;
+    }
+
+    // The batch a row is shown in (displayRows): a series' batches follow each other - the rows of the batches
+    // before keep their places and their order, a new batch's rows join after them. A cached row, and a fresh
+    // row that no batch of this series made (the live connection before the first scan), go with the newest.
+    int rowBatch(const Row &r) const { return r.cached || r.batch < 1 ? qMax(1, m_batch) : r.batch; }
 
     struct Unverified {
         ScanCandidate c;
@@ -2082,6 +2108,13 @@ private:
     // The stamp of CURRENT evidence: the strict generation tuple's hash and this scan's token (the scan id).
     QString currentStamp() const { return m_net.generation() + QLatin1Char('|') + m_scanId; }
 
+    // The one gate of «Найти ещё» (moreTapped and the view's more.blocked read it): "" = a batch may start now.
+    // Only real limits hold it - the cellular hour; the re-scan cooldown never does.
+    QString moreBlockedBy(qint64 now) const
+    {
+        return budgetBlocked(now).hourly ? QStringLiteral("budget") : QString();
+    }
+
     ScanBudgetDecision budgetBlocked(qint64 now) const
     {
         if (m_net.kind != ScanNetKind::Cellular && m_manifest.manifest.deviceBytesPerHour <= 0) {
@@ -2183,7 +2216,7 @@ private:
                 r.liveVerified = false;
                 r.generation = m_net.generation();
                 r.fingerprint = m_net.fingerprint;
-                r.arrival = ++m_arrival;
+                stampArrival(r);
                 for (const Cand &x : m_cands)
                     if (x.c.id == c.nodeId)
                         r.crowdWorks = x.c.crowdWorks;
@@ -2195,7 +2228,7 @@ private:
                     r.cached = false;
                     r.fromLive = true;
                     r.liveVerified = false; // a cached verdict is not current evidence
-                    r.arrival = ++m_arrival;
+                    stampArrival(r);
                 }
                 r.generation = m_net.generation();
                 r.fingerprint = m_net.fingerprint;
@@ -2462,6 +2495,9 @@ private:
             m_worksBase = 0;
         }
         ++m_batch;
+        if (m_batch == 1)
+            for (Row &r : m_rows)
+                r.batch = 1; // a new series: what stays on the screen belongs to its first batch
         m_moreAvailable = false;
         m_cands.clear();
         m_unverified.clear();
@@ -2608,6 +2644,14 @@ private:
         in.awgProbeIpKnown = m_manifest.awgProbeIpKnown;
         in.awgAddressKnown = m_manifest.awgAddressKnown;
         const ScanPlan plan = buildScanPlan(in);
+        // «Найти ещё» never offers again what this series already put on the screen or cannot probe on this host:
+        // the «Не проверено» rows of the host's own limits and the absent ones join the judged rows in `seen` /
+        // the skip set. A scope reason (another country, the white lists) is not «seen»: another scope may offer it.
+        for (const ScanCandidate &c : plan.orderOnly)
+            m_shownNet.insert(c.id);
+        for (const ScanPlanExclusion &x : plan.excluded)
+            if (x.reason != QLatin1String("country") && x.reason != QLatin1String("scope") && x.reason != QLatin1String("shown"))
+                m_shownNet.insert(x.id);
         m_planRemaining = m_fromServer ? (m_serverExhausted ? 0 : 1) : plan.remaining;
         m_planCandidates = plan.probe.size() + plan.orderOnly.size();
         m_manifestRevision = m_manifest.manifest.upstreamRevision;
@@ -2964,7 +3008,7 @@ private:
             r.generation = m_scanNet.generation();
             r.fingerprint = m_scanNet.fingerprint;
             if (r.cached || ri < 0)
-                r.arrival = ++m_arrival;
+                stampArrival(r);
             r.cached = false;
             if (ri >= 0)
                 m_rows[ri] = r;
@@ -3667,7 +3711,7 @@ private:
             r.generation = m_scanNet.generation();
             r.fingerprint = m_scanNet.fingerprint;
             r.evidence = QStringLiteral("exclusion");
-            r.arrival = ++m_arrival;
+            stampArrival(r);
             if (ri >= 0)
                 m_rows[ri] = r;
             else
@@ -3866,6 +3910,7 @@ private:
             int sort;
             bool forced;
             bool cached;
+            int batch;
         };
         QList<Item> verified;
         for (const Row &r : m_rows) {
@@ -3917,10 +3962,14 @@ private:
             it.sort = r.sortMs;
             it.forced = isCurrent || r.id == m_connectingId || m_tapFailed.contains(r.id);
             it.cached = r.cached;
+            it.batch = rowBatch(r);
             verified << it;
         }
-        // Admission: forced rows, then tier first, fresh before cached, speed, ms.
+        // Admission, per batch of the series («Найти ещё» adds its rows, never replaces them): forced rows, then
+        // tier first, fresh before cached, speed, ms - at most the cap per batch.
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
+            if (a.batch != b.batch)
+                return a.batch < b.batch;
             if (a.forced != b.forced)
                 return a.forced;
             if (a.tier != b.tier)
@@ -3930,9 +3979,20 @@ private:
             return displayLess(a.v, a.tier, a.rank, b.v, b.tier, b.rank, a.sort, b.sort);
         });
         const int cap = qMax(1, m_t.listTargetWorks);
-        while (verified.size() > cap)
-            verified.removeLast();
+        QHash<int, int> admitted;
+        for (int i = 0; i < verified.size();) {
+            int &n = admitted[verified.at(i).batch];
+            if (n >= cap) {
+                verified.removeAt(i);
+                continue;
+            }
+            ++n;
+            ++i;
+        }
+        // Shown: the batches in their order, each by speed - a row of an earlier batch never moves for a new one.
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
+            if (a.batch != b.batch)
+                return a.batch < b.batch;
             return displayLess(a.v, a.tier, a.rank, b.v, b.tier, b.rank, a.sort, b.sort);
         });
         QList<ScanRowView> out;
@@ -3941,7 +4001,7 @@ private:
             out << it.v;
             ids.insert(it.v.id);
         }
-        if (out.size() < cap) {
+        if (admitted.value(qMax(1, m_batch)) < cap) {
             int n = 0;
             for (const Unverified &u : m_unverified) {
                 if (n >= m_t.unverifiedRowsMax)
@@ -4175,6 +4235,7 @@ private:
     enum class ServerBatch { Unknown, Yes, No };
     ServerBatch m_serverBatch = ServerBatch::Unknown; // /v1/scan/candidates answered / refused this session
     QString m_candReqId;
+    QSet<QString> m_candSeen;        // the `seen` of that request
     bool m_fromServer = false;       // this scan probes the server's batch
     bool m_serverExhausted = false;
 
@@ -4199,6 +4260,7 @@ private:
             return;
         }
         m_candReqId = a.requestId;
+        m_candSeen = QSet<QString>(a.ids.begin(), a.ids.end());
         s.actions << a;
     }
     bool m_completed = false;
@@ -4441,9 +4503,14 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     o.insert(QStringLiteral("more_available"), v.moreAvailable);
     o.insert(QStringLiteral("batch"), v.batch);
     o.insert(QStringLiteral("more_country"), v.moreCountry);
-    if (!v.moreState.isEmpty())
-        o.insert(QStringLiteral("more"), QJsonObject{{QStringLiteral("state"), v.moreState}, {QStringLiteral("batch"), v.batch},
-                                                     {QStringLiteral("country"), v.moreCountry}});
+    if (!v.moreState.isEmpty()) {
+        QJsonObject more{{QStringLiteral("state"), v.moreState}, {QStringLiteral("batch"), v.batch}, {QStringLiteral("country"), v.moreCountry}};
+        if (!v.moreBlocked.isEmpty()) {
+            more.insert(QStringLiteral("blocked"), v.moreBlocked);
+            more.insert(QStringLiteral("retry_min"), v.moreRetryMin);
+        }
+        o.insert(QStringLiteral("more"), more);
+    }
     if (!v.netRadio.isEmpty())
         o.insert(QStringLiteral("net_radio"), v.netRadio);
     QJsonObject card;

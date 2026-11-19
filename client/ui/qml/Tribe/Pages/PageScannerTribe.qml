@@ -606,6 +606,8 @@ PageType {
                     id: moreBox
                     readonly property string st: (root.view.more && root.view.more.state) ? String(root.view.more.state) : ""
                     readonly property bool canAsk: root.hasScanner && typeof TribeScanner.findMore === "function"
+                    // the engine's one gate (view.more.blocked): a limit is said on the button, never a dead tap
+                    readonly property string blocked: (root.view.more && root.view.more.blocked) ? String(root.view.more.blocked) : ""
                     visible: !root.blocked && rowsModel.count > 0 && (st === "available" || st === "running" || st === "exhausted")
                     width: parent.width
                     height: st === "exhausted" ? moreDone.implicitHeight + Theme.space.sm : moreBtn.implicitHeight + Theme.space.sm
@@ -616,8 +618,10 @@ PageType {
                         width: parent.width
                         variant: "glass"
                         strokeIcon: moreBox.st === "running" ? "" : "radar"
-                        text: moreBox.st === "running" ? ScanTexts.moreRunning : ScanTexts.more
-                        enabled: moreBox.st === "available" && moreBox.canAsk
+                        text: moreBox.st === "running" ? ScanTexts.moreRunning
+                              : moreBox.blocked === "budget" ? ScanTexts.moreInMin.arg(root.view.more.retry_min || 1)
+                              : ScanTexts.more
+                        enabled: moreBox.st === "available" && moreBox.blocked === "" && moreBox.canAsk
                         onClicked: { Haptic.play("light"); TribeScanner.findMore() }
                     }
                     Text {

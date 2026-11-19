@@ -133,6 +133,7 @@ QtObject {
     // (waits for bar.scope_countries + empty.scope_cc)
     readonly property string more: qsTr("Найти ещё")                                       // button under the list, a finished scan
     readonly property string moreRunning: qsTr("Ищем ещё…")                                // the same button while the next batch runs
+    readonly property string moreInMin: qsTr("Найти ещё через %1 мин")                     // the same button, disabled: the cellular hour's limit (view.more.blocked "budget"; the bar says hourLimit)
     readonly property string moreExhausted: qsTr("Больше доступных нод в этой сети нет")   // replaces the button: nothing left to check
     readonly property string scanScope: qsTr("Сканировать")                               // bar button: a country chosen that the shown result does not cover
     readonly property string emptyScopeTitle: qsTr("%1: доступных нод сейчас нет")         // empty result of a country scan (%1 = the country)

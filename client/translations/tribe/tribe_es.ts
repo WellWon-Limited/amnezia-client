@@ -2175,12 +2175,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+74"/>
+        <location line="+75"/>
         <source>Отправляем отчёт…</source>
         <translation>Enviando el informe…</translation>
     </message>
     <message>
-        <location line="-67"/>
+        <location line="-68"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>Ahora todas las plazas están ocupadas: conectando el siguiente servidor</translation>
     </message>
@@ -2326,6 +2326,11 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
+        <source>Найти ещё через %1 мин</source>
+        <translation>Buscar más en %1 min</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Больше доступных нод в этой сети нет</source>
         <translation>No hay más nodos disponibles en esta red</translation>
     </message>
@@ -2365,7 +2370,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Hasta 20 segundos: el informe llegará al chat</translation>
     </message>
     <message>
-        <location line="-30"/>
+        <location line="-31"/>
         <source>Запустить службу</source>
         <translation>Iniciar el servicio</translation>
     </message>
@@ -3091,7 +3096,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4175"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4276"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3191,7 +3196,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-2953"/>
+        <location line="-3026"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3241,7 +3246,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Servidor actual</translation>
     </message>
     <message>
-        <location line="+371"/>
+        <location line="+375"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No hay una suscripción activa. Consigue una para conectarte.</translation>
     </message>
@@ -3256,7 +3261,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>El modo de conexión ahora es «Auto» para conectar el servidor elegido</translation>
     </message>
     <message>
-        <location line="+111"/>
+        <location line="+157"/>
         <source>«%1» в этой сети не работает — подключено через другой сервер</source>
         <translation>«%1» no funciona en esta red: conectado mediante otro servidor</translation>
     </message>
@@ -3276,7 +3281,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>«%1» no funcionó hace poco en esta red: conectado mediante «%2»</translation>
     </message>
     <message>
-        <location line="+10"/>
+        <location line="+17"/>
         <source>Выбранный сервер сейчас не работает в этой сети — выберите другой или «Авто»</source>
         <translation>El servidor elegido no funciona ahora en esta red: elija otro o «Auto»</translation>
     </message>
@@ -3287,12 +3292,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3796"/>
+        <location line="+3824"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-3793"/>
+        <location line="-3821"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
     </message>
@@ -3302,7 +3307,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se encontró ningún servidor que funcione en esta red: revise la red e inténtelo de nuevo</translation>
     </message>
     <message>
-        <location line="+483"/>
+        <location line="+495"/>
         <source>Отправляем…</source>
         <translation>Enviando…</translation>
     </message>
@@ -3317,7 +3322,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Grabando, enviado a las %1</translation>
     </message>
     <message>
-        <location line="+1124"/>
+        <location line="+1128"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>Este informe ya se ha entregado</translation>
     </message>
@@ -3408,7 +3413,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo instalar el servicio VPN</translation>
     </message>
     <message>
-        <location line="+481"/>
+        <location line="+493"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation>No se pudo desactivar la VPN. Inténtalo de nuevo o desactívala en los Ajustes de iOS.</translation>
     </message>
@@ -3464,12 +3469,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
     <message>
-        <location line="+807"/>
+        <location line="+809"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>
     <message>
-        <location line="+603"/>
+        <location line="+629"/>
         <source>Введите код доступа</source>
         <translation>Introduce tu código de acceso</translation>
     </message>

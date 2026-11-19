@@ -3506,7 +3506,11 @@ static void findMore()
     CHECK(scanViewToJson(v).value(QStringLiteral("more_available")).toBool() && scanViewToJson(v).value(QStringLiteral("batch")).toInt() == 1);
 
     // batch 2: the proven row stays fresh, its candidate is not probed again; the stop counts the new rows only
-    CHECK(m.moreTapped(QString(), kT0 + 9000).actions.isEmpty() && m.view(kT0 + 9000).moreState == QLatin1String("available")); // the cooldown holds
+    {
+        ScanMachine early = m; // the re-scan cooldown runs (owner 19.11): «Найти ещё» is not held by it
+        CHECK(early.view(kT0 + 9000).bar.button == ScanBarButton::RetryInSeconds && early.view(kT0 + 9000).moreBlocked.isEmpty());
+        CHECK(early.moreTapped(QString(), kT0 + 9000).has(ScanActionKind::RequestManifest));
+    }
     CHECK(m.moreTapped(QString(), kT0 + 31000).has(ScanActionKind::RequestManifest));
     const QList<ScanCandidate> second = candidatesOf(afterManifest(m, kT0 + 31050));
     bool skipped = !second.isEmpty();
@@ -3601,6 +3605,122 @@ static void findMore()
     CHECK(rd.view(kT0 + 10).netRadio == QLatin1String("5g"));
 }
 
+// «Найти ещё» on the owner's iPhone (19.11): (a) a dead button while the re-scan countdown ran - the cooldown held it
+// silently; now only a real limit holds it and the view names it; (b) a second batch replaced the list - the list
+// cap (scan_list_target_works) applied to the whole series and re-sorted it by speed; now each batch has its own
+// cap, the rows of the batches before keep their places and the new rows join after them; `seen` carries what the
+// host cannot probe; a server batch of rows already seen ends the series instead of offering it again.
+static void findMoreAppends()
+{
+    World w = baseWorld("more_append", hostMac(), ScanNetKind::Wifi);
+    w.nodes = ownOnly(w.nodes);
+    w.caps.maxAwgConcurrent = 0; // this host cannot probe AmneziaWG: those nodes are absent ("awg_no_host")
+    w.numbers.insert(QStringLiteral("scan_stop_works"), 1);
+    w.numbers.insert(QStringLiteral("scan_list_target_works"), 1);
+    const auto actionOf = [](const ScanStep &s, ScanActionKind k) {
+        for (const ScanAction &a : s.actions)
+            if (a.kind == k)
+                return a;
+        return ScanAction();
+    };
+    const auto works = [](const QString &id, int rtt) {
+        ScanProbeFacts f = goodData(rtt);
+        f.id = id;
+        f.egressNode = id.section(QLatin1Char(':'), 0, 0);
+        return f;
+    };
+    const auto ids = [](const ScanView &v) {
+        QStringList out;
+        for (const ScanRowView &r : v.rows)
+            if (r.verified)
+                out << r.id;
+        return out;
+    };
+    ScanMachine m(w.caps);
+    m.opened(openOf(w, QString(), false), kT0);
+    const ScanAction s1 = actionOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50), ScanActionKind::StartHostScan);
+    CHECK(s1.candidates.size() >= 3);
+    if (s1.candidates.size() < 3)
+        return;
+    bool awgProbed = false;
+    for (const ScanCandidate &c : s1.candidates)
+        awgProbed = awgProbed || c.transport == ScanTransport::Awg;
+    CHECK(!awgProbed);
+    const QString a = s1.candidates.at(0).id;
+    m.hostProgress(progressOf(m, {works(a, 900)}), kT0 + 900); // a medium row
+    m.tick(kT0 + 50 + 8000);
+    ScanView v = m.view(kT0 + 8100);
+    CHECK(!v.scanning && ids(v) == QStringList{a} && v.moreState == QLatin1String("available"));
+
+    // (a) inside the re-scan cooldown: «Повторить через N с», and «Найти ещё» starts at once
+    CHECK(v.bar.button == ScanBarButton::RetryInSeconds && v.moreBlocked.isEmpty());
+    const ScanStep more = m.moreTapped(QString(), kT0 + 9000);
+    CHECK(more.has(ScanActionKind::RequestManifest));
+    const ScanStep ms = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 9050);
+    const ScanAction rc = actionOf(ms, ScanActionKind::RequestCandidates);
+    // `seen`: the judged row and the nodes this host cannot probe (own AmneziaWG "1", "2")
+    CHECK(!rc.requestId.isEmpty() && rc.ids.contains(a) && rc.ids.contains(QStringLiteral("1")) && rc.ids.contains(QStringLiteral("2")));
+    // an older server: the device's own next batch, without what was seen
+    const ScanAction s2 = actionOf(m.candidatesUnavailable(rc.requestId, QStringLiteral("unsupported"), 300, kT0 + 9100),
+                                   ScanActionKind::StartHostScan);
+    CHECK(!s2.candidates.isEmpty());
+    if (s2.candidates.isEmpty())
+        return;
+    for (const ScanCandidate &c : s2.candidates)
+        CHECK(c.id != a);
+    const QString b = s2.candidates.at(0).id;
+    m.hostProgress(progressOf(m, {works(b, 60)}), kT0 + 9600); // a FAST row: it must not jump over the first batch
+    v = m.view(kT0 + 9700);
+    CHECK(ids(v) == (QStringList{a, b})); // (b) appended while the batch runs
+    m.tick(kT0 + 9100 + 8000);
+    v = m.view(kT0 + 17200);
+    CHECK(!v.scanning && v.batch == 2 && ids(v) == (QStringList{a, b}) && v.verifiedCount == 2); // (b) 1 + 1, in place
+
+    // (a) the cellular hour used up: the button says why, a tap does nothing
+    {
+        QJsonArray ledger; // far past the cellular hour's cap, spent after the first batch
+        ledger << QJsonObject{{QStringLiteral("at_ms"), double(kT0 + 10000)}, {QStringLiteral("bytes"), double(512LL * 1024 * 1024)},
+                              {QStringLiteral("cellular"), true}};
+        World wc = w;
+        wc.net = scanNet(ScanNetKind::Cellular, QStringLiteral("cell:250-02:4g"));
+        ScanMachine mc(wc.caps);
+        mc.opened(openOf(wc, QString(), false), kT0);
+        const ScanAction c1 = actionOf(mc.manifestReady(manifestInputFrom(manifestArgs(wc)), kT0 + 50), ScanActionKind::StartHostScan);
+        if (!c1.candidates.isEmpty())
+            mc.hostProgress(progressOf(mc, {works(c1.candidates.at(0).id, 900)}), kT0 + 900);
+        mc.tick(kT0 + 50 + 8000);
+        CHECK(mc.view(kT0 + 8100).moreState == QLatin1String("available") && mc.view(kT0 + 8100).moreBlocked.isEmpty());
+        mc.restoreBudget(ledger);
+        const ScanView bv = mc.view(kT0 + 40000);
+        CHECK(bv.moreBlocked == QLatin1String("budget") && bv.moreRetryMin > 0);
+        const QJsonObject mj = scanViewToJson(bv).value(QStringLiteral("more")).toObject();
+        CHECK(mj.value(QStringLiteral("blocked")).toString() == QLatin1String("budget") && mj.value(QStringLiteral("retry_min")).toInt() > 0);
+        CHECK(!mc.moreTapped(QString(), kT0 + 40000).has(ScanActionKind::RequestManifest));
+        CHECK(!scanViewToJson(m.view(kT0 + 40000)).value(QStringLiteral("more")).toObject().contains(QStringLiteral("blocked")));
+    }
+
+    // a server that answers «Найти ещё» with rows the request already listed in `seen`: nothing new - exhausted
+    ScanMachine sv(w.caps);
+    sv.opened(openOf(w, QString(), false), kT0);
+    const ScanAction t1 = actionOf(sv.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50), ScanActionKind::StartHostScan);
+    if (t1.candidates.isEmpty())
+        return;
+    sv.hostProgress(progressOf(sv, {works(t1.candidates.at(0).id, 900)}), kT0 + 900);
+    sv.tick(kT0 + 50 + 8000);
+    sv.moreTapped(QString(), kT0 + 9000);
+    const ScanAction rs = actionOf(sv.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 9050), ScanActionKind::RequestCandidates);
+    ScanManifestView mv;
+    scanManifestViewFromJson(manifestBody(w), mv);
+    ScanCandidatesView cv;
+    cv.exhausted = false;
+    for (const ScanManifestNode &n : mv.nodes)
+        if (rs.ids.contains(n.nodeId))
+            cv.nodes << n;
+    CHECK(!cv.nodes.isEmpty());
+    sv.candidatesReady(rs.requestId, cv, 2000, kT0 + 9100);
+    const ScanView ev = sv.view(kT0 + 9200);
+    CHECK(!ev.scanning && ev.moreState == QLatin1String("exhausted") && ids(ev).size() == 1);
+}
 
 // The server's side of the scope and «Найти ещё» (contract 1.14.0): /v1/scan/pool feeds the scope menu,
 // /v1/scan/candidates gives the batch (score order across tiers, `seen`, `exhausted`); an older server falls back.
@@ -3955,6 +4075,7 @@ int main(int argc, char **argv)
     cooldownRule();
     rowsAfter17Nov();
     findMore();
+    findMoreAppends();
     serverBatches();
     overruns();
     properties();
