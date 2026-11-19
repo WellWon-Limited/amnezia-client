@@ -10,6 +10,13 @@ import ".."   // Theme, ScanTexts, Haptic
 // (chipSelected + accent border) with the «Авто» card's check circle 20. It opens upwards, `menuLift` above the
 // button top (the bar sets it so the menu bottom sits 4 px under the bar's top edge). The menu is an overlay:
 // the UI-DESIGN §8a.1 drawerDepth contract (Back / Escape closes it, not the page).
+// Long pools (owner, iPhone Air 19.11: 20+ countries): the list scrolls inside the panel (artboard .mn
+// max-height 372 + overflow-y auto - the same Flickable pattern as TribeAnnouncementSheet), «Все страны» is its
+// first row. A row is chosen by a TAP only (TapHandler: a finger that moves past the drag threshold is a scroll,
+// never a choice, also at the list's ends where the Flickable has nothing to take), and the rows are rebuilt only
+// when the countries really change - not on every view update (the cooldown re-emits the view every second, and
+// a rebuilt row drops the finger that is on it). The panel closes only on a choice, the button, Back, or a tap
+// outside (the page's catcher).
 Item {
     id: root
 
@@ -33,6 +40,24 @@ Item {
     function open() { panel.open() }
     function close() { panel.close(false) }
     function toggle() { if (panel.opened) panel.close(false); else panel.open() }
+
+    // The menu's rows: «Все страны» + the pool's countries. A pool entry without a country code (a provider group
+    // without a country) is not a row of its own - it would read «Все страны» a second time; its servers are in
+    // the «Все страны» count. Rebuilt only when the content changes (see the header).
+    property var entries: []
+    function rebuildEntries() {
+        const list = [{ cc: "", count: root.total }]
+        for (let i = 0; i < root.countries.length; ++i) {
+            const c = root.countries[i]
+            if (c && String(c.cc || "") !== "")
+                list.push({ cc: String(c.cc), count: Number(c.count || 0), name: String(c.name || "") })
+        }
+        if (JSON.stringify(list) !== JSON.stringify(root.entries))
+            root.entries = list
+    }
+    onCountriesChanged: rebuildEntries()
+    onTotalChanged: rebuildEntries()
+    Component.onCompleted: rebuildEntries()
 
     onEnabledChanged: if (!enabled) panel.close(false)
 
@@ -96,6 +121,13 @@ Item {
             if (opened) return
             opened = true
             depthIndex = PageController.incrementDrawerDepth()
+            // the chosen row in sight (a country far down the pool); «Все страны» or a row on the first page: the top
+            let at = 0
+            for (let i = 0; i < root.entries.length; ++i)
+                if (root.entries[i].cc === root.selected) { at = i; break }
+            const rowY = at * (Theme.scan.menuRow + menuCol.spacing)
+            menuFlick.contentY = Math.max(0, Math.min(menuFlick.contentHeight - menuFlick.height,
+                                                      rowY + Theme.scan.menuRow - menuFlick.height))
         }
         function close(viaController) {
             if (!opened) return
@@ -125,12 +157,18 @@ Item {
         border.width: 1
         border.color: Theme.color.border2
 
+        // the panel's own padding is part of the menu: a touch there neither falls through to the page's
+        // tap-outside catcher nor reaches the list under the panel
+        MouseArea { anchors.fill: parent }
+
         Flickable {
+            id: menuFlick
             anchors.fill: parent
             anchors.margins: 6
             contentHeight: menuCol.implicitHeight
             clip: contentHeight > height
             interactive: contentHeight > height
+            flickableDirection: Flickable.VerticalFlick
             boundsBehavior: Flickable.StopAtBounds
 
             Column {
@@ -138,20 +176,26 @@ Item {
                 width: parent.width
                 spacing: 2
                 Repeater {
-                    model: [{ cc: "", count: root.total }].concat(root.countries)
+                    model: root.entries
                     delegate: Rectangle {
                         id: mrow
                         required property var modelData
                         readonly property bool on: root.selected === (modelData.cc || "")
+                        function choose() {
+                            Haptic.play("selection")
+                            panel.close(false)
+                            root.chosen(mrow.modelData.cc || "")
+                        }
                         width: menuCol.width
                         height: Theme.scan.menuRow
                         radius: Theme.radius.sm
-                        color: on ? Theme.color.chipSelected : (mma.containsMouse ? Theme.color.glassStrong : "transparent")
+                        color: on ? Theme.color.chipSelected : (hover.hovered ? Theme.color.glassStrong : "transparent")
                         border.width: 1
                         border.color: on ? Theme.color.accent : "transparent"
                         Accessible.role: Accessible.RadioButton
                         Accessible.name: mrowName.text
                         Accessible.checked: on
+                        Accessible.onPressAction: mrow.choose()
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 10
@@ -195,16 +239,14 @@ Item {
                                 }
                             }
                         }
-                        MouseArea {
-                            id: mma
-                            anchors.fill: parent
-                            hoverEnabled: true
+                        HoverHandler {
+                            id: hover
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                Haptic.play("selection")
-                                panel.close(false)
-                                root.chosen(mrow.modelData.cc || "")
-                            }
+                        }
+                        // a tap, never a drag (DragThreshold): a swipe over the rows scrolls or does nothing
+                        TapHandler {
+                            gesturePolicy: TapHandler.DragThreshold
+                            onTapped: mrow.choose()
                         }
                     }
                 }

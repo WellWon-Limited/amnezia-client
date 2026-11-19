@@ -193,72 +193,82 @@ PageType {
             bars: Number(r.bars || 0), ms: r.ms === undefined ? -1 : Number(r.ms),
             fromCache: f.cache === true, dimmed: f.dimmed === true, tappable: f.not_tappable !== true,
             verifying: f.verifying === true, current: f.current === true,
-            unverified: f.unverified === true, liveUnverified: f.live_unverified === true, crowd: f.crowd === true
+            unverified: f.unverified === true, liveUnverified: f.live_unverified === true, crowd: f.crowd === true,
+            leaving: false
         }
     }
-    // Calm arrival (owner 18.11 «передёргивание при появлении вкладок нод»): while a scan runs, a row already on
-    // the screen keeps its place - a new row joins the end of its group (proven rows, then «Не проверено»), so
-    // nothing visible jumps when a faster row arrives or a figure changes. Results arrive roughly fastest-first, so
-    // the held order is already close to the speed order. The view's speed order (ScanMachine displayRows) is
-    // applied once, after the rings have collapsed, as one short move animation. false = the previous behaviour
-    // (every update re-sorted in place), kept for the side-by-side shots of the harness only.
-    readonly property bool holdOrderWhileScanning: true
-    // «Найти ещё» adds a batch the same way: its rows join the end while it runs (view.more.state "running")
+    // Calm list (owner 18.11 and 19.11 «передёргивание», iPhone Air s12: rows overlapped and slid while a scan ran).
+    // The view (ScanMachine displayRows) is re-sorted by speed at every update, so a faster result arrives ABOVE rows
+    // already shown, and it holds «Не проверено» rows only while fewer than the list cap are proven. The list here:
+    //  - a row on the screen keeps its place and its height until the list is rebuilt (page open, a scope change);
+    //    a new row joins the END; the view's order is taken only when the list starts empty;
+    //  - a «Не проверено» row (flag unverified, not the live connection) is the scan's last word, not a result:
+    //    while rows arrive (a scan or «Найти ещё» runs) it is not added; when the scan ends, those the view still
+    //    holds join the end (a row whose follow-up later proves it arrives as an ordinary row);
+    //  - a row the view drops fades out where it stands, then the rows under it close the gap together - at no
+    //    frame do two rows overlap, and nothing moves because another row arrived.
     readonly property bool moreRunning: !!view.more && view.more.state === "running"
     readonly property bool arriving: scanning || moreRunning
-    readonly property bool orderHeld: holdOrderWhileScanning && (arriving || settleOrder.running)
-    onArrivingChanged: if (!arriving && holdOrderWhileScanning) settleOrder.restart()
-    Timer {
-        id: settleOrder
-        interval: Theme.motion.reduceMotion ? 0 : Theme.motion.slow
-        onTriggered: root.syncRows()
+    onArrivingChanged: Qt.callLater(syncRows)       // the held «Не проверено» rows join when the scan ends
+    function sameItem(a, b) {
+        for (const k in a)
+            if (a[k] !== b[k]) return false
+        return true
     }
     function syncRows() {
         const src = root.scopePending ? [] : (view.rows || [])
         const vmap = src.some(r => r.transport === "awg" && r.version === undefined) ? versionMap() : {}
-        let cacheAll = src.length > 0, crowd = false, liveL = "", liveC = ""
-        const byId = {}
+        const at = {}                                   // rid -> model index of a row on the screen
+        for (let j = 0; j < rowsModel.count; ++j) {
+            const m = rowsModel.get(j)
+            if (!m.leaving) at[m.rid] = j
+        }
+        let cacheAll = true, crowd = false, liveL = "", liveC = ""
         const items = []
+        const byId = {}
         for (let i = 0; i < src.length; ++i) {
             const it = toItem(src[i], vmap)
+            if (root.arriving && it.unverified && !it.current && at[it.rid] === undefined)
+                continue                                // not a result yet: shown when the scan ends
             cacheAll = cacheAll && it.fromCache
             crowd = crowd || it.crowd
             if (it.current && liveL === "") { liveL = it.label; liveC = it.cc }
             byId[it.rid] = it
             items.push(it)
         }
-        // rows that left the view go first, so the rest only moves where it has to
-        for (let j = rowsModel.count - 1; j >= 0; --j)
-            if (byId[rowsModel.get(j).rid] === undefined) rowsModel.remove(j, 1)
-        let order = items
-        if (orderHeld && rowsModel.count > 0) {
-            const shown = {}
-            const held = []
-            for (let j = 0; j < rowsModel.count; ++j) {
-                const rid = rowsModel.get(j).rid
-                shown[rid] = true
-                held.push(byId[rid])
+        if (items.length === 0) {
+            // nothing to show (a new scope, a new network, a scan without the last result): no rows to keep calm
+            leaveTimer.stop()
+            rowsModel.clear()
+        } else {
+            let left = false
+            for (let j = rowsModel.count - 1; j >= 0; --j) {
+                const m = rowsModel.get(j)
+                if (m.leaving || byId[m.rid] !== undefined) continue
+                if (Theme.motion.reduceMotion) rowsModel.remove(j, 1)
+                else { rowsModel.setProperty(j, "leaving", true); left = true }
             }
-            for (let i = 0; i < items.length; ++i)
-                if (shown[items[i].rid] !== true) held.push(items[i])
-            const group = it => (it.unverified && !it.current) ? 1 : 0
-            order = held.filter(it => group(it) === 0).concat(held.filter(it => group(it) === 1))
-        }
-        for (let i = 0; i < order.length; ++i) {
-            const it = order[i]
-            let at = -1
-            for (let j = i; j < rowsModel.count; ++j)
-                if (rowsModel.get(j).rid === it.rid) { at = j; break }
-            if (at < 0) rowsModel.insert(i, it)
-            else {
-                if (at !== i) rowsModel.move(at, i, 1)
-                rowsModel.set(i, it)
+            for (let i = 0; i < items.length; ++i) {
+                const it = items[i]
+                const j = at[it.rid]
+                if (j === undefined) rowsModel.append(it)
+                else if (!sameItem(it, rowsModel.get(j))) rowsModel.set(j, it)
             }
+            if (left) leaveTimer.restart()
         }
-        allCache = cacheAll
+        allCache = items.length > 0 && cacheAll
         anyCrowd = crowd
         liveLabel = liveL
         liveCc = liveC
+    }
+    // the faded rows leave the model together; the rows under them then glide up into the gap (delegate y)
+    Timer {
+        id: leaveTimer
+        interval: Theme.motion.fast
+        onTriggered: {
+            for (let j = rowsModel.count - 1; j >= 0; --j)
+                if (rowsModel.get(j).leaving) rowsModel.remove(j, 1)
+        }
     }
 
     // ── rings collapse (360 ms) into the header mark, and grow back the same way on «Повторить» ──
@@ -279,12 +289,16 @@ PageType {
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
     TribeEdgeBack { onTriggered: root.goBack() }
 
-    // a tap outside the open country menu closes it
+    // a TAP outside the open country menu closes it; a swipe outside does nothing (the catcher holds the touch so
+    // the list under the menu does not scroll, and only a tap - not a drag - closes the menu)
     MouseArea {
         anchors.fill: parent
         z: 5
         visible: bar.menuOpen
-        onClicked: bar.closeMenu()
+        TapHandler {
+            gesturePolicy: TapHandler.DragThreshold
+            onTapped: bar.closeMenu()
+        }
     }
 
     // ── header ──
@@ -581,11 +595,9 @@ PageType {
                     lineHeight: 15
                     lineHeightMode: Text.FixedHeight
                 }
-                // The rows place THEMSELVES (owner 18.11 «передёргивание», harness traces): y = index x pitch, a
-                // change of place glides 220 ms, a new row fades in at its own place. Before, the Column positioned
-                // them: a new delegate was born at the top of the list and its move transition flew it down over
-                // the other rows, and every height change of the card above restarted the move animation of every
-                // row, so the rows lagged behind the card and slid over its lines.
+                // The rows place THEMSELVES: y = index x pitch. Rows only join the end (syncRows), so an index changes
+                // only when a dropped row has faded out and left the model - then the rows under it glide up together
+                // into the gap. A new row fades in at its own place, rising from one gap below (never over a row).
                 Item {
                     id: rowsBox
                     readonly property real pitch: Theme.scan.rowHeight + content.spacing
@@ -617,8 +629,12 @@ PageType {
                             ParallelAnimation {
                                 id: arrive
                                 NumberAnimation { target: rowWrap; property: "opacity"; from: 0; to: 1; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
-                                NumberAnimation { target: lift; property: "y"; from: 8; to: 0; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
+                                NumberAnimation { target: lift; property: "y"; from: content.spacing; to: 0; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                             }
+                            // dropped by the view: fades out where it stands (syncRows removes it after Theme.motion.fast)
+                            readonly property bool leaving: rowWrap.model.leaving === true
+                            onLeavingChanged: if (leaving) { arrive.stop(); leave.start() }
+                            NumberAnimation { id: leave; target: rowWrap; property: "opacity"; to: 0; duration: Theme.motion.fast; easing.type: Easing.OutCubic }
                             TribeScanRow {
                                 id: rowItem
                                 anchors.fill: parent
@@ -633,7 +649,7 @@ PageType {
                                 ms: rowWrap.model.ms
                                 cached: rowWrap.model.fromCache && root.lastResult
                                 dimmed: rowWrap.model.dimmed
-                                tappable: rowWrap.model.tappable
+                                tappable: rowWrap.model.tappable && !rowWrap.leaving
                                 verifying: rowWrap.model.verifying
                                 liveUnverified: rowWrap.model.liveUnverified
                                 unverified: rowWrap.model.unverified
