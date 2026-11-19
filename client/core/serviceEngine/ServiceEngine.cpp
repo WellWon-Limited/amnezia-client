@@ -350,7 +350,11 @@ void ServiceEngine::feedOwner(const path::AttemptEvent &ev)
     m_inOwner = true;
     while (!m_ownerQueue.isEmpty()) {
         const path::AttemptEvent e = m_ownerQueue.takeFirst();
-        applyOwnerEffects(m_owner.handle(e, ownerContext()));
+        const QList<path::AttemptEffect> effects = m_owner.handle(e, ownerContext());
+        for (quint64 a = m_stampedAttempt + 1; a <= m_owner.attempt(); ++a)
+            m_attemptEpochs.insert(a, m_intentEpoch); // H3: an attempt begun by this event serves the intent in force
+        m_stampedAttempt = qMax(m_stampedAttempt, m_owner.attempt());
+        applyOwnerEffects(effects);
     }
     m_inOwner = false;
     if (std::exchange(m_ownerQueueRaceStop, false))
@@ -453,6 +457,8 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                                .arg(r.connected ? r.path.id.id : QStringLiteral("-"))
                                .arg(r.paths).arg(r.elapsedMs).arg(int(r.fallbackNotice)));
             m_lastResult = r;
+            m_lastResult->intentEpoch = m_attemptEpochs.value(r.attempt, m_intentEpoch);
+            m_attemptEpochs.remove(r.attempt);
             if (!r.connected && m_tunnel)
                 m_tunnel->startRefused(); // an attempt that ends before Connected holds no seat (G2): idempotent, no StopPath needed
             if (m_race.running()) // the attempt has its result: the spares are not needed any more
