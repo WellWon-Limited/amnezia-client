@@ -495,6 +495,9 @@ struct ScanView {
     QString moreBlocked;             // view.more.blocked: why «Найти ещё» cannot run now ("" = it can; "budget" =
                                      // the cellular hour, moreRetryMin = view.more.retry_min)
     int moreRetryMin = 0;
+    int moreUnshown = 0;             // view.more.unshown (state exhausted, a country / white-list scope): servers of the scope the
+                                     // menu counts that the list does not show - their probes failed, or they could not be
+                                     // checked here (device round 13, A6/A12: «Великобритания 32» listed 30)
     QString netRadio;                // view.net_radio: the cellular radio generation ("" = unknown / not cellular)
 };
 
@@ -1629,6 +1632,8 @@ public:
                       : !m_completed  ? QString()
                       : m_moreAvailable ? QStringLiteral("available")
                                         : QStringLiteral("exhausted");
+        if (v.moreState == QLatin1String("exhausted") && !m_scannedScope.isEmpty())
+            v.moreUnshown = unshownInScope(m_scannedScope);
         if (v.moreState == QLatin1String("available")) {
             v.moreBlocked = moreBlockedBy(now);
             if (!v.moreBlocked.isEmpty())
@@ -4376,6 +4381,25 @@ private:
     bool m_fromServer = false;       // this scan probes the server's batch
     bool m_serverExhausted = false;
 
+    // What the scope menu counts for a scope and the list does not show (the menu counts the pool's servers: a server whose
+    // probe failed here, one this host cannot probe, a refused one never reaches the list). The honest end message says
+    // how many (the menu cannot know before a scan which of them answer).
+    int unshownInScope(const QString &scope) const
+    {
+        int pool = 0;
+        if (scope == QLatin1String(kScanScopeWhitelist))
+            pool = qMax(0, m_poolWhitelist);
+        else
+            for (const ScanCountryView &c : scopeList())
+                if (c.countryCode == scope)
+                    pool += c.count;
+        int shown = 0;
+        for (const ListEntry &e : m_list)
+            if (scope == QLatin1String(kScanScopeWhitelist) ? e.row.countryCode.isEmpty() : e.row.countryCode == scope)
+                ++shown;
+        return qMax(0, pool - shown);
+    }
+
     QList<ScanCountryView> scopeList() const { return m_poolCountries.isEmpty() ? m_scopeCountries : m_poolCountries; }
 
     // A scope (a country, the white lists) or «Найти ещё» asks the server for its batch while it may answer.
@@ -4619,6 +4643,8 @@ inline QJsonObject scanViewToJson(const ScanView &v)
             more.insert(QStringLiteral("blocked"), v.moreBlocked);
             more.insert(QStringLiteral("retry_min"), v.moreRetryMin);
         }
+        if (v.moreUnshown > 0)
+            more.insert(QStringLiteral("unshown"), v.moreUnshown);
         o.insert(QStringLiteral("more"), more);
     }
     if (!v.netRadio.isEmpty())

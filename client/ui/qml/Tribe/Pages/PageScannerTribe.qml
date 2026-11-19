@@ -617,6 +617,7 @@ PageType {
                 Item {
                     id: moreBox
                     readonly property string st: (root.view.more && root.view.more.state) ? String(root.view.more.state) : ""
+                    readonly property int unshown: (root.view.more && root.view.more.unshown) ? Number(root.view.more.unshown) : 0
                     readonly property bool canAsk: root.hasScanner && typeof TribeScanner.findMore === "function"
                     // the engine's one gate (view.more.blocked): a limit is said on the button, never a dead tap
                     readonly property string limit: (root.view.more && root.view.more.blocked) ? String(root.view.more.blocked) : ""
@@ -644,8 +645,12 @@ PageType {
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.WordWrap
                         // a country scope: every server of that country was checked («Найти ещё» has nothing left)
+                        // (the menu counted more servers than the list shows: it says how many did not answer here)
                         text: root.scope !== "" && root.scope === String(root.barView.scanned_scope || "")
-                              ? ScanTexts.moreExhaustedScope.arg(bar.countryName(root.scope)) : ScanTexts.moreExhausted
+                              ? (Number(moreBox.unshown) > 0
+                                 ? ScanTexts.moreExhaustedUnshown.arg(bar.countryName(root.scope)).arg(moreBox.unshown)
+                                 : ScanTexts.moreExhaustedScope.arg(bar.countryName(root.scope)))
+                              : ScanTexts.moreExhausted
                         textFormat: Text.PlainText
                         color: Theme.color.text3
                         font.family: Theme.font.body

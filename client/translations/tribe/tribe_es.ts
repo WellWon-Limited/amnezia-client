@@ -1155,12 +1155,12 @@
     </message>
     <message>
         <location line="+1"/>
-        <location line="+521"/>
+        <location line="+535"/>
         <source>Проверяем трафик…</source>
         <translation>Comprobando el tráfico…</translation>
     </message>
     <message>
-        <location line="-519"/>
+        <location line="-533"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>El tráfico iba por fuera de la VPN: probando otra ruta</translation>
     </message>
@@ -1176,12 +1176,12 @@
     </message>
     <message>
         <location line="+3"/>
-        <location line="+512"/>
+        <location line="+526"/>
         <source>Отключаемся…</source>
         <translation>Desconectando…</translation>
     </message>
     <message>
-        <location line="-511"/>
+        <location line="-525"/>
         <source>Проверяем…</source>
         <translation>Verificando…</translation>
     </message>
@@ -1236,7 +1236,7 @@
         <translation>Servidor</translation>
     </message>
     <message>
-        <location line="+22"/>
+        <location line="+26"/>
         <source>Xray Reality</source>
         <translation>Xray Reality</translation>
     </message>
@@ -1256,7 +1256,7 @@
         <translation>Amnezia</translation>
     </message>
     <message>
-        <location line="-24"/>
+        <location line="-28"/>
         <source>Нет связи с Tribe</source>
         <translation>Sin conexión con Tribe</translation>
     </message>
@@ -1271,7 +1271,7 @@
         <translation>Selección inteligente de servidor</translation>
     </message>
     <message>
-        <location line="+34"/>
+        <location line="+37"/>
         <source>Повторяем автоматически</source>
         <translation>Reintentando automáticamente</translation>
     </message>
@@ -1281,12 +1281,12 @@
         <translation>Un momento…</translation>
     </message>
     <message>
-        <location line="-88"/>
+        <location line="-91"/>
         <source> мс</source>
         <translation> ms</translation>
     </message>
     <message>
-        <location line="+101"/>
+        <location line="+115"/>
         <source>%1 в этой сети не отвечает</source>
         <translation>%1 no responde en esta red</translation>
     </message>
@@ -1318,22 +1318,22 @@
         <translation>¿Cómo renuevo el acceso?</translation>
     </message>
     <message>
-        <location line="-141"/>
+        <location line="-151"/>
         <source>Авто</source>
         <translation>Auto</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="+15"/>
         <source>в этой сети не отвечает</source>
         <translation>no responde en esta red</translation>
     </message>
     <message>
-        <location line="+4"/>
+        <location line="-11"/>
         <source>Сервис подберёт быстрейший узел</source>
         <translation>El servicio elige el nodo más rápido</translation>
     </message>
     <message>
-        <location line="+255"/>
+        <location line="+266"/>
         <location line="+4"/>
         <source>Заменить сервер</source>
         <translation>Cambiar servidor</translation>
@@ -1344,8 +1344,8 @@
         <translation>Instalando…</translation>
     </message>
     <message>
-        <location line="-511"/>
-        <location line="+512"/>
+        <location line="-525"/>
+        <location line="+526"/>
         <source>Подключаемся…</source>
         <translation>Conectando…</translation>
     </message>
@@ -2160,12 +2160,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+86"/>
+        <location line="+87"/>
         <source>Отправляем отчёт…</source>
         <translation>Enviando el informe…</translation>
     </message>
     <message>
-        <location line="-79"/>
+        <location line="-80"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>Ahora todas las plazas están ocupadas: conectando el siguiente servidor</translation>
     </message>
@@ -2376,6 +2376,11 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
+        <source>%1: проверены все серверы. Не ответили: %2</source>
+        <translation>%1: todos los servidores comprobados. Sin respuesta: %2</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>%1: доступных нод сейчас нет</source>
         <translation>%1: no hay nodos disponibles ahora</translation>
     </message>
@@ -2410,7 +2415,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Listas blancas</translation>
     </message>
     <message>
-        <location line="-43"/>
+        <location line="-44"/>
         <source>Запустить службу</source>
         <translation>Iniciar el servicio</translation>
     </message>
@@ -3141,7 +3146,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4387"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4434"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3241,7 +3246,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-3078"/>
+        <location line="-3122"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3301,12 +3306,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo actualizar la lista de servidores. Vuelve a conectarte.</translation>
     </message>
     <message>
-        <location line="+69"/>
+        <location line="+90"/>
         <source>Режим подключения переключён на «Авто», чтобы подключить выбранный сервер</source>
         <translation>El modo de conexión ahora es «Auto» para conectar el servidor elegido</translation>
     </message>
     <message>
-        <location line="+152"/>
+        <location line="+173"/>
         <source>«%1» в этой сети не работает — подключено через другой сервер</source>
         <translation>«%1» no funciona en esta red: conectado mediante otro servidor</translation>
     </message>
@@ -3337,12 +3342,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3864"/>
+        <location line="+3877"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-3861"/>
+        <location line="-3874"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
     </message>
@@ -3372,7 +3377,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Grabando, enviado a las %1</translation>
     </message>
     <message>
-        <location line="+1128"/>
+        <location line="+1130"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>Este informe ya se ha entregado</translation>
     </message>
@@ -3453,12 +3458,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>baseline y amnezia ven el mismo egress (%1): parece que la VPN no estaba apagada durante la medición baseline</translation>
     </message>
     <message>
-        <location line="+1095"/>
+        <location line="+1105"/>
         <source>Установка службы VPN отменена</source>
         <translation>Instalación del servicio VPN cancelada</translation>
     </message>
     <message>
-        <location line="+127"/>
+        <location line="+128"/>
         <source>Не удалось установить службу VPN</source>
         <translation>No se pudo instalar el servicio VPN</translation>
     </message>
@@ -3499,8 +3504,8 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Este servidor no está disponible ahora: conectando otro</translation>
     </message>
     <message>
-        <location line="-3885"/>
-        <location line="+3897"/>
+        <location line="-3898"/>
+        <location line="+3910"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>
@@ -3515,17 +3520,17 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No hay servidores disponibles: actualice la lista de servidores</translation>
     </message>
     <message>
-        <location line="+128"/>
+        <location line="+132"/>
         <source>Недостаточно живых серверов для переключения</source>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
     <message>
-        <location line="+690"/>
+        <location line="+693"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>
     <message>
-        <location line="+646"/>
+        <location line="+651"/>
         <source>Введите код доступа</source>
         <translation>Introduce tu código de acceso</translation>
     </message>

@@ -140,6 +140,7 @@ QtObject {
     readonly property string startTitle: qsTr("Найдём, через что подключиться")          // no pool counts yet
     readonly property string startText: qsTr("Нажмите «Сканировать» — проверим серверы в этой сети.")
     readonly property string moreExhaustedScope: qsTr("%1: проверены все серверы")        // «Найти ещё» has nothing left in a country scope
+    readonly property string moreExhaustedUnshown: qsTr("%1: проверены все серверы. Не ответили: %2") // the same, when the menu counted more servers than the list shows (%2 = how many)
     readonly property string emptyScopeTitle: qsTr("%1: доступных нод сейчас нет")         // empty result of a country scan (%1 = the country)
     readonly property string emptyScopeText: qsTr("Попробуйте другую страну или проверьте все страны.") // text, the same state
     // variant B (owner decision 18.11): the check with the report lives in Support - the bar under the chat header

@@ -4226,6 +4226,37 @@ static void serverBatches()
     CHECK(actionOf(wl.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 80050), ScanActionKind::RequestCandidates).requestId.isEmpty());
 }
 
+// Device round 13, A6/A12: the menu counts the pool's servers of a scope, the list shows the ones that answered. When the
+// series is exhausted the view says how many of the menu's count the list does not show (view.more.unshown), so the end
+// message is honest; with nothing missing it says nothing.
+static void exhaustedScopeSaysWhatIsMissing()
+{
+    World w = baseWorld("unshown", hostMac(), ScanNetKind::Wifi);
+    for (int pool : {2, 7}) {
+        ScanMachine m(w.caps);
+        m.opened(openOf(w, QString(), false), kT0);
+        m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+        m.tick(kT0 + 50 + 8100);
+        m.poolReady(ScanPoolView{{{QStringLiteral("DE"), pool, 0}}, 0, 0}, kT0 + 8200);
+        m.filterChosen(QStringLiteral("DE"), kT0 + 8300);
+        m.retryTapped(kT0 + 40000);
+        const ScanStep st = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 40050);
+        ScanCandidatesView cv; // the server has nothing more of the scope than what it said
+        cv.exhausted = true;
+        for (const ScanAction &a : st.actions)
+            if (a.kind == ScanActionKind::RequestCandidates)
+                m.candidatesReady(a.requestId, cv, 500, kT0 + 40100);
+        m.tick(kT0 + 40100 + 12000);
+        const ScanView v = m.view(kT0 + 60000);
+        int shown = 0;
+        for (const ScanRowView &r : v.rows)
+            shown += r.countryCode == QLatin1String("DE") ? 1 : 0;
+        CHECK(v.moreState == QLatin1String("exhausted"));
+        CHECK(v.moreUnshown == qMax(0, pool - shown) && v.moreUnshown > 0);
+        CHECK(scanViewToJson(v).value(QStringLiteral("more")).toObject().value(QStringLiteral("unshown")).toInt() == v.moreUnshown);
+    }
+}
+
 static void countrylessRows()
 {
     // Device round air7 (19.11): a white-list row (no country) became a second «Все страны» entry of the menu.
@@ -4797,6 +4828,7 @@ int main(int argc, char **argv)
     scanStartsNewList();
     connectedFirstInEveryList();
     cachedResultKeepsEveryShownRow();
+    exhaustedScopeSaysWhatIsMissing();
     serverBatches();
     overruns();
     properties();
