@@ -1300,6 +1300,46 @@ static void scenarioHostileCellular1911()
     CHECK(s.lastTapWallMs() <= 9000); // the device took 17-24 s
 }
 
+// Device round 19.11 night (LTE, build b3381533f, empty ledger): the probes were out but none had answered when the
+// race's wait ended (dead first candidates answer only by their timeouts, the working provider waits its turn). The
+// blind leg went to node 16 - whose probe was in flight - so that probe was cancelled, the host scan was reset and
+// every other probe started again; 3 s later the next leg did the same, and the race ended with nothing proven:
+// 2 connects of 6 within 17 s. The walk now prefers a candidate nobody is probing.
+static void scenarioBlindLegBesideSlowProbes()
+{
+    const NetworkObservation lte = cell("", "lte");
+    const QString k = key(lte);
+    World w;
+    w.set(k, QStringLiteral("16"), Behaviour::noData(2000));
+    w.setProbe(k, QStringLiteral("16"), ProbeBehaviour::fail(3900));
+    w.set(k, QStringLiteral("11:xray"), Behaviour::noData(1900));
+    w.setProbe(k, QStringLiteral("11:xray"), ProbeBehaviour::fail(3900));
+    w.set(k, QStringLiteral("up:dead"), Behaviour::noData(800));
+    w.setProbe(k, QStringLiteral("up:dead"), ProbeBehaviour::fail(3900));
+    w.set(k, QStringLiteral("17"), Behaviour::works(2100, 1300, 400));
+    w.setProbe(k, QStringLiteral("17"), ProbeBehaviour::ok(3500, 30 * 1024)); // slower than the race's wait
+    w.set(k, QStringLiteral("15"), Behaviour::works(2100, 1300, 400));
+    w.setProbe(k, QStringLiteral("15"), ProbeBehaviour::ok(900, 30 * 1024));
+    const QList<PathCandidate> pool = { awg("16", "RS", false, 3.0), xray("11:xray", "FI"),
+                                        prov("up:dead", UpstreamKind::Country, "NL", 0), awg("17", "EE"), awg("15", "EE") };
+    Sim s(pool, w, lte);
+    s.caps = hostCaps();
+    s.stopMs = 850;
+    s.starveShareMs = 1000;
+    s.rule = Sim::Rule::Proposed;
+    s.bytesLeft = RaceTimings().cellularMaxBytes;
+    const AttemptResult r = s.raceTap(UserChoice::automatic());
+    const QStringList legs = legPaths(s);
+    g_rows.append({ QStringLiteral("LTE 19.11 night: no probe answers before the wait ends"),
+                    r.connected ? QStringLiteral("connected ") + r.path.id.id : QStringLiteral("failed"),
+                    s.lastTapWallMs(), r.paths, legs.join(QLatin1Char(' ')) });
+    CHECK(r.connected);
+    // the blind leg is not a path whose probe is in flight (16, 11:xray, up:dead and 17 are being probed)
+    CHECK(!legs.isEmpty() && legs.first() == QLatin1String("15"));
+    CHECK(legs.size() == 1);
+    CHECK(s.lastTapWallMs() <= 7500);
+}
+
 static void scenarioTrace1911()
 {
     struct Case {
@@ -1471,6 +1511,7 @@ static void scenarioRace()
     //    (Old), 5.59 s (Current). Pool in the device's order: Serbia 1 AmneziaWG (16) first, Finland 1 own Xray, Estonia.
     scenarioTrace1911();
     scenarioHostileCellular1911();
+    scenarioBlindLegBesideSlowProbes();
     // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when real bytes spent + what the probes
     // in flight hold + its own bound fit; a candidate the cap cannot pay does not block the cheaper ones behind it.
     // (Rewritten for the real-byte cap: a result no longer carries a byte number, spent() does.)
@@ -1642,6 +1683,49 @@ static void scenarioRace()
                 started << e.path.id.id;
         CHECK(race.spentBytes() == 0 && race.reservedBytes() == costs.xray); // nothing charged, nothing left held
         CHECK(started == QStringList({ "a1", "x1" }));                       // the Xray probe (116 736 B of 170 308) starts
+    }
+
+    // Device 19.11 evening (iPhone Air, LTE): four slow probes out, the owner's blind legs raise two of the probed paths, each
+    // cancel makes the host restart the others (a new scan: its opening /netinfo again) - the old accounting reserved every
+    // restart again and the race ended "bytes" with nothing proven at +6.3 s. Reservations belong to probes, a reopen moves a
+    // probe without a new hold, and only real bytes count: ~45 KB of real spend against a 393 KB cap never ends the race.
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.awg = 54572;
+        costs.xray = 116736;
+        costs.provider = 107520;
+        RaceTimings rt;
+        rt.hedgeMs = 20000;
+        PathRace race(rt);
+        const QList<PathCandidate> list = { awg("a1", "RS"), xray("x1", "FI"), prov("up:p", UpstreamKind::Country, "NL", 0),
+                                            awg("a2", "EE"), xray("x2", "DE"), xray("x3", "NL"), awg("a3", "PL") };
+        QStringList started;
+        bool bytesDone = false;
+        const auto take = [&](const QList<RaceEffect> &fx) {
+            for (const RaceEffect &e : fx) {
+                bytesDone = bytesDone || (e.type == RaceEffectType::Done && e.reason == RaceDoneReason::Bytes);
+                if (e.type == RaceEffectType::StartProbe)
+                    started << e.path.id.id;
+            }
+        };
+        take(race.begin(0, list, tr.current(), hostCaps(), 393216, costs));
+        race.spent(9000);   // the scan's opening /netinfo
+        for (qint64 t = 250; t <= 6300; t += 250) {
+            if (t == 3000) { // the owner's blind leg takes a probed path: the host restarts the other probes in a new scan
+                take(race.legStarted(t, QStringLiteral("a1")));
+                race.spent(9000 + 4000); // the new scan's opening and what the restarted parts had spent
+            }
+            if (t == 6000) {
+                take(race.legStarted(t, QStringLiteral("x1")));
+                race.spent(9000 + 4000);
+            }
+            take(race.tick(t));
+        }
+        CHECK(!bytesDone);                       // before: ended "bytes" at +6.3 s with nothing proven
+        CHECK(race.spentBytes() >= 22000 && race.spentBytes() <= 393216 / 4); // real bytes only, far below the cap
+        CHECK(started.size() >= 6);              // the candidates behind the cancelled probes were still started
     }
 
     // The hold of a probe in flight is released in full however the probe ends (a result, its timeout, the owner raising its

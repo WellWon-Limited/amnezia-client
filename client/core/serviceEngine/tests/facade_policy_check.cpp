@@ -894,6 +894,58 @@ static void exactRowRequestObject()
             v.mode = QLatin1String(mode);
             return v;
         };
+        // J1: the choice by its stable identity - the same server with another transport id / reordered paths / changed
+        // metadata is the same value; another server, another country, exact vs preferred, Auto are different
+        {
+            using K = avpn::IntentChoiceKind;
+            const QString srv = avpn::intentChoiceIdentity(K::Server, QString(), QStringLiteral("DE|fra"), QString());
+            CHECK(srv == avpn::intentChoiceIdentity(K::Server, QString(), QStringLiteral("DE|fra"), QStringLiteral("ignored")));
+            CHECK(srv != avpn::intentChoiceIdentity(K::Server, QString(), QStringLiteral("DE|ber"), QString()));
+            CHECK(srv != avpn::intentChoiceIdentity(K::Country, QString(), QString(), QStringLiteral("DE")));
+            CHECK(avpn::intentChoiceIdentity(K::Country, QString(), QString(), QStringLiteral("de"))
+                  == avpn::intentChoiceIdentity(K::Country, QString(), QString(), QStringLiteral("DE")));
+            CHECK(avpn::intentChoiceIdentity(K::Country, QString(), QString(), QStringLiteral("FR"))
+                  != avpn::intentChoiceIdentity(K::Country, QString(), QString(), QStringLiteral("DE")));
+            CHECK(avpn::intentChoiceIdentity(K::Exact, QStringLiteral("7"), QString(), QString())
+                  != avpn::intentChoiceIdentity(K::Exact, QStringLiteral("8"), QString(), QString()));
+            CHECK(avpn::intentChoiceIdentity(K::Exact, QStringLiteral("7"), QStringLiteral("DE|fra"), QString()) != srv);
+            CHECK(avpn::intentChoiceIdentity(K::Auto, QString(), QString(), QString()) != srv);
+            // a refresh that only renames / reorders transports leaves the epoch where it is
+            IntentEpoch refresh;
+            IntentValue v1;
+            v1.wanted = true;
+            v1.choice = srv;
+            v1.mode = QStringLiteral("auto");
+            refresh.set(v1);
+            const quint64 running = refresh.stampForNewAttempt();
+            IntentValue v2 = v1; // same identity after the refresh
+            CHECK(!refresh.set(v2) && refresh.resultBelongs(running));
+        }
+        // J2: at launch with a saved Xray the SELECTED mode is the seed; the engine putting Xray in force for an adopted
+        // session (or Auto for one it cannot serve) does not change the value, and the adopted attempt is stamped by it
+        {
+            IntentEpoch l;
+            IntentValue saved;
+            saved.wanted = false;
+            saved.choice = QStringLiteral("auto");
+            saved.mode = QStringLiteral("xray"); // the saved setting, whatever is in force while the observation is awaited
+            l.set(saved);
+            IntentValue adopt = saved;
+            adopt.wanted = true; // the facade syncs wanted on, then the engine adopts
+            l.set(adopt);
+            const quint64 adopted = l.stampForNewAttempt();
+            IntentValue after = adopt; // judgeAdoptedSession changes the mode in force only: the selected mode is unchanged
+            CHECK(!l.set(after) && l.resultBelongs(adopted));
+            // mirror: saved Auto, an adopted tunnel of another transport: the selected mode stays Auto
+            IntentEpoch m2;
+            IntentValue sa;
+            sa.wanted = true;
+            sa.choice = QStringLiteral("auto");
+            sa.mode = QStringLiteral("auto");
+            m2.set(sa);
+            const quint64 st = m2.stampForNewAttempt();
+            CHECK(!m2.set(sa) && m2.resultBelongs(st));
+        }
         // I7: launch - the first value only seeds; the epoch the engine is given is the facade's from the start
         IntentEpoch e;
         CHECK(!e.set(val(false, "auto", "auto")) && e.epoch == 1);

@@ -335,6 +335,14 @@ public:
     }
 
     bool running() const { return m_running; }
+    // The paths this race is probing right now (started, no answer yet).
+    QSet<QString> inFlightPathIds() const
+    {
+        QSet<QString> ids;
+        for (const Flight &f : m_inFlight)
+            ids.insert(f.path.id.id);
+        return ids;
+    }
     quint64 raceNumber() const { return m_race; }
     int inFlight() const { return int(m_inFlight.size()); }
     int proven() const { return m_proven; }
