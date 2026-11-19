@@ -375,6 +375,7 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                                .arg(m_owner.progressDone()).arg(m_owner.progressTotal())
                                .arg(e.lead ? QStringLiteral("proof") : QStringLiteral("order")));
             // the leg's own path leaves the race before its tunnel starts (CONNECT-INVARIANTS §32 p. 3)
+            m_raisedPaths.insert(e.path.id.id); // also while the race still waits for its session
             if (m_race.running())
                 applyRaceEffects(m_race.legStarted(nowMs(), e.path.id.id));
             m_state = EngineState::Connecting;
@@ -533,7 +534,8 @@ bool ServiceEngine::raceAllowed() const
 void ServiceEngine::beginRaceForTap()
 {
     m_raceFailed.clear(); // per tap
-    m_raceWait.reset();
+    m_raceWait.reset(); // a race of an older tap never begins under this one
+    m_raisedPaths.clear();
     m_prober->prepare(m_net.current()); // idempotent: a fresh session is kept
     m_race.setTimings(m_raceTimingsForTest ? *m_raceTimingsForTest : raceTimingsTuned());
     const path::SelectionContext ctx = ownerContext();
@@ -589,9 +591,15 @@ void ServiceEngine::beginRaceForTap()
         m_raceFirst = false; // nothing could be raced: the owner walks at once
 }
 
-void ServiceEngine::launchRace(const QList<path::PathCandidate> &race, qint64 bytesLeft, const QString &knownId, qint64 waitedMs)
+void ServiceEngine::launchRace(const QList<path::PathCandidate> &asked, qint64 bytesLeft, const QString &knownId, qint64 waitedMs)
 {
     const bool known = !knownId.isEmpty();
+    // A path the owner raised (or is raising) in this attempt is never probed - one rule for a pending race too: the
+    // list a race waited with may be stale by the time its session arrives.
+    QList<path::PathCandidate> race;
+    for (const path::PathCandidate &pc : asked)
+        if (!m_raisedPaths.contains(pc.id.id))
+            race << pc;
     // The owner's wait for a first proof counts from the tap: a session that came late shortens it.
     if (!known && waitedMs > 0) {
         path::RaceTimings t = m_race.timings();

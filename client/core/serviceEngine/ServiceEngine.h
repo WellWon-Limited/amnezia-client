@@ -630,7 +630,10 @@ private:
         QString knownId; // the proven path that already leads ("" = none)
     };
     std::optional<RaceWait> m_raceWait;
-    void launchRace(const QList<path::PathCandidate> &race, qint64 bytesLeft, const QString &knownId, qint64 waitedMs);
+    // Paths the owner raised in this tap's attempt (every StartPath, whether the race runs yet or not): a race that
+    // begins later never probes them (CONNECT-INVARIANTS §32 p. 3). PathRace::legStarted covers a running race.
+    QSet<QString> m_raisedPaths;
+    void launchRace(const QList<path::PathCandidate> &asked, qint64 bytesLeft, const QString &knownId, qint64 waitedMs);
     void pollRaceWait();
     void endRaceWait(const char *reason);
     void applyRaceEffects(const QList<path::RaceEffect> &effects);

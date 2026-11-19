@@ -656,6 +656,42 @@ int main(int argc, char **argv)
             r.pass(500);
             CHECK(r.last() == QLatin1String("17") && p.started.isEmpty());
         }
+        {   // I3: known A starts, the race waits for its session, A fails, B starts: when the session arrives
+            // neither B (its tunnel is coming up) nor A is probed - a raised path is never probed, whatever the race state
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            CHECK(r.eng.recordProbeProof(QStringLiteral("17"), QStringLiteral("test")));
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17") && !r.eng.raceRunning());
+            r.up();
+            CHECK(r.eng.verifyFailed(QStringLiteral("no data")));
+            r.confirmStop();
+            CHECK(r.last() == QLatin1String("16") && !r.eng.raceRunning());
+            p.ready = true;
+            p.preparing = false;
+            r.pass(1500);
+            CHECK(p.stampOf("16").probe == 0 && p.stampOf("17").probe == 0);
+        }
+        {   // the session arrives BEFORE A fails: B's probe in flight is cancelled when B starts (the existing rule)
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            CHECK(r.eng.recordProbeProof(QStringLiteral("17"), QStringLiteral("test")));
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            p.ready = true;
+            p.preparing = false;
+            r.pass(500);
+            CHECK(r.eng.raceRunning() && p.stampOf("17").probe == 0);
+            const bool bProbed = p.stampOf("16").probe != 0;
+            r.up();
+            CHECK(r.eng.verifyFailed(QStringLiteral("no data")));
+            r.confirmStop();
+            CHECK(r.last() == QLatin1String("16") && bProbed && p.cancels >= 1);
+        }
         {   // the person stops while the race waits: nothing starts afterwards
             Rig r(pool);
             FakeProber p;
