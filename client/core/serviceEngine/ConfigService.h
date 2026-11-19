@@ -54,6 +54,15 @@ public:
     void setNowMsForTest(std::function<qint64()> nowMs) { m_nowMsFn = std::move(nowMs); }
 
     void reportNetworkFailure();
+    // The physical network changed or the app came to the foreground: if the edge walk is backing off after a full
+    // unsuccessful round (EdgeWalk.h::edgeRoundPauseMs), the back-off is forgotten and a new round starts now.
+    // Touches nothing tunnel-related (an edge switch never does).
+    void resumeEdgeWalk();
+    // Test hook: the first-try limit and the round pause numbers (replace the defaults and the server's numbers).
+    void setEdgeWalkTimingForTest(int fastFirstTryMs, qint64 pauseBaseMs, qint64 pauseCapMs)
+    {
+        m_fastEdgeMs = fastFirstTryMs; m_pauseBaseTest = pauseBaseMs; m_pauseCapTest = pauseCapMs;
+    }
     // Another API request got an answer on the active edge. 5.1.109 (iOS, macOS): while the process is
     // still on the cached config and the config is owed (a config request got no answer), this also
     // asks for /v1/config - at once, then not closer than the refresh throttle to the previous such
@@ -96,6 +105,13 @@ private:
     QString      m_sessionEdge; // the control plane's edge while a tunnel carries requests (R1a)
     bool         m_edgeAnswered = false; // the direct edge gave an HTTP answer in this run (fast failover)
     static constexpr int kFastEdgeFirstTryMs = 2500;
+    int          m_fastEdgeMs = kFastEdgeFirstTryMs;
+    qint64       m_pauseBaseTest = -1, m_pauseCapTest = -1; // test overrides of the round pause numbers
+    // R9: silent edges since the last HTTP answer / round start, finished unsuccessful rounds, and the pause timer.
+    int          m_walkSilent = 0;
+    int          m_walkRounds = 0;
+    QTimer       m_walkPause;
+    void walkPauseElapsed();
     QString      m_pubKeyHex;
     QStringList  m_bakedEdges;
     RemoteConfig m_config;

@@ -281,6 +281,68 @@ private slots:
         QTRY_COMPARE(edgeB.configRequests, 1);
         qDeleteAll(held);
     }
+    // R9 (review of 141): with two edges and a network that drops every connection, the quick 2.5 s try walked the
+    // edges for ever. One full unsuccessful round now backs off (EdgeWalk.h::edgeRoundPauseMs); inside a round every
+    // edge still gets one quick try. Time is scaled: first try 50 ms, pause 100 ms doubling to 400 ms (the real
+    // defaults are 2500 ms and 10 s doubling to 120 s).
+    void allEdgesSilentBackOffAfterEachRound()
+    {
+        QStringList order;
+        ConfigServer edgeA([&](int) { order << "a"; return QByteArray(); });
+        ConfigServer edgeB([&](int) { order << "b"; return QByteArray(); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.setEdgeWalkTimingForTest(50, 100, 400);
+        service.start();
+        QTest::qWait(3000);
+        const int total = edgeA.configRequests + edgeB.configRequests;
+        // Without the back-off: ~3000 / 50 = 60 requests. With it: rounds at 0, 200, 500, 1000, 1500, 2100, 2600 ms.
+        QVERIFY2(total <= 16, qPrintable(QString::number(total)));
+        QVERIFY2(total >= 6, qPrintable(QString::number(total))); // the walk still runs round after round
+        // No edge twice in a row: each round tries every edge once (two edges, so the order alternates).
+        for (int i = 1; i < order.size(); ++i)
+            QVERIFY2(order.at(i) != order.at(i - 1), qPrintable(order.join(',')));
+    }
+    // One edge answers in round N: the walk stops there (the round counter and the pause are reset on any answer).
+    void edgeAnswerInLaterRoundStopsWalkAndResetsPause()
+    {
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int n) { return n < 3 ? QByteArray() : httpAnswer("503 Service Unavailable", "{}"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.setEdgeWalkTimingForTest(50, 100, 400);
+        service.start();
+        QTRY_VERIFY_WITH_TIMEOUT(edgeB.configRequests >= 3, 4000); // rounds 1 and 2 silent, round 3 answered
+        const int ra = edgeA.configRequests;
+        QTest::qWait(1200);
+        QCOMPARE(edgeA.configRequests, ra); // the walk stopped: nothing more is asked
+        QCOMPARE(edgeB.configRequests, 3);
+    }
+    // A network change (or the foreground) during a long pause ends it: a new round starts at once.
+    void networkChangeDuringPauseStartsNewRound()
+    {
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int) { return QByteArray(); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.setEdgeWalkTimingForTest(50, 5000, 5000);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(edgeA.configRequests + edgeB.configRequests, 2, 2000); // round 1
+        QTest::qWait(400);
+        QCOMPARE(edgeA.configRequests + edgeB.configRequests, 2); // paused for 5 s
+        service.resumeEdgeWalk();
+        QTRY_COMPARE_WITH_TIMEOUT(edgeA.configRequests + edgeB.configRequests, 4, 1000); // round 2 at once
+        QTest::qWait(400);
+        QCOMPARE(edgeA.configRequests + edgeB.configRequests, 4); // and a pause again, from the base
+        service.resumeEdgeWalk();                                  // while no pause is running: harmless
+        QCOMPARE(edgeA.configRequests + edgeB.configRequests, 4);
+    }
     // Decision 2026-11-05: small calls succeed on the edge (they reset the edge walk), but two
     // /v1/subscription transport failures in a row on it switch the active edge; a delivered
     // subscription in between resets that streak.
