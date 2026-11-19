@@ -48,6 +48,15 @@ struct FakeHost : IScanHost {
     QHash<QString, bool> doneNext;
     QHash<QString, bool> unknownScan;
     bool refuseAdds = false;
+    bool holdAdds = false;                     // scan_add answers wait in `heldAdds` until releaseAdds()
+    QList<std::function<void()>> heldAdds;
+    void releaseAdds()
+    {
+        const auto h = heldAdds;
+        heldAdds.clear();
+        for (const auto &f : h)
+            f();
+    }
     qint64 seq = 0;
 
     ScanHostCaps knownCaps() const override { return ScanHostCaps(); }
@@ -101,6 +110,10 @@ struct FakeHost : IScanHost {
             r = QJsonObject{{"error", "unknown_action"}};
         }
         const QByteArray bytes = QJsonDocument(r).toJson(QJsonDocument::Compact);
+        if (a == "scan_add" && holdAdds) {
+            heldAdds << [reply, bytes]() { reply(bytes); };
+            return;
+        }
         QTimer::singleShot(0, [reply, bytes]() { reply(bytes); });
     }
 
@@ -233,7 +246,7 @@ struct FakeEngine : IScanEngine {
     void fillManifestInput(ScanManifestInput &) const override {}
     QString ownProbeConfig(const ScanCandidate &c) const override
     {
-        return c.id == QLatin1String("11:xray") ? QStringLiteral(R"({"outbound":{"protocol":"vless","tag":"proxy"},"dns":[]})") : QString();
+        return (c.id == QLatin1String("11:xray") || c.id == QLatin1String("12:xray")) ? QStringLiteral(R"({"outbound":{"protocol":"vless","tag":"proxy"},"dns":[]})") : QString();
     }
     QString liveProbeBase(const ScanCurrent &) const override { return QString(); }
     bool reportQueueFull() const override { return false; }
@@ -430,6 +443,118 @@ static void caseProvider()
     check(y.resultOf(1) && y.resultOf(1)->outcome == path::PathOutcome::Inconclusive && y.host.of("scan_start").isEmpty()
               && y.api.released.size() == 1,
           "a profile the connect would refuse is never probed; its seat goes back");
+}
+
+// Round 2 (F5, F6): the prober's host bookkeeping after a reopen. Each scan has its own id; a reply of an older scan is
+// dropped; a probe's parts are a SET of part ids, a probe is proven only when every part reported exactly once.
+static void caseReopen()
+{
+    g_case = "reopen";
+    { // (1) A, B, C in one scan: cancel A, then B - the host stops that scan both times, C still reports
+        World w;
+        w.ready();
+        const path::ProbeStamp a = w.start(1, 1, QStringLiteral("12:xray"), path::PathKind::OwnXray);
+        spin(30);
+        const path::ProbeStamp b = w.start(1, 2, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(30);
+        w.start(1, 3, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        const QString s1 = w.host.scanOf(1);
+        w.prober.cancel(a);
+        spin(40);
+        const QString s2 = w.host.scanOf(2);
+        w.prober.cancel(b);
+        spin(40);
+        const QList<QJsonObject> cancels = w.host.of("scan_cancel");
+        check(cancels.size() == 2 && cancels.at(0).value("scan_id").toString() == s1 && cancels.at(1).value("scan_id").toString() == s2
+                  && s2 != s1,
+              "cancel A, then cancel B: the host is told to stop the scan that held each of them");
+        check(w.host.scanOf(3) != s2 && !w.host.scanOf(3).isEmpty(), "C is re-opened again in a third scan");
+        w.host.item(3, true);
+        spin(40);
+        check(w.resultOf(3) && w.resultOf(3)->outcome == path::PathOutcome::ProbeOk && !w.resultOf(1) && !w.resultOf(2),
+              "C still reports, A and B do not");
+    }
+    { // (2) the answer of the old scan_add arrives after the reopen: ignored (nothing resent)
+        World w;
+        w.prober.xrayBurst = 4;
+        w.ready();
+        const path::ProbeStamp a = w.start(1, 1, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(30);
+        w.host.holdAdds = true;
+        w.start(1, 2, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.prober.cancel(a);
+        spin(30);
+        const int startsBefore = w.host.of("scan_start").size();
+        const int addsBefore = w.host.of("scan_add").size();
+        w.host.releaseAdds();
+        spin(40);
+        check(w.host.of("scan_start").size() == startsBefore && w.host.of("scan_add").size() == addsBefore,
+              "a late scan_add answer of the old scan sends nothing");
+        int partRequests = 0;
+        for (const QJsonObject &rq : w.host.requests)
+            if (rq.value("scan_id").toString() == w.host.scanOf(2))
+                partRequests += rq.value("candidates").toArray().size();
+        check(partRequests == 4, "the burst's four parts went to the new scan once");
+    }
+    { // (3) parts are a set: a repeat is ignored, proof needs every distinct part
+        World w;
+        w.prober.xrayBurst = 4;
+        w.ready();
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(40);
+        const QStringList parts = w.host.partIdsOf(1);
+        const QString scan = w.host.scanOf(1);
+        check(parts.size() == 4, "four parts");
+        for (int i = 1; i < 4; ++i)
+            w.host.itemFor(parts.at(i), scan, true, 5000);
+        w.host.itemFor(parts.at(1), scan, true, 5000); // a repeat
+        spin(40);
+        check(w.results.isEmpty(), "three parts and a repeat of one: not decided, the data part is still out");
+        w.host.itemFor(parts.at(0), scan, false, 5000);
+        spin(40);
+        check(w.resultOf(1) && w.resultOf(1)->outcome == path::PathOutcome::Inconclusive && w.resultOf(1)->bytes == 20000,
+              "the data part fails: not proven, each part's bytes counted once");
+        World x;
+        x.prober.xrayBurst = 4;
+        x.ready();
+        x.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(40);
+        const QStringList px = x.host.partIdsOf(1);
+        for (const QString &id : px)
+            x.host.itemFor(id, x.host.scanOf(1), true, 5000);
+        spin(40);
+        check(x.resultOf(1) && x.resultOf(1)->outcome == path::PathOutcome::ProbeOk, "four distinct parts: proven");
+    }
+    { // (4) bytes across a reopen: a part that reported before the reopen is neither run nor counted again
+        World w;
+        w.prober.xrayBurst = 4;
+        w.ready();
+        const path::ProbeStamp a = w.start(1, 1, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(30);
+        w.start(1, 2, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(40);
+        const QStringList parts = w.host.partIdsOf(2);
+        const QString scan = w.host.scanOf(2);
+        w.host.itemFor(parts.at(1), scan, true, 5000);
+        w.host.itemFor(parts.at(2), scan, true, 5000);
+        spin(40); // polled: two parts reported in the old scan
+        w.prober.cancel(a);
+        spin(40);
+        const QString scan2 = w.host.scanOf(2);
+        check(scan2 != scan, "the neighbour's cancel re-opened the scan");
+        int sent2 = 0;
+        for (const QJsonObject &rq : w.host.requests)
+            if (rq.value("scan_id").toString() == scan2)
+                sent2 += rq.value("candidates").toArray().size();
+        check(sent2 == 2, "only the two parts that had not reported run again");
+        w.host.itemFor(parts.at(0), scan2, true, 5000);
+        w.host.itemFor(parts.at(3), scan2, true, 5000);
+        spin(40);
+        check(w.resultOf(2) && w.resultOf(2)->outcome == path::PathOutcome::ProbeOk && w.resultOf(2)->bytes == 20000,
+              "one result, every part's bytes counted once across the reopen");
+    }
 }
 
 static void caseCancel()
@@ -653,6 +778,7 @@ int main(int argc, char **argv)
     caseRefusedLocally();
     caseProvider();
     caseCancel();
+    caseReopen();
     caseScanReplaced();
     caseSession();
     caseBurst();

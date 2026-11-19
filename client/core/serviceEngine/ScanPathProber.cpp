@@ -271,7 +271,11 @@ void ScanPathProber::sendCandidate(quint64 key, const ScanHostCandidate &c)
         return;
     if (it->hostId.isEmpty() || !c.id.contains(QLatin1Char('.')))
         it->hostId = c.id;
-    it->sent << c;
+    bool known = false;
+    for (const ScanHostCandidate &s : it->sent)
+        known = known || s.id == c.id;
+    if (!known)
+        it->sent << c; // a re-send of a refused add keeps one entry per part
     const quint64 race = it->stamp.race;
     if (m_scan.closed || m_scan.race != race) {
         openScan(race, {c});
@@ -300,8 +304,10 @@ void ScanPathProber::openScan(quint64 race, const QList<ScanHostCandidate> &cand
     m_scan.startSent = true;
     for (const ScanHostCandidate &c : cands) {
         const quint64 key = keyOfHostId(c.id);
-        if (m_probes.contains(key))
-            m_probes[key].scanId = m_scan.id;
+        if (m_probes.contains(key)) {
+            Probe &p = m_probes[key]; // the one place a probe is bound to a scan: first open and every reopen alike
+            p.scanId = m_scan.id; // what already reported (doneParts, bytes, allOk) is the probe's own and stays
+        }
     }
     const ScanTunables t = tunables();
     ScanStartRequest req;
@@ -328,9 +334,13 @@ void ScanPathProber::openScan(quint64 race, const QList<ScanHostCandidate> &cand
 void ScanPathProber::onStartReply(const QString &scanId, const QList<ScanHostCandidate> &cands, const QByteArray &reply)
 {
     const ScanHostReply r = scanDecodeReply(reply);
-    if (scanId != m_scan.id) { // a newer scan replaced it: its probes were moved or finished there
-        for (const ScanHostCandidate &c : cands)
-            finish(keyOfHostId(c.id), path::PathOutcome::Inconclusive, 0, "scan_replaced");
+    if (scanId != m_scan.id) { // a newer scan replaced it: a probe moved there is the new scan's, the rest is over
+        for (const ScanHostCandidate &c : cands) {
+            const quint64 key = keyOfHostId(c.id);
+            const auto p = m_probes.constFind(key);
+            if (p != m_probes.constEnd() && p->scanId == scanId)
+                finish(key, path::PathOutcome::Inconclusive, 0, "scan_replaced");
+        }
         return;
     }
     if (r.kind != ScanHostReplyKind::Ack) {
@@ -356,9 +366,11 @@ void ScanPathProber::onStartReply(const QString &scanId, const QList<ScanHostCan
 
 void ScanPathProber::onAddReply(const QString &scanId, const QList<ScanHostCandidate> &cands, const QByteArray &reply)
 {
+    if (scanId != m_scan.id)
+        return; // an answer of an older scan: its probes were re-opened in the current one (openScan), nothing to resend
     const ScanHostReply r = scanDecodeReply(reply);
     const bool taken = r.kind == ScanHostReplyKind::Ack && r.accepted == cands.size();
-    if (taken && scanId == m_scan.id) {
+    if (taken) {
         armPoll();
         return;
     }
@@ -426,11 +438,18 @@ void ScanPathProber::onPollReply(const QString &scanId, const QByteArray &reply)
         auto it = m_probes.find(key);
         if (it == m_probes.end())
             continue;
-        it->partsDone += 1;
+        if (it->doneParts.contains(f.id))
+            continue; // a repeat of a part that already reported: never counted twice
+        bool expected = false;
+        for (const ScanHostCandidate &sc : it->sent)
+            expected = expected || sc.id == f.id;
+        if (!expected)
+            continue; // not a part of this probe
+        it->doneParts.insert(f.id);
         it->bytes += f.spentBytes;
         const bool ok = scanPathOutcomeOf(f) == path::PathOutcome::ProbeOk;
         it->allOk = it->allOk && ok;
-        if (it->partsDone >= it->parts)
+        if (it->doneParts.size() >= it->parts)
             finish(key, it->allOk ? path::PathOutcome::ProbeOk : path::PathOutcome::Inconclusive, it->bytes,
                    it->allOk ? "proven" : (it->parts > 1 ? "burst_part_failed" : scanProbeErrorName(f.error)));
     }
@@ -470,14 +489,11 @@ void ScanPathProber::cancel(const path::ProbeStamp &stamp)
     // and re-open the probes that are still wanted in a new scan.
     const quint64 race = m_scan.race;
     QList<ScanHostCandidate> again;
-    for (Probe &p : m_probes) {
-        if (p.scanId != m_scan.id || p.sent.isEmpty())
-            continue;
-        p.partsDone = 0;
-        p.allOk = true;
-        again << p.sent;
-        p.sent.clear();
-    }
+    for (const Probe &p : m_probes)
+        if (p.scanId == m_scan.id)
+            for (const ScanHostCandidate &sc : p.sent)
+                if (!p.doneParts.contains(sc.id))
+                    again << sc; // only the parts that have not reported: a reported part is never run (or counted) twice
     endHostScan();
     if (!again.isEmpty())
         openScan(race, again);
