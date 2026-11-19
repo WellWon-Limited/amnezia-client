@@ -70,6 +70,10 @@ private const val TAG = "AmneziaActivity"
 const val ACTIVITY_MESSENGER_NAME = "Activity"
 
 private const val CHECK_VPN_PERMISSION_ACTION_CODE = 1
+// AVPN: states of QtAndroidController.onVpnPermissionPrompt
+private const val PROMPT_PENDING = 0
+private const val PROMPT_GRANTED = 1
+private const val PROMPT_DENIED = 2
 private const val CREATE_FILE_ACTION_CODE = 2
 private const val OPEN_FILE_ACTION_CODE = 3
 private const val CHECK_NOTIFICATION_PERMISSION_ACTION_CODE = 4
@@ -578,18 +582,34 @@ class AmneziaActivity : QtActivity() {
     /**
      * Methods of starting and stopping VpnService
      */
+    // AVPN (Android permission prompt): tell the engine that a system permission dialog is on screen (PROMPT_*), so
+    // it stops the leg's clock while the person reads it, and how it ended. Same rule as the iOS "allow VPN
+    // configuration" prompt. Guarded: an APK whose native half lacks the method just does not pause.
+    private fun reportPermissionPrompt(state: Int) {
+        try {
+            QtAndroidController.onVpnPermissionPrompt(state)
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w(TAG, "No native onVpnPermissionPrompt: $e")
+        }
+    }
+
     @MainThread
     private fun checkVpnPermission(onPermissionGranted: () -> Unit) {
         Log.d(TAG, "Check VPN permission")
         VpnService.prepare(applicationContext)?.let { intent ->
+            reportPermissionPrompt(PROMPT_PENDING)
             startActivityForResult(intent, CHECK_VPN_PERMISSION_ACTION_CODE, ActivityResultHandler(
                 onSuccess = {
                     Log.d(TAG, "Vpn permission granted")
+                    reportPermissionPrompt(PROMPT_GRANTED)
                     Toast.makeText(this@AmneziaActivity, resources.getText(R.string.vpnGranted), Toast.LENGTH_LONG).show()
                     onPermissionGranted()
                 },
                 onFail = {
                     Log.w(TAG, "Vpn permission denied")
+                    // The engine must learn "denied" before the Disconnected that onVpnPermissionRejected causes
+                    // (both hop to the Qt thread in this order): it ends the attempt instead of trying the next server.
+                    reportPermissionPrompt(PROMPT_DENIED)
                     showOnVpnPermissionRejectDialog()
                     mainScope.launch {
                         qtInitialized.await()
@@ -625,12 +645,19 @@ class AmneziaActivity : QtActivity() {
 
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private fun showNotificationPermissionDialog(onChecked: () -> Unit) {
+        // AVPN (Android permission prompt): this dialog (and the system one behind "Yes") also stands between the
+        // tap and the tunnel start: the engine's clock pauses for it like for the VPN dialog; one report at its end.
+        reportPermissionPrompt(PROMPT_PENDING)
+        val done: () -> Unit = {
+            reportPermissionPrompt(PROMPT_GRANTED)
+            onChecked()
+        }
         AlertDialog.Builder(this)
             .setTitle(R.string.notificationDialogTitle)
             .setMessage(R.string.notificationDialogMessage)
             .setNegativeButton(R.string.no) { _, _ ->
                 Prefs.save(PREFS_NOTIFICATION_PERMISSION_ASKED, true)
-                onChecked()
+                done()
             }
             .setPositiveButton(R.string.yes) { _, _ ->
                 val saveAsked: () -> Unit = {
@@ -642,10 +669,13 @@ class AmneziaActivity : QtActivity() {
                     PermissionRequestHandler(
                         onSuccess = saveAsked,
                         onFail = saveAsked,
-                        onAny = onChecked
+                        onAny = done
                     )
                 )
             }
+            // AVPN: a dialog dismissed outside its buttons used to leave the connect hanging; it now counts as "No"
+            // for this tap (asked again next time) so the pause always ends.
+            .setOnCancelListener { done() }
             .show()
     }
 

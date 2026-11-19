@@ -902,6 +902,75 @@ static void scenarioSuspended()
     CHECK(s.lastTapWallMs() > 30000); // wall time includes the sleep, the deadlines did not
 }
 
+// Android permission prompt (the system's "allow VPN configuration" dialog, VpnService.prepare): the host delivers
+// no tick while it is on screen (the same rule as the iOS prompt) - the simulator's suspend() is exactly that - and
+// reports "denied" with the leg's stamp. Granted: the leg goes on; denied: the attempt ends once.
+static void scenarioPermissionPrompt()
+{
+    const NetworkObservation home = wifi("192.168.1.1");
+    const QString k = key(home);
+
+    // The defect: with no pause the dialog read for 20 s runs the 4.5 s start deadline out and the owner walks on.
+    {
+        World w;
+        w.set(k, QStringLiteral("a1"), Behaviour::works(20700, 400, 100));
+        w.set(k, QStringLiteral("a2"), Behaviour::noHandshake());
+        Sim s({ awg("a1", "EE"), awg("a2", "FI") }, w, home);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("prompt 20 s, NO pause (the defect, for contrast)", s, r, 0);
+        CHECK(s.legs.size() > 1);
+    }
+    // Pending 20 s (and longer than the whole 45 s budget), then granted: the same leg connects, nothing recorded
+    // against the server, the wait is not counted.
+    for (const int promptMs : { 20000, 60000 }) {
+        World w;
+        w.set(k, QStringLiteral("a1"), Behaviour::works(promptMs + 700, 400, 100));
+        w.set(k, QStringLiteral("a2"), Behaviour::works(300, 400, 100));
+        Sim s({ awg("a1", "EE"), awg("a2", "FI") }, w, home);
+        s.suspend(300, promptMs);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row(promptMs == 20000 ? "prompt pending 20 s, granted" : "prompt pending 60 s, granted", s, r, 0);
+        CHECK(r.connected && r.paths == 1 && s.legs.size() == 1 && s.legs[0].path == QLatin1String("a1"));
+        CHECK(s.reports.size() == 1 && s.reports[0].outcome == PathOutcome::DataOk);
+        CHECK(r.elapsedMs < s.owner.timings().budgetMs / 4); // the wait did not use the attempt budget
+        CHECK(s.lastTapWallMs() > promptMs);
+    }
+    // Denied after 20 s: the attempt ends once with PermissionDenied - no second leg, nothing recorded, no ledger
+    // entry, and no event of a later tick changes it.
+    for (const bool exact : { false, true }) {
+        World w;
+        w.set(k, QStringLiteral("a1"), Behaviour::noHandshake());
+        w.set(k, QStringLiteral("a2"), Behaviour::works(300, 400, 100));
+        Sim s({ awg("a1", "EE"), awg("a2", "FI") }, w, home);
+        s.suspend(300, 20000);
+        s.at(20000, [&s] {
+            s.deliver(AttemptEvent::permissionDenied(s.now, s.owner.currentLeg()));
+            s.deliver(AttemptEvent::stopConfirmed(s.now, s.owner.stoppingLeg())); // a stale echo: nothing
+        });
+        const AttemptResult r = s.tap(exact ? UserChoice::exactPath(QStringLiteral("a1"))
+                                            : UserChoice::automatic());
+        row(exact ? "prompt denied (exact server)" : "prompt denied (Auto)", s, r, 0);
+        CHECK(!r.connected && r.reason == FailReason::PermissionDenied && r.paths == 1);
+        CHECK(s.legs.size() == 1 && s.reports.isEmpty() && s.ledger.size() == 0);
+        s.idle(90000); // a tap is needed for the next try: nothing starts by itself
+        CHECK(s.legs.size() == 1 && s.results.size() == 1 && s.owner.phase() == AttemptPhase::Idle && !s.owner.running());
+        // the next tap is a new attempt (the dialog is raised again only by it)
+        const AttemptResult again = s.tap(UserChoice::automatic());
+        CHECK(again.attempt == r.attempt + 1);
+    }
+    // A denial that does not belong to the running leg (an older leg, no attempt, the leg already up) changes nothing.
+    {
+        World w;
+        w.set(k, QStringLiteral("b1"), Behaviour::works(1000, 400, 100));
+        Sim s({ awg("b1", "EE") }, w, home);
+        s.deliver(AttemptEvent::permissionDenied(s.now, PathStamp{ 9, 1, 1 })); // no attempt yet
+        CHECK(s.results.isEmpty());
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        s.deliver(AttemptEvent::permissionDenied(s.now, s.owner.currentLeg())); // connected: not a leg in Starting
+        CHECK(r.connected && s.results.size() == 1 && s.owner.phase() == AttemptPhase::Connected);
+    }
+}
+
 static void scenarioPreference()
 {
     const NetworkObservation home = wifi("192.168.7.1");
@@ -1642,6 +1711,7 @@ int main()
     scenarioFlapping();
     scenarioNetworkChange();
     scenarioSuspended();
+    scenarioPermissionPrompt();
     scenarioPreference();
     scenarioModeBeatsPreference();
     scenarioRevision();

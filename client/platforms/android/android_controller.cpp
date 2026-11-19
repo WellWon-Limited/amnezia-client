@@ -132,6 +132,17 @@ bool AndroidController::initialize()
             qWarning() << "AndroidController: no onUpstreamStatus in the Kotlin half - upstream lease status off";
         }
     }
+    // AVPN (Android permission prompt): the permission dialog's state, optional the same way (the Kotlin side
+    // guards the call; without it the engine simply does not pause for the dialog).
+    {
+        const JNINativeMethod promptMethods[] = {
+            {"onVpnPermissionPrompt", "(I)V", reinterpret_cast<void *>(onVpnPermissionPrompt)},
+        };
+        if (!env.registerNativeMethods(QT_ANDROID_CONTROLLER_CLASS, promptMethods, 1)) {
+            env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent);
+            qWarning() << "AndroidController: no onVpnPermissionPrompt in the Kotlin half - no pause for the VPN dialog";
+        }
+    }
     // AVPN (Scanner, lane A3): the probe host's reply and state, optional the same way (without them the Scanner's
     // host stays NeedsVpn on Android: every scan ends «Не проверено» / NoScan host_no_vpn).
     {
@@ -626,6 +637,15 @@ void AndroidController::onVpnPermissionRejected(JNIEnv *env, jobject thiz)
     Q_UNUSED(thiz);
 
     emit AndroidController::instance()->vpnPermissionRejected();
+}
+
+// static
+void AndroidController::onVpnPermissionPrompt(JNIEnv *env, jobject thiz, jint state)
+{
+    Q_UNUSED(env);
+    Q_UNUSED(thiz);
+
+    emit AndroidController::instance()->vpnPermissionPrompt(int(state));
 }
 
 // static

@@ -442,6 +442,9 @@ public:
     bool onTunnelConnected();
     bool onTunnelError(bool tunnelGone = false); // tunnelGone: the Error proves the tunnel is down (desktop)
     bool onTunnelDisconnected();
+    // The person refused the system's VPN permission dialog while the leg was starting (Android; the platform
+    // reports the fact, the owner ends the ATTEMPT: nothing recorded, no other leg). true: the phase changed.
+    bool onPermissionDenied();
 
     // AVPN (Android-адопт): туннель ФАКТИЧЕСКИ жив (AndroidController::initConnectionState после
     // ре-байнда мессенджера/холодного старта), а движок — в терминале после фейкового Disconnected
