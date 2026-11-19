@@ -22,12 +22,19 @@
 #include "../path/PathSelect.h"
 #include "../TuningStore.h"
 #include "../UpstreamEngine.h"
+#include "../UpstreamLeaseClient.h"
 #include "../UpstreamLeaseOwner.h"
+#include "../WhoamiVerdict.h"
 #include "../XrayConfigBuilder.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QElapsedTimer>
+#include <QNetworkAccessManager>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -1732,10 +1739,203 @@ static void scanOfferedRows()
     TuningStore::set({}, {}, {}, {});
 }
 
+// --- T1 for provider legs (lead 142): one starving rule for own and provider data checks ---------------------
+// The provider leg's data check (the sized probe through the provider, UpstreamLeaseClient::runProbe) carries the
+// same first-byte watch as the own-server check (whoami): no first byte past kWhoamiFirstByteShareMs = starving,
+// a first byte after that = receiving again. With a path the race proved, a starving provider leg is left at once:
+// nothing recorded against it (one starving check is not "dead"), its seat goes back through the tunnel adapter's
+// down(), and the proven path comes up within the same attempt. A leg that is receiving is never abandoned.
+// Real QNetworkAccessManager + loopback servers for the request; the engine on the test clock.
+struct SeatTunnel : ITunnelControl {
+    FakeIo io;
+    UpstreamLeaseOwner owner{&io};
+    qint64 now = 9000000;
+    QStringList ups;
+    int downs = 0;
+    TunnelStats st;
+    SeatTunnel()
+    {
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = true; // the macOS GUI owner: this process releases (iOS: the extension, on its stop)
+        owner.setOptions(op);
+    }
+    TunnelResult up(const Subscription &, const SubscriptionNode &n) override
+    {
+        ups << n.nodeId;
+        if (n.upstream.has_value()) { // the seat: acquired and granted, the core comes up on it
+            owner.begin(n, 1, std::nullopt, now, 1);
+            owner.onAcquireReply(io.last("acquire")->id, granted(n.upstream->profileId, n.upstream->configSha256), now + 100);
+        }
+        return TunnelResult::success();
+    }
+    TunnelStats readStats() override { return st; }
+    // VpnConnectionTunnelControl::down(): an active session's seat goes back with the stop
+    void down() override
+    {
+        ++downs;
+        if (owner.active() && !owner.preparing())
+            owner.disconnect(now);
+    }
+};
+
+struct RaceProber : path::IPathProber {
+    QList<std::pair<path::ProbeStamp, QString>> started;
+    path::ProberCaps caps() const override
+    {
+        path::ProberCaps c;
+        c.available = true;
+        return c;
+    }
+    void start(const path::ProbeStamp &s, const path::PathCandidate &p, int) override { started.append({ s, p.id.id }); }
+    void cancel(const path::ProbeStamp &) override {}
+    path::ProbeStamp stampOf(const QString &node) const
+    {
+        for (const auto &e : started)
+            if (e.second == node)
+                return e.first;
+        return {};
+    }
+};
+
+// A loopback "provider edge": silent (accepts, never answers) or answering a first chunk after firstByteMs.
+struct ProbeEdge {
+    QTcpServer server;
+    int firstByteMs = -1; // -1 = never
+    ProbeEdge(int firstByte) : firstByteMs(firstByte)
+    {
+        server.listen(QHostAddress::LocalHost);
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [this]() {
+            while (QTcpSocket *s = server.nextPendingConnection()) {
+                QObject::connect(s, &QTcpSocket::readyRead, s, [this, s]() {
+                    s->readAll();
+                    if (firstByteMs >= 0)
+                        QTimer::singleShot(firstByteMs, s, [s]() {
+                            s->write("HTTP/1.1 200 OK\r\nContent-Length: 65536\r\n\r\n");
+                            s->write(QByteArray(4096, 'x')); // the body keeps coming (the rest never: still running)
+                        });
+                });
+            }
+        });
+    }
+    QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()); }
+};
+
+static void providerLegStarvedCheck()
+{
+    TuningStore::set({}, {{QStringLiteral("upstream_nodes"), true}, {QStringLiteral("xray_client"), true},
+                          {QStringLiteral("path_race"), true}}, {}, {});
+    QJsonObject own = awgNode("9", 9, "EE");
+    own.insert("manual_only", true); // the own path is the race's: the owner's first leg is the provider
+    const QJsonArray pool{stubNode("aaaaaaaaaaaaaaa0", 1, 0), own};
+    const QString provider = QStringLiteral("up:aaaaaaaaaaaaaaa0");
+    QNetworkAccessManager nam;
+    UpstreamLeaseClient client;
+    client.configure(&nam, [] { return QStringLiteral("http://127.0.0.1:1"); }, QStringLiteral("00"),
+                     [] { return QStringLiteral("token"); });
+    struct Run {
+        ServiceEngine eng;
+        SeatTunnel tun;
+        RaceProber prober;
+        QStringList journal;
+        QList<bool> told; // what the provider check's watch told the engine, in order
+    };
+    // The facade's provider check (AvpnEngineQml::upstreamVerifyAttempt): the probe with the first-byte watch whose
+    // sink is the engine's noteCheckStarved.
+    // Returns when the request ended (its own bound: timeoutMs); starvedAtMs = when the watch first said "starving".
+    const auto runCheck = [&client](Run &r, const ProbeEdge &edge, int timeoutMs) {
+        UpstreamLeaseClient::ProbeRequest pr;
+        pr.base = edge.base();
+        pr.scanToken = QStringLiteral("tsc1.scan");
+        pr.bytes = 65536;
+        pr.nonce = QByteArrayLiteral("0123456789abcdef");
+        pr.timeoutMs = timeoutMs;
+        QElapsedTimer clock;
+        clock.start();
+        qint64 starvedAtMs = -1;
+        pr.firstByteShareMs = kWhoamiFirstByteShareMs;
+        pr.onStarved = [&r, &clock, &starvedAtMs](bool starved) {
+            if (starved && starvedAtMs < 0)
+                starvedAtMs = clock.elapsed();
+            r.told << starved;
+            r.eng.noteCheckStarved(starved);
+        };
+        bool done = false;
+        client.runProbe(pr, [&done](const UpstreamProbeFacts &) { done = true; });
+        while (!done && clock.elapsed() < timeoutMs + 3000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        CHECK(done);
+        return starvedAtMs;
+    };
+    const auto begin = [&](Run &r) {
+        r.eng.setTunnel(&r.tun);
+        r.eng.setNowMsForTest([&r] { return r.tun.now; });
+        QString err;
+        CHECK(r.eng.loadSubscription(body(pool), err));
+        path::NetworkObservation cell;
+        cell.medium = path::NetMedium::Cellular;
+        cell.gateway = QStringLiteral("10.64.0.1");
+        r.eng.observeNetwork(cell);
+        r.eng.setProber(&r.prober);
+        CHECK(r.eng.connect(err) && r.tun.ups == QStringList{ provider } && r.eng.raceRunning());
+        for (int i = 0; i < 3; ++i) { // the race's stagger: the own path's probe starts too
+            r.tun.now += 500;
+            r.eng.attemptTick();
+        }
+        CHECK(r.prober.stampOf(QStringLiteral("9")).race != 0);
+        r.eng.onTunnelConnected(); // the provider leg is up (its seat held), in its data check
+        CHECK(r.eng.isVerifying() && r.tun.owner.active());
+    };
+    // 1. Starving + the race proved 9: the provider leg is left inside the check's budget, its seat released.
+    {
+        Run r;
+        begin(r);
+        r.tun.now += 500;
+        r.eng.onProbeResult(r.prober.stampOf(QStringLiteral("9")), path::PathOutcome::ProbeOk, 1000);
+        CHECK(r.tun.downs == 0 && r.eng.isVerifying()); // a proof alone never ends a check
+        ProbeEdge silent(-1);
+        const qint64 starvedAt = runCheck(r, silent, 2000);
+        CHECK(r.told.value(0, false) && r.tun.downs == 1);
+        // the attempt moves on at the share, inside the check's own budget
+        CHECK(starvedAt >= kWhoamiFirstByteShareMs && starvedAt < r.eng.dataCheckMs());
+        const FakeIo::Call *rel = r.tun.io.last("release");
+        CHECK(rel && rel->profileOrLease == QLatin1String(kLease) && r.tun.owner.releaseSent());
+        r.tun.now += 300;
+        r.eng.onTunnelDisconnected(); // the stop confirmed
+        CHECK(r.tun.ups.last() == QLatin1String("9") && r.eng.attemptRunning());
+        CHECK(r.eng.pathStateHere(provider) == QLatin1String("unknown")); // one starving check: nothing recorded
+        r.journal << r.eng.takeAttemptJournal();
+        bool preempted = false;
+        for (const QString &l : r.journal)
+            preempted = preempted || l.contains(QStringLiteral("leg_preempted_for_proof node=") + provider);
+        CHECK(preempted);
+    }
+    // 2. Receiving: the first byte came late (past the share) and bytes flow - a later proof keeps the provider leg.
+    {
+        Run r;
+        begin(r);
+        ProbeEdge late(1300);
+        runCheck(r, late, 1800); // bytes flow from 1.3 s, the body never completes: our bound ends the request
+        CHECK(r.told == (QList<bool>{ true, false }));
+        r.tun.now += 500;
+        r.eng.onProbeResult(r.prober.stampOf(QStringLiteral("9")), path::PathOutcome::ProbeOk, 1000);
+        CHECK(r.tun.downs == 0 && r.eng.isVerifying() && !r.tun.io.last("release"));
+    }
+    // 3. An answer inside the share: the watch says nothing.
+    {
+        Run r;
+        begin(r);
+        ProbeEdge quick(50);
+        runCheck(r, quick, 1500);
+        CHECK(r.told.isEmpty() && r.tun.downs == 0);
+    }
+    TuningStore::set({}, {}, {}, {});
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    providerLegStarvedCheck();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();

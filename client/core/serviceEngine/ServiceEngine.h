@@ -263,7 +263,8 @@ public:
     bool raceRunning() const { return m_race.running(); }
     // T1 (device round 6): the running data check has had no first byte past its first-byte share. With a proven
     // alternative from the race, the leg is left at once (nothing recorded) and the owner brings the proven path up;
-    // a leg that is receiving bytes is never abandoned. The facade tells it (its check knows the bytes).
+    // a leg that is receiving bytes is never abandoned. The facade tells it (its check knows the bytes): own and
+    // provider legs alike, through one first-byte watch (NetAwait.h::watchFirstByte) - false once bytes arrive.
     void noteCheckStarved(bool starved);
     void setRaceTimingsForTest(const path::RaceTimings &t) { m_raceTimingsForTest = t; }
     // "checked N of M" of the running attempt (0/0 = no walk).

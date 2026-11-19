@@ -8557,6 +8557,8 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
     };
     connect(r, &QNetworkReply::readyRead, r, drain);
     const qint64 t0 = m_verifyClock.elapsed();
+    // T1: no first byte past the first-byte share - the engine may leave this leg for a proven alternative
+    avpn::watchFirstByte(r, avpn::kWhoamiFirstByteShareMs, checkStarvedSink(epoch));
     {
         auto lastByteAt = std::make_shared<qint64>(-1);
         connect(r, &QNetworkReply::readyRead, r, [this, lastByteAt]() { *lastByteAt = m_verifyClock.elapsed(); });
@@ -8565,9 +8567,6 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
         connect(watch, &QTimer::timeout, r, [this, r, lastByteAt, t0, left]() {
             if (!r->isRunning())
                 return;
-            // T1: no first byte past the first-byte share - the engine may leave this leg for a proven alternative
-            if (*lastByteAt < 0 && m_verifyClock.elapsed() - t0 > avpn::kWhoamiFirstByteShareMs)
-                m_engine.noteCheckStarved(true);
             if (avpn::whoamiProgressCut(m_verifyClock.elapsed(), t0, *lastByteAt, left)) {
                 r->setProperty("avpn_timed_out", true); // our clock ended it, not the path
                 r->abort();
@@ -8647,6 +8646,14 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
             m_lastVerifyTtfbMs = int(m_verifyClock.elapsed() - t0);
         finishWhoami(epoch, v, facts);
     });
+}
+
+std::function<void(bool)> AvpnEngineQml::checkStarvedSink(int epoch)
+{
+    return [this, epoch](bool starved) {
+        if (epoch == m_verifyEpoch && m_engine.isVerifying())
+            m_engine.noteCheckStarved(starved);
+    };
 }
 
 void AvpnEngineQml::finishWhoami(int epoch, avpn::WhoamiVerdict v, const QString &facts, bool tiebreakDone)
@@ -11802,6 +11809,7 @@ void AvpnEngineQml::startUpstreamVerification()
     m_verifyClock.start();
     m_verifyAttempts = 0;
     m_upstreamVerifyAttempts = 0;
+    m_upstreamFirstProbeMs = -1;
     m_lastVerifyRxProof = false;
     m_busy = true;
     m_pathCheck = QStringLiteral("checking");
@@ -11859,6 +11867,13 @@ void AvpnEngineQml::upstreamVerifyAttempt(int epoch)
     pr.accessNetToken = grant.accessNetToken;
     const avpn::UpstreamCheckLimits limits;
     pr.timeoutMs = int(qMin<qint64>(left, limits.totalMs + 1000));
+    // T1, the same rule as the own-server check: no first byte past the share = starving. Measured from the check's
+    // first probe - an early retry only follows a probe that received nothing (upstreamProbeNotYet).
+    if (m_upstreamFirstProbeMs < 0)
+        m_upstreamFirstProbeMs = m_verifyClock.elapsed();
+    pr.firstByteShareMs =
+        std::max<qint64>(0, avpn::kWhoamiFirstByteShareMs - (m_verifyClock.elapsed() - m_upstreamFirstProbeMs));
+    pr.onStarved = checkStarvedSink(epoch);
     m_tunnel.upstreamClient()->runProbe(pr, [this, epoch, grant, limits](const avpn::UpstreamProbeFacts &f) {
         if (epoch != m_verifyEpoch || !m_engine.isVerifying())
             return;
