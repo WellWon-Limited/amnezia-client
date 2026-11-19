@@ -53,10 +53,21 @@ path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayB
     c.xray = data + qint64(qBound(1, xrayBurst, 6) - 1) * scanXrayBurstPartCostBytes(t) + access;
     c.awg = kScanAwgHandshakeBytes + qint64(t.awgPrimeEchoes) * kScanAwgEchoBytes + data + access;
     c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes /* release */ + access;
+    // Byte accounting of one race probe (one number, two ledgers):
+    //   part                          race cap (PathRace)   hour ledger (Scanner, raceCharge)
+    //   host data bytes (items)       bytes + fixed         Spent effect (PathRace charge minus *Outside)
+    //   host /netinfo opening+closing fixed (= access)      Spent effect (no one else knows them)
+    //   session fetch (manifest/token) -                    chargeApiBytes at the fetch (real bytes)
+    //   provider seat batch + config  fixed                 chargeApiBytes in the seat callback (real bytes)
+    //   provider release              fixed                 chargeApiBytes (release owner, real bytes)
+    // *Outside = the part of `fixed` that chargeApiBytes already put into the hour ledger, so the Spent effect does not
+    // charge it again. A probe's reported bytes are Probe::bytes (one entry per reported part), reported by finish()
+    // whatever the outcome; a cancelled probe's go to chargeApiBytes at once (the race gets no result for it).
     // what of each projection is spent outside the host (PathRace charges it on top of the host's count)
     c.awgFixed = access;
     c.xrayFixed = access;
     c.providerFixed = qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes + access;
+    c.providerOutside = qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes;
     return c;
 }
 
@@ -114,7 +125,7 @@ void ScanPathProber::sessionArrived(const RaceScanSession &s)
             continue;
         it->waitingSession = false;
         if (!sessionReady())
-            finish(key, path::PathOutcome::Inconclusive, 0, "no_session");
+            finish(key, path::PathOutcome::Inconclusive, "no_session");
         else
             launch(key);
     }
@@ -166,7 +177,7 @@ void ScanPathProber::launch(quint64 key)
         c.kind = sc.kind;
         c.config = m_engine->ownProbeConfig(sc);
         if (c.config.isEmpty()) {
-            finish(key, path::PathOutcome::Inconclusive, 0, "no_config");
+            finish(key, path::PathOutcome::Inconclusive, "no_config");
             return;
         }
         c.costBytes = qint64(t.warmBytes) + kRaceProbeBytes + 2 * kScanTlsOverheadBytes;
@@ -181,8 +192,7 @@ void ScanPathProber::launch(quint64 key)
         ScanAwgNodeInput n;
         if (m_caps.maxAwgConcurrent <= 0 || t.awgConcurrency <= 0 || mark == m_session.awgNodes.constEnd()
             || m_session.baseIps.isEmpty() || !m_engine->awgProbeInput(pc.id.id, n)) {
-            finish(key, path::PathOutcome::Inconclusive, 0,
-                   m_caps.maxAwgConcurrent <= 0 ? "awg_no_host"
+            finish(key, path::PathOutcome::Inconclusive, m_caps.maxAwgConcurrent <= 0 ? "awg_no_host"
                    : t.awgConcurrency <= 0                 ? "awg_off"
                    : mark == m_session.awgNodes.constEnd() ? "awg_no_peer"
                    : m_session.baseIps.isEmpty()            ? "awg_no_api_ip"
@@ -206,14 +216,14 @@ void ScanPathProber::launch(quint64 key)
         c.kind = ScanProbeKind::AwgMini;
         c.config = scanAwgMiniConfig(in);
         if (c.config.isEmpty()) {
-            finish(key, path::PathOutcome::Inconclusive, 0, "awg_config");
+            finish(key, path::PathOutcome::Inconclusive, "awg_config");
             return;
         }
         break;
     }
     case path::PathKind::Provider: {
         if (m_caps.maxFullConcurrent <= 0) {
-            finish(key, path::PathOutcome::Inconclusive, 0, "no_full_pool");
+            finish(key, path::PathOutcome::Inconclusive, "no_full_pool");
             return;
         }
         const QString profileId = pc.id.id.startsWith(QLatin1String("up:")) ? pc.id.id.mid(3) : pc.id.id;
@@ -235,13 +245,13 @@ void ScanPathProber::launch(quint64 key)
                 return; // the probe went away while the seat was asked: its owner released the seat
             p->waitingSeat = false;
             if (!seat.ok || seat.leaseId.isEmpty() || seat.config.isEmpty()) {
-                finish(key, path::PathOutcome::Inconclusive, 0, seat.code == QLatin1String("lease_gone") ? "seat_gone" : "no_seat");
+                finish(key, path::PathOutcome::Inconclusive, seat.code == QLatin1String("lease_gone") ? "seat_gone" : "no_seat");
                 return;
             }
             const SanitizedProfile chk = upstreamProfileCheck(seat.config.toUtf8(), seat.configSha256,
                                                               m_engine->upstreamProtocolTags(nodeId));
             if (!chk.ok()) {
-                finish(key, path::PathOutcome::Inconclusive, 0, "profile_refused");
+                finish(key, path::PathOutcome::Inconclusive, "profile_refused");
                 return;
             }
             ScanHostCandidate hc;
@@ -282,6 +292,7 @@ void ScanPathProber::sendCandidate(quint64 key, const ScanHostCandidate &c)
         return;
     }
     it->scanId = m_scan.id;
+    it->partScan.insert(c.id, m_scan.id);
     if (!m_scan.acked) {
         m_scan.queued << c; // joins once the start is acked
         return;
@@ -306,7 +317,11 @@ void ScanPathProber::openScan(quint64 race, const QList<ScanHostCandidate> &cand
         const quint64 key = keyOfHostId(c.id);
         if (m_probes.contains(key)) {
             Probe &p = m_probes[key]; // the one place a probe is bound to a scan: first open and every reopen alike
-            p.scanId = m_scan.id; // what already reported (doneParts, bytes, allOk) is the probe's own and stays
+            p.scanId = m_scan.id;
+            for (const ScanHostCandidate &pc : cands)
+                if (keyOfHostId(pc.id) == key)
+                    p.partScan.insert(pc.id, m_scan.id);
+            // what already reported (doneParts, bytes, allOk) is the probe's own and stays
         }
     }
     const ScanTunables t = tunables();
@@ -339,7 +354,7 @@ void ScanPathProber::onStartReply(const QString &scanId, const QList<ScanHostCan
             const quint64 key = keyOfHostId(c.id);
             const auto p = m_probes.constFind(key);
             if (p != m_probes.constEnd() && p->scanId == scanId)
-                finish(key, path::PathOutcome::Inconclusive, 0, "scan_replaced");
+                finish(key, path::PathOutcome::Inconclusive, "scan_replaced");
         }
         return;
     }
@@ -347,7 +362,7 @@ void ScanPathProber::onStartReply(const QString &scanId, const QList<ScanHostCan
         say(QStringLiteral("race_prober scan_start refused scan=%1 error=%2 %3").arg(scanId, r.errorCode, r.detail));
         m_scan.closed = true;
         for (const ScanHostCandidate &c : cands + m_scan.queued)
-            finish(keyOfHostId(c.id), path::PathOutcome::Inconclusive, 0, "start_refused");
+            finish(keyOfHostId(c.id), path::PathOutcome::Inconclusive, "start_refused");
         m_scan.queued.clear();
         return;
     }
@@ -366,33 +381,39 @@ void ScanPathProber::onStartReply(const QString &scanId, const QList<ScanHostCan
 
 void ScanPathProber::onAddReply(const QString &scanId, const QList<ScanHostCandidate> &cands, const QByteArray &reply)
 {
-    if (scanId != m_scan.id)
-        return; // an answer of an older scan: its probes were re-opened in the current one (openScan), nothing to resend
-    const ScanHostReply r = scanDecodeReply(reply);
-    const bool taken = r.kind == ScanHostReplyKind::Ack && r.accepted == cands.size();
-    if (taken) {
-        armPoll();
-        return;
+    if (scanId == m_scan.id) {
+        const ScanHostReply r = scanDecodeReply(reply);
+        if (r.kind == ScanHostReplyKind::Ack && r.accepted == cands.size()) {
+            armPoll();
+            return;
+        }
+        // The engine closed that scan (every candidate final, its deadline, a Scanner start replaced it): a new scan.
+        m_scan.closed = true;
     }
-    // The engine closed that scan (every candidate final, its deadline, a Scanner start replaced it): a new scan.
+    // An older scan's answer, or the refusal of the current one: each named part is resolved from its probe's own state.
+    placeParts(scanId, cands);
+}
+
+void ScanPathProber::placeParts(const QString &fromScan, const QList<ScanHostCandidate> &cands)
+{
     QList<ScanHostCandidate> again;
     for (const ScanHostCandidate &c : cands) {
-        const quint64 key = keyOfHostId(c.id);
-        if (!m_probes.contains(key))
-            continue;
+        const auto p = m_probes.constFind(keyOfHostId(c.id));
+        if (p == m_probes.constEnd() || p->doneParts.contains(c.id))
+            continue; // gone, or already reported: nothing to run
+        if (p->partScan.value(c.id) != fromScan)
+            continue; // already named in another scan: that scan's own answer decides it
         again << c;
     }
-    if (scanId == m_scan.id)
-        m_scan.closed = true;
     if (again.isEmpty())
         return;
     const quint64 race = m_probes.value(keyOfHostId(again.first().id)).stamp.race;
-    if (!m_scan.closed && m_scan.race == race && m_scan.id != scanId) {
-        for (const ScanHostCandidate &c : again)
-            sendCandidate(keyOfHostId(c.id), c);
+    if (m_scan.closed || m_scan.race != race) {
+        openScan(race, again);
         return;
     }
-    openScan(race, again);
+    for (const ScanHostCandidate &c : again)
+        sendCandidate(keyOfHostId(c.id), c);
 }
 
 void ScanPathProber::armPoll()
@@ -450,8 +471,7 @@ void ScanPathProber::onPollReply(const QString &scanId, const QByteArray &reply)
         const bool ok = scanPathOutcomeOf(f) == path::PathOutcome::ProbeOk;
         it->allOk = it->allOk && ok;
         if (it->doneParts.size() >= it->parts)
-            finish(key, it->allOk ? path::PathOutcome::ProbeOk : path::PathOutcome::Inconclusive, it->bytes,
-                   it->allOk ? "proven" : (it->parts > 1 ? "burst_part_failed" : scanProbeErrorName(f.error)));
+            finish(key, it->allOk ? path::PathOutcome::ProbeOk : path::PathOutcome::Inconclusive, it->allOk ? "proven" : (it->parts > 1 ? "burst_part_failed" : scanProbeErrorName(f.error)));
     }
     if (r.progress.done) {
         closeScan(scanId);
@@ -470,7 +490,7 @@ void ScanPathProber::closeScan(const QString &scanId)
     for (quint64 key : keys) {
         const Probe &p = m_probes.value(key);
         if (p.scanId == scanId && !p.hostId.isEmpty())
-            finish(key, path::PathOutcome::Inconclusive, 0, "scan_ended");
+            finish(key, path::PathOutcome::Inconclusive, "scan_ended");
     }
 }
 
@@ -480,6 +500,8 @@ void ScanPathProber::cancel(const path::ProbeStamp &stamp)
     if (it == m_probes.end() || !(it->stamp == stamp))
         return;
     const bool atHost = !it->sent.isEmpty() && it->scanId == m_scan.id && !m_scan.closed;
+    if (it->bytes > 0 && chargeApiBytes)
+        chargeApiBytes(it->bytes); // the race gets no result of a cancelled probe: what it spent goes straight to the ledger
     m_probes.erase(it); // its seat goes with it (a seat still asked: released by its operation id once the ask ends)
     if (!atHost) {
         cancelScanIfIdle();
@@ -526,16 +548,17 @@ void ScanPathProber::finishLater(quint64 key, const char *why)
     const QString reason = QLatin1String(why);
     QTimer::singleShot(0, this, [this, alive, key, reason]() {
         if (alive.lock())
-            finish(key, path::PathOutcome::Inconclusive, 0, reason.toLatin1().constData());
+            finish(key, path::PathOutcome::Inconclusive, reason.toLatin1().constData());
     });
 }
 
-void ScanPathProber::finish(quint64 key, path::PathOutcome outcome, qint64 bytes, const char *why)
+void ScanPathProber::finish(quint64 key, path::PathOutcome outcome, const char *why)
 {
     auto it = m_probes.find(key);
     if (it == m_probes.end())
         return;
     const Probe p = it.value(); // its seat is released as the last copy goes, after the result below
+    const qint64 bytes = p.bytes;
     m_probes.erase(it);
     say(QStringLiteral("race_prober result race=%1 probe=%2 node=%3 outcome=%4 bytes=%5 why=%6")
             .arg(p.stamp.race).arg(p.stamp.probe).arg(p.path.id.id, QLatin1String(path::pathOutcomeName(outcome)))

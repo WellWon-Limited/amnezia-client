@@ -1605,6 +1605,38 @@ static void scenarioRace()
         CHECK(started == QStringList({ "up:p" })); // 32 640 B left: still no room for 54 572 B
     }
 
+    // Third review of 141, G7: the hour budget gets the same number the race cap is charged. An own probe spends the
+    // host's /netinfo opening and closing (xrayFixed) that no probe result carries: the Spent effect has it. A provider
+    // probe's seat batch, config and release (providerFixed - providerOutside) are charged by the API calls themselves:
+    // never twice; only its access part joins the reported bytes.
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.xray = 100000;
+        costs.xrayFixed = 5000;
+        costs.provider = 107520;
+        costs.providerFixed = 40000;
+        costs.providerOutside = 35000;
+        const auto spentOf = [&](const PathCandidate &cand, qint64 hostBytes) {
+            RaceTimings rt;
+            rt.hedgeMs = 5000;
+            PathRace race(rt);
+            ProbeStamp stamp;
+            for (const RaceEffect &e : race.begin(0, { cand }, tr.current(), hostCaps(), 500000, costs))
+                if (e.type == RaceEffectType::StartProbe)
+                    stamp = e.stamp;
+            qint64 spent = 0;
+            for (const RaceEffect &e : race.probeDone(1500, stamp, PathOutcome::ProbeOk, hostBytes))
+                if (e.type == RaceEffectType::Spent)
+                    spent += e.bytes;
+            return spent;
+        };
+        CHECK(spentOf(xray("x1", "NL"), 20000) == 25000);        // host bytes + the host's own access bytes
+        CHECK(spentOf(prov("up:p", UpstreamKind::Country, "NL", 0), 20000) == 25000); // + access only: seat/config/release are charged by the API calls
+        CHECK(spentOf(xray("x1", "NL"), 0) == 8 * 1024); // the floor (PathRace::kMinProbeChargeBytes): a host that reported nothing still used the network (the floor)
+    }
+
     // B3a: the first candidate works. With no evidence the race goes first: the first leg waits for the first proof
     // (here that candidate's own probe) and costs at most that probe over no race - never a dropped leg. A known path
     // (the second tap) starts at once: never slower than no race.
