@@ -109,5 +109,15 @@ l3="$(printf '%s\n' "$stop_fn" | grep -nF 'm_tunnel.down();' | head -1 | cut -d:
 { [ -n "$l1" ] && [ -n "$l2" ] && [ -n "$l3" ] && [ "$l1" -lt "$l2" ] && [ "$l2" -lt "$l3" ]; } \
     || bad "B1: a stop with nothing native must settle before any native stop is asked"
 
+# T1 (one starving rule): both data checks - own (whoami) and provider (the probe) - feed the engine through the one
+# first-byte watch and the one sink (behaviour: upstream_engine_check providerLegStarvedCheck).
+has "$(body "$FACADE" 'void AvpnEngineQml::whoamiAttempt(int epoch)')" 'avpn::watchFirstByte(r, avpn::kWhoamiFirstByteShareMs, checkStarvedSink(epoch));' \
+    || bad "T1: the own-server check's request must carry the first-byte watch"
+has "$(body "$FACADE" 'void AvpnEngineQml::upstreamVerifyAttempt(int epoch)')" 'pr.onStarved = checkStarvedSink(epoch);' \
+    || bad "T1: the provider check's request must carry the first-byte watch"
+has "$(body "$ENGINE/UpstreamLeaseClient.cpp" 'void UpstreamLeaseClient::runProbe(')" 'watchFirstByte(r, pr.firstByteShareMs, pr.onStarved);' \
+    || bad "T1: the probe request must arm the watch it was given"
+[ "$(count "$FACADE" 'm_engine.noteCheckStarved(')" = 1 ] || bad "T1: the engine hears starving from the one sink only"
+
 [ "$fail" = 0 ] && echo "check_lifecycle_142_wiring: OK" || echo "check_lifecycle_142_wiring: FAILED"
 exit $fail

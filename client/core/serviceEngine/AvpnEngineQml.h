@@ -1223,6 +1223,10 @@ private:
     QString upstreamNetworkKeyNow() const;
     void startWhoamiVerification();
     void whoamiAttempt(int epoch);
+    // T1, one rule for both data checks (own whoami, the provider probe): the sink of their first-byte watch
+    // (NetAwait.h::watchFirstByte) - starving / receiving again go to ServiceEngine::noteCheckStarved while this
+    // check (epoch) still runs.
+    std::function<void(bool)> checkStarvedSink(int epoch);
     // tiebreakDone: the verdict came from the generate_204 tiebreak and is final.
     void finishWhoami(int epoch, avpn::WhoamiVerdict v, const QString &facts, bool tiebreakDone = false);
     void finishVerifyInconclusive(int epoch);
@@ -1736,6 +1740,7 @@ private:
     qint64                       m_upstreamRefreshAskedRev = 0; // the newest revision a refresh was asked for
     bool                         m_upstreamFallbackVerify = false; // the generate_204 fallback runs for an upstream node
     int                          m_upstreamVerifyAttempts = 0;
+    qint64                       m_upstreamFirstProbeMs = -1; // m_verifyClock at the check's first probe (T1 share)
     qint64                       m_standbyFetchedWallMs = 0;  // wall clock of the last successful pack fetch
     qint64                       m_standbyLastTryWallMs = 0;  // wall clock of the last attempt (throttle)
     int                          m_standbyEntries = -1;       // -1 = no usable pack

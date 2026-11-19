@@ -20,6 +20,10 @@
 #include <QDateTime>
 #include <QTimer>
 
+#include <algorithm>
+#include <functional>
+#include <memory>
+
 namespace avpn {
 
 inline constexpr int kNetTimeoutMs  = 15000; // АСИНХРОННЫЙ путь (armTimeout) — UI не блокируется
@@ -75,6 +79,34 @@ inline void armTimeout(QNetworkReply *reply, int timeoutMs = kNetTimeoutMs)
         }
     });
     t->start(timeoutMs);
+}
+
+// T1 (device round 6), one rule for every in-tunnel data check (own whoami, the provider probe): no first byte
+// shareMs after the request started = starving -> starved(true); the first byte after that = receiving again ->
+// starved(false). Nothing is told when the first byte comes inside the share. The timer is parked on the reply
+// (it dies with it); a request that ended is never reported. The caller's sink decides what starving means.
+inline void watchFirstByte(QNetworkReply *reply, qint64 shareMs, std::function<void(bool)> starved)
+{
+    if (!reply || !starved)
+        return;
+    struct State {
+        bool gotByte = false;
+        bool told = false;
+    };
+    auto st = std::make_shared<State>();
+    QObject::connect(reply, &QNetworkReply::readyRead, reply, [st, starved]() {
+        if (st->gotByte)
+            return;
+        st->gotByte = true;
+        if (st->told)
+            starved(false);
+    });
+    QTimer::singleShot(int(std::max<qint64>(0, shareMs)), reply, [reply, st, starved]() {
+        if (st->gotByte || !reply->isRunning())
+            return;
+        st->told = true;
+        starved(true);
+    });
 }
 
 // Tunnel transition on the shared QNAM (DebugSnapshot.h::transitionNetAction): take the requests

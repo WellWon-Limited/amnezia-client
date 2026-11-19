@@ -346,6 +346,8 @@ void UpstreamLeaseClient::runProbe(const ProbeRequest &pr, std::function<void(co
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *r = m_nam->get(req);
     armTimeout(r, qMax(1000, pr.timeoutMs));
+    if (pr.onStarved && pr.firstByteShareMs >= 0)
+        watchFirstByte(r, pr.firstByteShareMs, pr.onStarved);
     struct Live {
         QCryptographicHash hash{QCryptographicHash::Sha256};
         QElapsedTimer clock;

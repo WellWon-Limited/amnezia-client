@@ -91,6 +91,10 @@ public:
         // moment the count would pass it (read in bounded chunks). -1 (default) = today's behaviour: only the
         // body is bounded, by `bytes` (the upstream session's data check is unchanged).
         qint64 maxWireBytes = -1;
+        // T1 for provider legs: the data check's first-byte watch (NetAwait.h::watchFirstByte), the same one the
+        // own-server check (whoami) has - starving / receiving again go to onStarved. Unset (the Scanner): none.
+        qint64 firstByteShareMs = -1;
+        std::function<void(bool)> onStarved;
     };
     void runProbe(const ProbeRequest &req, std::function<void(const UpstreamProbeFacts &)> done);
 
