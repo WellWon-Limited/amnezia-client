@@ -13,13 +13,17 @@
 //   Begin(candidates in the owner's order, network, budget) -> a window of waveSize candidates; probes start one per
 //   staggerMs, at most `parallelism` in flight (capped by the host: legs, one provider profile at a
 //   time - the Go engine runs one full Xray instance - and two AmneziaWG), each bounded by probeTimeoutMs.
-//   ProbeDone(stamp, outcome, bytes): ProbeOk -> Report(probe ok) and, the first time, Winner(path); a failure is
+//   ProbeDone(stamp, outcome): ProbeOk -> Report(probe ok) and, the first time, Winner(path); a failure is
 //   NOT recorded (a light probe never quarantines a path - its result says "not proven", the owner's own legs
-//   decide); bytes are charged (Spent) to the one byte ledger the Scanner uses.
-//   Byte cap (device round 19.11: two of three LTE races spent 0.28 MB against 256 KB): a probe starts only when its
-//   projected cost (IPathProber::costs: all its parts, an upper bound) fits what is left; the projection is what it
-//   costs the cap - real bytes go to the Scanner's ledger, never back into this race's cap. A candidate that does
-//   not fit is left to the owner's walk and the next, cheaper ones still start.
+//   decide). A result carries NO byte number: the race's bytes come in through spent().
+//   Byte cap (device round 19.11: two of three LTE races spent 0.28 MB against 256 KB): the cap is spent by REAL bytes,
+//   as the prober reports them (spent(): the host's own counter as deltas, the API calls' bytes - the same stream that
+//   goes to the Scanner's hour ledger). A probe in flight additionally HOLDS its upper bound (IPathProber::costs) for
+//   admission only: it starts only if `spent so far + what is held in flight + its own bound <= cap`; the hold is
+//   released in full when the probe ends however it ends (result, cancel, timeout) - it is derived from the probes in
+//   flight, so nothing can leak. A probe that never left the app holds its bound while it is "in flight" and costs
+//   nothing by itself. A candidate that does not fit waits (deferred) for the cap to free; the next, cheaper ones
+//   still start.
 //   The window refills as probes end (the next wave); nothing left, the race budget
 //   (awake time) over or nothing more the byte cap can pay -> Done(reason). The engine then lets the
 //   owner walk one path at a time (stage-1 behaviour).
@@ -66,10 +70,11 @@ struct RaceTimings {
     int hedgeMs = -1;
     int spareProofs = 1;        // proofs kept after the winner, then the race stops (no probing on)
     int knownFreshMin = 30;     // a known path that carried data here this recently: no race at all
-    // bytes one race may spend on cellular (the Scanner's hour budget stays its own). A probe RESERVES its upper bound
-    // while it runs (AmneziaWG 54,572, our Xray with its burst 116,736, a provider profile 107,520) and is charged
-    // what it really spent when it ends, so dead paths (a few KB each) do not use the cap up. The first window fits
-    // one probe of each kind plus a second AmneziaWG server (333,400); measured races spent 11-165 KB.
+    // bytes one race may spend on cellular (the Scanner's hour budget stays its own). The cap is spent by the real
+    // bytes the prober reports; a probe in flight also HOLDS its upper bound for admission (AmneziaWG 54,572, our Xray
+    // with its burst 116,736, a provider profile 107,520), released when it ends, so dead paths (a few KB each) do not
+    // use the cap up. The first window fits one probe of each kind plus a second AmneziaWG server (333,400); measured
+    // races spent 11-165 KB.
     int cellularMaxBytes = 393216;
 
     // How long the owner waits for a first proof before it starts blind: the last probe of the first parallel wave has
@@ -124,17 +129,16 @@ inline const char *raceDoneReasonName(RaceDoneReason r)
 // Hedge: nothing proven within hedgeAfterMs() - the engine starts the owner on its first choice, the race runs on beside it.
 // Failed: a probe ended without a proof (path, outcome) - not a ledger outcome (a probe is weaker than a tunnel), only
 // a hint for the order of this attempt: the walk does not start with a server the race has just seen fail.
-enum class RaceEffectType { StartProbe, CancelProbe, Report, Spent, Winner, Done, Hedge, Failed };
+enum class RaceEffectType { StartProbe, CancelProbe, Report, Winner, Done, Hedge, Failed };
 
 struct RaceEffect {
     RaceEffectType type = RaceEffectType::Done;
-    ProbeStamp stamp;          // StartProbe / CancelProbe
+    ProbeStamp stamp;          // StartProbe / CancelProbe; Done: stamp.race = the race that ended
     PathCandidate path;        // StartProbe / Report / Winner
     int timeoutMs = 0;         // StartProbe
     PathOutcome outcome = PathOutcome::Inconclusive; // Report (always ProbeOk)
     QString network;           // Report: local network key
     quint64 networkGeneration = 0;
-    qint64 bytes = 0;          // Spent
     int ms = -1;               // Report: the probe's time to proof (its start to its answer) - the ledger's probe speed
     RaceDoneReason reason = RaceDoneReason::None; // Done
 };
@@ -147,19 +151,7 @@ public:
     struct Costs {
         qint64 awg = 90 * 1024;
         qint64 xray = 160 * 1024;
-        qint64 provider = 160 * 1024;
-        // The part of each projection spent OUTSIDE the probe host (the API calls around a probe: opening the scan,
-        // a provider's seat batch with its config, the release). The host's byte count does not include it, so a
-        // finished probe is charged its reported bytes PLUS this part (second review of 141, F8: a provider probe was
-        // refunded its API share and the race could pass its cap).
-        qint64 awgFixed = 0;
-        qint64 xrayFixed = 0;
-        qint64 providerFixed = 0;
-        // The part of each `fixed` the Scanner's ledger already holds from the API calls themselves (real bytes): the
-        // Spent effect carries the cap's charge minus this, so no byte reaches the hour budget twice or not at all.
-        qint64 awgOutside = 0;
-        qint64 xrayOutside = 0;
-        qint64 providerOutside = 0;
+        qint64 provider = 160 * 1024; // upper bounds, for admission only (nothing is charged by them)
     };
 
     // A new race (an older one ends first, its probes cancelled). bytesLeft < 0 = no byte cap (Wi-Fi without a
@@ -177,7 +169,8 @@ public:
         m_net = net;
         m_caps = caps;
         m_costs = costs;
-        m_bytesLeft = bytesLeft;
+        m_cap = bytesLeft;
+        m_spent = 0;
         m_order = order;
         m_next = 0;
         m_pending.clear();
@@ -211,7 +204,7 @@ public:
         return out;
     }
 
-    QList<RaceEffect> probeDone(qint64 now, const ProbeStamp &s, PathOutcome outcome, qint64 bytes)
+    QList<RaceEffect> probeDone(qint64 now, const ProbeStamp &s, PathOutcome outcome)
     {
         QList<RaceEffect> out;
         advance(now);
@@ -220,33 +213,7 @@ public:
             return out; // stale: an older race, an older network, a cancelled or unknown probe
         const PathCandidate path = it.value().path;
         const int tookMs = int(std::max<qint64>(0, m_awake - it.value().startedAt));
-        const qint64 reserved = it.value().reserved;
-        m_inFlight.erase(it);
-        // The cap: the probe reserved its upper bound at the start; now it is charged what it spent (never less than
-        // kMinProbeChargeBytes - a host that reports nothing still used the network; never more than it reserved).
-        // Device round 19.11 (LTE, three dead first candidates): 11 KB were spent, 327 KB stayed reserved, the race
-        // ended "bytes" with nothing proven and the working servers were never probed.
-        // One number: what the cap is charged is what the hour ledger gets (less what the API calls already put there).
-        // bytes < 0: no byte of this probe reached the host (a candidate refused locally, a start the host refused): the
-        // host side costs nothing - the charge follows what was sent, not the kind - only the API part (seat batch,
-        // config, release: `outside`, already in the hour ledger by its real bytes) stays on the cap.
-        if (bytes < 0) {
-            if (m_bytesLeft >= 0)
-                m_bytesLeft += reserved - std::min(reserved, outsideOf(path));
-        } else {
-            const qint64 raw = bytes + fixedOf(path);
-            const qint64 charge = reserved > 0 ? std::clamp<qint64>(raw, std::min(kMinProbeChargeBytes, reserved), reserved) : raw;
-            if (m_bytesLeft >= 0)
-                m_bytesLeft += reserved - charge;
-            // (a probe that went past its reservation - the host cuts at cost_bytes, so rarely - is charged what it used)
-            const qint64 ledger = std::max<qint64>(0, std::max(charge, raw) - outsideOf(path));
-            if (ledger > 0) { // the Scanner's ledger
-                RaceEffect e;
-                e.type = RaceEffectType::Spent;
-                e.bytes = ledger;
-                out << e;
-            }
-        }
+        m_inFlight.erase(it); // its hold on the cap ends with it (reservedInFlight() is derived from m_inFlight)
         if (outcome == PathOutcome::ProbeOk) {
             RaceEffect r;
             r.type = RaceEffectType::Report;
@@ -278,6 +245,16 @@ public:
         pump(out);
         return out;
     }
+
+    // Real bytes of this race, as the prober reports them (the host's counter as deltas, API calls as they are spent).
+    // Counted only while the race runs; the same stream goes to the Scanner's hour ledger (ServiceEngine).
+    void spent(qint64 bytes)
+    {
+        if (m_running && bytes > 0)
+            m_spent += bytes;
+    }
+    qint64 spentBytes() const { return m_spent; }
+    qint64 reservedBytes() const { return reservedInFlight(); }
 
     // The engine confirms a Winner the ledger accepted (it is "working" there); a refused one leaves the race open.
     void acceptWinner(const QString &pathId) { m_winner = pathId; }
@@ -377,11 +354,7 @@ private:
         PathCandidate path;
         qint64 deadline = 0;
         qint64 startedAt = 0; // awake time of its start
-        qint64 reserved = 0;  // bytes of the cap it holds while it runs (0 = no cap)
     };
-    // The least a finished probe is charged against the cap, whatever the host reports.
-    static constexpr qint64 kMinProbeChargeBytes = 8 * 1024;
-
     void advance(qint64 now)
     {
         // the same awake clock as the owner: a gap longer than 2.5 s is a suspension and does not count
@@ -403,27 +376,16 @@ private:
         return m_costs.xray;
     }
 
-    qint64 outsideOf(const PathCandidate &c) const
+    // What the probes in flight hold: their upper bounds, nothing else (no state to leak: a probe that is gone holds nothing).
+    qint64 reservedInFlight() const
     {
-        switch (c.kind) {
-        case PathKind::OwnAwg: return m_costs.awgOutside;
-        case PathKind::OwnXray: return m_costs.xrayOutside;
-        case PathKind::Provider: return m_costs.providerOutside;
-        }
-        return 0;
+        qint64 n = 0;
+        for (const Flight &f : m_inFlight)
+            n += costOf(f.path);
+        return n;
     }
 
-    qint64 fixedOf(const PathCandidate &c) const
-    {
-        switch (c.kind) {
-        case PathKind::OwnAwg: return m_costs.awgFixed;
-        case PathKind::OwnXray: return m_costs.xrayFixed;
-        case PathKind::Provider: return m_costs.providerFixed;
-        }
-        return 0;
-    }
-
-    bool affordable(const PathCandidate &c) const { return m_bytesLeft < 0 || costOf(c) <= m_bytesLeft; }
+    bool affordable(const PathCandidate &c) const { return m_cap < 0 || m_spent + reservedInFlight() + costOf(c) <= m_cap; }
 
     int inFlightOf(PathKind k) const
     {
@@ -517,10 +479,6 @@ private:
                 f.deadline = m_awake + m_t.probeTimeoutMs + 1000; // the host's grace after its own bound
                 f.startedAt = m_awake;
                 const quint64 probe = ++m_probeSeq;
-                if (m_bytesLeft >= 0) {
-                    f.reserved = costOf(c); // held while it runs; probeDone charges what it spent
-                    m_bytesLeft -= f.reserved;
-                }
                 m_inFlight.insert(probe, f);
                 if (c.kind == PathKind::Provider)
                     ++m_providersStarted;
@@ -548,6 +506,7 @@ private:
         m_running = false;
         RaceEffect e;
         e.type = RaceEffectType::Done;
+        e.stamp.race = m_race; // the race that ended (the engine tells the prober, which ends the race's host scan)
         e.reason = reason;
         out << e;
     }
@@ -561,7 +520,8 @@ private:
     QString m_winner;
     quint64 m_race = 0;
     quint64 m_probeSeq = 0;
-    qint64 m_bytesLeft = -1;
+    qint64 m_cap = -1;   // bytes the race may spend (< 0 = no cap)
+    qint64 m_spent = 0;  // real bytes of this race so far (spent())
     qint64 m_lastNow = 0;
     qint64 m_awake = 0;
     qint64 m_budgetEnd = 0;

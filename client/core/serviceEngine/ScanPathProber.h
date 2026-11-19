@@ -6,8 +6,14 @@
 // Scanner screen state, nothing that touches the tunnel.
 //
 // How one race maps onto the host (one host scan at a time per engine process):
-//  - The first StartProbe of a race opens a host scan (scan_start); the next ones join it (scan_add). A scan the
-//    engine already closed (every queued candidate final, or its deadline) is replaced by a new scan_start.
+//  - ONE host scan serves a whole race: the first StartProbe opens it (scan_start), the next ones join (scan_add); a scan
+//    whose queue drained stays open for scan_add (the host's contract), so sequential probes never reopen it. It is
+//    cancelled once: when the race ends (raceEnded) or when cancelling a probe requires stopping the host (below). A scan the
+//    host closed itself (its deadline) is replaced by a new scan_start.
+//  - Bytes: the host's own cumulative bytes_spent per scan is the only source of host spend. The prober keeps the last
+//    total seen per scan and emits each increase once through onSpent; a cancelled scan keeps being polled until the host
+//    says `final` (the cancel ack comes without it while the closing /netinfo runs), unknown_scan, or kScanFinalWaitMs.
+//    API-side bytes (session, seat batch, release) are emitted by their callbacks. See raceCosts() for the table.
 //  - Probe kinds as the Scanner uses them, no reach stage (the race has its own bound): own AmneziaWG -> awg_mini
 //    (the device's own key, 64 KB body through the node's NAT; only for a node the signed manifest marks awg_probe
 //    and with the API's IP known), own Xray -> xray_leg when the host has legs (the node's one outbound) else
@@ -15,7 +21,7 @@
 //    XrayProfileSanitizer.h). A candidate that cannot be built is answered "not proven" at once.
 //  - Results: a data item of the probe -> ProbeOk only with a verified digest of the sized body (sha_ok, no error);
 //    anything else, the scan's end without an item, an unknown scan -> Inconclusive (never recorded by the race).
-//    Bytes = the item's spent bytes (the host's own count). Every result goes to onResult once, on the GUI thread,
+//    A result's bytes are the journal's figure only. Every result goes to onResult once, on the GUI thread,
 //    never from inside start().
 //  - cancel(): the probe's result is dropped and the probe is gone, and it is stopped AT THE HOST: the host has only
 //    a per-scan cancel, so when other probes still share the scan it is cancelled and the others are re-opened in a
@@ -50,6 +56,7 @@
 #include "TribeScanner.h" // IScanEngine
 #include "path/PathProber.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QObject>
 #include <QSet>
@@ -144,12 +151,16 @@ public:
         m_api = m_ownedApi.get();
     }
 
-    // Wiring (all optional). onResult: ServiceEngine::onProbeResult. hostBusy: the Scanner's own scan runs (it owns
-    // the host). chargeApiBytes: the manifest / token / seat requests' real bytes into the Scanner's ledger (the
-    // probes' bytes go back with each result and the engine charges them). wallNow: wall clock (token expiry).
+    // Wiring (all optional). onResult: ServiceEngine::onProbeResult (the third number is the journal's only - what the
+    // probe's host items showed; nothing is charged by it). hostBusy: the Scanner's own scan runs (it owns the host).
+    // onSpent: THE byte stream - every real byte of the race's traffic, once (the host's counters as deltas, the session,
+    // seat and release calls' bytes); the engine sets it through setSpendSink and puts it on the race's cap and the hour
+    // ledger (see raceCosts for the table). wallNow: wall clock (token expiry).
     std::function<void(const path::ProbeStamp &, path::PathOutcome, qint64)> onResult;
     std::function<bool()> hostBusy;
-    std::function<void(qint64)> chargeApiBytes;
+    std::function<void(qint64)> onSpent;
+    void setSpendSink(std::function<void(qint64)> sink) override { onSpent = std::move(sink); }
+    void raceEnded(quint64 race) override;
     std::function<qint64()> wallNow;
     std::function<void(const QString &)> log; // ids, kinds, codes, counts only
 
@@ -175,6 +186,9 @@ public:
     bool sessionReady() const;
     int liveProbes() const { return int(m_probes.size()); }
     QString openScanId() const { return m_scan.id; }
+    // Scans still followed for their last total, and scans that ended without it (unknown_scan, the bound): the model's numbers.
+    int scansFollowed() const { return int(m_books.size()); }
+    int scansWithoutFinal() const { return m_withoutFinal; }
     int pollIntervalMs = 200;
     // Own Xray is probed the way a tunnel opens it (ScanPlan.h scanXrayBurstOf, shared with the Scanner): the data
     // probe plus xrayBurst-1 small parallel ones; proven only if every one of them carried its body. 1 = a single
@@ -183,6 +197,9 @@ public:
     // The race's data body (device 18.11: 190 KB - 1.4 MB per race with the Scanner's 64 KB body, the cellular hour
     // ran out within a few connects): 24 KB still proves data through the path (a 15-20 KB flow freeze cuts it).
     static constexpr int kRaceProbeBytes = 24576;
+    // How long a cancelled or closed scan is polled for its `final` (the host's closing /netinfo takes up to the reach
+    // timeout, 1.5 s; its replace wait is 3 s). A scan is dropped from the book only on `final`, unknown_scan or this bound.
+    static constexpr qint64 kScanFinalWaitMs = 3000;
 
 private:
     struct Probe {
@@ -196,11 +213,17 @@ private:
         int parts = 1;          // host candidates of this probe (own Xray: the burst, see xrayBurst)
         QSet<QString> doneParts; // host ids of the parts that reported data, in whatever scan (a repeat is ignored)
         bool allOk = true;
-        qint64 bytes = 0;
+        qint64 bytes = 0;        // what this probe's host items showed (the journal only; no byte is charged by it)
         QSet<QString> acceptedParts; // part ids the CURRENT scan's host acknowledged (cleared when a probe is bound to a new scan)
-        bool reachedHost = false; // the host accepted at least one part: otherwise no byte of this probe ever moved
         QHash<QString, QString> partScan; // part host id -> the scan its last message named (pending or accepted)
         QList<ScanHostCandidate> sent; // the probe's host candidates (all its parts), kept for the probe's life; a reopen sends those not in doneParts
+    };
+    // What the prober follows of one host scan: the last cumulative bytes_spent seen (the only thing it charges from).
+    struct ScanBook {
+        qint64 seen = 0;
+        qint64 lastSeq = 0;
+        qint64 forgetAtMs = 0;    // 0 = the scan is open (no bound); else the time this entry is dropped if `final` never came
+        qint64 pollSentAtMs = -1; // a poll of it is out since then (-1 = none)
     };
     struct HostScan {
         QString id;
@@ -208,7 +231,6 @@ private:
         bool startSent = false;
         bool acked = false;
         bool closed = true;
-        qint64 lastSeq = 0;
         QList<ScanHostCandidate> queued; // to add once the start is acked
     };
 
@@ -224,25 +246,24 @@ private:
     void poll();
     void onPollReply(const QString &scanId, const QByteArray &reply);
     void closeScan(const QString &scanId);
-    void cancelScanIfIdle();
     void endHostScan();
     void onCancelReply(const QString &scanId, const QByteArray &reply);
     // End the current scan at the host and open a new one with every part of its probes that has not reported: the
     // one function behind a cancelled neighbour and the refusal of an add (the engine closed the scan).
     void retireScan();
-    static constexpr int kScanLedgerMax = 16;
-public:
-    int scanLedgerSizeForTest() const { return int(m_scanReported.size()); }
-private: // scans whose final total may still come
-    QStringList m_scanOrder;
-    void chargeScanRemainder(const QString &scanId, qint64 total);
-    QSet<QString> m_cancelSent; // scans a cancel was sent for and whose ack is not in yet
-    QHash<QString, qint64> m_scanReported; // scan id -> item bytes attributed to a probe (charged by its result or cancel)
+    // Host spend: one counter per scan, the last total seen; only a larger total charges, the difference, once.
+    void noteTotal(const QString &scanId, qint64 total);
+    void spend(qint64 bytes);
+    bool pollable(const QString &id, const ScanBook &b) const;
+    qint64 mono() const { return m_clock.elapsed(); }
+    static constexpr qint64 kPollStaleMs = 1000; // an unanswered poll is asked again after this
+    QHash<QString, ScanBook> m_books;
+    int m_withoutFinal = 0;
+    QElapsedTimer m_clock;
     // One owner of what an answer of a scan that is no longer the current one (or a refusal of the current one) means:
     // every named part that is neither reported nor already named in another scan goes into the current scan.
     void placeParts(const QString &fromScan, const QList<ScanHostCandidate> &cands);
-    // A probe's bytes are a ledger with one entry point (Probe::bytes, added once per reported part); every end of the
-    // probe - proven, refused, timed out, ended with its scan - reports that total.
+    // Every end of a probe - proven, refused, timed out, ended with its scan - reports once.
     void finish(quint64 key, path::PathOutcome outcome, const char *why);
     void finishLater(quint64 key, const char *why);
     void armPoll();

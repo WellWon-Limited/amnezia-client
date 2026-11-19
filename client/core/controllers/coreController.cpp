@@ -336,7 +336,6 @@ void CoreController::initControllers()
             auto *prober = new avpn::ScanPathProber(avpnEngine->scanHost(), avpnEngine->scanEngine(), nullptr, avpnEngine);
             prober->adoptApi(std::make_unique<avpn::ScanApiRaceApi>(tribeScanner->api(), avpnEngine->scanEngine()));
             prober->hostBusy = [tribeScanner]() { return tribeScanner->hostScanRunning(); };
-            prober->chargeApiBytes = [tribeScanner](qint64 bytes) { tribeScanner->raceCharge(bytes); };
             prober->log = [](const QString &line) { qInfo().noquote() << "[avpn race]" << line; };
             prober->onResult = [avpnEngine](const avpn::path::ProbeStamp &stamp, avpn::path::PathOutcome outcome, qint64 bytes) {
                 avpnEngine->pathProbeResult(stamp, outcome, bytes);

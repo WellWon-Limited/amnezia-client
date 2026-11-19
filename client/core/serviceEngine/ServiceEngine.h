@@ -248,17 +248,29 @@ public:
     void setProber(path::IPathProber *prober)
     {
         m_prober = prober;
+        if (m_prober)
+            m_prober->setSpendSink([this](qint64 bytes) { spendProbeBytes(bytes); });
         if (m_prober && m_net.current().usable())
             m_prober->prepare(m_net.current());
     }
-    // The one byte ledger the Scanner uses: bytes the race may still spend now (-1 = no cap) and the charge of what
-    // a probe spent. Unset = no cap, nothing charged.
+    // The one byte ledger the Scanner uses: bytes the race may still spend now (-1 = no cap) and the charge of every
+    // real byte of the race's traffic (the prober's one stream: the race's cap gets it too). Unset = no cap, nothing charged.
     void setProbeBudget(std::function<qint64()> bytesLeft, std::function<void(qint64)> charge)
     {
         m_probeBytesLeft = std::move(bytesLeft);
         m_chargeProbeBytes = std::move(charge);
     }
-    void onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent);
+    // bytesSeen: the journal's figure only (a probe's host items); the bytes are charged through spendProbeBytes.
+    void onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSeen);
+    // One real byte count of the race's traffic, from the prober: the race's cap and the hour ledger, once.
+    void spendProbeBytes(qint64 bytes)
+    {
+        if (bytes <= 0)
+            return;
+        m_race.spent(bytes);
+        if (m_chargeProbeBytes)
+            m_chargeProbeBytes(bytes);
+    }
     // A probe proof that came from elsewhere (the Scanner's finished scan on the current network): recorded at
     // "probe ok" strength, like a race result. false = not recorded (unknown node, no usable network).
     bool recordProbeProof(const QString &nodeId, const QString &source);
