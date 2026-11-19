@@ -2291,7 +2291,10 @@ private:
                     r.cached = false;
                     r.fromLive = true;
                     r.liveVerified = false; // a cached verdict is not current evidence
+                    const int keptBatch = r.batch; // its batch stays: re-stamping put it in the first batch and took a place there
                     stampArrival(r);
+                    if (keptBatch > 0)
+                        r.batch = keptBatch;
                 }
                 r.generation = m_net.generation();
                 r.fingerprint = m_net.fingerprint;
