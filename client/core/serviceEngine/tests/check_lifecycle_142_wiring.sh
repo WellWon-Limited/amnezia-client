@@ -122,5 +122,30 @@ has "$(body "$ENGINE/UpstreamLeaseClient.cpp" 'void UpstreamLeaseClient::runProb
     || bad "T1: the probe request must arm the watch it was given"
 [ "$(count "$FACADE" 'm_engine.noteCheckStarved(')" = 1 ] || bad "T1: the engine hears starving from the one sink only"
 
+# BG (device log 13:22:02-13:23:18): the connect attempt and a seat release being resent hold iOS background time
+# through the ONE platform hook (BackgroundTaskHook.h; behaviour: ios BackgroundTaskBookTests). The attempt: begun
+# after connect() started it (guardedStart), level-synced on every change and at the end of syncAttempt (where the
+# owner's result is taken); each seat release path begins on a resend and ends on its final answer; the iOS half
+# runs on the one UIKit task of AvpnBackgroundGuard, not a second one.
+[ "$(count "$FACADE" 'avpn::bgtask::begin(')" = 1 ] || bad "BG: the facade must begin the attempt's hold in one place"
+[ "$(count "$FACADE" 'avpn::bgtask::end(')" = 1 ] || bad "BG: the facade must end the attempt's hold in one place"
+has "$(body "$FACADE" 'void AvpnEngineQml::syncAttemptBgHold()')" 'm_engine.attemptRunning() || m_engine.isVerifying()' \
+    || bad "BG: the hold must follow the attempt owner / the verifying engine"
+has "$(body "$FACADE" 'bool AvpnEngineQml::syncAttempt()')" 'syncAttemptBgHold();' \
+    || bad "BG: syncAttempt must end the hold when the owner's result is taken"
+[ "$(count "$FACADE" 'syncAttemptBgHold)')" = 1 ] || bad "BG: every state change must sync the attempt's hold"
+[ "$(count "$FACADE" 'syncAttemptBgHold(); // build 142: the attempt began')" = 1 ] || bad "BG: the start must sync the hold right after connect() began the attempt"
+for f in UpstreamLeaseClient.cpp ScanApiClient.cpp; do
+    [ "$(count "$ENGINE/$f" 'avpn::bgtask::begin(avpn::bgtask::Reason::Release')" = 1 ] || bad "BG: $f must begin a release hold when it schedules a resend"
+    [ "$(count "$ENGINE/$f" 'avpn::bgtask::end(avpn::bgtask::Reason::Release')" -ge 2 ] || bad "BG: $f must end the release hold on every final outcome"
+done
+BGMM="$IOS/AvpnBackgroundGuard.mm"
+[ "$(count "$BGMM" 'beginBackgroundTaskWithName')" = 1 ] || bad "BG: exactly one UIKit background task owner"
+has "$(code "$BGMM")" 'taskBook()' || bad "BG: the hook must run on the task book"
+for f in "$ENGINE"/*.cpp "$ENGINE"/*.h; do
+    case "$f" in */BackgroundTaskHook.h) continue ;; esac
+    [ "$(count "$f" 'UIApplication')" = 0 ] || bad "BG: shared code must not reference UIKit ($f)"
+done
+
 [ "$fail" = 0 ] && echo "check_lifecycle_142_wiring: OK" || echo "check_lifecycle_142_wiring: FAILED"
 exit $fail
