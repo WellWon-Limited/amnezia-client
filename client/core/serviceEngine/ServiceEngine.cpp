@@ -526,12 +526,12 @@ void ServiceEngine::beginRaceForTap()
         race << order.at(i).path;
     qint64 bytesLeft = m_probeBytesLeft ? m_probeBytesLeft() : -1;
     // B3d: on cellular one race spends at most cellularMaxBytes (the Scanner's hour budget stays its own)
-    if (m_net.current().coarse.startsWith(QLatin1String("cell")))
+    if (m_net.current().cellular())
         bytesLeft = bytesLeft < 0 ? rt.cellularMaxBytes : std::min<qint64>(bytesLeft, rt.cellularMaxBytes);
     attemptJournal(QStringLiteral("race_begin known=%1 candidates=%2 bytes_left=%3")
                        .arg(known ? order.first().path.id.id : QStringLiteral("-")).arg(race.size()).arg(bytesLeft));
     m_raceFirst = !known;
-    applyRaceEffects(m_race.begin(nowMs(), race, m_net.current(), m_prober->caps(), bytesLeft, m_probeCosts));
+    applyRaceEffects(m_race.begin(nowMs(), race, m_net.current(), m_prober->caps(), bytesLeft, m_prober->costs()));
     if (m_raceFirst && !m_race.running())
         m_raceFirst = false; // nothing could be raced: the owner walks at once
 }

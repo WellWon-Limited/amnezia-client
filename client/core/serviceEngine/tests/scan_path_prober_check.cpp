@@ -539,6 +539,32 @@ static void caseBurst()
     }
 }
 
+// F5 of device round 19.11 (two of three LTE races spent 0.28 MB against the 256 KB cap): the race pays a probe's
+// projection before it starts it, so the projection must cover what the prober really sends - every burst part's
+// cost on the wire plus the scan's access check; one own Xray probe measured 92 723 B on the iPhone.
+static void caseCosts()
+{
+    g_case = "race_costs";
+    World w;
+    w.prober.xrayBurst = 4;
+    w.ready();
+    w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+    spin(40);
+    qint64 parts = 0;
+    for (const QJsonObject &rq : w.host.requests)
+        for (const QJsonValue &v : rq.value("candidates").toArray())
+            parts += qint64(v.toObject().value("cost_bytes").toDouble());
+    const path::PathRace::Costs c = w.prober.costs();
+    check(parts > 0 && c.xray >= parts, "own Xray: the projection covers every burst part the prober sends");
+    check(c.xray >= 92723, "own Xray: at least what one race probe measured on the device");
+    const ScanTunables t;
+    check(c.awg >= qint64(t.warmBytes) + ScanPathProber::kRaceProbeBytes, "AmneziaWG: the race's body and more");
+    check(c.provider >= qint64(t.warmBytes) + ScanPathProber::kRaceProbeBytes + t.costBatchBytes + t.costConfigBytes,
+          "provider: the data connection and the seat batch with its config");
+    w.prober.xrayBurst = 1;
+    check(w.prober.costs().xray < c.xray, "one connection costs less than the burst");
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -550,6 +576,7 @@ int main(int argc, char **argv)
     caseScanReplaced();
     caseSession();
     caseBurst();
+    caseCosts();
     if (g_failures) {
         std::fprintf(stderr, "scan path prober check: %d of %d checks FAILED\n", g_failures, g_checks);
         return 1;

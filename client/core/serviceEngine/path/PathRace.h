@@ -16,8 +16,12 @@
 //   ProbeDone(stamp, outcome, bytes): ProbeOk -> Report(probe ok) and, the first time, Winner(path); a failure is
 //   NOT recorded (a light probe never quarantines a path - its result says "not proven", the owner's own legs
 //   decide); bytes are charged (Spent) to the one byte ledger the Scanner uses.
+//   Byte cap (device round 19.11: two of three LTE races spent 0.28 MB against 256 KB): a probe starts only when its
+//   projected cost (IPathProber::costs: all its parts, an upper bound) fits what is left; the projection is what it
+//   costs the cap - real bytes go to the Scanner's ledger, never back into this race's cap. A candidate that does
+//   not fit is left to the owner's walk and the next, cheaper ones still start.
 //   The window refills as probes end (the next wave); nothing left, the race budget
-//   (awake time) over or the byte budget unable to pay the next probe -> Done(reason). The engine then lets the
+//   (awake time) over or nothing more the byte cap can pay -> Done(reason). The engine then lets the
 //   owner walk one path at a time (stage-1 behaviour).
 //   Stop / NetworkChanged: every probe in flight is cancelled; its answer, if it still comes, is dropped.
 // Stamps: every probe is (race number, network generation, probe number); a result with any other stamp is
@@ -110,8 +114,7 @@ class PathRace {
 public:
     explicit PathRace(RaceTimings t = {}) : m_t(t) {}
 
-    // Costs of one probe per kind, in bytes (the engine fills them from ScanBudget.h::scanProbeCostBytes so the
-    // race and the Scanner charge one ledger the same way).
+    // Costs of one probe per kind, in bytes: upper bounds from the prober (IPathProber::costs).
     struct Costs {
         qint64 awg = 90 * 1024;
         qint64 xray = 160 * 1024;
@@ -141,6 +144,7 @@ public:
         m_inFlight.clear();
         m_winner.clear();
         m_providersStarted = 0;
+        m_unpaid = false;
         m_proven = 0;      // B2: per race
         m_legs.clear();
         m_hedged = false;
@@ -173,13 +177,11 @@ public:
         const PathCandidate path = it.value().path;
         const int tookMs = int(std::max<qint64>(0, m_awake - it.value().startedAt));
         m_inFlight.erase(it);
-        if (bytes > 0) {
+        if (bytes > 0) { // the Scanner's ledger; this race's cap was paid by the projection at the start
             RaceEffect e;
             e.type = RaceEffectType::Spent;
             e.bytes = bytes;
             out << e;
-            if (m_bytesLeft >= 0)
-                m_bytesLeft = std::max<qint64>(0, m_bytesLeft - bytes);
         }
         if (outcome == PathOutcome::ProbeOk) {
             RaceEffect r;
@@ -318,6 +320,8 @@ private:
         return m_costs.xray;
     }
 
+    bool affordable(const PathCandidate &c) const { return m_bytesLeft < 0 || costOf(c) <= m_bytesLeft; }
+
     int inFlightOf(PathKind k) const
     {
         int n = 0;
@@ -359,50 +363,56 @@ private:
             finish(RaceDoneReason::Budget, out);
             return;
         }
-        while (m_next < int(m_order.size()) && int(m_pending.size() + m_inFlight.size()) < m_t.waveSize) {
-            const PathCandidate &c = m_order.at(m_next++);
-            if (m_legs.contains(c.id.id))
-                continue; // the owner raises it: never probed beside its own leg
-            if (c.kind == PathKind::Provider && m_providersQueued >= m_t.providerPerRace)
-                continue; // over the probe-seat bound of this race: left to the owner's walk
-            m_providersQueued += c.kind == PathKind::Provider ? 1 : 0;
-            m_pending << c;
-        }
-        for (int i = 0; i < m_pending.size() && m_awake >= m_nextStartAt;) {
-            const PathCandidate c = m_pending.at(i);
-            if (!hostTakes(c)) {
-                ++i;
-                continue;
-            }
-            if (m_bytesLeft >= 0 && costOf(c) > m_bytesLeft) {
-                if (m_inFlight.isEmpty()) {
-                    finish(RaceDoneReason::Bytes, out); // the byte budget cannot pay a probe: one at a time
-                    return;
+        // the cap only shrinks: a candidate it cannot pay is dropped (the owner's walk) and the window refills
+        for (bool dropped = true; dropped;) {
+            dropped = false;
+            while (m_next < int(m_order.size()) && int(m_pending.size() + m_inFlight.size()) < m_t.waveSize) {
+                const PathCandidate &c = m_order.at(m_next++);
+                if (m_legs.contains(c.id.id))
+                    continue; // the owner raises it: never probed beside its own leg
+                if (c.kind == PathKind::Provider && m_providersQueued >= m_t.providerPerRace)
+                    continue; // over the probe-seat bound of this race: left to the owner's walk
+                if (!affordable(c)) {
+                    m_unpaid = true;
+                    continue;
                 }
-                break;
+                m_providersQueued += c.kind == PathKind::Provider ? 1 : 0;
+                m_pending << c;
             }
-            m_pending.removeAt(i);
-            Flight f;
-            f.path = c;
-            f.deadline = m_awake + m_t.probeTimeoutMs + 1000; // the host's grace after its own bound
-            f.startedAt = m_awake;
-            const quint64 probe = ++m_probeSeq;
-            m_inFlight.insert(probe, f);
-            if (m_bytesLeft >= 0)
-                m_bytesLeft = std::max<qint64>(0, m_bytesLeft - costOf(c)); // reserved; the real bytes come with Done
-            if (c.kind == PathKind::Provider)
-                ++m_providersStarted;
-            RaceEffect e;
-            e.type = RaceEffectType::StartProbe;
-            e.stamp = ProbeStamp{ m_race, m_net.generation, probe };
-            e.path = c;
-            e.timeoutMs = m_t.probeTimeoutMs;
-            out << e;
-            // the stagger on a virtual schedule: a coarse platform tick (500 ms) still starts one per staggerMs
-            m_nextStartAt = std::max(m_nextStartAt, m_awake - m_t.staggerMs) + m_t.staggerMs;
+            for (int i = 0; i < m_pending.size() && m_awake >= m_nextStartAt;) {
+                const PathCandidate c = m_pending.at(i);
+                if (!affordable(c)) { // the probes started since it was queued took what it needed
+                    m_pending.removeAt(i);
+                    m_unpaid = dropped = true;
+                    continue;
+                }
+                if (!hostTakes(c)) {
+                    ++i;
+                    continue;
+                }
+                m_pending.removeAt(i);
+                Flight f;
+                f.path = c;
+                f.deadline = m_awake + m_t.probeTimeoutMs + 1000; // the host's grace after its own bound
+                f.startedAt = m_awake;
+                const quint64 probe = ++m_probeSeq;
+                m_inFlight.insert(probe, f);
+                if (m_bytesLeft >= 0)
+                    m_bytesLeft -= costOf(c); // paid: the projection is the cap's charge, never refunded
+                if (c.kind == PathKind::Provider)
+                    ++m_providersStarted;
+                RaceEffect e;
+                e.type = RaceEffectType::StartProbe;
+                e.stamp = ProbeStamp{ m_race, m_net.generation, probe };
+                e.path = c;
+                e.timeoutMs = m_t.probeTimeoutMs;
+                out << e;
+                // the stagger on a virtual schedule: a coarse platform tick (500 ms) still starts one per staggerMs
+                m_nextStartAt = std::max(m_nextStartAt, m_awake - m_t.staggerMs) + m_t.staggerMs;
+            }
         }
         if (m_pending.isEmpty() && m_inFlight.isEmpty() && m_next >= int(m_order.size()))
-            finish(RaceDoneReason::Exhausted, out);
+            finish(m_unpaid && m_proven == 0 ? RaceDoneReason::Bytes : RaceDoneReason::Exhausted, out);
     }
 
     void finish(RaceDoneReason reason, QList<RaceEffect> &out)
@@ -440,6 +450,7 @@ private:
     int m_proven = 0;
     bool m_hedged = false;
     bool m_running = false;
+    bool m_unpaid = false; // a candidate was left out because the byte cap could not pay it
 };
 
 } // namespace avpn::path

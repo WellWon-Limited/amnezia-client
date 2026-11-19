@@ -47,6 +47,9 @@ struct NetworkKey {
     quint64 generation = 0;
 
     bool usable() const { return !local.isEmpty(); }
+    // Cellular by the local key (always known at the tap). Not by the coarse key: on iOS the carrier is not readable
+    // and the ASN unknown at the tap, so it is empty (device round 19.11: the race's cellular byte cap never applied).
+    bool cellular() const { return local.startsWith(QLatin1String("cell:")); }
 };
 
 namespace detail {

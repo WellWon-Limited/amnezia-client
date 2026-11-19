@@ -179,6 +179,16 @@ static void testNetworkKey()
     bare.medium = NetMedium::Wifi;
     CHECK(key(bare) == QLatin1String("wifi:-"));
     CHECK(key(cell("250-01", "LTE")) == QLatin1String("cell:250-01:lte"));
+    {
+        // iOS cannot read the carrier and the ASN is unknown at the tap: the coarse key is empty, the network is still
+        // cellular (device round 19.11: the race's cellular cap never applied, races spent 0.28 MB on LTE)
+        NetworkTracker t;
+        t.observe(cell("", "lte"));
+        CHECK(t.current().local == QLatin1String("cell:-:lte") && t.current().coarse.isEmpty() && t.current().cellular());
+        NetworkTracker w;
+        w.observe(wifi("192.168.1.1"));
+        CHECK(!w.current().cellular());
+    }
     NetworkObservation off;
     off.medium = NetMedium::Offline;
     CHECK(key(off).isEmpty());
@@ -1197,6 +1207,46 @@ static void scenarioRace()
         row("race 8: Wi-Fi 19.11, hedged leg up before any proof", sw, rw, 0);
         CHECK(rw.connected && rw.path.id.id == QLatin1String("16") && sw.yields == 0 && rw.paths == 1);
         CHECK(sw.lastTapWallMs() <= 3900);
+    }
+
+    // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when its projection fits; real bytes
+    // never refund the cap; a candidate the cap cannot pay is left to the owner's walk and the cheaper ones still start.
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.awg = 45000;
+        costs.xray = 110000;
+        costs.provider = 320000;
+        const QList<PathCandidate> list = { xray("x1", "FI"), prov("up:p", UpstreamKind::Country, "NL", 0), xray("x2", "DE"),
+                                            awg("a1", "EE"), awg("a2", "NL"), xray("x3", "NL") };
+        RaceTimings rt;
+        rt.hedgeMs = 5000;
+        PathRace race(rt);
+        const qint64 cap = 262144;
+        qint64 projected = 0;
+        QStringList started;
+        QList<RaceEffect> fx = race.begin(0, list, tr.current(), hostCaps(), cap, costs);
+        bool bytesDone = false;
+        for (qint64 t = 0; t <= 6000; t += 250) {
+            if (t > 0)
+                fx << race.tick(t);
+            while (!fx.isEmpty()) {
+                const RaceEffect e = fx.takeFirst();
+                bytesDone = bytesDone || (e.type == RaceEffectType::Done && e.reason == RaceDoneReason::Bytes);
+                if (e.type != RaceEffectType::StartProbe)
+                    continue;
+                started << e.path.id.id;
+                projected += e.path.kind == PathKind::OwnXray ? costs.xray : e.path.kind == PathKind::OwnAwg ? costs.awg
+                                                                                                          : costs.provider;
+                // the host reports MORE than the projection - the cap is still charged by the projection only
+                fx << race.probeDone(t + 100, e.stamp, PathOutcome::Inconclusive, 200000);
+            }
+        }
+        CHECK(projected <= cap);
+        CHECK(started == QStringList({ "x1", "x2" }) && bytesDone && !race.running());
+        CHECK(!started.contains(QStringLiteral("up:p"))); // 320 000 B never fits a 256 KiB race
+        CHECK(started.contains(QStringLiteral("x2")));    // the provider that cannot be paid does not block the next
     }
 
     // B3a: the first candidate works - the race (hedge at once) is never slower than no race

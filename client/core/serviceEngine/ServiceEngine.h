@@ -251,7 +251,6 @@ public:
         m_probeBytesLeft = std::move(bytesLeft);
         m_chargeProbeBytes = std::move(charge);
     }
-    void setProbeCosts(const path::PathRace::Costs &c) { m_probeCosts = c; }
     void onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent);
     // A probe proof that came from elsewhere (the Scanner's finished scan on the current network): recorded at
     // "probe ok" strength, like a race result. false = not recorded (unknown node, no usable network).
@@ -603,7 +602,6 @@ private:
     path::IPathProber *m_prober = nullptr;
     std::function<qint64()> m_probeBytesLeft;
     std::function<void(qint64)> m_chargeProbeBytes;
-    path::PathRace::Costs m_probeCosts;
     std::optional<path::RaceTimings> m_raceTimingsForTest;
     bool m_ownerQueueRaceStop = false; // the owner finished inside an effect batch: stop the race after it
     bool m_raceStartedOwner = false; // this tap's owner was started by the race (never a second UserStart)

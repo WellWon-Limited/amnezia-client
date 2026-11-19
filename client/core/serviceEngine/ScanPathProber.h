@@ -139,6 +139,12 @@ public:
     std::function<void(const QString &)> log; // ids, kinds, codes, counts only
 
     path::ProberCaps caps() const override;
+    // What one race probe costs at most, as launch() builds it: the race's body (kRaceProbeBytes), every part of an
+    // own Xray burst, the AmneziaWG handshake and echoes, a provider's seat batch with its config and its release,
+    // and the host's access check of a scan opened for the probe. Device round 19.11: the race charged the Scanner's
+    // single-connection price (82 944 B for an own Xray probe that sent four connections, 92 723 B measured).
+    path::PathRace::Costs costs() const override { return raceCosts(tunables(), xrayBurst); }
+    static path::PathRace::Costs raceCosts(const ScanTunables &t, int xrayBurst);
     void start(const path::ProbeStamp &stamp, const path::PathCandidate &path, int timeoutMs) override;
     void cancel(const path::ProbeStamp &stamp) override;
 

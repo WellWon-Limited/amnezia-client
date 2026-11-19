@@ -3238,13 +3238,7 @@ void AvpnEngineQml::syncControlPlaneEdge(bool tunnelUp)
 void AvpnEngineQml::attachPathProber(path::IPathProber *prober, std::function<qint64()> bytesLeft,
                                      std::function<void(qint64)> charge)
 {
-    // the race charges a probe as the Scanner does (ScanBudget.h::scanProbeCostBytes) - one ledger, one price list
-    const ScanTunables t;
-    path::PathRace::Costs c;
-    c.awg = scanProbeCostBytes(ScanProbeKind::AwgMini, false, t);
-    c.xray = scanProbeCostBytes(ScanProbeKind::XrayLeg, false, t);
-    c.provider = scanProbeCostBytes(ScanProbeKind::XrayFull, false, t) + t.costBatchBytes + t.costConfigBytes;
-    m_engine.setProbeCosts(c);
+    // what one race probe costs comes from the prober (IPathProber::costs: its parts as it runs them)
     m_engine.setProbeBudget(std::move(bytesLeft), std::move(charge));
     m_engine.setProber(prober);
     reliabilityEvent(QStringLiteral("race_prober attached=%1").arg(int(prober != nullptr)));
