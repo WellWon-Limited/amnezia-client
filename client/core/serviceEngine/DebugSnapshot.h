@@ -613,11 +613,16 @@ inline bool ownStopInFlight(bool wantConnected, bool opStopping, bool awaitingSt
     return !wantConnected && (opStopping || awaitingStopConfirm);
 }
 enum class OrbTap { Start, Stop, StopAgain, Ignore };
+// waitingUplink (F1 of round 2): the intent is on and the start waits for the physical network. That is a visible
+// pending state (the orb shows connecting, the caption says there is no network), so a tap cancels it like any
+// pending connect - never a new start without a network.
 inline OrbTap decideOrbTap(bool engineConnected, bool busy, bool wantConnected, bool ownStopping,
-                           bool ownOpInFlight, bool preparingStart, bool liveSessionPending)
+                           bool ownOpInFlight, bool preparingStart, bool liveSessionPending, bool waitingUplink = false)
 {
     if (ownStopping)
         return OrbTap::StopAgain;
+    if (waitingUplink && wantConnected && !engineConnected)
+        return OrbTap::Stop;
     if (preparingStart || ownOpInFlight)
         return OrbTap::Stop;
     // Not connected and either idle or busy with intent off (a foreign transition): orb "Connect".

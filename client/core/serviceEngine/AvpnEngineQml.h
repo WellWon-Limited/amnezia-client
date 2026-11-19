@@ -79,6 +79,9 @@ class AvpnEngineQml : public QObject {
     // поэтому переживает пересоздание страницы и покрывает ВСЕ пути teardown (орб/шторка/отмена коннекта).
     Q_PROPERTY(bool stopping READ stopping NOTIFY changed)
     Q_PROPERTY(bool ownStopping READ ownStopping NOTIFY changed)
+    // F1 (round 2): the intent is on and the start waits for the physical network: the orb looks pending, the caption
+    // says so, a tap cancels it.
+    Q_PROPERTY(bool waitingUplink READ waitingUplink NOTIFY changed)
     // AVPN (macOS, beachball-фикс 2026-07-21): идёт установка root-демона Tribe-service (фоновый
     // поток, GUI живой) — QML показывает «Устанавливаем службу VPN…» вместо «Подбираем сервер…».
     // На остальных платформах всегда false.
@@ -376,6 +379,10 @@ public:
     bool ownStopping() const
     {
         return ownStopInFlight(m_wantConnected, m_op == Op::Stopping, m_latch.awaitingStopConfirm);
+    }
+    bool waitingUplink() const
+    {
+        return m_wantConnected && m_waitUplink && !m_busy && !m_paused && m_lastTunnelState != Vpn::Connected;
     }
     bool lastSelectionMeasured() const { return m_lastSelectionMeasured; }
     // AVPN (macOS): идёт фоновая установка root-демона (см. Q_PROPERTY выше). Прочие ОС — false.

@@ -439,6 +439,11 @@ static void wave4UpstreamBehaviour()
     // P1-4 (revised 2026-11-04): the tap does what the orb shows. Args: engineConnected, busy,
     // wantConnected, ownStopping, ownOpInFlight, preparingStart, liveSessionPending.
     CHECK(decideOrbTap(false, false, false, false, false, false, false) == OrbTap::Start); // "Connect"
+    // F1 (round 2): the wait for the network is a pending state - a tap is a Stop, never a new walk without a network
+    CHECK(decideOrbTap(false, false, true, false, false, false, false) == OrbTap::Start);  // before: the wait read as idle
+    CHECK(decideOrbTap(false, false, true, false, false, false, false, /*waitingUplink=*/true) == OrbTap::Stop);
+    CHECK(decideOrbTap(false, false, false, false, false, false, false, true) == OrbTap::Start); // intent off: nothing waits
+    CHECK(decideOrbTap(false, true, false, true, true, false, false, true) == OrbTap::StopAgain); // a stop in flight wins
     CHECK(decideOrbTap(false, true, true, false, false, false, true) == OrbTap::Ignore);   // "Checking…", status not yet in
     CHECK(decideOrbTap(true, true, true, false, false, false, true) == OrbTap::Ignore);    // still pending while busy
     // Tap 1 s after adoption with the orb showing "Connected" stops (the old 2.5 s grace swallowed it;

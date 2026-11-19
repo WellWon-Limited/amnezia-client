@@ -1776,10 +1776,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         reliabilityEvent(QStringLiteral("uplink %1").arg(up ? QStringLiteral("up") : QStringLiteral("down")));
         if (!up || !m_wantConnected || !m_waitUplink)
             return;
+        // F1: the pending look stays through the 1.5 s the network needs to settle: busy replaces "waiting", so the
+        // orb never flashes the idle "Connect" and a tap in this window is still a Stop.
         m_waitUplink = false;
+        m_busy = true;
+        emit changed();
         QTimer::singleShot(1500, this, [this]() {
             if (m_wantConnected && m_lastTunnelState != Vpn::Connected)
                 reconcile();
+            if (!m_opInFlight && !m_engine.attemptRunning() && !m_engine.isVerifying()) {
+                m_busy = false; // nothing started (the person stopped, a pause): the pending look ends with it
+                emit changed();
+            }
         });
     });
     // Волна-3: §16-сторож десктопа не дождался ответа демона — упал компонент, не пользователь.
@@ -6401,10 +6409,10 @@ QString AvpnEngineQml::orbTap()
 {
     const QString st = state();
     const OrbTap d = decideOrbTap(st == QLatin1String("connected"), m_busy, m_wantConnected, ownStopping(),
-                                  m_op != Op::None, m_preparingStart, m_liveSessionPending);
-    reliabilityEvent(QStringLiteral("orb_tap state=%1 busy=%2 decision=%3 pending=%4")
+                                  m_op != Op::None, m_preparingStart, m_liveSessionPending, waitingUplink());
+    reliabilityEvent(QStringLiteral("orb_tap state=%1 busy=%2 decision=%3 pending=%4 waiting_uplink=%5")
                          .arg(st).arg(int(m_busy)).arg(QLatin1String(orbTapName(d)))
-                         .arg(int(m_liveSessionPending)));
+                         .arg(int(m_liveSessionPending)).arg(int(waitingUplink())));
     switch (d) {
     case OrbTap::Start:
         start();
@@ -6558,6 +6566,7 @@ void AvpnEngineQml::reconcile()
                 emit changed();
                 return;
             }
+            m_waitUplink = false; // the wait is over: the start goes (a stale flag would read "waiting" at an attempt)
             guardedStart();
         }
     } else {                             // хотим офлайн

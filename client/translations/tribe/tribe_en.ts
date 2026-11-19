@@ -1084,7 +1084,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+195"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+197"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1150,6 +1150,11 @@
     </message>
     <message>
         <location line="+203"/>
+        <source>Нет сети — подключимся, когда она появится</source>
+        <translation>No network — we will connect when it is back</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <location line="+521"/>
         <source>Проверяем трафик…</source>
         <translation>Checking traffic…</translation>
@@ -1191,7 +1196,7 @@
         <translation>Connected, but traffic is not getting through</translation>
     </message>
     <message>
-        <location line="-699"/>
+        <location line="-700"/>
         <source>Нет связи</source>
         <translation>No connection</translation>
     </message>
@@ -1201,7 +1206,7 @@
         <translation>Loading…</translation>
     </message>
     <message>
-        <location line="+696"/>
+        <location line="+697"/>
         <source>Ищем рабочий сервер — пробуем %1 из %2</source>
         <translation>Looking for a working server — trying %1 of %2</translation>
     </message>
@@ -3136,7 +3141,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4314"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4387"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3236,7 +3241,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-3052"/>
+        <location line="-3078"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3301,7 +3306,7 @@ You can attach a photo or video.</translation>
         <translation>Connection mode is now “Auto” to connect the selected server</translation>
     </message>
     <message>
-        <location line="+151"/>
+        <location line="+152"/>
         <source>«%1» в этой сети не работает — подключено через другой сервер</source>
         <translation>“%1” does not work on this network — connected via another server</translation>
     </message>
@@ -3321,7 +3326,7 @@ You can attach a photo or video.</translation>
         <translation>“%1” recently did not work on this network — connected via “%2”</translation>
     </message>
     <message>
-        <location line="+17"/>
+        <location line="+39"/>
         <source>Выбранный сервер сейчас не работает в этой сети — выберите другой или «Авто»</source>
         <translation>The selected server does not work on this network right now — choose another one or “Auto”</translation>
     </message>
@@ -3332,14 +3337,19 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3848"/>
+        <location line="+3864"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>There is no server in the selected mode — switch to “Auto”</translation>
     </message>
     <message>
-        <location line="-3845"/>
+        <location line="-3861"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>No network — connect when it is back</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Без разрешения на VPN подключиться нельзя — нажмите «Подключить» и разрешите настройку VPN</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
         <location line="+3"/>
@@ -3443,7 +3453,7 @@ You can attach a photo or video.</translation>
         <translation>baseline and amnezia see the same egress (%1) — looks like the VPN wasn&apos;t off during the baseline measurement</translation>
     </message>
     <message>
-        <location line="+1082"/>
+        <location line="+1095"/>
         <source>Установка службы VPN отменена</source>
         <translation>VPN service installation cancelled</translation>
     </message>
@@ -3489,7 +3499,8 @@ You can attach a photo or video.</translation>
         <translation>This server is unavailable right now — connecting another one</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="-3885"/>
+        <location line="+3897"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>No network — we will connect when it is back</translation>
     </message>
@@ -3509,7 +3520,7 @@ You can attach a photo or video.</translation>
         <translation>Not enough live servers to switch</translation>
     </message>
     <message>
-        <location line="+680"/>
+        <location line="+690"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray is not available in this app version</translation>
     </message>
@@ -3625,7 +3636,7 @@ You can attach a photo or video.</translation>
         <translation>Auto</translation>
     </message>
     <message>
-        <location line="+582"/>
+        <location line="+584"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Sign in or connect first</translation>
     </message>

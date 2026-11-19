@@ -1084,7 +1084,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+195"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+197"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1150,6 +1150,11 @@
     </message>
     <message>
         <location line="+203"/>
+        <source>Нет сети — подключимся, когда она появится</source>
+        <translation>Sin red: nos conectaremos cuando vuelva</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <location line="+521"/>
         <source>Проверяем трафик…</source>
         <translation>Comprobando el tráfico…</translation>
@@ -1191,7 +1196,7 @@
         <translation>Conectado, pero el tráfico no pasa</translation>
     </message>
     <message>
-        <location line="-699"/>
+        <location line="-700"/>
         <source>Нет связи</source>
         <translation>Sin conexión</translation>
     </message>
@@ -1201,7 +1206,7 @@
         <translation>Cargando…</translation>
     </message>
     <message>
-        <location line="+696"/>
+        <location line="+697"/>
         <source>Ищем рабочий сервер — пробуем %1 из %2</source>
         <translation>Buscando un servidor que funcione: probando %1 de %2</translation>
     </message>
@@ -3136,7 +3141,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4314"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4387"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3236,7 +3241,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-3052"/>
+        <location line="-3078"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3301,7 +3306,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>El modo de conexión ahora es «Auto» para conectar el servidor elegido</translation>
     </message>
     <message>
-        <location line="+151"/>
+        <location line="+152"/>
         <source>«%1» в этой сети не работает — подключено через другой сервер</source>
         <translation>«%1» no funciona en esta red: conectado mediante otro servidor</translation>
     </message>
@@ -3321,7 +3326,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>«%1» no funcionó hace poco en esta red: conectado mediante «%2»</translation>
     </message>
     <message>
-        <location line="+17"/>
+        <location line="+39"/>
         <source>Выбранный сервер сейчас не работает в этой сети — выберите другой или «Авто»</source>
         <translation>El servidor elegido no funciona ahora en esta red: elija otro o «Auto»</translation>
     </message>
@@ -3332,14 +3337,19 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3848"/>
+        <location line="+3864"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-3845"/>
+        <location line="-3861"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Без разрешения на VPN подключиться нельзя — нажмите «Подключить» и разрешите настройку VPN</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
         <location line="+3"/>
@@ -3443,7 +3453,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>baseline y amnezia ven el mismo egress (%1): parece que la VPN no estaba apagada durante la medición baseline</translation>
     </message>
     <message>
-        <location line="+1082"/>
+        <location line="+1095"/>
         <source>Установка службы VPN отменена</source>
         <translation>Instalación del servicio VPN cancelada</translation>
     </message>
@@ -3489,7 +3499,8 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Este servidor no está disponible ahora: conectando otro</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="-3885"/>
+        <location line="+3897"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>
@@ -3509,7 +3520,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
     <message>
-        <location line="+680"/>
+        <location line="+690"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>
@@ -3625,7 +3636,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Auto</translation>
     </message>
     <message>
-        <location line="+582"/>
+        <location line="+584"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Primero inicia sesión o conéctate</translation>
     </message>
