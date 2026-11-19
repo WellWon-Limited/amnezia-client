@@ -279,12 +279,16 @@ PageType {
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
     TribeEdgeBack { onTriggered: root.goBack() }
 
-    // a tap outside the open country menu closes it
+    // a TAP outside the open country menu closes it; a swipe outside does nothing (the catcher holds the touch so
+    // the list under the menu does not scroll, and only a tap - not a drag - closes the menu)
     MouseArea {
         anchors.fill: parent
         z: 5
         visible: bar.menuOpen
-        onClicked: bar.closeMenu()
+        TapHandler {
+            gesturePolicy: TapHandler.DragThreshold
+            onTapped: bar.closeMenu()
+        }
     }
 
     // ── header ──
