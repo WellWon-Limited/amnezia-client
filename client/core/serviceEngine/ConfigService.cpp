@@ -20,7 +20,7 @@ namespace avpn {
 ConfigService::ConfigService(QNetworkAccessManager *nam, const QString &baseUrl,
                              const QString &pubKeyHex, const QStringList &bakedEdges,
                              QObject *parent, bool pinned)
-    : QObject(parent), m_nam(nam), m_pubKeyHex(pubKeyHex), m_bakedEdges(bakedEdges), m_refreshTimer(this), m_walkPause(this),
+    : QObject(parent), m_nam(nam), m_pubKeyHex(pubKeyHex), m_bakedEdges(bakedEdges), m_refreshTimer(this), m_walkPause(this), m_askLater(this),
       m_pinned(pinned && !baseUrl.isEmpty())
 {
     // 5.1.108: a pinned control plane (AVPN_API_URL) is used as is. Before, the stored active edge of
@@ -39,6 +39,8 @@ ConfigService::ConfigService(QNetworkAccessManager *nam, const QString &baseUrl,
     m_walkPause.setObjectName(QStringLiteral("edgeRoundPause"));
     m_walkPause.setSingleShot(true);
     connect(&m_walkPause, &QTimer::timeout, this, &ConfigService::walkPauseElapsed);
+    m_askLater.setSingleShot(true);
+    connect(&m_askLater, &QTimer::timeout, this, &ConfigService::askDirectOnce);
 }
 
 void ConfigService::start()
@@ -169,6 +171,10 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     m_lastFetchMs = nowMs();
     const quint64 seq = m_configSeq;
     const quint64 order = ++m_requestOrder;
+    // Lane C: what this request can teach about the DIRECT route is decided by how it was SENT: while no tunnel of ours
+    // was up, under this network generation (checked again at the answer).
+    const bool directAtSend = !tunnelUp();
+    const quint64 genAtSend = generationNow();
     QNetworkRequest req{QUrl(activeBaseUrl() + QStringLiteral("/v1/config"))};
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply);
@@ -183,10 +189,13 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             }
         });
     }
-    connect(reply, &QNetworkReply::finished, this, [this, reply, seq, order, startedByApiSuccess]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, seq, order, startedByApiSuccess, directAtSend, genAtSend]() {
         reply->deleteLater();
+        const bool learnsDirect = directAtSend && genAtSend == generationNow();
         if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()) {
             m_edgeAnswered = true;
+            if (learnsDirect)
+                setReach(ApiReach::Reachable); // a direct request, sent on this network, was answered
             leaveWalkPause(); // an answer: the network reaches the API, the walk's back-off is over
         }
         if (reply->property("avpn_fast_edge").toBool() && seq == m_configSeq) {
@@ -201,7 +210,13 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             // R9: one full round of silent edges = the network cannot reach the API now. Back off instead of
             // walking for ever; each edge still gets its quick first try inside a round.
             const int edges = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges).size();
-            if (edges >= 2 && ++m_walkSilent >= edges) {
+            // Lane C: every edge silent on its quick first try = the direct control plane cannot be reached here.
+            const bool allSilent = edges >= 1 && ++m_walkSilent >= edges;
+            if (allSilent && learnsDirect)
+                setReach(ApiReach::Unreachable);
+            if (allSilent && edges < 2)
+                m_walkSilent = 0;
+            if (edges >= 2 && allSilent) {
                 m_walkSilent = 0;
                 ++m_walkRounds;
                 const qint64 base = m_pauseBaseTest >= 0 ? m_pauseBaseTest
@@ -358,9 +373,11 @@ void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64, 
 // (ревью 2026-07-12, finding 2): у детектора иная классификация (5xx = сеть жива) —
 // эмиссии стоят по местам, где известен code (fetchConfig выше; движковые фетчи зовут
 // noteControlPlane* напрямую).
-bool ConfigService::reportNetworkSuccess()
+bool ConfigService::reportNetworkSuccess(bool directRoute)
 {
     m_failStreak = 0;
+    if (directRoute && m_sessionEdge.isEmpty())
+        setReach(ApiReach::Reachable); // a request on the direct route was answered (not one through a tunnel)
     rejudgeCachedXray();
     // R9/F7: any API answer ends the edge walk's back-off; the config the walk was after is asked for at once.
     if (leaveWalkPause()) {
@@ -440,6 +457,73 @@ bool ConfigService::leaveWalkPause()
 void ConfigService::resumeEdgeWalk()
 {
     leaveWalkPause(); // a new round now
+}
+
+void ConfigService::noteNetworkChanged()
+{
+    m_netChangeMs = nowMs();
+    if (m_pinned)
+        return;
+    // Deferred: the network generation is bumped by a later slot of the same event.
+    QTimer::singleShot(0, this, [this]() { askDirectOnce(); });
+}
+
+void ConfigService::noteTunnelDown()
+{
+    if (m_pinned)
+        return;
+    QTimer::singleShot(0, this, [this]() { askDirectOnce(); }); // after the facade has recorded the tunnel as down
+}
+
+// Lane C: ask the direct route about the current network - but never while a tunnel of ours is up (nothing direct can
+// be learned), once per network generation, not when this generation's fact is already known directly, and not closer
+// than kAskSpacingMs to the previous ask. The walk starts over with the quick first try (an edge that answered on the
+// old network proves nothing here); a backed-off walk ends its pause with the config request (leaveWalkPause).
+// Worst flapping minute: at most 2 asks, each at most one quick try per edge.
+void ConfigService::askDirectOnce()
+{
+    if (m_pinned || !m_nam || tunnelUp() || !m_sessionEdge.isEmpty())
+        return;
+    const quint64 gen = generationNow();
+    if (m_askedAny && m_askedGen == gen)
+        return;
+    if (directApiReach() != ApiReach::Unknown)
+        return;
+    const qint64 now = nowMs();
+    if (m_lastAskMs >= 0 && now >= m_lastAskMs && now - m_lastAskMs < kAskSpacingMs) {
+        // The spacing bounds the rate, it does not cancel the ask this network is owed: one deferred ask when the
+        // spacing allows (it re-checks everything above, so a tunnel, a known fact or a newer ask ends it).
+        if (!m_askLater.isActive())
+            m_askLater.start(int(kAskSpacingMs - (now - m_lastAskMs)));
+        return;
+    }
+    m_askedAny = true;
+    m_askedGen = gen;
+    m_lastAskMs = now;
+    m_edgeAnswered = false;
+    m_walkSilent = 0;
+    if (!leaveWalkPause() && !m_configInFlight)
+        fetchConfig();
+}
+
+// Lane C: the single owner of "can the direct control plane be reached on this network now". A fact observed under an
+// older network generation is forgotten (Unknown), whatever it said.
+ApiReach ConfigService::directApiReach() const
+{
+    if (m_reach == ApiReach::Unknown)
+        return ApiReach::Unknown;
+    if (m_generationFn && m_reachGen != m_generationFn())
+        return ApiReach::Unknown;
+    return m_reach;
+}
+
+void ConfigService::setReach(ApiReach r)
+{
+    const ApiReach before = directApiReach();
+    m_reach = r;
+    m_reachGen = m_generationFn ? m_generationFn() : 0;
+    if (before != r)
+        emit directApiReachChanged(r);
 }
 
 void ConfigService::setSessionEdge(const QString &edge)

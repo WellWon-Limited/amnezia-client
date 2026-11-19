@@ -46,6 +46,8 @@ struct FakeProber : path::IPathProber {
     bool on = true;
     bool ready = true;      // the session of the host is in hand
     bool preparing = false; // it is being fetched
+    int prepares = 0;       // prepare() calls (the manifest fetch of the real host starts there)
+    void prepare(const path::NetworkKey &) override { ++prepares; }
     QList<std::pair<path::ProbeStamp, QString>> started;
     int cancels = 0;
     std::function<void(quint64, qint64)> sink; // the engine's byte sink (setSpendSink): the test spends through it
@@ -618,6 +620,61 @@ int main(int argc, char **argv)
         TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true}}, {}, {});
     }
 
+    // Lane C (C1, C3) in the engine: with the direct control plane unreachable, a provider profile without a standby-pack
+    // entry is not walked (one journal line per attempt: count and reason; never a path outcome); on a cellular network
+    // without proof the white-list provider with a pack entry leads; on Wi-Fi the usual order stays.
+    {
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true},
+                              {QStringLiteral("upstream_nodes"), true}}, {}, {});
+        avpn::upstreamPlatformRuntimeReady().store(true);
+        const auto stub = [](const char *id, UpstreamKind kind, bool pack, int prio) {
+            SubscriptionNode n;
+            n.nodeId = QString::fromLatin1(id);
+            n.region = QStringLiteral("upstream");
+            n.proto = QStringLiteral("xray");
+            UpstreamStub u;
+            u.profileId = n.nodeId.mid(3);
+            u.kind = kind;
+            u.packSourced = pack;
+            u.priority = prio;
+            n.upstream = u;
+            return n;
+        };
+        const QList<SubscriptionNode> prov = { stub("up:n1", UpstreamKind::Auto, false, 0),
+                                               stub("up:w1", UpstreamKind::Whitelist, true, 5) };
+        QString err;
+        {   // Wi-Fi, control plane unreachable: the non-pack provider is skipped (counted), the usual order leads
+            Rig r(pool);
+            r.eng.setStandbyCandidates(prov);
+            r.eng.setControlPlaneSource([] { return avpn::ApiReach::Unreachable; });
+            CHECK(r.eng.connect(err));
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(journalHas(r.journal, "paths_skipped reason=no_control count=1"));
+            CHECK(r.last() == QLatin1String("17")); // own servers first on an ordinary network
+        }
+        {   // UNKNOWN: nothing skipped, no line
+            Rig r(pool);
+            r.eng.setStandbyCandidates(prov);
+            CHECK(r.eng.connect(err));
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(!journalHas(r.journal, "paths_skipped"));
+        }
+        {   // cellular, no proof, unreachable: the white-list pack provider leads
+            Rig r(pool);
+            r.eng.setStandbyCandidates(prov);
+            r.eng.setControlPlaneSource([] { return avpn::ApiReach::Unreachable; });
+            path::NetworkObservation lte;
+            lte.medium = path::NetMedium::Cellular;
+            lte.carrier = QStringLiteral("250-01");
+            lte.radio = QStringLiteral("lte");
+            r.eng.observeNetwork(lte);
+            CHECK(r.eng.connect(err));
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(r.last() == QLatin1String("up:w1"));
+        }
+        avpn::upstreamPlatformRuntimeReady().store(false);
+    }
+
     // Device round 19.11 (LTE, first tap after launch): the prober's session was not in hand. The race must not
     // pretend to probe: no probe started, nothing reserved or charged; the session arriving within the race's own wait
     // starts the probes; no session (failed, or not arriving in time) ends the race `no_session` and the owner starts.
@@ -636,6 +693,34 @@ int main(int argc, char **argv)
             r.journal << r.eng.takeAttemptJournal();
             CHECK(p.started.isEmpty() && charged == 0 && journalHas(r.journal, "race_done reason=no_session proven=0")
                   && !journalHas(r.journal, "race_begin") && !journalHas(r.journal, "race_probe "));
+        }
+        {   // lane C (C2): the direct control plane is unreachable on this network - the session (a manifest over the
+            // direct API) cannot come: no wait (even while "preparing"), no prepare, no probe bytes, the owner starts at
+            // once; the journal names the reason. UNKNOWN keeps the wait (the test below).
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            r.eng.setControlPlaneSource([] { return avpn::ApiReach::Unreachable; });
+            const int before = p.prepares;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17") && !r.eng.raceRunning());
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(p.started.isEmpty() && p.prepares == before);
+            CHECK(journalHas(r.journal, "race_done reason=no_control proven=0 waited_ms=0") && !journalHas(r.journal, "race_wait_session"));
+        }
+        {   // and when the fact flips to unreachable DURING a wait, the wait ends at once
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            bool dead = false;
+            r.eng.setControlPlaneSource([&dead] { return dead ? avpn::ApiReach::Unreachable : avpn::ApiReach::Unknown; });
+            CHECK(r.eng.connect(err) && r.eng.attemptRunning() && r.tun.ups.isEmpty());
+            dead = true;
+            r.pass(500);
+            CHECK(!r.tun.ups.isEmpty() && journalHas(r.journal, "race_done reason=no_control"));
         }
         {   // the session arrives inside the wait: the probes start then, not before
             Rig r(pool);

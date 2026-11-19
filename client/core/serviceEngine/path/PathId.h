@@ -22,6 +22,7 @@
 //    DNS, MTU, keepalive and allowed IPs are left out: they do not decide whether the path passes a network.
 #pragma once
 
+#include "../ApiReach.h" // lane C: the control plane fact (re-exported to the path code below)
 #include "../NodeRotation.h" // isManualOnlyNode / protoOf / isXrayProto: today's meaning of the server flags
 #include "../dto/Subscription.h"
 
@@ -65,6 +66,10 @@ struct PathCandidate {
     double weight = 1.0;  // server weight, higher first
     int tier = 0;         // 0 = our own; provider policy tier >= 1 (main, reserve)
     int priority = 0;     // order inside a provider tier, lower first
+    // Lane C (C1): provider only - the profile can start WITHOUT the direct API (a usable standby-pack entry: its
+    // config and the seat confirmation's tunnel API base are on the device). A provider without it needs the lease
+    // request over the direct route; on a network where that is unreachable it cannot start.
+    bool standbyEntry = false;
 };
 
 namespace detail {
@@ -130,6 +135,7 @@ inline PathCandidate pathCandidateFromNode(const SubscriptionNode &n)
             c.country.clear();
         c.tier = qMax(1, n.upstream->tier);
         c.priority = n.upstream->priority;
+        c.standbyEntry = n.upstream->packSourced; // a stub with a usable pack entry is marked by the engine (pathPool)
     }
     return c;
 }

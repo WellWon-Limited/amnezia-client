@@ -383,6 +383,143 @@ private slots:
         QCOMPARE(edgeA.configRequests, 1);
         QCOMPARE(edgeB.configRequests, 2); // exactly one request went out: no duplicate from the second exit
     }
+    // Lane C: the one fact "can the direct control plane be reached on this network" (ApiReach.h): Unreachable after one
+    // full round of silent edges, Reachable at the first direct answer, forgotten (Unknown) on a network change; an
+    // answer through a tunnel (session edge) proves nothing about the direct route.
+    void directApiReachFollowsTheWalkPerNetworkGeneration()
+    {
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int n) { return n < 2 ? QByteArray() : httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        quint64 generation = 1;
+        service.setNetworkGenerationSource([&generation] { return generation; });
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.setEdgeWalkTimingForTest(50, 5000, 5000);
+        QSignalSpy flips(&service, &avpn::ConfigService::directApiReachChanged);
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Unreachable, 2000); // a full round, both silent
+        QCOMPARE(edgeA.configRequests + edgeB.configRequests, 2);
+        generation = 2; // another network: the fact is not about it
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+        service.setSessionEdge(b);
+        service.reportNetworkSuccess(); // an answer through a tunnel: nothing about the direct route
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+        service.setSessionEdge(QString());
+        service.noteNetworkChanged(); // the new network is asked at once (the pause is over)
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 1000);
+        QCOMPARE(flips.count(), 2); // Unreachable, Reachable
+        generation = 3;
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+    }
+    // A network change while the walk is not paused still asks the new network (an edge that answered on the old one
+    // proves nothing): the fact converges without waiting for the next refresh.
+    void networkChangeAsksTheNewNetworkAndFlipsTheFact()
+    {
+        ConfigServer edgeA([](int) { return httpAnswer("200 OK", R"({"features":{}})"); });
+        ConfigServer edgeB([](int) { return httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        quint64 generation = 1;
+        service.setNetworkGenerationSource([&generation] { return generation; });
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000);
+        const int before = edgeA.configRequests;
+        generation = 2;
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+        service.noteNetworkChanged();
+        QTRY_COMPARE_WITH_TIMEOUT(edgeA.configRequests, before + 1, 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000);
+    }
+    // Lane C review: what a request teaches about the DIRECT route is decided by how it was SENT. An answer to a
+    // request sent while a tunnel of ours was up (the app's API requests ride it) says nothing about the direct route.
+    void answerThroughOwnTunnelDoesNotSetReachable()
+    {
+        ConfigServer edge([](int) { return httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, edge.base(), "fixture-key", {edge.base(), edge.base() + "/"});
+        bool tunnel = true;
+        service.setTunnelUpSource([&tunnel] { return tunnel; });
+        service.setNetworkGenerationSource([] { return quint64(1); });
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(edge.configRequests, 1, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(service.isFresh(), 2000);
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown); // answered through the tunnel
+        service.reportNetworkSuccess(/*directRoute=*/false);         // the facade: sent with a tunnel up
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+        tunnel = false;
+        service.reportNetworkSuccess(/*directRoute=*/true);          // a direct request answered
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Reachable);
+    }
+    // A request sent on the previous network generation that goes silent after the change is not a silent edge of the
+    // new one (with a single edge that alone used to flip the fact).
+    void timeoutOfRequestSentOnPreviousGenerationDoesNotCount()
+    {
+        for (const bool changed : { true, false }) {
+            ConfigServer silent([](int) { return QByteArray(); });
+            LoopbackOnlyNam network;
+            avpn::ConfigService service(&network, silent.base(), "fixture-key", {silent.base()});
+            quint64 generation = 1;
+            service.setNetworkGenerationSource([&generation] { return generation; });
+            service.setEdgeWalkTimingForTest(150, 5000, 5000);
+            service.start();
+            QTRY_COMPARE_WITH_TIMEOUT(silent.configRequests, 1, 2000);
+            if (changed)
+                generation = 2; // the network changed while the request was in flight
+            QTest::qWait(500);  // its quick timeout has fired
+            QCOMPARE(service.directApiReach(), changed ? avpn::ApiReach::Unknown : avpn::ApiReach::Unreachable);
+        }
+    }
+    // Our tunnel went down: nothing learned through it applies; the direct route is asked once.
+    void tunnelDownAsksTheDirectRouteOnce()
+    {
+        ConfigServer edge([](int) { return QByteArray(); }); // silent: the request stays in flight, the fact stays Unknown
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, edge.base(), "fixture-key", {edge.base()});
+        bool tunnel = true;
+        service.setTunnelUpSource([&tunnel] { return tunnel; });
+        service.setNetworkGenerationSource([] { return quint64(1); });
+        service.noteTunnelDown(); // still "up" (the facade records the state after): no ask
+        QTest::qWait(100);
+        QCOMPARE(edge.configRequests, 0);
+        tunnel = false;
+        service.noteTunnelDown();
+        QTRY_COMPARE_WITH_TIMEOUT(edge.configRequests, 1, 1000);
+        service.noteTunnelDown(); // once per generation
+        service.noteNetworkChanged();
+        QTest::qWait(200);
+        QCOMPARE(edge.configRequests, 1);
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unknown);
+    }
+    // Network changes under a tunnel of ours ask nothing; without a tunnel a flapping network asks once per generation
+    // at most and not closer than the spacing.
+    void networkChangesAreBoundedAsks()
+    {
+        ConfigServer edge([](int) { return QByteArray(); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, edge.base(), "fixture-key", {edge.base()});
+        bool tunnel = true;
+        quint64 generation = 1;
+        service.setTunnelUpSource([&tunnel] { return tunnel; });
+        service.setNetworkGenerationSource([&generation] { return generation; });
+        for (int i = 0; i < 10; ++i) {
+            ++generation;
+            service.noteNetworkChanged();
+        }
+        QTest::qWait(200);
+        QCOMPARE(edge.configRequests, 0); // ten network changes under a tunnel: zero asks
+        tunnel = false;
+        for (int i = 0; i < 10; ++i) {
+            ++generation;
+            service.noteNetworkChanged();
+            QTest::qWait(20);
+        }
+        QTest::qWait(200);
+        QCOMPARE(edge.configRequests, 1); // ten changes in a row without a tunnel: one ask (the rest wait the spacing)
+    }
     // Decision 2026-11-05: small calls succeed on the edge (they reset the edge walk), but two
     // /v1/subscription transport failures in a row on it switch the active edge; a delivered
     // subscription in between resets that streak.

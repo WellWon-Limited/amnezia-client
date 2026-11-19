@@ -282,6 +282,12 @@ public:
     bool recordProbeProof(const QString &nodeId, const QString &source);
     // S6: the path's real tunnel came up and carried no data on the current network, with no data ok since.
     bool failedInTunnelHere(const QString &nodeId) const;
+    // Lane C: the facade gives the engine the one read-only fact "can the direct control plane be reached on this
+    // network" (its owner is ConfigService; the engine keeps no copy) and the one rule "this provider node can start
+    // without it" (a usable standby-pack entry: UpstreamEngine.h::standbyCandidateFor, the rule bring-up itself uses).
+    void setControlPlaneSource(std::function<ApiReach()> reach) { m_controlPlane = std::move(reach); }
+    void setStandbyEntryProbe(std::function<bool(const SubscriptionNode &)> has) { m_hasStandbyEntry = std::move(has); }
+    ApiReach controlPlane() const { return m_controlPlane ? m_controlPlane() : ApiReach::Unknown; }
     // R1 (device round 4): the ledger outcome of a provider start failure code (Inconclusive = not the path's).
     static path::PathOutcome startFailureOutcome(const QString &code);
     bool raceRunning() const { return m_race.running(); }
@@ -543,6 +549,8 @@ private:
     // The pool of the attempt owner: supported, alive nodes as paths (path::pathCandidateFromNode).
     QList<path::PathCandidate> pathPool() const;
     path::SelectionContext ownerContext() const;
+    void prepareProber(); // prober->prepare() unless the control plane is known unreachable (lane C2)
+    void journalControlPlaneSkips(); // one line per attempt: the provider paths C1 leaves out
     void feedOwner(const path::AttemptEvent &ev);
     void applyOwnerEffects(const QList<path::AttemptEffect> &effects);
     void attemptJournal(const QString &line);
@@ -628,6 +636,8 @@ private:
     path::PathRace m_race;
     path::IPathProber *m_prober = nullptr;
     std::function<qint64()> m_probeBytesLeft;
+    std::function<ApiReach()> m_controlPlane;               // lane C: ConfigService::directApiReach (unset = Unknown)
+    std::function<bool(const SubscriptionNode &)> m_hasStandbyEntry; // lane C: the node has a usable pack entry
     std::function<void(qint64)> m_chargeProbeBytes;
     std::optional<path::RaceTimings> m_raceTimingsForTest;
     bool m_ownerQueueRaceStop = false; // the owner finished inside an effect batch: stop the race after it

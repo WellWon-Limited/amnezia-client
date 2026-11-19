@@ -278,6 +278,7 @@ struct SelectionContext {
     const PathLedger *ledger = nullptr;
     qint64 wallNowMs = 0;
     QHash<QString, double> crowd;
+    ApiReach controlPlane = ApiReach::Unknown; // lane C: the direct control plane of the owner's network
 };
 
 class AttemptOwner {
@@ -634,6 +635,7 @@ private:
         in.choice = m_choice;
         in.mode = m_mode;
         in.crowd = ctx.crowd;
+        in.controlPlane = ctx.controlPlane;
         in.tried = m_tried;
         in.nowMs = ctx.wallNowMs;
         in.preferredRetryAfterMs = ctx.ledger ? ctx.ledger->tunables().quarantineMs[0] : 0;

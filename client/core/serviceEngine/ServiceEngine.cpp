@@ -271,6 +271,9 @@ void ServiceEngine::noteStartRefused(const QString &nodeId, const QString &code)
 // R1 (device round 4): only the server's own answer about this profile is the path's outcome. A transport failure
 // or timeout of OUR control plane (the lease request), a retry-later answer (429, 503), a request our server
 // rejected as malformed and every local failure (envelope, bridge, invoke) say nothing about the path.
+// Lane C (C4, checked): a lease `transport` failure (no answer from the direct API) falls to the default below -
+// Inconclusive: no evidence about the path. With the control plane unreachable C1 no longer attempts those paths at
+// all; one that still fails this way (state Unknown) stays evidence-free (covered: path_integration_check).
 path::PathOutcome ServiceEngine::startFailureOutcome(const QString &codeIn)
 {
     const QString code = codeIn.section(QLatin1Char('/'), 0, 0);
@@ -313,7 +316,10 @@ QList<path::PathCandidate> ServiceEngine::pathPool() const
         // server); Auto keeps to the delivered stubs.
         if (n.upstream.has_value() && n.upstream->scanOffered && !m_choice.pathIds.contains(n.nodeId))
             continue;
-        out << path::pathCandidateFromNode(n);
+        path::PathCandidate c = path::pathCandidateFromNode(n);
+        if (c.kind == path::PathKind::Provider && !c.standbyEntry && m_hasStandbyEntry)
+            c.standbyEntry = m_hasStandbyEntry(n); // lane C: a usable pack entry lets the profile start without the API
+        out << c;
     }
     return out;
 }
@@ -324,6 +330,12 @@ path::SelectionContext ServiceEngine::ownerContext() const
     c.pool = pathPool();
     c.ledger = &m_ledger;
     c.wallNowMs = nowMs();
+    c.controlPlane = controlPlane();
+    // Lane C (C3): a cellular network with no proof whose direct control plane is unreachable - the servers built for
+    // restricted networks (white-list provider profiles that start from the standby pack) lead. Through the crowd
+    // prior; any evidence of this network outranks it (PathSelect.h::restrictedNetworkPrior).
+    c.crowd = path::restrictedNetworkPrior(c.pool, m_ledger.viewOf(m_net.current().local, c.pool, c.wallNowMs),
+                                           c.controlPlane, m_net.current().cellular());
     // Paths whose probe failed in the race of this tap: the worst prior for this attempt, so the walk tries the
     // servers the race has not seen fail first (device round 19.11, LTE: the race saw three first candidates fail,
     // proved nothing, and the walk then spent 6 s on each of the same three).
@@ -509,8 +521,7 @@ void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
         applyRaceEffects(m_race.networkChanged(nowMs(), m_net.current()));
     if (m_raceWait)
         endRaceWait("network_changed"); // its session was asked for the old network
-    if (m_prober && m_net.current().usable())
-        m_prober->prepare(m_net.current()); // the host warms up for the new network (caps, probe session)
+    prepareProber(); // the host warms up for the new network (caps, probe session)
     feedOwner(path::AttemptEvent::networkChanged(nowMs(), m_net.current()));
 }
 
@@ -543,12 +554,32 @@ bool ServiceEngine::raceAllowed() const
         && m_choice.kind != path::UserChoice::Kind::ExactPath; // an exact node is the person's: nothing to race
 }
 
+void ServiceEngine::prepareProber()
+{
+    if (m_prober && m_net.current().usable() && controlPlane() != ApiReach::Unreachable)
+        m_prober->prepare(m_net.current());
+}
+
+// Lane C (C1): the paths the choice leaves out because they cannot start on this network - one journal line per
+// attempt with the count and the reason, never a path outcome. They return by themselves when the control plane answers.
+void ServiceEngine::journalControlPlaneSkips()
+{
+    if (controlPlane() != ApiReach::Unreachable || m_choice.kind == path::UserChoice::Kind::ExactPath)
+        return;
+    int skipped = 0;
+    for (const path::PathCandidate &c : pathPool())
+        if (path::needsControlPlane(c) && path::modeAllows(c.kind, transportMode()))
+            ++skipped;
+    if (skipped > 0)
+        attemptJournal(QStringLiteral("paths_skipped reason=no_control count=%1").arg(skipped));
+}
+
 void ServiceEngine::beginRaceForTap()
 {
     m_raceFailed.clear(); // per tap
     m_raceWait.reset(); // a race of an older tap never begins under this one
     m_raisedPaths.clear();
-    m_prober->prepare(m_net.current()); // idempotent: a fresh session is kept
+    prepareProber(); // idempotent: a fresh session is kept (not asked for while the control plane is unreachable)
     m_race.setTimings(m_raceTimingsForTest ? *m_raceTimingsForTest : raceTimingsTuned());
     const path::SelectionContext ctx = ownerContext();
     path::SelectInput in;
@@ -556,6 +587,8 @@ void ServiceEngine::beginRaceForTap()
     in.evidence = m_ledger.viewOf(m_net.current().local, ctx.pool, ctx.wallNowMs);
     in.choice = m_choice;
     in.mode = transportMode();
+    in.controlPlane = ctx.controlPlane;
+    in.crowd = ctx.crowd;
     const QList<path::RankedPath> order = path::selectPaths(in);
     if (order.isEmpty())
         return; // the owner reports "no candidate" itself
@@ -578,7 +611,16 @@ void ServiceEngine::beginRaceForTap()
         bytesLeft = bytesLeft < 0 ? rt.cellularMaxBytes : std::min<qint64>(bytesLeft, rt.cellularMaxBytes);
     m_raceFirst = !known;
     const path::ProberCaps pc = m_prober->caps();
+    const bool noControl = controlPlane() == ApiReach::Unreachable;
     if (!pc.ready) {
+        // Lane C (C2): the race's session (GET /v1/scan/manifest) comes over the direct API; with that unreachable on
+        // this network it cannot come - the owner starts at once, no wait, no manifest bytes (device round 10: 3.0 s
+        // of wait and 34 KB of the cellular cap per tap).
+        if (noControl) {
+            attemptJournal(QStringLiteral("race_done reason=no_control proven=0 waited_ms=0"));
+            m_raceFirst = false; // the owner walks at once
+            return;
+        }
         // Device round 19.11 (LTE, right after launch): the session was not there, four probes "started" that never
         // left the app, 386 KB of the 393 KB cap were reserved for them and the owner walked blind. A probe that
         // cannot leave is not started: the race waits for the session within its own wait, or does not run.
@@ -639,7 +681,9 @@ void ServiceEngine::pollRaceWait()
             startOwnerAfterRace("not_raced"); // nothing could be raced: the owner walks now
         return;
     }
-    if (!pc.preparing || waited >= m_raceWait->boundMs)
+    if (controlPlane() == ApiReach::Unreachable)
+        endRaceWait("no_control"); // lane C (C2): the session cannot come over a dead direct API
+    else if (!pc.preparing || waited >= m_raceWait->boundMs)
         endRaceWait("no_session");
 }
 
@@ -1198,6 +1242,7 @@ bool ServiceEngine::connect(QString &error)
     // Stage 2: with a probe host, a known working path starts at once and the spares are raced beside it; with
     // none known, the race runs first and the owner starts with its first proven path as the lead (or blind when the
     // race's wait, PathRace.h hedgeAfterMs, is over or the race ends).
+    journalControlPlaneSkips();
     if (raceAllowed()) {
         m_raceStartedOwner = false;
         beginRaceForTap();
