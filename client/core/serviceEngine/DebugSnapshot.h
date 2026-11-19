@@ -532,6 +532,24 @@ inline bool stopNeedsGuardedStop(bool stoppable, bool stopInFlight, bool opInFli
     return stoppable || (opInFlight && stopFindsNothingNative(observed, ownerHoldsNativeLeg));
 }
 
+// Device round 19.11 (airplane mode for 20 s while connected): the live check failed, the failover walked 12 servers
+// in 0.7 s with no network under it, the attempt ended "nothing proven", the intent was dropped and the VPN stayed
+// off after the network came back. What a failed attempt does to the person's intent:
+//  - Wait: there is no physical network at that moment - the failure says nothing about the servers; the intent
+//    stays and the start comes with the uplink (the facade's wait-for-uplink, wave 3);
+//  - DropAndResume: the network is up, the attempt was the failover of a session lost by itself - honest failure
+//    now, and one new attempt on the next network (design 2026-11-17: "wait for a network change, no blind retry");
+//  - Drop: everything else (a tap that found nothing, an exact server, no candidate, a refused permission).
+enum class FailedAttemptIntent { Drop, Wait, DropAndResume };
+inline FailedAttemptIntent failedAttemptIntent(bool serversWereJudged, bool uplinkUp, bool afterLiveLoss)
+{
+    if (!serversWereJudged)
+        return FailedAttemptIntent::Drop;
+    if (!uplinkUp)
+        return FailedAttemptIntent::Wait;
+    return afterLiveLoss ? FailedAttemptIntent::DropAndResume : FailedAttemptIntent::Drop;
+}
+
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
 {
     return legStartFailures > 0 || attemptEndedNothingProven;

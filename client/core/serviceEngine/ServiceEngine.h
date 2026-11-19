@@ -46,6 +46,8 @@ class ServiceEngine {
 public:
     // The server switch of the probe race: "path_race" on iOS, "path_race_desktop" elsewhere (ServiceEngine.cpp).
     static QString raceFlagKey();
+    // The attempt in flight, or the one that has just ended, is the failover of a live session lost by itself.
+    bool attemptAfterLiveLoss() const { return m_attemptAfterLiveLoss; }
     ServiceEngine() : m_owner(path::AttemptTimings{})
     {
         m_net.observe(path::NetworkObservation{}); // "unknown" until the platform tells the network (observeNetwork)
@@ -612,6 +614,7 @@ private:
     bool m_checkStarved = false;   // T1: the running check has no first byte past its share
     bool m_raceFirst = false; // the race runs and the owner waits for its first proven path (or its end)
     QSet<QString> m_raceFailed; // paths whose probe failed in the race of this tap: last in this attempt's order
+    bool m_attemptAfterLiveLoss = false; // the attempt in flight (or just ended) is the failover of a lost live session
     bool raceAllowed() const;
     void beginRaceForTap();
     void applyRaceEffects(const QList<path::RaceEffect> &effects);

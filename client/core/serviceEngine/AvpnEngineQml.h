@@ -1769,6 +1769,8 @@ private:
                                                                    // входа guardedStart. НЕ сбрасывается сменой
                                                                    // состояния (в отличие от m_opInFlight) — иначе
                                                                    // reconcile внутри цикла застекал бы 2-й loop.exec
+    bool                         m_resumeOnNewNetwork = false;     // a lost session's failover found nothing: one attempt on the next network
+    quint64                      m_resumeNetworkGen = 0;           // the network generation it failed on
     bool                         m_waitUplink = false;             // волна-3: старт ждёт физический аплинк (попытки не считаются)
     bool                         m_componentLost = false;          // волна-3: §16-сторож сообщил о мёртвом демоне (следующий Disconnected = Component)
     // AVPN (sub-grace): флаг для UI «движок сам погасил туннель по истечению подписки» (Q_PROPERTY

@@ -672,6 +672,8 @@ void ServiceEngine::loseLiveSession(path::PathOutcome outcome, bool tunnelGone, 
                             QLatin1String(path::pathOutcomeName(outcome)))
                        .arg(int(tunnelGone)).arg(int(restart)).arg(why));
     m_owner.setTimings(attemptTimings());
+    if (restart)
+        m_attemptAfterLiveLoss = true; // until the next start asked from outside (connect)
     if (m_owner.phase() == path::AttemptPhase::Connected) {
         feedOwner(path::AttemptEvent::liveLost(nowMs(), outcome, tunnelGone, restart, m_choice, transportMode(),
                                                m_net.current()));
@@ -1093,6 +1095,7 @@ bool ServiceEngine::connect(QString &error)
         return false;
     }
     m_modeGate.sessionStartedByUs(); // 5.1.109 (S4.1): never re-judged as an adopted session
+    m_attemptAfterLiveLoss = false;
     m_owner.setTimings(attemptTimings());
     m_state = EngineState::Selecting;
     m_lastResult.reset();

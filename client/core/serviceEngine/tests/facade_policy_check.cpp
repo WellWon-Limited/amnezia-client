@@ -867,6 +867,13 @@ static void stopNothingNative()
     CHECK(!avpn::stopNeedsGuardedStop(false, false, true, ObservedTunnel::Unknown, false));      // maybe up: not ours
     CHECK(avpn::stopNeedsGuardedStop(true, false, true, ObservedTunnel::Connected, true));       // native work: as before
     CHECK(!avpn::stopNeedsGuardedStop(true, true, true, ObservedTunnel::Connected, true));       // a stop already runs
+    // Device round 19.11: airplane mode while connected - the failover fails with no network under it.
+    using avpn::FailedAttemptIntent;
+    CHECK(avpn::failedAttemptIntent(true, false, true) == FailedAttemptIntent::Wait);   // the airplane case
+    CHECK(avpn::failedAttemptIntent(true, false, false) == FailedAttemptIntent::Wait);  // a tap with no network
+    CHECK(avpn::failedAttemptIntent(true, true, true) == FailedAttemptIntent::DropAndResume); // lost session, live net
+    CHECK(avpn::failedAttemptIntent(true, true, false) == FailedAttemptIntent::Drop);   // a tap that found nothing
+    CHECK(avpn::failedAttemptIntent(false, false, true) == FailedAttemptIntent::Drop);  // exact server, permission...
 }
 
 static void checkBlameRule()

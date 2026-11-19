@@ -1856,6 +1856,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // Path engine: the network generation (an attempt in flight restarts on the new network).
         auto netKey = [this]() {
             m_engine.observeNetwork(currentNetworkObservation());
+            if (m_resumeOnNewNetwork && !m_wantConnected && m_engine.network().usable()
+                && m_engine.network().generation != m_resumeNetworkGen) {
+                // the session that was lost by itself comes back on the new network (armed in syncAttempt)
+                m_resumeOnNewNetwork = false;
+                m_wantConnected = true;
+                reliabilityEvent(QStringLiteral("resume_on_new_network net_gen=%1").arg(m_engine.network().generation));
+                QTimer::singleShot(0, this, [this]() { reconcile(); });
+            }
             if (syncAttempt())
                 QTimer::singleShot(0, this, [this]() { reconcile(); });
         };
@@ -3422,11 +3430,33 @@ bool AvpnEngineQml::syncAttempt()
                                     : tr("«%1» недавно не работал в этой сети — подключено через «%2»").arg(wanted, got));
                 Q_UNUSED(lang)
             }
+        } else if (r->reason != avpn::path::FailReason::StoppedByUser
+                   && avpn::failedAttemptIntent(r->reason == avpn::path::FailReason::NoNetwork
+                                                    || r->reason == avpn::path::FailReason::NothingProven,
+                                                uplinkUp(), m_engine.attemptAfterLiveLoss())
+                          == avpn::FailedAttemptIntent::Wait) {
+            // No physical network under the attempt: nothing is said about the servers. The intent stays and the
+            // start comes with the uplink (the same wait as a native loss without a network, wave 3).
+            m_busy = false;
+            m_waitUplink = true;
+            reliabilityEvent(QStringLiteral("intent_kept why=attempt_failed_no_uplink reason=%1")
+                                 .arg(QLatin1String(avpn::path::failReasonName(r->reason))));
+            emit notice(tr("Нет сети — подключимся, когда она появится"));
+            QTimer::singleShot(0, this, [this]() { reconcile(); }); // the uplink may be back already
         } else if (r->reason != avpn::path::FailReason::StoppedByUser) {
             m_wantConnected = false;
             m_busy = false;
             reliabilityEvent(QStringLiteral("intent_off why=attempt_failed reason=%1")
                                  .arg(QLatin1String(avpn::path::failReasonName(r->reason))));
+            if (avpn::failedAttemptIntent(r->reason == avpn::path::FailReason::NoNetwork
+                                              || r->reason == avpn::path::FailReason::NothingProven,
+                                          uplinkUp(), m_engine.attemptAfterLiveLoss())
+                == avpn::FailedAttemptIntent::DropAndResume) {
+                // a session lost by itself whose failover found nothing here: one new attempt on the next network
+                m_resumeOnNewNetwork = true;
+                m_resumeNetworkGen = m_engine.network().generation;
+                reliabilityEvent(QStringLiteral("resume_on_new_network armed net_gen=%1").arg(m_resumeNetworkGen));
+            }
             if (std::exchange(m_exactRestoreReconnectNow, false)) {
                 // S6: the failed Scanner row does not leave the VPN off - the session before the tap comes back
                 // through the ordinary start with the restored choice
@@ -6348,6 +6378,7 @@ void AvpnEngineQml::noteUserStart()
 void AvpnEngineQml::noteIntentChange()
 {
     ++m_intentSerial;
+    m_resumeOnNewNetwork = false; // the person acted: a pending resume of a lost session is theirs no more
     // R3: a Scanner row's restore belongs to that one request: any other action on the intent (stop, Auto, another
     // choice, a connect) ends it without restoring - the person's newer choice is never overwritten later. The row's
     // own tap arms it again right after its own call (scanConnectRow).
