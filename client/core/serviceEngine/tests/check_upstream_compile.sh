@@ -139,6 +139,11 @@ typedef struct tagMSG MSG;
 SHIM
   W_INC="-I$SHIM_W/extra -I$SHIM_W"
   for m in $QT_MODULES; do W_INC="$W_INC -I$SHIM_W/$m"; done
+  # Conan headers of the macOS tree (zlib for ScanApiClient.cpp; the real Windows build gets them from the conan
+  # targets): plain headers, searched after the mingw system headers so they never shadow one.
+  for d in $(grep -E '^CXX_INCLUDES' "$FLAGS_MAKE" | tr ' ' '\n' | grep -E '/\.conan2/' | sed 's/^-I//' | sort -u); do
+    W_INC="$W_INC -idirafter $d"
+  done
   # zig: -fsyntax-only ends with a bogus FileNotFound and -o /dev/null leaves <name>.obj in the current
   # directory - the object goes into the temp dir, removed below.
   W_DEF="-DAMNEZIA_DESKTOP -DQT_CORE_LIB -DQT_NETWORK_LIB -DQT_GUI_LIB -DQT_QML_LIB -DQT_QUICK_LIB -DQT_REMOTEOBJECTS_LIB -DQT_NO_DEBUG -DAVPN_ENGINE_ENABLED=1 -D_WINSOCKAPI_"

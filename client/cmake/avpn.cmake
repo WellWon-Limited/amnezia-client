@@ -308,10 +308,17 @@ add_custom_target(avpn_git_commit ALL
     COMMENT "AVPN: commit label"
     VERBATIM)
 add_dependencies(${PROJECT} avpn_git_commit)
+# Force-include spelling per compiler: "-include" is clang/gcc only; MSVC (the Windows build) has /FI and would
+# ignore "-include" and take the header for an input file, so the label would silently stay the configure-time one.
+if(MSVC)
+    set(AVPN_GIT_COMMIT_FORCE_INCLUDE " /FI\"${AVPN_GIT_COMMIT_HEADER}\"")
+else()
+    set(AVPN_GIT_COMMIT_FORCE_INCLUDE " -include ${AVPN_GIT_COMMIT_HEADER}")
+endif()
 foreach(avpn_label_src main.cpp ui/controllers/settingsUiController.cpp core/controllers/settingsController.cpp)
     # COMPILE_FLAGS, not COMPILE_OPTIONS: the Xcode generator passes a per-file "SHELL:" option to clang verbatim
     set_property(SOURCE ${CMAKE_CURRENT_LIST_DIR}/../${avpn_label_src} APPEND_STRING PROPERTY
-                 COMPILE_FLAGS " -include ${AVPN_GIT_COMMIT_HEADER}")
+                 COMPILE_FLAGS "${AVPN_GIT_COMMIT_FORCE_INCLUDE}")
     set_property(SOURCE ${CMAKE_CURRENT_LIST_DIR}/../${avpn_label_src} APPEND PROPERTY
                  OBJECT_DEPENDS ${AVPN_GIT_COMMIT_HEADER})
 endforeach()

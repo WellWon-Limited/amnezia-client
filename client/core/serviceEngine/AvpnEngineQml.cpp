@@ -1009,7 +1009,6 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_liveReachable = reachable;
         if (reachable)
             m_liveProven = true;     // 5.1.108: ONLINE without node_scan (dataFlowingNow)
-        if (reachable)
         // AVPN (красные палочки): различаем «ещё мерю» (m_liveDead=false → плейсхолдер 1 зелёная)
         // и «связь подтверждённо мертва» (m_liveDead=true → 0 зелёных + все красные). Один таймаут
         // в «мертво» НЕ роняем — ждём kLiveDeadStreak неудач подряд (анти-фликер на транзиентном дропе).
