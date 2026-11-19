@@ -612,16 +612,37 @@ inline bool ownStopInFlight(bool wantConnected, bool opStopping, bool awaitingSt
 {
     return !wantConnected && (opStopping || awaitingStopConfirm);
 }
-// G3 + H3 (rounds 3-4): which attempt serves which intent. The epoch moves only when the person's intent changes in a
-// way the running attempt cannot serve: a Stop, or another choice (a different pick, Auto, a Scanner row). A repeated
-// start, a refused pick or any other action that leaves the choice as it was does NOT move it. Every attempt is
-// stamped with the epoch in force when it began (the facade's connect and the engine's own failover after a live
-// loss alike); a result belongs to the current intent unless its attempt serves an older epoch - then a newer intent
+// G3 + H3 + I1/I2/I7 (rounds 3-5): which attempt serves which intent. The intent is ONE value - wanted on/off, the choice
+// as the attempt owner reads it (kind, country, paths) and the transport mode in force - held by the facade, set in
+// one function (AvpnEngineQml::syncIntent). The epoch moves there and only there, exactly when the value changes
+// (compared with the value the facade itself held last, never with state some other door already replaced). Every
+// attempt is stamped with the epoch in force when it began (the facade's connect, the engine's own failover, an adopted
+// session); a result belongs to the current intent unless its attempt serves an older epoch - then a newer intent
 // exists and its start is pending, and the old result ends nothing of it.
+struct IntentValue {
+    bool wanted = false;
+    QString choice; // kind|country|paths of the engine's UserChoice
+    QString mode;   // transport mode in force
+    bool operator==(const IntentValue &o) const { return wanted == o.wanted && choice == o.choice && mode == o.mode; }
+};
 struct IntentEpoch {
     quint64 epoch = 1;
-    void onStop() { ++epoch; }
-    void onChoice(bool changed) { if (changed) ++epoch; }
+    IntentValue held;
+    bool seeded = false;
+    // True when the value changed (the epoch moved). The first value only seeds (launch): nothing runs before it.
+    bool set(const IntentValue &v)
+    {
+        if (!seeded) {
+            held = v;
+            seeded = true;
+            return false;
+        }
+        if (v == held)
+            return false;
+        held = v;
+        ++epoch;
+        return true;
+    }
     quint64 stampForNewAttempt() const { return epoch; }
     bool resultBelongs(quint64 resultEpoch) const { return resultEpoch >= epoch; }
 };

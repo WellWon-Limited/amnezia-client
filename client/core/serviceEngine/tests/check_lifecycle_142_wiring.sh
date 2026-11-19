@@ -132,18 +132,29 @@ d3="$(printf '%s\n' "$stop_fn2" | grep -nF 'restoreChoiceBeforeRow(cancelledRow)
 { [ -n "$d1" ] && [ -n "$d2" ] && [ -n "$d3" ] && [ "$d1" -lt "$d2" ] && [ "$d2" -lt "$d3" ]; } \
     || bad "F2: a stop must read the request, then end it, then restore the choice from before the tap"
 
-# G3 + H3 (rounds 3-4): attempt -> intent epoch. The epoch moves on a Stop and on another choice (syncChoice) only; the
-# connect and the engine stamp every attempt with the epoch in force; syncAttempt hands on only the results that serve it.
-sc_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::syncChoice\(\)/{f=1} f{print} f&&/^}/{exit}')"
-printf '%s\n' "$sc_fn" | grep -qF 'm_intentEpoch.onChoice(!(c == m_engine.userChoice()));' || bad "H3: syncChoice must move the epoch on another choice only"
-printf '%s\n' "$stop_fn2" | grep -qF 'm_intentEpoch.onStop();' || bad "H3: a stop must move the epoch"
-[ "$(count "$FACADE" 'm_intentEpoch.onStop();')" = 1 ] || bad "H3: only stop() moves the epoch on a stop"
+# G3 + H3 + I1/I2/I7 (rounds 3-5): the intent is ONE value (wanted, choice, mode) set in syncIntent; the epoch moves there and
+# only there; the engine's choice and epoch are written nowhere else; every attempt is stamped; syncAttempt hands on
+# only the results that serve the intent in force.
+sc_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::syncIntent\(\)/{f=1} f{print} f&&/^}/{exit}')"
+printf '%s\n' "$sc_fn" | grep -qF 'm_intentEpoch.set(v)' || bad "I1: syncIntent must set the intent value and move the epoch"
+printf '%s\n' "$sc_fn" | grep -qF 'v.mode = avpn::transportModeToString(m_engine.transportMode());' || bad "I2: the transport mode is part of the intent value"
+printf '%s\n' "$sc_fn" | grep -qF 'v.wanted = m_wantConnected;' || bad "I1: wanted is part of the intent value"
+[ "$(count "$FACADE" 'm_intentEpoch.set(')" = 1 ] || bad "I1: the epoch moves in one place only"
+[ "$(count "$FACADE" 'm_engine.setUserChoice(')" = 1 ] && [ "$(count "$FACADE" 'm_engine.setIntentEpoch(')" = 1 ] \
+    || bad "I1: the engine's choice and epoch are written by syncIntent only"
+[ "$(count "$FACADE" 'm_engine.tapTransportMode(')" = 1 ] && [ "$(count "$FACADE" 'm_engine.loadTransportModeChoice(')" = 1 ] \
+    || bad "I2: the engine's mode is written by setTransportMode and the launch load only"
 printf '%s\n' "$ni_fn" | grep -qF 'm_intentEpoch' && bad "H3: noteIntentChange must not move the epoch (it does not always lead to a new attempt)"
-has "$(code "$FACADE")" 'm_engine.setIntentEpoch(m_intentEpoch.stampForNewAttempt());' || bad "H3: the connect must stamp the attempt it begins"
-has "$(code "$ENGINE/ServiceEngine.cpp")" 'm_attemptEpochs.insert(a, m_intentEpoch);' || bad "H3: the engine must stamp every attempt the owner begins"
+tm_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::setTransportMode\(const QString &mode\)/{f=1} f{print} f&&/^}/{exit}')"
+printf '%s\n' "$tm_fn" | grep -qF 'm_engine.attemptRunning()' && printf '%s\n' "$tm_fn" | grep -qF 'syncIntent();' \
+    || bad "I2: a mode change replaces the running walk (restart request) and moves the epoch"
+has "$(code "$FACADE")" 'syncIntent(); // I7: the saved choice and mode become the first intent value' || bad "I7: launch must seed the intent value and push the epoch"
+[ "$(count "$FACADE" 'syncIntent(); // I7')" -ge 4 ] || bad "I7: every adoption of a live session must sync the intent first"
 sa_fn="$(code "$FACADE" | awk '/^bool AvpnEngineQml::syncAttempt\(\)/{f=1} f{print} f&&/^}/{exit}')"
+printf '%s\n' "$sa_fn" | grep -qF 'syncIntent(); // I1/I2' || bad "I1: syncAttempt must look at the intent before it judges a result"
 printf '%s\n' "$sa_fn" | grep -qF 'm_intentEpoch.resultBelongs(result->intentEpoch)' || bad "G3: syncAttempt must match a result to the intent"
 printf '%s\n' "$sa_fn" | grep -qF 'if (const std::optional<avpn::path::AttemptResult> &r = current) {' || bad "G3: the request, the intent rule and the notices read only the current result"
+has "$(code "$ENGINE/ServiceEngine.cpp")" 'm_attemptEpochs.insert(a, m_intentEpoch);' || bad "H3: the engine must stamp every attempt the owner begins"
 # G4 (round 3): the restore asks the pure plan and clears the engine pin when the previous pin was refused.
 rs_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::restoreChoiceBeforeRow/{f=1} f{print} f&&/^}/{exit}')"
 printf '%s\n' "$rs_fn" | grep -qF 'req.restorePlan(applied)' && printf '%s\n' "$rs_fn" | grep -qF 'm_engine.clearPin();' \
