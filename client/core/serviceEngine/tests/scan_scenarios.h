@@ -582,7 +582,7 @@ inline QList<Scenario> scenarios()
 
     // 3. Cellular, part of the nodes do not carry data: the scan runs to the deadline.
     l << Scenario{QStringLiteral("cellular_dead_nodes"),
-                  {QStringLiteral("stop at scan_stop_ms"), QStringLiteral("failures never shown, reported"), QStringLiteral("cellular hint"),
+                  {QStringLiteral("stop at scan_stop_ms"), QStringLiteral("failures never shown, reported"), QStringLiteral("no traffic-cost hint"),
                    QStringLiteral("budget ledger gets the actual bytes")},
                   [] {
                       World w = baseWorld("cellular_dead_nodes", hostIosFull(), ScanNetKind::Cellular);
@@ -605,8 +605,10 @@ inline QList<Scenario> scenarios()
                       const QStringList ids = rowIds(v);
                       for (const char *dead : {"4:xray", "5:xray", "7:xray", "9:xray", "3", "6"})
                           f.check(!ids.contains(QLatin1String(dead)), QStringLiteral("dead row hidden ") + QLatin1String(dead));
-                      f.check(v.value(QLatin1String("bar")).toObject().value(QLatin1String("hint")).toString() == QLatin1String("cellular_cost"),
-                              QStringLiteral("cellular hint"));
+                      // variant B (18.11): the scan computes no «Скан потратит до N МБ» line any more
+                      f.check(v.value(QLatin1String("bar")).toObject().value(QLatin1String("hint")).toString() == QLatin1String("none")
+                                  && !v.value(QLatin1String("bar")).toObject().contains(QLatin1String("hint_bytes")),
+                              QStringLiteral("no traffic-cost hint"));
                       bool unreachable = false, noData = false;
                       for (const ScanAction &a : actionsOf(d, ScanActionKind::SendOutcomes))
                           for (const ScanOutcomeItem &it : a.outcomes) {

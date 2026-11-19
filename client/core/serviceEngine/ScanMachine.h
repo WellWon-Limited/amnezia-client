@@ -399,7 +399,7 @@ enum class ScanRowState { Works, Slow, NotVerified, Connecting, Connected, Faile
 enum class ScanCardMode { Hidden, Off, Filling, Filled, Checking, Checked };
 enum class ScanCardButton { Hidden, Ready, Disabled, Busy };
 enum class ScanBarButton { Stop, Retry, RetryInSeconds, RetryInMinutes, ConnectAndScan };
-enum class ScanHint { None, CellularCost, CellularBudgetHour };
+enum class ScanHint { None, CellularBudgetHour };
 enum class ScanEmptyVariant { None, Cellular, Wifi, NoScan };
 
 inline const char *scanStageKeyName(ScanStageKey k)
@@ -467,7 +467,6 @@ inline const char *scanBarButtonName(ScanBarButton b)
 inline const char *scanHintName(ScanHint h)
 {
     switch (h) {
-    case ScanHint::CellularCost: return "cellular_cost";
     case ScanHint::CellularBudgetHour: return "cellular_budget_hour";
     case ScanHint::None: break;
     }
@@ -543,7 +542,6 @@ struct ScanBarView {
     bool buttonEnabled = true;
     int buttonValue = 0;             // seconds / minutes of the countdown
     ScanHint hint = ScanHint::None;
-    qint64 hintBytes = 0;            // CellularCost: «Скан потратит до N МБ»
     QList<ScanCountryView> scopeCountries; // the pool's countries (own nodes + provider profiles), most paths first
     int scopeWhitelist = -1;         // the pool's white-list rows (/v1/scan/pool; -1 = unknown)
     QString scannedScope;            // the country the shown result covers ("" = all)
@@ -1787,10 +1785,6 @@ public:
             v.bar.menuEnabled = false;
             v.bar.button = ScanBarButton::Stop;
             v.bar.buttonEnabled = true;
-            if (cellular) {
-                v.bar.hint = ScanHint::CellularCost;
-                v.bar.hintBytes = m_t.budgetScanBytes;
-            }
         } else {
             v.bar.menuVisible = v.bar.countries.size() >= 2;
             v.bar.menuEnabled = true;
@@ -1811,10 +1805,6 @@ public:
             } else {
                 v.bar.button = ScanBarButton::Retry;
                 v.bar.buttonEnabled = true;
-            }
-            if (cellular && !b.hourly) {
-                v.bar.hint = ScanHint::CellularCost;
-                v.bar.hintBytes = m_t.budgetScanBytes;
             }
         }
         // Empty state.
@@ -4494,8 +4484,6 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     bar.insert(QStringLiteral("button_enabled"), v.bar.buttonEnabled);
     bar.insert(QStringLiteral("button_value"), v.bar.buttonValue);
     bar.insert(QStringLiteral("hint"), QLatin1String(scanHintName(v.bar.hint)));
-    if (v.bar.hintBytes)
-        bar.insert(QStringLiteral("hint_bytes"), double(v.bar.hintBytes));
     o.insert(QStringLiteral("bar"), bar);
     QJsonObject empty;
     empty.insert(QStringLiteral("variant"), QLatin1String(scanEmptyVariantName(v.empty.variant)));

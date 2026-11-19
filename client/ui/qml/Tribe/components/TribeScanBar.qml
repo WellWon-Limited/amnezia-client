@@ -6,9 +6,9 @@ import ".."   // Theme, ScanTexts, Haptic
 // AVPN: the Scanner's pinned bottom bar (artboard vpn-scanner-kit.js scanFoot, plan §1.2/§1.3): the hint line,
 // then the country menu LEFT of the action button. `bar` is the ScanView bar JSON (ScanMachine.h): menu_visible,
 // menu_enabled, selected, countries, total, button stop | retry | retry_in_s | retry_in_min | connect_and_scan,
-// button_enabled, button_value, hint none | cellular_cost | cellular_budget_hour, hint_bytes.
-// Owner 18.11: no «Скан потратит до N МБ» line - the machine's cellular_cost hint is not drawn and the bar is one line
-// lower; only the hourly limit (cellular_budget_hour) and the VPN-off hint keep a line. The budget rule is unchanged.
+// button_enabled, button_value, hint none | cellular_budget_hour.
+// Owner 18.11: no «Скан потратит до N МБ» line (the machine no longer computes it); only the hourly limit
+// (cellular_budget_hour) and the VPN-off hint keep a line. The budget rule is unchanged.
 // The countdown lives INSIDE the button: a 1 s Timer rewrites only the button text from the end time
 // (the view's cooldown_ends_at_ms against its now_ms; minutes and a view without them: now + button_value at
 // arrival), so the screen is not rebuilt every second; at zero the button turns into «Повторить» (the machine
