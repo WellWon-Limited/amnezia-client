@@ -858,6 +858,24 @@ static void scannerCancelAfterShownConnectedWithoutData()
 // The white-list detector's trigger from the attempt owner (it lived in the deleted start watchdog).
 // R1 (device round 4): a failed data check is the path's only on the path's own evidence.
 // B1 (race measurement 18.11): a stop during the race prelude has no native Disconnected to wait for.
+// F2 (round 2): a Scanner row's request is one object with one lifetime.
+static void exactRowRequestObject()
+{
+    using avpn::ExactRowRequest;
+    ExactRowRequest none;
+    CHECK(!none.active() && !none.exactFor(QStringLiteral("B")));
+    const ExactRowRequest a = ExactRowRequest::begin(none, QStringLiteral("B"), QStringLiteral("A"), true);
+    CHECK(a.active() && a.exactFor(QStringLiteral("B")) && !a.exactFor(QStringLiteral("A")));
+    CHECK(a.restorePin == QLatin1String("A") && a.reconnect);
+    // a second row while the first runs: the person's choice before the FIRST tap stays the one to come back to
+    const ExactRowRequest c = ExactRowRequest::begin(a, QStringLiteral("C"), QStringLiteral("B"), false);
+    CHECK(c.row == QLatin1String("C") && c.restorePin == QLatin1String("A") && c.reconnect);
+    // an ended request holds nothing: no exact choice, no restore, no reconnect (before: the row outlived the flag)
+    ExactRowRequest e = c;
+    e.clear();
+    CHECK(!e.active() && !e.exactFor(QStringLiteral("C")) && e.restorePin.isEmpty() && !e.reconnect);
+}
+
 static void stopNothingNative()
 {
     CHECK(avpn::stopFindsNothingNative(avpn::ObservedTunnel::Disconnected, /*ownerHoldsNativeLeg=*/false));
@@ -1299,6 +1317,7 @@ int main()
     whitelistTriggerFromOwner();
     checkBlameRule();
     stopNothingNative();
+    exactRowRequestObject();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();

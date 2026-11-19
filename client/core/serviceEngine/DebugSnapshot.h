@@ -612,6 +612,29 @@ inline bool ownStopInFlight(bool wantConnected, bool opStopping, bool awaitingSt
 {
     return !wantConnected && (opStopping || awaitingStopConfirm);
 }
+// F2 (round 2): a Scanner row's one request - the exact row and what to restore after it are ONE object with one
+// lifetime. It is non-empty from the row's tap until the request ends (connected, failed, stopped by the person,
+// superseded by any other action on the intent); nothing else holds "the row is exact" or "a restore is armed".
+struct ExactRowRequest {
+    QString row;        // the exact node; empty = no request
+    QString restorePin; // the choice before the tap ("" = Auto)
+    bool reconnect = false; // a live session before the tap comes back if the row fails
+    bool active() const { return !row.isEmpty(); }
+    bool exactFor(const QString &pin) const { return active() && pin == row; }
+    void clear() { *this = ExactRowRequest(); }
+    // A row tapped while another request still runs keeps that one's "before": the choice to come back to is the
+    // person's, not the earlier row.
+    static ExactRowRequest begin(const ExactRowRequest &held, const QString &row, const QString &savedPin,
+                                 bool liveSessionBefore)
+    {
+        ExactRowRequest r;
+        r.row = row;
+        r.restorePin = held.active() ? held.restorePin : savedPin;
+        r.reconnect = held.active() ? held.reconnect : liveSessionBefore;
+        return r;
+    }
+};
+
 enum class OrbTap { Start, Stop, StopAgain, Ignore };
 // waitingUplink (F1 of round 2): the intent is on and the start waits for the physical network. That is a visible
 // pending state (the orb shows connecting, the caption says there is no network), so a tap cancels it like any
