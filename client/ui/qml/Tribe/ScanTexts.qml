@@ -47,9 +47,6 @@ QtObject {
     readonly property string ms: qsTr("%1 мс")
     readonly property string msApprox: qsTr("~%1 мс")
 
-    // ── what is connected now: the one line at the top of the list (variant B, 18.11) ──
-    readonly property string cardOff: qsTr("VPN не подключён")
-
     // ── bottom bar ──
     readonly property string allCountries: qsTr("Все страны")
     readonly property string stop: qsTr("Остановить")

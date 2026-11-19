@@ -163,7 +163,6 @@ QtObject {
         readonly property int menuRow: 44
         readonly property int menuMaxHeight: 372
         readonly property int menuButtonMax: 172  // room for the 18 flag + «Белые списки» (was 150, before the white-list flag)
-        readonly property int cardRow: 26
         readonly property int cardLabel: 66       // vpn-scanner.css .cc-r .l (the kit caption says 72)
         readonly property int mark: 18            // the header mark after the scan
         readonly property int chip: 30            // the status chips row in the radar block's corners (TribePill)

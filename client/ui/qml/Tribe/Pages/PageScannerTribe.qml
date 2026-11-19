@@ -10,11 +10,11 @@ import "../../Controls2" // PageType
 // AVPN: the Scanner («Сканер») — ONE screen (owner, artboard design/systems/tribe-backend/lab/vpn-scanner @ 9ac7ccff,
 // plan scanner-client-plan.md §1, §4; owner review 18.11): header «Сканер» (+ the 18 px mark after the scan), the
 // two status chips (last check, network), the rings with one status line and a thin bar while scanning (they
-// collapse in 360 ms), then the list - one line of what is connected now (variant B: the card «Ваше подключение»
-// and its check left for Support), the machine's rows in its order, the crowd legend - and the pinned bar (country
+// collapse in 360 ms), then the list - the machine's rows in its order (the live connection is its first row, drawn like the others: no
+// separate connection card; the check with its report lives in Support), the crowd legend - and the pinned bar (country
 // menu left of «Повторить» / «Остановить»). The empty result and the «Скан сейчас невозможен» reasons are drawn from
 // the same kit parts. The screen only DRAWS the view: TribeScanner.view = ScanView JSON (ScanMachine.h
-// scanViewToJson); every decision (order, row lifetime, scope, stop, cooldown, budget, card, shades) is the pure
+// scanViewToJson); every decision (order, row lifetime, scope, stop, cooldown, budget, shades) is the pure
 // machine's.
 // Non-tab page (goToTabBarPageUrl); back returns to where it was opened from. After a row tap the user STAYS here.
 PageType {
@@ -89,11 +89,6 @@ PageType {
                 TribeScanner.showShade("warning", d.indexOf("vpn_on") === 0 ? "service_vpn_on" : "service_failed", [])
         }
     }
-    // The live VPN state from the engine (the card's badge): connected = data path up, connecting = an attempt runs
-    readonly property string liveVpn: typeof TribeEngine === "undefined" ? "off"
-        : TribeEngine.state === "connected" ? "connected"
-        : (TribeEngine.busy === true && TribeEngine.stopping !== true) || TribeEngine.state === "verifying" ? "connecting"
-        : "off"
     readonly property bool emptyResult: phase === "empty"
     // the bar is up in every state but blocked / empty: on page open too (idle) - it holds the one Scan button
     readonly property bool showBar: !blocked && !emptyResult
@@ -116,8 +111,6 @@ PageType {
     property bool allCache: false         // every shown row is a cached one (set by syncRows)
     readonly property bool lastResult: !scanning && rowsModel.count > 0 && (blocked || allCache)
     property bool anyCrowd: false
-    property string liveLabel: ""
-    property string liveCc: ""
     property bool leaving: false
 
     // ── navigation ──
@@ -192,7 +185,7 @@ PageType {
             rstate: String(r.state || "works"), speed: String(r.speed || "none"),
             bars: Number(r.bars || 0), ms: r.ms === undefined ? -1 : Number(r.ms),
             fromCache: f.cache === true, dimmed: f.dimmed === true, tappable: f.not_tappable !== true,
-            verifying: f.verifying === true, current: f.current === true,
+            verifying: f.verifying === true,
             unverified: f.unverified === true, liveUnverified: f.live_unverified === true, crowd: f.crowd === true
         }
     }
@@ -214,20 +207,17 @@ PageType {
             rowsModel.clear()
             listBuild = build
         }
-        let cacheAll = true, crowd = false, liveL = "", liveC = ""
+        let cacheAll = true, crowd = false
         for (let i = 0; i < src.length; ++i) {
             const it = toItem(src[i], vmap)
             cacheAll = cacheAll && it.fromCache
             crowd = crowd || it.crowd
-            if (it.current && liveL === "") { liveL = it.label; liveC = it.cc }
             if (i >= rowsModel.count) rowsModel.append(it)
             else if (rowsModel.get(i).rid !== it.rid) { rowsModel.remove(i, rowsModel.count - i); rowsModel.append(it) }
             else if (!sameItem(it, rowsModel.get(i))) rowsModel.set(i, it)
         }
         allCache = src.length > 0 && cacheAll
         anyCrowd = crowd
-        liveLabel = liveL
-        liveCc = liveC
     }
 
     // ── rings collapse (360 ms) into the header mark, and grow back the same way on «Повторить» ──
@@ -376,7 +366,7 @@ PageType {
         }
     }
 
-    // ── the list: card, rows, wait line, legend (all inside the scroll) ──
+    // ── the list: caption, rows, wait line, legend (all inside the scroll) ──
     Item {
         id: listArea
         visible: !root.emptyResult
@@ -388,7 +378,7 @@ PageType {
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
 
-        // a Flickable + Column (the list holds <= 12 rows + 2 «Не проверено»): the card, the caption and the rows
+        // a Flickable + Column (the list holds <= 12 rows + 2 «Не проверено»): the caption and the rows
         // scroll together; rows keep their delegates across view updates (ListModel diff) and animate in once
         Flickable {
             id: list
@@ -479,19 +469,6 @@ PageType {
                     }
                 }
 
-                TribeConnectionCard {
-                    // what is connected now, one line (owner 18.11, variant B): always on the list, in every phase
-                    width: parent.width
-                    liveState: root.liveVpn
-                    liveProto: (typeof TribeEngine !== "undefined") ? String(TribeEngine.activeProto || "") : ""
-                    liveProtoVersion: (typeof TribeEngine !== "undefined" && TribeEngine.currentNode)
-                                      ? String(TribeEngine.currentNode.protoVersion || "") : ""
-                    serverLabel: root.liveLabel
-                                 || ((typeof TribeEngine !== "undefined" && TribeEngine.currentNode) ? (TribeEngine.currentNode.name || "") : "")
-                    serverCc: root.liveCc
-                              || ((typeof TribeEngine !== "undefined" && TribeEngine.currentNode) ? (TribeEngine.currentNode.countryCode || "") : "")
-                }
-
                 // «Все страны · 46 серверов» / «Германия · 12 серверов» + what the Scan button does: page open
                 // without results, or a scope the shown result does not cover (the kit's empty-state pattern: icon,
                 // title, text; the action is the bar's Scan button - one button, one meaning)
@@ -542,8 +519,7 @@ PageType {
                 Text {
                     id: sectionLabel
                     visible: rowsModel.count > 0
-                    // .sec-label.in-list margin-top 4, none as the list's first child
-                    topPadding: Theme.space.xs   // the card is always above it now
+                    // the list's first child (the connected row is the first row under it): no top padding
                     text: root.lastResult ? ScanTexts.sectionLast : ScanTexts.sectionNow
                     textFormat: Text.PlainText
                     color: Theme.color.text3
@@ -703,8 +679,7 @@ PageType {
                         lineHeightMode: Text.FixedHeight
                     }
                 }
-                // a finished scan WITH rows and no live connection (desktop with the VPN off: the line says «VPN не
-                // подключён») still sends its results to support - the empty state's link, the view's
+                // a finished scan WITH rows and no live connection (desktop with the VPN off) still sends its results to support - the empty state's link, the view's
                 // empty.report_link (ScanMachine reportLinkOffered; lab seam S7, no artboard frame)
                 ReportLink {
                     visible: root.phase === "done" && root.emptyView.report_link === true

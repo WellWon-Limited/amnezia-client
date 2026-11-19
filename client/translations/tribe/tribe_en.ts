@@ -2029,12 +2029,12 @@ You can attach a photo or video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+66"/>
+        <location line="+63"/>
         <source>Сканер</source>
         <translation>Scanner</translation>
     </message>
     <message>
-        <location line="-65"/>
+        <location line="-62"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2117,11 +2117,6 @@ You can attach a photo or video.</translation>
         <location line="+1"/>
         <source>~%1&#xa0;мс</source>
         <translation>~%1&#xa0;ms</translation>
-    </message>
-    <message>
-        <location line="+3"/>
-        <source>VPN не подключён</source>
-        <translation>VPN is not connected</translation>
     </message>
     <message>
         <location line="+3"/>
@@ -2425,7 +2420,7 @@ You can attach a photo or video.</translation>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-93"/>
+        <location line="-90"/>
         <source>только что</source>
         <translation>just now</translation>
     </message>
@@ -2490,7 +2485,7 @@ You can attach a photo or video.</translation>
         <translation>Available</translation>
     </message>
     <message>
-        <location line="+19"/>
+        <location line="+16"/>
         <source>Подключитесь к Wi‑Fi — через него VPN обычно работает. Потом откройте Сканер и нажмите «Сканировать».</source>
         <translation>Connect to Wi‑Fi — VPN usually works through it. Then open the Scanner and tap “Scan”.</translation>
     </message>
@@ -3151,7 +3146,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4286"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4314"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3251,7 +3246,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-3029"/>
+        <location line="-3052"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3347,12 +3342,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3824"/>
+        <location line="+3848"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>There is no server in the selected mode — switch to “Auto”</translation>
     </message>
     <message>
-        <location line="-3821"/>
+        <location line="-3845"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>No network — connect when it is back</translation>
     </message>
@@ -3362,7 +3357,7 @@ You can attach a photo or video.</translation>
         <translation>No working server was found on this network — check the network and try again</translation>
     </message>
     <message>
-        <location line="+495"/>
+        <location line="+518"/>
         <source>Отправляем…</source>
         <translation>Sending…</translation>
     </message>
@@ -3463,7 +3458,7 @@ You can attach a photo or video.</translation>
         <translation>VPN service installation cancelled</translation>
     </message>
     <message>
-        <location line="+126"/>
+        <location line="+127"/>
         <source>Не удалось установить службу VPN</source>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
