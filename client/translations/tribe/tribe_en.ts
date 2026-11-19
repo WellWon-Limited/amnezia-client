@@ -3349,7 +3349,7 @@ You can attach a photo or video.</translation>
     <message>
         <location line="+3"/>
         <source>Без разрешения на VPN подключиться нельзя — нажмите «Подключить» и разрешите настройку VPN</source>
-        <translation type="unfinished"></translation>
+        <translation>VPN cannot connect without the permission — tap “Connect” and allow the VPN configuration</translation>
     </message>
     <message>
         <location line="+3"/>

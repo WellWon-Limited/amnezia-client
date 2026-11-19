@@ -3349,7 +3349,7 @@ Puedes adjuntar una foto o un video.</translation>
     <message>
         <location line="+3"/>
         <source>Без разрешения на VPN подключиться нельзя — нажмите «Подключить» и разрешите настройку VPN</source>
-        <translation type="unfinished"></translation>
+        <translation>Sin el permiso de VPN no es posible conectar: pulsa «Connect» y permite la configuración de VPN</translation>
     </message>
     <message>
         <location line="+3"/>
