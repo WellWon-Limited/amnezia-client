@@ -179,6 +179,16 @@ static void testNetworkKey()
     bare.medium = NetMedium::Wifi;
     CHECK(key(bare) == QLatin1String("wifi:-"));
     CHECK(key(cell("250-01", "LTE")) == QLatin1String("cell:250-01:lte"));
+    {
+        // iOS cannot read the carrier and the ASN is unknown at the tap: the coarse key is empty, the network is still
+        // cellular (device round 19.11: the race's cellular cap never applied, races spent 0.28 MB on LTE)
+        NetworkTracker t;
+        t.observe(cell("", "lte"));
+        CHECK(t.current().local == QLatin1String("cell:-:lte") && t.current().coarse.isEmpty() && t.current().cellular());
+        NetworkTracker w;
+        w.observe(wifi("192.168.1.1"));
+        CHECK(!w.current().cellular());
+    }
     NetworkObservation off;
     off.medium = NetMedium::Offline;
     CHECK(key(off).isEmpty());
@@ -309,6 +319,63 @@ static PathView viewState(PathState s, bool quarantine = false, qint64 success =
         v.lastSuccessMs = success;
     }
     return v;
+}
+
+// F2 of device round 19.11 (iPhone Air, LTE, Auto): repeats kept landing on Estonia 3 AmneziaWG (connect + first
+// byte 2.7-4.6 s, median 5.0 s to data) because it connected last, while Finland 1 Xray had carried data on the same
+// network in 2.7-3.0 s (3.5-3.7 s to data). The measured, decayed time to data orders working paths; the preference
+// and the mode still come first.
+static void testSpeedOrder()
+{
+    const QString net = QStringLiteral("cell:-:lte");
+    const qint64 T = 1'800'000'000'000LL;
+    const PathCandidate ee = awg("17", "EE"), fi = xray("11:xray", "FI");
+    PathLedger l;
+    l.record(net, fi.id, PathOutcome::DataOk, T, 1858, 946);       // 06:34
+    l.record(net, fi.id, PathOutcome::DataOk, T + 60000, 2032, 813);
+    l.record(net, ee.id, PathOutcome::DataOk, T + 120000, 3029, 588);
+    l.record(net, ee.id, PathOutcome::DataOk, T + 180000, 4083, 549); // the newest proof
+    const PathView vfi = l.view(net, fi.id, T + 200000), vee = l.view(net, ee.id, T + 200000);
+    CHECK(vfi.speedMs > 2700 && vfi.speedMs < 2900 && vee.speedMs > 4000 && vee.speedMs < 4400);
+    SelectInput in;
+    in.pool = { ee, fi };
+    in.evidence = l.viewOf(net, in.pool, T + 200000);
+    CHECK(ids(selectPaths(in)) == QStringList({ "11:xray", "17" })); // before: 17 (newest proof first)
+    // a preferred country still wins over a faster path elsewhere
+    in.choice = UserChoice::preferCountry(QStringLiteral("EE"));
+    CHECK(selectPaths(in).first().path.id.id == QLatin1String("17"));
+    in.choice = UserChoice::automatic();
+    // the mode is stronger than speed
+    in.mode = TransportMode::Awg;
+    CHECK(ids(selectPaths(in)) == QStringList({ "17" }));
+    in.mode = TransportMode::Auto;
+    // within one speed step the newest proof leads (no flapping between equally fast paths)
+    PathLedger near;
+    near.record(net, fi.id, PathOutcome::DataOk, T, 2000, 800);
+    near.record(net, ee.id, PathOutcome::DataOk, T + 1000, 2100, 750);
+    in.evidence = near.viewOf(net, in.pool, T + 2000);
+    CHECK(selectPaths(in).first().path.id.id == QLatin1String("17"));
+    // decayed: a new slow sample moves the average halfway at once, an old value weighs less with age
+    PathLedger d;
+    d.record(net, ee.id, PathOutcome::DataOk, T, 2000, 0);
+    d.record(net, ee.id, PathOutcome::DataOk, T + 1000, 4000, 0);
+    CHECK(d.view(net, ee.id, T + 2000).speedMs == 3000);
+    PathLedger old;
+    old.record(net, ee.id, PathOutcome::DataOk, T, 2000, 0);
+    old.record(net, ee.id, PathOutcome::DataOk, T + 12LL * 3600 * 1000, 4000, 0); // two half-lives later
+    CHECK(old.view(net, ee.id, T + 12LL * 3600 * 1000).speedMs == 3600);
+    // an adopted tunnel (no start measured, connect 0) adds no sample
+    d.record(net, ee.id, PathOutcome::DataOk, T + 3000, 0, 300);
+    CHECK(d.view(net, ee.id, T + 4000).speedMs == 3000);
+    // probe proofs: the faster time to proof first (the race's winner before a later, slower proof)
+    PathLedger p;
+    p.record(net, fi.id, PathOutcome::ProbeOk, T, 990);
+    p.record(net, ee.id, PathOutcome::ProbeOk, T + 1400, 1390);
+    in.evidence = p.viewOf(net, in.pool, T + 2000);
+    CHECK(ids(selectPaths(in)) == QStringList({ "11:xray", "17" }));
+    // persisted
+    const PathLedger back = PathLedger::fromJson(l.toJson());
+    CHECK(back.view(net, fi.id, T + 200000).speedMs == vfi.speedMs && back.view(net, ee.id, T + 200000).speedMs == vee.speedMs);
 }
 
 static void testSelect()
@@ -1054,15 +1121,16 @@ static void scenarioRace()
     {
         World w;
         const NetworkObservation lte = cell("25001", "lte");
-        w.setProbe(k, QStringLiteral("17"), ProbeBehaviour::ok(2500));
+        // (the hedged first choice 17 is never probed beside its own leg: the spare 12 carries the late answer)
+        w.setProbe(k, QStringLiteral("12"), ProbeBehaviour::ok(2500));
         w.set(key(lte), QStringLiteral("17"), Behaviour::works(700, 400, 120));
-        Sim s({ awg("17", "EE") }, w, home);
+        Sim s({ awg("17", "EE", false, 2.0), awg("12", "DE") }, w, home);
         s.caps = hostCaps();
         s.changeNetworkAt(1000, lte);
         const AttemptResult r = s.raceTap(UserChoice::automatic());
         row("race 4: results after a network change", s, r, 0);
         CHECK(r.connected && s.raceLog.contains(QStringLiteral("done:network_changed")));
-        CHECK(s.ledger.view(k, awg("17", "EE").id, s.wall()).state == PathState::Unknown); // the late probe ok: dropped
+        CHECK(s.ledger.view(k, awg("12", "DE").id, s.wall()).state == PathState::Unknown); // the late probe ok: dropped
     }
 
     // 5. Cellular budget exhausted: no probe can be paid - one path at a time, exactly as stage 1.
@@ -1097,6 +1165,88 @@ static void scenarioRace()
         row("race 6: provider probe seat answers lost", s, r, 0);
         CHECK(r.connected && r.path.id.id == QLatin1String("11"));
         CHECK(s.providerProbes <= s.race.timings().providerPerRace && s.lostSeatAnswers <= s.race.timings().providerPerRace);
+    }
+
+    // 8. Device round 19.11, iPhone Air on LTE, Auto, empty ledger: the hedged leg (Serbia 1, AmneziaWG) shakes hands at
+    //    ~2.0 s and carries no data; the race proves Finland 1 Xray at ~1.0-1.7 s. The leg has shown nothing of its own
+    //    when the proof comes (not up, not proven): it yields at once and the proven path is next. Before: the leg was
+    //    left only by its starving data check (~4.1 s) and the attempt took 7.5-8.2 s.
+    {
+        const NetworkObservation lte = cell("25099", "lte");
+        const QString kl = key(lte);
+        World w;
+        w.set(kl, QStringLiteral("16"), Behaviour::noData(2000));
+        w.setProbe(kl, QStringLiteral("16"), ProbeBehaviour::silent());
+        w.set(kl, QStringLiteral("11:xray"), Behaviour::works(1900, 1600, 800));
+        w.setProbe(kl, QStringLiteral("11:xray"), ProbeBehaviour::ok(1000));
+        w.set(kl, QStringLiteral("17"), Behaviour::works(2900, 1450, 600));
+        w.setProbe(kl, QStringLiteral("17"), ProbeBehaviour::ok(1400));
+        const QList<PathCandidate> pool = { awg("16", "RS", false, 3.0), xray("11:xray", "FI"), awg("17", "EE") };
+        Sim s(pool, w, lte);
+        s.caps = hostCaps();
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        row("race 8: LTE 19.11, hedged leg no data, Xray proven first", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("11:xray"));
+        CHECK(legPaths(s) == QStringList({ "16", "11:xray" }) && s.yields == 1);
+        CHECK(s.lastTapWallMs() < 6000);
+        CHECK(stateOf(s, awg("16", "RS")) == PathState::Unknown); // yielded: nothing recorded against it
+        CHECK(!s.raceLog.contains(QStringLiteral("probe:16")));    // the leg's own node is never probed beside it
+        // The same phone's Wi-Fi: the hedged leg is up (2.15 s) before the race proves another path (2.6 s) - it keeps
+        // its data check and wins (3.9 s on the device), nothing yields.
+        const NetworkObservation home = wifi("192.168.19.1");
+        const QString kw = key(home);
+        World ww;
+        ww.set(kw, QStringLiteral("16"), Behaviour::works(2150, 1700, 900));
+        ww.set(kw, QStringLiteral("11:xray"), Behaviour::works(1900, 1600, 800));
+        ww.setProbe(kw, QStringLiteral("11:xray"), ProbeBehaviour::ok(2600));
+        ww.set(kw, QStringLiteral("17"), Behaviour::works(2100, 1500, 700));
+        ww.setProbe(kw, QStringLiteral("17"), ProbeBehaviour::silent());
+        Sim sw(pool, ww, home);
+        sw.caps = hostCaps();
+        const AttemptResult rw = sw.raceTap(UserChoice::automatic());
+        row("race 8: Wi-Fi 19.11, hedged leg up before any proof", sw, rw, 0);
+        CHECK(rw.connected && rw.path.id.id == QLatin1String("16") && sw.yields == 0 && rw.paths == 1);
+        CHECK(sw.lastTapWallMs() <= 3900);
+    }
+
+    // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when its projection fits; real bytes
+    // never refund the cap; a candidate the cap cannot pay is left to the owner's walk and the cheaper ones still start.
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.awg = 45000;
+        costs.xray = 110000;
+        costs.provider = 320000;
+        const QList<PathCandidate> list = { xray("x1", "FI"), prov("up:p", UpstreamKind::Country, "NL", 0), xray("x2", "DE"),
+                                            awg("a1", "EE"), awg("a2", "NL"), xray("x3", "NL") };
+        RaceTimings rt;
+        rt.hedgeMs = 5000;
+        PathRace race(rt);
+        const qint64 cap = 262144;
+        qint64 projected = 0;
+        QStringList started;
+        QList<RaceEffect> fx = race.begin(0, list, tr.current(), hostCaps(), cap, costs);
+        bool bytesDone = false;
+        for (qint64 t = 0; t <= 6000; t += 250) {
+            if (t > 0)
+                fx << race.tick(t);
+            while (!fx.isEmpty()) {
+                const RaceEffect e = fx.takeFirst();
+                bytesDone = bytesDone || (e.type == RaceEffectType::Done && e.reason == RaceDoneReason::Bytes);
+                if (e.type != RaceEffectType::StartProbe)
+                    continue;
+                started << e.path.id.id;
+                projected += e.path.kind == PathKind::OwnXray ? costs.xray : e.path.kind == PathKind::OwnAwg ? costs.awg
+                                                                                                          : costs.provider;
+                // the host reports MORE than the projection - the cap is still charged by the projection only
+                fx << race.probeDone(t + 100, e.stamp, PathOutcome::Inconclusive, 200000);
+            }
+        }
+        CHECK(projected <= cap);
+        CHECK(started == QStringList({ "x1", "x2" }) && bytesDone && !race.running());
+        CHECK(!started.contains(QStringLiteral("up:p"))); // 320 000 B never fits a 256 KiB race
+        CHECK(started.contains(QStringLiteral("x2")));    // the provider that cannot be paid does not block the next
     }
 
     // B3a: the first candidate works - the race (hedge at once) is never slower than no race
@@ -1161,6 +1311,55 @@ static void scenarioRace()
         const ProbeStamp old{ race.raceNumber() + 7, tr.current().generation, 1 };
         CHECK(race.probeDone(800, old, PathOutcome::ProbeOk, 1000).isEmpty()); // another race: dropped
     }
+    // CONNECT-INVARIANTS §32 p. 3 (device round 19.11: the hedged leg's own AmneziaWG node was probe 1 of every race,
+    // with the device's key beside the leg coming up): the path the owner raises leaves the race - its probe in
+    // flight is cancelled, it is never started again in that race; the others go on.
+    {
+        NetworkTracker tr;
+        tr.observe(home);
+        const QList<PathCandidate> list = { awg("a", "EE"), awg("b", "NL"), xray("c", "FI") };
+        // hedge at once: the first candidate is the leg raised now - never probed
+        {
+            PathRace race;
+            QStringList started;
+            for (const RaceEffect &e : race.begin(0, list, tr.current(), hostCaps(), -1, PathRace::Costs{}))
+                if (e.type == RaceEffectType::StartProbe)
+                    started << e.path.id.id;
+            for (qint64 t = 250; t <= 2000; t += 250)
+                for (const RaceEffect &e : race.tick(t))
+                    if (e.type == RaceEffectType::StartProbe)
+                        started << e.path.id.id;
+            CHECK(started == QStringList({ "b", "c" }));
+        }
+        RaceTimings later;
+        later.hedgeMs = 5000; // the owner's leg comes later: its probe in flight is cancelled then
+        PathRace race(later);
+        QList<RaceEffect> fx = race.begin(0, list, tr.current(), hostCaps(), -1, PathRace::Costs{});
+        CHECK(fx.size() >= 1 && fx.first().type == RaceEffectType::StartProbe && fx.first().path.id.id == QLatin1String("a"));
+        const ProbeStamp a = fx.first().stamp;
+        fx = race.legStarted(10, QStringLiteral("a"));
+        bool cancelled = false;
+        for (const RaceEffect &e : fx)
+            cancelled = cancelled || (e.type == RaceEffectType::CancelProbe && e.stamp == a);
+        CHECK(cancelled && race.inFlight() == 0);
+        QStringList started;
+        for (qint64 t = 250; t <= 2000; t += 250)
+            for (const RaceEffect &e : race.tick(t))
+                if (e.type == RaceEffectType::StartProbe)
+                    started << e.path.id.id;
+        CHECK(started == QStringList({ "b", "c" }));
+        CHECK(race.probeDone(2100, a, PathOutcome::ProbeOk, 1000).isEmpty()); // its late answer: dropped
+        // a path still waiting in the window leaves it too
+        PathRace r2(later);
+        r2.begin(0, list, tr.current(), hostCaps(), -1, PathRace::Costs{});
+        r2.legStarted(10, QStringLiteral("c"));
+        QStringList s2;
+        for (qint64 t = 250; t <= 2000; t += 250)
+            for (const RaceEffect &e : r2.tick(t))
+                if (e.type == RaceEffectType::StartProbe)
+                    s2 << e.path.id.id;
+        CHECK(s2 == QStringList({ "b" }));
+    }
 }
 
 // --- Device round 4, R1: what is not the path's fault never enters the ledger ------------------------------------
@@ -1222,6 +1421,7 @@ int main()
     testNetworkKey();
     testLedger();
     testSelect();
+    testSpeedOrder();
     testOwnerStale();
     testOwnerLive();
     scenarioHomeWifi();

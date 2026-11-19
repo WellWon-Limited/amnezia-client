@@ -158,6 +158,7 @@ public:
     int probesStarted = 0;
     int providerProbes = 0;
     int lostSeatAnswers = 0;    // provider probe seats left to the server's TTL
+    int yields = 0;             // legs that gave way to a proven path (ProofReady)
     bool raceFirst = false;
     qint64 ownerStartedMs = -1;
     QStringList raceLog;
@@ -280,6 +281,8 @@ private:
         for (const AttemptEffect &e : effects) {
             switch (e.type) {
             case EffectType::StartPath: {
+                if (race.running()) // the leg's own path leaves the race (CONNECT-INVARIANTS §32 p. 3)
+                    applyRace(race.legStarted(now, e.path.id.id));
                 const QString net = tracker.current().local;
                 legs.append({ e.stamp, e.path.id.id, net, now });
                 const Behaviour b = m_world.at(net, e.path.id.id, now);
@@ -342,6 +345,10 @@ private:
                 break;
             case EffectType::Show: break;
             case EffectType::StopUnconfirmed: break;
+            case EffectType::Yield:
+                ++yields;
+                raceLog << QStringLiteral("yield:%1").arg(e.path.id.id);
+                break;
             }
         }
     }
@@ -390,7 +397,9 @@ private:
             case RaceEffectType::Report:
                 reports.append(OutcomeReport{ e.network, e.networkGeneration, e.path.id, e.outcome, -1, -1 });
                 if (tracker.isCurrent(e.networkGeneration))
-                    ledger.record(e.network, e.path.id, e.outcome, wall());
+                    ledger.record(e.network, e.path.id, e.outcome, wall(), e.ms);
+                if (owner.running()) // a proof while a leg is in flight (the engine's rule)
+                    deliver(AttemptEvent::proofReady(now, false));
                 break;
             case RaceEffectType::Spent:
                 bytesSpent += e.bytes;

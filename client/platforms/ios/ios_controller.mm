@@ -24,6 +24,7 @@
 #import <os/lock.h> // AVPN: os_unfair_lock — владение m_currentTunnel (ревью 2026-07-11)
 #import "core/utils/swiftBridge.h"
 #include "core/serviceEngine/TuningStore.h" // AVPN backend-first (Task 6): xray_* NE timeouts + network_change_debounce_ms
+#include "core/serviceEngine/IosAppScanHost.h" // AVPN (path engine): iosAwgLivePeerJson (pure)
 #include "IosXrayTunables.h" // AVPN (upstream nodes): xray_tunables of the Xray envelope
 #include <time.h>            // AVPN (upstream nodes): clock_gettime_nsec_np (sleep-proof clock)
 
@@ -537,6 +538,21 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
 #endif
     m_proto = proto;
     m_rawConfig = configuration;
+    {
+        // AVPN (path engine, device round 19.11): the peer of this start, for the in-app probe host beside it
+        QJsonObject peer;
+        int kind = 1;
+        if (isWireGuardBasedProto(proto)) {
+            const QJsonObject c = configuration.value(ProtocolUtils::key_proto_config_data(proto)).toObject();
+            peer = avpn::iosAwgLivePeerJson(c.value(configKey::serverPubKey).toString(),
+                                            c.value(configKey::hostName).toString(),
+                                            c.value(configKey::port).toVariant().toInt());
+            kind = peer.isEmpty() ? 0 : 2;
+        }
+        std::lock_guard<std::mutex> g(m_ownPeerLock);
+        m_ownPeerKind = kind;
+        m_ownPeer = peer;
+    }
     // AVPN (upstream nodes): the armed upstream start belongs to this connect only when it names this
     // node and this is an Xray start; any other connect drops it (nothing of it leaks into AWG/own Xray).
     {
@@ -2906,6 +2922,14 @@ bool IosController::isTestFlight() {
 // ({"action":"scan_*"}, PacketTunnelProvider+Scan.swift). The same session as checkStatus (a retained manager,
 // sendProviderMessage), but the bytes travel as they are: the tribe-scan-v1 JSON is decoded only by the Scanner's
 // coordinator (ScanHostContract.h), never here, and never logged (it carries the scan token and the configs).
+int IosController::ownStartLivePeer(QJsonObject *peer) const
+{
+    std::lock_guard<std::mutex> g(m_ownPeerLock);
+    if (peer)
+        *peer = m_ownPeer;
+    return m_ownPeerKind;
+}
+
 bool IosController::scanHostRunning()
 {
     NETunnelProviderManager *tunnel = retainedCurrentTunnel();

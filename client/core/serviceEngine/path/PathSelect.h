@@ -20,7 +20,10 @@
 //     this network goes behind every working or untried path of any country. The attempt reports the fallback
 //     (AttemptResult::fallbackNotice).
 //  5. Auto order:
-//       a. working on this network: data proof before probe proof, newest proof first, then faster;
+//       a. working on this network: data proof before probe proof, then faster (the measured time to proof of that
+//          strength, PathLedger.h "Speed", in steps of kSpeedStepMs: closer than a step is the same speed), then the
+//          newest proof first, then by prior. Device round 19.11 (LTE): with "newest first" the path that connected last
+//          led for ever (Estonia 3 AmneziaWG, median 5.0 s) although Finland 1 Xray carried data there in 3.7 s;
 //       b. unknown, regular: by crowd prior, then server prior (tier: ours -> main provider -> reserve provider,
 //          provider priority, transport rank, weight), INTERLEAVED by kind (AmneziaWG / our Xray / provider
 //          country / provider whitelist / provider balancer) so that one blocked protocol cannot fill the
@@ -139,9 +142,18 @@ inline bool modeAllows(PathKind k, TransportMode mode)
     return true;
 }
 
+// Two working paths whose measured times differ by less than about this are equally fast (the newest proof leads).
+constexpr int kSpeedStepMs = 500;
+
 namespace detail {
 
 constexpr double kNeutralCrowd = 0.5;
+
+// The speed step of a working path's measured time; unknown after every measured one.
+inline int speedStep(const PathView &v)
+{
+    return v.speedMs < 0 ? std::numeric_limits<int>::max() : v.speedMs / kSpeedStepMs;
+}
 
 // Server prior (and crowd prior) of an unproven path: true = a before b.
 inline bool priorLess(const RankedPath &a, const RankedPath &b, const QHash<QString, double> &crowd)
@@ -282,13 +294,10 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
     const auto working = [&](const RankedPath &a, const RankedPath &b) {
         if (a.view.strength != b.view.strength)
             return a.view.strength > b.view.strength;
+        if (detail::speedStep(a.view) != detail::speedStep(b.view))
+            return detail::speedStep(a.view) < detail::speedStep(b.view);
         if (a.view.lastSuccessMs != b.view.lastSuccessMs)
             return a.view.lastSuccessMs > b.view.lastSuccessMs;
-        const auto speed = [](const PathView &v) {
-            return v.connectMs < 0 || v.ttfbMs < 0 ? std::numeric_limits<int>::max() : v.connectMs + v.ttfbMs;
-        };
-        if (speed(a.view) != speed(b.view))
-            return speed(a.view) < speed(b.view);
         return prior(a, b);
     };
     const auto byTime = [&](qint64 PathView::*field) {

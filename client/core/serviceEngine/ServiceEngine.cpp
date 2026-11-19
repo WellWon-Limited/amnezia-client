@@ -363,6 +363,9 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                                .arg(e.stamp.attempt).arg(e.stamp.network).arg(e.stamp.leg).arg(e.path.id.id)
                                .arg(QLatin1String(path::pathKindName(e.path.kind))).arg(e.timeoutMs)
                                .arg(m_owner.progressDone()).arg(m_owner.progressTotal()));
+            // the leg's own path leaves the race before its tunnel starts (CONNECT-INVARIANTS §32 p. 3)
+            if (m_race.running())
+                applyRaceEffects(m_race.legStarted(nowMs(), e.path.id.id));
             m_state = EngineState::Connecting;
             if (m_currentNodeId != e.path.id.id)
                 resetHealSession(e.path.id.id);
@@ -416,6 +419,14 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                                .arg(e.report.connectMs).arg(e.report.ttfbMs)
                                .arg(QLatin1String(path::pathStateName(
                                    m_ledger.view(e.report.network, e.report.path, nowMs()).state))));
+            break;
+        case path::EffectType::Yield:
+            attemptJournal(e.phase == path::AttemptPhase::Starting
+                               ? QStringLiteral("leg_preempted_for_proof node=%1 phase=starting (not up, a proven path waits)")
+                                     .arg(e.path.id.id)
+                               : QStringLiteral("leg_preempted_for_proof node=%1 (no first byte, a proven path waits)")
+                                     .arg(e.path.id.id));
+            m_checkStarved = false;
             break;
         case path::EffectType::StopUnconfirmed:
             attemptJournal(QStringLiteral("attempt_stop_unconfirmed leg=%1 node=%2 (platform, not recorded)")
@@ -515,12 +526,12 @@ void ServiceEngine::beginRaceForTap()
         race << order.at(i).path;
     qint64 bytesLeft = m_probeBytesLeft ? m_probeBytesLeft() : -1;
     // B3d: on cellular one race spends at most cellularMaxBytes (the Scanner's hour budget stays its own)
-    if (m_net.current().coarse.startsWith(QLatin1String("cell")))
+    if (m_net.current().cellular())
         bytesLeft = bytesLeft < 0 ? rt.cellularMaxBytes : std::min<qint64>(bytesLeft, rt.cellularMaxBytes);
     attemptJournal(QStringLiteral("race_begin known=%1 candidates=%2 bytes_left=%3")
                        .arg(known ? order.first().path.id.id : QStringLiteral("-")).arg(race.size()).arg(bytesLeft));
     m_raceFirst = !known;
-    applyRaceEffects(m_race.begin(nowMs(), race, m_net.current(), m_prober->caps(), bytesLeft, m_probeCosts));
+    applyRaceEffects(m_race.begin(nowMs(), race, m_net.current(), m_prober->caps(), bytesLeft, m_prober->costs()));
     if (m_raceFirst && !m_race.running())
         m_raceFirst = false; // nothing could be raced: the owner walks at once
 }
@@ -558,26 +569,8 @@ bool ServiceEngine::recordProbeProof(const QString &nodeId, const QString &sourc
 void ServiceEngine::noteCheckStarved(bool starved)
 {
     m_checkStarved = starved;
-    if (starved)
-        maybePreemptStarvedCheck();
-}
-
-void ServiceEngine::maybePreemptStarvedCheck()
-{
-    if (!m_checkStarved || m_owner.phase() != path::AttemptPhase::Checking || !m_race.hasWinner())
-        return;
-    // the proven alternative: any path of this network the ledger holds as working that is not the current leg
-    const path::PathCandidate current = m_owner.currentPath();
-    bool alternative = false;
-    for (const SubscriptionNode &n : m_merged)
-        if (n.nodeId != current.id.id
-            && m_ledger.view(m_net.current().local, path::derivePathId(n), nowMs()).state == path::PathState::Working)
-            alternative = true;
-    if (!alternative)
-        return;
-    m_checkStarved = false;
-    attemptJournal(QStringLiteral("leg_preempted_for_proof node=%1 (no first byte, a proven path waits)").arg(current.id.id));
-    feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(), path::PathOutcome::Inconclusive));
+    if (starved) // T1: a starving check of a leg goes when a proven path waits (the owner decides)
+        feedOwner(path::AttemptEvent::proofReady(nowMs(), true));
 }
 
 void ServiceEngine::startOwnerAfterRace(const char *why)
@@ -608,12 +601,16 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
             break;
         case path::RaceEffectType::Report:
             if (findNode(e.path.id.id) && m_net.isCurrent(e.networkGeneration)
-                && m_ledger.record(e.network, e.path.id, e.outcome, nowMs()))
+                && m_ledger.record(e.network, e.path.id, e.outcome, nowMs(), e.ms))
                 m_ledgerDirty = true;
-            attemptJournal(QStringLiteral("path_outcome net=%1 net_gen=%2 node=%3 rev=%4 outcome=%5 source=race state=%6")
+            attemptJournal(QStringLiteral("path_outcome net=%1 net_gen=%2 node=%3 rev=%4 outcome=%5 source=race probe_ms=%6 state=%7")
                                .arg(e.network).arg(e.networkGeneration).arg(e.path.id.id, e.path.id.revision,
-                                    QLatin1String(path::pathOutcomeName(e.outcome)),
-                                    QLatin1String(path::pathStateName(m_ledger.view(e.network, e.path.id, nowMs()).state))));
+                                    QLatin1String(path::pathOutcomeName(e.outcome)))
+                               .arg(e.ms)
+                               .arg(QLatin1String(path::pathStateName(m_ledger.view(e.network, e.path.id, nowMs()).state))));
+            // a proof while a leg is in flight: a leg that has shown nothing of its own yields to it (the owner decides)
+            if (m_owner.running())
+                feedOwner(path::AttemptEvent::proofReady(nowMs(), m_checkStarved));
             break;
         case path::RaceEffectType::Spent:
             if (m_chargeProbeBytes)
@@ -625,7 +622,6 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
                 m_race.acceptWinner(e.path.id.id);
                 attemptJournal(QStringLiteral("race_winner node=%1").arg(e.path.id.id));
                 startOwnerAfterRace("winner");
-                maybePreemptStarvedCheck(); // T1: a starving check of another leg goes now
             }
             break;
         case path::RaceEffectType::Hedge:

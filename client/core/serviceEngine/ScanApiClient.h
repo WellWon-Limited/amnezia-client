@@ -253,6 +253,8 @@ public:
     std::function<void(const QString &)> log;
 
 private:
+    // One try of a probe-seat release; a try our own tunnel transition cancelled is sent again (upstreamReleaseNext).
+    void sendRelease(const IScanHttp::Request &rq, int leases, int attempt, qint64 spent, std::function<void(qint64)> done);
     struct Stored {
         bool ok = false;
         QByteArray body;

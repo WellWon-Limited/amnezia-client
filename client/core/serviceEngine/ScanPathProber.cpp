@@ -50,6 +50,19 @@ path::ProberCaps ScanPathProber::caps() const
     return scanPathProberCaps(m_caps, usable);
 }
 
+path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayBurst)
+{
+    const qint64 body = qMin<qint64>(t.stage2Bytes, kRaceProbeBytes);       // openScan: req.bytes
+    const qint64 data = qint64(t.warmBytes) + body + 2 * kScanTlsOverheadBytes; // one data connection
+    const qint64 access = t.costApiBytes;                                     // a scan opened for this probe
+    path::PathRace::Costs c;
+    c.xray = data + qint64(qBound(1, xrayBurst, 6) - 1) * (qint64(t.warmBytes) + kXrayBurstBytes + 2 * kScanTlsOverheadBytes)
+             + access;
+    c.awg = kScanAwgHandshakeBytes + qint64(t.awgPrimeEchoes) * kScanAwgEchoBytes + data + access;
+    c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes /* release */ + access;
+    return c;
+}
+
 void ScanPathProber::warmUp()
 {
     if (m_host && m_host->availability() == ScanHostAvailability::Available && !m_capsAsked) {

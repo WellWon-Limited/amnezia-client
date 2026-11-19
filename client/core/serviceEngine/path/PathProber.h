@@ -30,6 +30,10 @@ public:
     virtual void prepare(const NetworkKey &net) { Q_UNUSED(net) }
     virtual void start(const ProbeStamp &stamp, const PathCandidate &path, int timeoutMs) = 0;
     virtual void cancel(const ProbeStamp &stamp) = 0;
+    // The most one probe of each kind can cost on the wire as this host runs it - every part of it (an Xray burst),
+    // its handshakes, a provider's seat batch answer with its config. The race pays a probe's cost from its byte cap
+    // before it starts it (PathRace.h), so these must be upper bounds.
+    virtual PathRace::Costs costs() const { return PathRace::Costs{}; }
 };
 
 } // namespace avpn::path

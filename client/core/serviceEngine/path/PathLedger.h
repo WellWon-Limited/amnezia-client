@@ -5,7 +5,7 @@
 //
 // What is recorded - only outcomes that belong to the path itself (design Р12):
 //   probe ok       a light check next to the tunnel passed (weak proof: may raise the path, never "Connected";
-//                  it never clears a tunnel "no data" - only a data ok does);
+//                  it never clears a tunnel "no data" - only a data ok does), with its time to proof when known;
 //   data ok        data passed through the raised tunnel, with time to tunnel and time to first byte (strong);
 //   no handshake   the path did not come up within its start deadline (AmneziaWG handshake, Xray connect);
 //   no data        the tunnel came up, no data passed within the check deadline;
@@ -25,6 +25,12 @@
 //             any success resets streak and ladder.
 //   Refused / no seat do not touch the streak or the ladder (they say nothing about the network): they keep
 //   the path "dead, in quarantine" for refusalCooldownMs only.
+// Speed (device round 19.11, iPhone Air on LTE: repeats kept landing on Estonia 3 AmneziaWG, median 5.0 s, while
+// Finland 1 Xray proven on the same network connected in 3.7 s - "newest proof first" made the last path win for
+// ever): a measured time is evidence like any other. dataMs = time to tunnel + time to first byte of the data oks of
+// this path here, a decayed average (the weight of the older value halves every speedHalfLifeMs); probeMs = the
+// newest probe's time to proof. The view carries the one of its strength (speedMs); PathSelect orders working
+// paths by it.
 // Bounded: entries untouched for evidenceTtlMs are dropped, then the oldest beyond maxEntries.
 // Persistence: toJson()/fromJson(), versioned ({"v":1,...}); another version or garbage reads as empty.
 //
@@ -46,6 +52,7 @@
 #include <QString>
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace avpn::path {
@@ -101,6 +108,7 @@ struct PathView {
     qint64 lastSuccessMs = 0;  // newest still-valid success
     int connectMs = -1;        // of the newest data ok
     int ttfbMs = -1;
+    int speedMs = -1;          // measured time to proof of this strength (data: dataMs, probe: probeMs); -1 unknown
     int failStreak = 0;
     qint64 lastFailureMs = 0;
     qint64 quarantineUntilMs = 0;
@@ -115,6 +123,8 @@ struct LedgerEntry {
     qint64 noDataMs = 0;       // newest tunnel "no data" (stage 2: a probe ok does not clear it)
     int connectMs = -1;
     int ttfbMs = -1;
+    int dataMs = -1;           // decayed average of connect + ttfb over the data oks (a real start only)
+    int probeMs = -1;          // the newest probe ok's time to proof
     int failStreak = 0;
     qint64 lastFailureMs = 0;
     PathOutcome lastFailure = PathOutcome::Inconclusive;
@@ -133,6 +143,8 @@ public:
     int size() const { return int(m_entries.size()); }
 
     // Records one attributable outcome; false = nothing recorded (inconclusive, no network, no path).
+    // DataOk: connectMs (start -> tunnel up; 0 = an adopted tunnel, no start measured) + ttfbMs. ProbeOk: connectMs =
+    // the probe's time to proof (-1 unknown).
     bool record(const QString &network, const PathId &path, PathOutcome o, qint64 nowMs, int connectMs = -1,
                 int ttfbMs = -1)
     {
@@ -147,6 +159,8 @@ public:
         }
         switch (o) {
         case PathOutcome::DataOk:
+            if (connectMs > 0 && ttfbMs >= 0)
+                e.dataMs = decayedMs(e.dataMs, e.dataOkMs, connectMs + ttfbMs, nowMs);
             e.dataOkMs = nowMs;
             e.connectMs = connectMs;
             e.ttfbMs = ttfbMs;
@@ -155,6 +169,8 @@ public:
         case PathOutcome::ProbeOk:
             if (o == PathOutcome::ProbeOk) {
                 e.probeOkMs = nowMs;
+                if (connectMs >= 0)
+                    e.probeMs = connectMs;
                 // Stage 2: a tunnel that came up and carried no data outranks a light probe (device round 18.11:
                 // own Xray 15 on LTE probes fine, the real tunnel passes nothing). Only a data ok through the
                 // tunnel clears such a failure; the probe is kept, the path stays suspect / dead, so the race
@@ -209,8 +225,10 @@ public:
             v.strength = EvidenceStrength::Data;
             v.connectMs = e.connectMs;
             v.ttfbMs = e.ttfbMs;
+            v.speedMs = e.dataMs;
         } else if (probeValid) {
             v.strength = EvidenceStrength::Probe;
+            v.speedMs = e.probeMs;
         }
         v.lastSuccessMs = std::max(dataValid ? e.dataOkMs : 0, probeValid ? e.probeOkMs : 0);
         if (e.failStreak >= 2) {
@@ -261,6 +279,7 @@ public:
                 { QStringLiteral("n"), e.network }, { QStringLiteral("p"), e.path }, { QStringLiteral("r"), e.revision },
                 { QStringLiteral("d"), double(e.dataOkMs) }, { QStringLiteral("pr"), double(e.probeOkMs) }, { QStringLiteral("nd"), double(e.noDataMs) },
                 { QStringLiteral("c"), e.connectMs }, { QStringLiteral("t"), e.ttfbMs }, { QStringLiteral("f"), e.failStreak },
+                { QStringLiteral("dm"), e.dataMs }, { QStringLiteral("pm"), e.probeMs },
                 { QStringLiteral("lf"), double(e.lastFailureMs) },
                 { QStringLiteral("lo"), QString::fromLatin1(pathOutcomeName(e.lastFailure)) },
                 { QStringLiteral("q"), double(e.quarantineUntilMs) }, { QStringLiteral("ru"), double(e.refusedUntilMs) },
@@ -289,6 +308,8 @@ public:
             e.noDataMs = qint64(o.value(QStringLiteral("nd")).toDouble());
             e.connectMs = o.value(QStringLiteral("c")).toInt(-1);
             e.ttfbMs = o.value(QStringLiteral("t")).toInt(-1);
+            e.dataMs = o.value(QStringLiteral("dm")).toInt(-1);
+            e.probeMs = o.value(QStringLiteral("pm")).toInt(-1);
             e.failStreak = std::max(0, o.value(QStringLiteral("f")).toInt());
             e.lastFailureMs = qint64(o.value(QStringLiteral("lf")).toDouble());
             e.lastFailure = pathOutcomeFromName(o.value(QStringLiteral("lo")).toString());
@@ -302,6 +323,17 @@ public:
     }
 
 private:
+    // The decayed average: the older value weighs (1 - speedWeight), halved for every speedHalfLifeMs since it was
+    // measured; the new sample weighs speedWeight.
+    int decayedMs(int oldMs, qint64 oldAtMs, int sampleMs, qint64 nowMs) const
+    {
+        if (oldMs < 0 || oldAtMs <= 0)
+            return sampleMs;
+        const double age = double(std::max<qint64>(0, nowMs - oldAtMs));
+        const double wOld = (1.0 - m_t.speedWeight) * std::pow(0.5, age / double(std::max<long long>(1, m_t.speedHalfLifeMs)));
+        return int(std::lround((wOld * oldMs + m_t.speedWeight * sampleMs) / (wOld + m_t.speedWeight)));
+    }
+
     static QString keyOf(const QString &network, const QString &pathId)
     {
         return network + QChar(0x1f) + pathId;

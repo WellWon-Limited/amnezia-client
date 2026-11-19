@@ -520,6 +520,27 @@ int main(int argc, char **argv)
         CHECK(t.last() == QLatin1String("16") && t.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
         t.journal << t.eng.takeAttemptJournal();
         CHECK(journalHas(t.journal, "leg_preempted_for_proof node=17"));
+        // Device round 19.11 (LTE): the hedged leg has shown nothing of its own (not up, not proven) when the race proves
+        // another path - it yields at once, nothing recorded, the proven path comes up; a leg already up keeps its check
+        Rig y(pool);
+        FakeProber yp;
+        y.eng.setProber(&yp);
+        CHECK(y.eng.connect(err) && y.last() == QLatin1String("17") && !yp.stampOf("17").probe); // the leg: never probed
+        y.pass(500);
+        y.eng.onProbeResult(yp.stampOf("16"), path::PathOutcome::ProbeOk, 1000);
+        CHECK(y.tun.downs == 1);
+        y.confirmStop();
+        CHECK(y.last() == QLatin1String("16") && y.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+        y.journal << y.eng.takeAttemptJournal();
+        CHECK(journalHas(y.journal, "leg_preempted_for_proof node=17 phase=starting"));
+        Rig u(pool);
+        FakeProber up;
+        u.eng.setProber(&up);
+        CHECK(u.eng.connect(err) && u.last() == QLatin1String("17"));
+        u.up(); // the leg shook hands before the proof
+        u.pass(500);
+        u.eng.onProbeResult(up.stampOf("16"), path::PathOutcome::ProbeOk, 1000);
+        CHECK(u.tun.downs == 0 && u.eng.isVerifying());
         // no host: stage 1
         Rig q(pool);
         FakeProber off;

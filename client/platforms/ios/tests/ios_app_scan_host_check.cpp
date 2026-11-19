@@ -144,6 +144,22 @@ static void testRouting()
     s.extensionRunning = false; // connecting / stopping
     check(iosAppScanRouteStart(s, true) == IosAppScanRoute::RefuseLivePeerUnknown,
           "awg_mini while the tunnel comes up and the extension does not answer: live peer unknown");
+    // Device round 19.11 (LTE, mode Amnezia): the hedged AmneziaWG leg of THIS app is coming up - its peer is known
+    // here, so the spare AmneziaWG probes run in the app beside it (with awg_live_peer) instead of being refused.
+    s.livePeer = IosLivePeer::Known;
+    check(iosAppScanRouteStart(s, true) == IosAppScanRoute::App,
+          "awg_mini beside this app's own starting AmneziaWG leg: in the app (the peer goes along)");
+    s.livePeer = IosLivePeer::NotAwg;
+    check(iosAppScanRouteStart(s, true) == IosAppScanRoute::App,
+          "awg_mini beside this app's own starting Xray leg: in the app (no AmneziaWG peer to avoid)");
+    s.awgBesideTunnelRefuse = true;
+    check(iosAppScanRouteStart(s, true) == IosAppScanRoute::RefuseLivePeerUnknown, "the refuse switch still refuses");
+    s.awgBesideTunnelRefuse = false;
+    s.extensionRunning = true;
+    check(iosAppScanRouteStart(s, true) == IosAppScanRoute::Extension,
+          "the extension answers: it keeps awg_mini beside the tunnel (it knows the current peer)");
+    s.extensionRunning = false;
+    s.livePeer = IosLivePeer::Unknown;
     s.foreground = false;
     check(iosAppScanRouteStart(s, false) == IosAppScanRoute::RefuseNoPath, "background, no extension: refused");
     s.extensionRunning = true;
@@ -158,6 +174,9 @@ static void testRouting()
     up.tunnelDown = false;
     check(!iosAppScanAddRefusedAwg(down, true) && iosAppScanAddRefusedAwg(up, true) && !iosAppScanAddRefusedAwg(up, false),
           "an in-app add with awg_mini is refused once a tunnel exists");
+    up.bindIndex = 4;
+    up.livePeer = IosLivePeer::Known;
+    check(!iosAppScanAddRefusedAwg(up, true), "an in-app add beside this app's own leg: taken (the peer goes along)");
     check(iosAppScanStopOnTunnelUp(IosAppScanMode::BeforeTunnel) && !iosAppScanStopOnTunnelUp(IosAppScanMode::Always),
           "in-app scans stop on a tunnel only in before_tunnel");
 }
@@ -197,6 +216,16 @@ static void testHostOptions()
     check(!poll.contains(QLatin1String("bind_interface_index")) && !poll.contains(QLatin1String("gen"))
               && poll.value(QLatin1String("host_epoch")).toInt() == 5,
           "other options: epoch only when no gen is known");
+    check(!start.contains(QLatin1String("awg_live_peer")), "no live peer: no awg_live_peer");
+    // the peer of this app's own AmneziaWG start: the base64 server key as 64 hex digits, host:port
+    const QByteArray key(32, '\x11');
+    const QJsonObject peer = iosAwgLivePeerJson(QString::fromLatin1(key.toBase64()), QStringLiteral("203.0.113.7"), 585);
+    check(peer.value(QLatin1String("public_key")).toString() == QString(64, QLatin1Char('1'))
+              && peer.value(QLatin1String("endpoint")).toString() == QLatin1String("203.0.113.7:585"),
+          "awg_live_peer of a config: hex key + endpoint");
+    check(iosAwgLivePeerJson(QStringLiteral("short"), QStringLiteral("h"), 1).isEmpty(), "an unusable key: no peer");
+    const QJsonObject with = QJsonDocument::fromJson(iosAppScanHostOptions(0, false, g, 6, peer)).object();
+    check(with.value(QLatin1String("awg_live_peer")).toObject() == peer, "the peer goes with the message");
     const QJsonObject lim = start.value(QLatin1String("platform_limits")).toObject();
     check(lim.value(QLatin1String("max_full")).toInt() == kIosAppMaxFull && lim.value(QLatin1String("max_instances")).toInt() == kIosAppMaxInstances
               && lim.value(QLatin1String("can_verify_composite")).toBool() && !lim.value(QLatin1String("needs_vpn")).toBool(true)

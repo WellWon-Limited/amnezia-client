@@ -225,6 +225,7 @@ struct Server {
     qint64 deviceBytesPerHour = 0;
     int leaseSerial = 0;
     QStringList releasedLeases;
+    int cancelReleases = 0; // the next N probe-seat releases are cut by our own tunnel transition (canceled, no answer)
     int outcomeItems = 0;
     QList<IScanHttp::Request> calls;
 
@@ -331,6 +332,11 @@ struct Server {
             return out;
         }
         if (path == QLatin1String("/v1/upstream/lease/probe-batch/release")) {
+            if (cancelReleases > 0) {
+                --cancelReleases;
+                out.canceled = true; // status 0: never reached the server
+                return out;
+            }
             for (const QJsonValue &v : QJsonDocument::fromJson(r.body).object().value("lease_ids").toArray())
                 releasedLeases << v.toString();
             out.status = 204;
@@ -3678,6 +3684,47 @@ static void caseScanCanceledRetryRule()
 }
 
 
+// Device round of 19.11 (iPhone Air 06:31:22, 06:32:04): a probe-seat release our own tunnel transition cut (status 0,
+// canceled) is sent again after the transition; a timeout / network error is not. Before: one try, the seats stayed
+// until the server's probe TTL.
+static void caseReleaseSurvivesTransition()
+{
+    g_case = QStringLiteral("release_survives_transition");
+    World w;
+    w.start();
+    const QStringList ids{QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID9001"), QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID9002")};
+    w.server.cancelReleases = 2;
+    bool done = false;
+    qint64 bytes = 0;
+    w.s->api()->releaseLeases(ids, 4096, [&](qint64 b) {
+        done = true;
+        bytes = b;
+    });
+    QElapsedTimer t;
+    t.start();
+    while (!done && t.elapsed() < 6000) {
+        w.run(50);
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    CHECK(done);
+    CHECK_EQ(w.server.cancelReleases, 0);
+    CHECK_EQ(w.server.releasedLeases, ids); // released once, by the third try
+    CHECK(bytes > 0);
+    // a cut that never ends: bounded by kScanCanceledRetries, then the seat is the server's TTL's
+    w.server.releasedLeases.clear();
+    w.server.cancelReleases = kScanCanceledRetries + 1;
+    done = false;
+    w.s->api()->releaseLeases(ids, 4096, [&](qint64) { done = true; });
+    t.restart();
+    while (!done && t.elapsed() < 9000) {
+        w.run(50);
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    CHECK(done);
+    CHECK(w.server.releasedLeases.isEmpty());
+    CHECK_EQ(w.server.cancelReleases, 0);
+}
+
 // Contract 1.14.0 end to end: the pool feeds the scope menu when the screen opens; «Найти ещё» asks the server's
 // batch with `seen`, the provider rows' stub nodes go to the engine before the rows; an older server (404) falls back.
 static void caseServerScope()
@@ -3750,6 +3797,7 @@ int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     caseScanCanceledRetryRule();
+    caseReleaseSurvivesTransition();
     caseFullScan();
     caseFullProbeProfileRule();
     caseServerScope();

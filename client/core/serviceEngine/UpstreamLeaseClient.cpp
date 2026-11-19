@@ -219,11 +219,15 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
     QNetworkReply *r = nullptr;
     if (m_nam && !base.isEmpty() && !bearer.isEmpty() && upstreamLeaseIdValid(leaseId)) {
         QNetworkRequest req{QUrl(base + QStringLiteral("/v1/upstream/lease/%1").arg(leaseId))};
-        req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
+        // No report to give (a late grant, a seat the tunnel owner held): no body at all - a report with seq 0
+        // is refused 422 by the server and the seat stayed until its TTL (upstreamReleaseBody).
+        const QByteArray body = upstreamReleaseBody(meter);
+        if (!body.isEmpty())
+            req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
         req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + bearer.toUtf8());
         req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
         // Contract §6: bounded to 1.5 s; on failure the server frees the seat at TTL.
-        r = m_nam->sendCustomRequest(req, QByteArrayLiteral("DELETE"), upstreamMeterBody(meter));
+        r = m_nam->sendCustomRequest(req, QByteArrayLiteral("DELETE"), body);
         armTimeout(r, kUpstreamReleaseTimeoutMs);
     }
     if (!r) {
