@@ -3521,38 +3521,9 @@ private:
         const QList<ScanRowView> rows = resultRows(now);
         m_phase = rows.isEmpty() ? ScanPhase::Empty : ScanPhase::Done;
         int working = 0;
-        ScanCachedResult cache;
-        cache.networkKey = m_scanNet.key;
-        cache.fingerprint = m_scanNet.fingerprint;
-        cache.savedAtMs = now;
-        cache.scope = m_scannedScope;
         for (const ScanRowView &r : rows)
-            if (r.verified) {
-                ++working;
-                const int ri = rowIndex(r.id);
-                if (ri < 0 || m_rows.at(ri).cached)
-                    continue;
-                const Row &x = m_rows.at(ri);
-                ScanCachedRow cr;
-                cr.id = x.id;
-                cr.origin = x.origin;
-                cr.profileId = x.profileId;
-                cr.label = x.label;
-                cr.countryCode = x.countryCode;
-                cr.transport = x.transport;
-                cr.transportVersion = x.transportVersion;
-                cr.tier = x.tier;
-                cr.rank = x.rank;
-                cr.cls = x.base;
-                cr.speed = x.speed;
-                cr.ms = x.sortMs;
-                cr.crowdWorks = x.crowdWorks;
-                cr.batch = rowBatch(x);
-                if (cache.rows.size() < kScanCacheRowsMax)
-                    cache.rows << cr;
-            }
-        cache.failures = m_failuresThisScan;
-        addSlot(cache, now);
+            working += r.verified ? 1 : 0;
+        ScanCachedResult cache = buildCache(rows, now);
         if (!connectStep)
             recordSummary(rows, now);
         if (!connectStep) {
@@ -3822,7 +3793,9 @@ private:
             cr.speed = x.speed;
             cr.ms = x.sortMs;
             cr.crowdWorks = x.crowdWorks;
-            cache.rows << cr;
+            cr.batch = rowBatch(x);
+            if (cache.rows.size() < kScanCacheRowsMax)
+                cache.rows << cr;
         }
         cache.failures = m_failuresThisScan;
         addSlot(cache, now);

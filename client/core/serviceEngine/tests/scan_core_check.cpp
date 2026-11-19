@@ -3927,8 +3927,20 @@ static void connectedFirstInEveryList()
     CHECK(!second.isEmpty());
     if (second.isEmpty())
         return;
-    m.hostProgress(progressOf(m, {works(second.at(0).id)}), kT0 + 32000);
-    m.tick(kT0 + 31050 + 8100);
+    ScanStep ended = m.hostProgress(progressOf(m, {works(second.at(0).id)}), kT0 + 32000);
+    ended.actions << m.tick(kT0 + 31050 + 8100).actions;
+    {
+        // what is put away keeps each row's batch (the reopened list has every row the person saw: device round 13, A10)
+        bool saw = false;
+        QSet<int> batches;
+        for (const ScanAction &a : ended.actions)
+            if (a.kind == ScanActionKind::PersistResults) {
+                saw = true;
+                for (const ScanCachedRow &r : a.cached.rows)
+                    batches.insert(r.batch);
+            }
+        CHECK(saw && batches.contains(1) && batches.contains(2) && !batches.contains(0));
+    }
     const QString tapped = second.at(0).id;
     CHECK(m.view(kT0 + 40000).rows.size() >= 2);
     // the tap: the row connects and stays where it is on the list on the screen
