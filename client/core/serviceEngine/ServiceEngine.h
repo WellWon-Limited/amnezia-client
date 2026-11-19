@@ -608,7 +608,6 @@ private:
     bool m_ownerQueueRaceStop = false; // the owner finished inside an effect batch: stop the race after it
     bool m_raceStartedOwner = false; // this tap's owner was started by the race (never a second UserStart)
     bool m_checkStarved = false;   // T1: the running check has no first byte past its share
-    void maybePreemptStarvedCheck();
     bool m_raceFirst = false; // the race runs and the owner waits for its first proven path (or its end)
     bool raceAllowed() const;
     void beginRaceForTap();

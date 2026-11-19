@@ -43,7 +43,14 @@
 // are simply "working" paths of the current network and come first; a path the race found dead drops back.
 // "Known path at once + race of the spares" (design §4 step 2) is: the facade sends UserStart at once (the
 // known path is the first choice) and starts the race beside it; "no known path" is: the facade lets the race
-// run first and sends UserStart when it has a winner or its own time is up. Neither needs a new event here.
+// run first and sends UserStart when it has a winner or its own time is up.
+// A proof while a leg is in flight (ProofReady, design §4 "hedged start"): the leg yields to the proven path when
+// it has shown nothing of its own - it is not up yet and not proven itself (the hedge was a blind bet), or it is up
+// and its one data check got no first byte within its share (`starved`). The proven path must be the owner's next
+// choice (mode, preference and tried paths all apply); nothing is recorded for the leg that yields. Device round of
+// 19.11 (iPhone Air, LTE, Auto): the hedged leg (Serbia 1, AmneziaWG) shook hands at 1.95-2.15 s and carried no
+// data, the race proved Finland 1 Xray at 1.44-1.69 s, and the leg was left only by its starving check at 3.8-4.2 s.
+// On the same phone's Wi-Fi the hedged leg was up at 2.15 s, before any other proof (2.6 s): it keeps its check.
 #pragma once
 
 #include "NetworkKey.h"
@@ -121,7 +128,8 @@ struct OutcomeReport {
 
 // StopUnconfirmed: the stop of `stamp` was not confirmed within stopConfirmMs - the attempt went on (journal it;
 // the platform layer keeps its own stop retries).
-enum class EffectType { StartPath, StopPath, RunDataCheck, Report, Show, Finish, StopUnconfirmed };
+// Yield: the leg in flight gives way to a proven path (ProofReady) - journal it; the StopPath follows.
+enum class EffectType { StartPath, StopPath, RunDataCheck, Report, Show, Finish, StopUnconfirmed, Yield };
 
 struct AttemptEffect {
     EffectType type = EffectType::Show;
@@ -144,6 +152,9 @@ enum class EventType {
     // A live tunnel this process did not raise (found at launch, re-bound): it becomes the leg of a new attempt
     // with `choice` / `mode` / `network`, already up - one in-tunnel data check decides like for any leg.
     Adopted,
+    // The race proved a path of this network, or the running data check starves (`starved`: no first byte within
+    // its share). The leg in flight may yield (see the header).
+    ProofReady,
 };
 
 struct AttemptEvent {
@@ -158,6 +169,7 @@ struct AttemptEvent {
     PathCandidate path;                              // Adopted
     bool tunnelGone = false;                         // LiveLost, PathFailed
     bool restart = false;                            // LiveLost
+    bool starved = false;                            // ProofReady: the running data check has no first byte yet
 
     static AttemptEvent userStart(qint64 now, const UserChoice &c, TransportMode m, const NetworkKey &net)
     {
@@ -187,6 +199,12 @@ struct AttemptEvent {
         return e;
     }
     static AttemptEvent tick(qint64 now) { return at(EventType::Tick, now); }
+    static AttemptEvent proofReady(qint64 now, bool starved)
+    {
+        AttemptEvent e = at(EventType::ProofReady, now);
+        e.starved = starved;
+        return e;
+    }
     static AttemptEvent networkChanged(qint64 now, const NetworkKey &net)
     {
         AttemptEvent e = at(EventType::NetworkChanged, now);
@@ -282,6 +300,7 @@ public:
             break;
         case EventType::LiveLost: onLiveLost(ev, ctx, out); break;
         case EventType::Adopted: onAdopted(ev, out); break;
+        case EventType::ProofReady: onProofReady(ev, ctx, out); break;
         }
         // A check that was running across a suspension and has not answered yet: void, run it again.
         if (m_checkSuspended && m_phase == AttemptPhase::Checking)
@@ -568,6 +587,41 @@ private:
             out << show(AttemptPhase::Idle);
     }
 
+    // The order of the next choice on the owner's network (what beginNext would pick now).
+    QList<RankedPath> order(const SelectionContext &ctx) const
+    {
+        SelectInput in;
+        in.pool = ctx.pool;
+        if (ctx.ledger)
+            in.evidence = ctx.ledger->viewOf(m_net.local, ctx.pool, ctx.wallNowMs);
+        in.choice = m_choice;
+        in.mode = m_mode;
+        in.crowd = ctx.crowd;
+        in.tried = m_tried;
+        in.nowMs = ctx.wallNowMs;
+        in.preferredRetryAfterMs = ctx.ledger ? ctx.ledger->tunables().quarantineMs[0] : 0;
+        return selectPaths(in);
+    }
+
+    void onProofReady(const AttemptEvent &ev, const SelectionContext &ctx, QList<AttemptEffect> &out)
+    {
+        if (!m_running || !legActive() || exact())
+            return;
+        const bool proven = ctx.ledger
+            && ctx.ledger->view(m_net.local, m_leg.path.id, ctx.wallNowMs).state == PathState::Working;
+        const bool blind = m_phase == AttemptPhase::Starting && !proven;
+        const bool starved = m_phase == AttemptPhase::Checking && ev.starved;
+        if (!blind && !starved)
+            return;
+        const QList<RankedPath> next = order(ctx);
+        if (next.isEmpty() || next.first().view.state != PathState::Working)
+            return;
+        AttemptEffect y = effect(EffectType::Yield);
+        y.phase = m_phase;
+        out << y;
+        failLeg(PathOutcome::Inconclusive, out); // its check did not complete: nothing recorded
+    }
+
     void onAdopted(const AttemptEvent &ev, QList<AttemptEffect> &out)
     {
         if (m_running || m_phase != AttemptPhase::Idle || !ev.path.id.isValid())
@@ -607,23 +661,13 @@ private:
             return finish(failure(FailReason::NoNetwork), out);
         if (m_pathsThisNet >= m_t.maxPaths)
             return finish(failure(FailReason::NothingProven), out);
-        SelectInput in;
-        in.pool = ctx.pool;
-        if (ctx.ledger)
-            in.evidence = ctx.ledger->viewOf(m_net.local, ctx.pool, ctx.wallNowMs);
-        in.choice = m_choice;
-        in.mode = m_mode;
-        in.crowd = ctx.crowd;
-        in.tried = m_tried;
-        in.nowMs = ctx.wallNowMs;
-        in.preferredRetryAfterMs = ctx.ledger ? ctx.ledger->tunables().quarantineMs[0] : 0;
-        const QList<RankedPath> order = selectPaths(in);
-        m_progressTotal = m_pathsThisNet + int(order.size());
-        if (order.isEmpty()) {
+        const QList<RankedPath> ranked = order(ctx);
+        m_progressTotal = m_pathsThisNet + int(ranked.size());
+        if (ranked.isEmpty()) {
             const bool nothingEver = m_pathsTotal == 0 && !exact();
             return finish(failure(nothingEver ? FailReason::NoCandidate : FailReason::NothingProven), out);
         }
-        const PathCandidate &next = order.first().path;
+        const PathCandidate next = ranked.first().path;
         m_preferredTried = m_preferredTried || isPreferred(m_choice, next);
         m_tried.insert(next.id.id);
         ++m_pathsThisNet;

@@ -158,6 +158,7 @@ public:
     int probesStarted = 0;
     int providerProbes = 0;
     int lostSeatAnswers = 0;    // provider probe seats left to the server's TTL
+    int yields = 0;             // legs that gave way to a proven path (ProofReady)
     bool raceFirst = false;
     qint64 ownerStartedMs = -1;
     QStringList raceLog;
@@ -344,6 +345,10 @@ private:
                 break;
             case EffectType::Show: break;
             case EffectType::StopUnconfirmed: break;
+            case EffectType::Yield:
+                ++yields;
+                raceLog << QStringLiteral("yield:%1").arg(e.path.id.id);
+                break;
             }
         }
     }
@@ -393,6 +398,8 @@ private:
                 reports.append(OutcomeReport{ e.network, e.networkGeneration, e.path.id, e.outcome, -1, -1 });
                 if (tracker.isCurrent(e.networkGeneration))
                     ledger.record(e.network, e.path.id, e.outcome, wall());
+                if (owner.running()) // a proof while a leg is in flight (the engine's rule)
+                    deliver(AttemptEvent::proofReady(now, false));
                 break;
             case RaceEffectType::Spent:
                 bytesSpent += e.bytes;

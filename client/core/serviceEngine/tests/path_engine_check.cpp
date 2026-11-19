@@ -1100,6 +1100,48 @@ static void scenarioRace()
         CHECK(s.providerProbes <= s.race.timings().providerPerRace && s.lostSeatAnswers <= s.race.timings().providerPerRace);
     }
 
+    // 8. Device round 19.11, iPhone Air on LTE, Auto, empty ledger: the hedged leg (Serbia 1, AmneziaWG) shakes hands at
+    //    ~2.0 s and carries no data; the race proves Finland 1 Xray at ~1.0-1.7 s. The leg has shown nothing of its own
+    //    when the proof comes (not up, not proven): it yields at once and the proven path is next. Before: the leg was
+    //    left only by its starving data check (~4.1 s) and the attempt took 7.5-8.2 s.
+    {
+        const NetworkObservation lte = cell("25099", "lte");
+        const QString kl = key(lte);
+        World w;
+        w.set(kl, QStringLiteral("16"), Behaviour::noData(2000));
+        w.setProbe(kl, QStringLiteral("16"), ProbeBehaviour::silent());
+        w.set(kl, QStringLiteral("11:xray"), Behaviour::works(1900, 1600, 800));
+        w.setProbe(kl, QStringLiteral("11:xray"), ProbeBehaviour::ok(1000));
+        w.set(kl, QStringLiteral("17"), Behaviour::works(2900, 1450, 600));
+        w.setProbe(kl, QStringLiteral("17"), ProbeBehaviour::ok(1400));
+        const QList<PathCandidate> pool = { awg("16", "RS", false, 3.0), xray("11:xray", "FI"), awg("17", "EE") };
+        Sim s(pool, w, lte);
+        s.caps = hostCaps();
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        row("race 8: LTE 19.11, hedged leg no data, Xray proven first", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("11:xray"));
+        CHECK(legPaths(s) == QStringList({ "16", "11:xray" }) && s.yields == 1);
+        CHECK(s.lastTapWallMs() < 6000);
+        CHECK(stateOf(s, awg("16", "RS")) == PathState::Unknown); // yielded: nothing recorded against it
+        CHECK(!s.raceLog.contains(QStringLiteral("probe:16")));    // the leg's own node is never probed beside it
+        // The same phone's Wi-Fi: the hedged leg is up (2.15 s) before the race proves another path (2.6 s) - it keeps
+        // its data check and wins (3.9 s on the device), nothing yields.
+        const NetworkObservation home = wifi("192.168.19.1");
+        const QString kw = key(home);
+        World ww;
+        ww.set(kw, QStringLiteral("16"), Behaviour::works(2150, 1700, 900));
+        ww.set(kw, QStringLiteral("11:xray"), Behaviour::works(1900, 1600, 800));
+        ww.setProbe(kw, QStringLiteral("11:xray"), ProbeBehaviour::ok(2600));
+        ww.set(kw, QStringLiteral("17"), Behaviour::works(2100, 1500, 700));
+        ww.setProbe(kw, QStringLiteral("17"), ProbeBehaviour::silent());
+        Sim sw(pool, ww, home);
+        sw.caps = hostCaps();
+        const AttemptResult rw = sw.raceTap(UserChoice::automatic());
+        row("race 8: Wi-Fi 19.11, hedged leg up before any proof", sw, rw, 0);
+        CHECK(rw.connected && rw.path.id.id == QLatin1String("16") && sw.yields == 0 && rw.paths == 1);
+        CHECK(sw.lastTapWallMs() <= 3900);
+    }
+
     // B3a: the first candidate works - the race (hedge at once) is never slower than no race
     {
         World w;
