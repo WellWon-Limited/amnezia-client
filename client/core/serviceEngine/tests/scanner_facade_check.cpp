@@ -4144,6 +4144,25 @@ static void caseServerScope()
 
         const QString state = QJsonObject::fromVariantMap(w.s->view().value(QStringLiteral("more")).toMap()).value("state").toString();
         CHECK(state == "exhausted" || state == "available");
+        // R7: the app restarts on the same network while the cache is valid: the cached batch row is shown, and its
+        // stub (public ids and names only, no config) comes back with the cache, so the tap offers it again
+        w.s->close();
+        w.s.reset();
+        w.engine.offered = QJsonArray();
+        w.engine.rowCalls.clear();
+        w.clock.t += 60000;
+        w.start();
+        w.s->open();
+        w.run(3000);
+        bool shown = false;
+        for (const QVariant &rv : w.s->view().value(QStringLiteral("rows")).toList())
+            shown = shown || rv.toMap().value("id").toString() == QLatin1String("up:abcdefabcdefabcd");
+        CHECK(shown);
+        w.s->tapRow(QStringLiteral("up:abcdefabcdefabcd"));
+        CHECK(w.engine.rowCalls.size() == 1);
+        CHECK(!w.engine.offered.isEmpty()
+              && w.engine.offered.last().toObject().value("node_id").toString() == QLatin1String("up:abcdefabcdefabcd"));
+        CHECK(!QJsonDocument(w.engine.offered).toJson().contains("config"));
         w.s->close();
     }
     {
