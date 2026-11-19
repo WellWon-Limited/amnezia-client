@@ -6,8 +6,8 @@
 // build switch AVPN_IOS_APP_SCAN_HOST; macOS / Windows: the service's probe engine; Android: none yet). Rules:
 //  - start(): one probe of `path`, bounded by timeoutMs; the result comes back ONCE through
 //    ServiceEngine::onProbeResult(stamp, outcome, bytesSpent) on the GUI thread, never from inside start().
-//    outcome: ProbeOk (the probe moved its payload through the path: AmneziaWG mini-probe 64 KB, Xray leg, provider
-//    profile) or anything else = not proven (never recorded). bytesSpent = what the host reported (the one byte
+//    outcome: ProbeOk (the probe moved its payload through the path - ScanPathProber: a 24 KB body for the AmneziaWG
+//    mini-probe and a provider profile, own Xray as its burst) or anything else = not proven (never recorded). bytesSpent = what the host reported (the one byte
 //    ledger the Scanner charges).
 //  - cancel(): best effort; a result that still comes is dropped by its stamp.
 //  - Provider probes take a PROBE seat through the existing batch API and release it; never a session seat.

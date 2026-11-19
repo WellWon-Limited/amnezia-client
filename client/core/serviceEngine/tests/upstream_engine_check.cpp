@@ -53,14 +53,11 @@ static int g_fail = 0, g_total = 0;
 
 // --- fixtures ------------------------------------------------------------------------------------------
 
-static void setFlags(bool upstream, int failCap = -1)
+static void setFlags(bool upstream)
 {
     QMap<QString, bool> f{{QStringLiteral("upstream_nodes"), upstream}, {QStringLiteral("xray_client"), true},
                           {QStringLiteral("transport_auto_pick"), true}};
-    QMap<QString, double> n;
-    if (failCap > 0)
-        n.insert(QStringLiteral("data_plane_fail_max_tries"), failCap);
-    TuningStore::set(n, f, {}, {});
+    TuningStore::set({}, f, {}, {});
 }
 
 static QString sha64(char c) { return QString(64, QLatin1Char(c)); }

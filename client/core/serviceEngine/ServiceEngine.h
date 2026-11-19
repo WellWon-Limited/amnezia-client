@@ -320,9 +320,8 @@ public:
     // the ladder (other transport of the same location, then another location).
     bool verifyFailed(const QString &reason = QStringLiteral("verify failed (failover)"));
     // Plan v3 step 5 (review): the data-path check could not decide (whoami 429/404, or no answer
-    // and generate_204 passed). Connected exactly as without the check, but nothing is proven: the
-    // give-up streak (data_plane_fail_max_tries) and the dead flag stay as they are - a reset here
-    // made the failover carousel endless on a dead network.
+    // and generate_204 passed). In an attempt's check the path engine gets an Inconclusive outcome (it
+    // decides); otherwise Connected exactly as without the check, nothing proven.
     bool verifyInconclusive();
     // AVPN (iOS data watch, build 141): the extension reported no_data / unconfirmed for this session -
     // back from Connected to Verifying, so the facade re-checks the path with the existing data check

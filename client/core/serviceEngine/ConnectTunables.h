@@ -234,18 +234,6 @@ inline int xrayProbeFailCyclesTuned()
     return qBound(1, int(TuningStore::numberOr(QStringLiteral("xray_probe_fail_cycles"), 3)), 10);
 }
 
-// AVPN awg31-xray-v1 (независимое ревью волны, MAJOR-1): кап ПОДРЯД идущих провалов data-plane
-// за сессию. Без него failover крутится вечно: при реально мёртвом data-plane (captive portal,
-// ТСПУ режет всё) цикл up → verifying → verifyFailed → down → up повторяется бесконечно, и
-// пользователь не видит ни ошибки, ни причины. По исчерпании капа движок уходит в Error, фасад
-// показывает честный текст и снимает намерение (§13 — поднять туннель может только пользователь).
-// Пол 1 (0/минус с бэка не должен выключать механизм — он обязателен), потолок 10 (выше —
-// та же вечная карусель). Дефолт 4: хватает обойти оба транспорта двух локаций.
-inline int dataPlaneFailMaxTriesTuned()
-{
-    return qBound(1, int(TuningStore::numberOr(QStringLiteral("data_plane_fail_max_tries"), 4)), 10);
-}
-
 // AVPN awg31-xray-v1 (независимое ревью волны, MAJOR-3; инвариант §22.5 «Подключено по xray —
 // только после реального трафика ЧЕРЕЗ туннель»). Успешный HEAD generate_204 доказывает ИНТЕРНЕТ,
 // а не туннель: если tun2socks/маршруты не встали, а протокол уже отдал Connected, проба уходит
