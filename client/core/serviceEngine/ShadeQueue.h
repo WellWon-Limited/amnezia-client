@@ -5,7 +5,7 @@
 // Plan scanner-client-plan.md §1.1 (Shade), §4.4; artboard SHADE_MS 1500, SHADE_ANIM 360. One queue for
 // the whole app (hosted by the facade, shown by TribeShadeHost over every Tribe page). Rules (each one a
 // test in tests/scan_core_check.cpp):
-//  - One shade visible at a time. A shown shade stays holdMs (1.5 s), then Hide; the slot is free again
+//  - One shade visible at a time. A shown shade stays holdMs (2.5 s, owner 19.11), then Hide; the slot is free again
 //    animMs (360 ms, the slide-up) later. A tap hides it at once (then the same slide-up wait).
 //  - No pre-emption: a shade that arrives while another is visible waits.
 //  - Coalescing: a request whose key (empty key = tone + text key + args) is visible (incl. sliding up)
@@ -72,7 +72,7 @@ struct ShadeRequest {
 };
 
 struct ShadeTiming {
-    int holdMs = 1500;
+    int holdMs = 2500;
     int animMs = 360;
     int staleMs = 3000;
     int maxPending = 3;

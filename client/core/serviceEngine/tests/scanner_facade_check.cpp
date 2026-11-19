@@ -3724,6 +3724,8 @@ static void caseShade()
     CHECK(w.s->shade().value("visible").toBool());
     CHECK_EQ(w.s->shade().value("text_key").toString(), QStringLiteral("test_key"));
     w.run(1600);
+    CHECK(w.s->shade().value("visible").toBool() && !w.s->shade().value("leaving").toBool()); // the hold is 2.5 s
+    w.run(1000);
     CHECK(w.s->shade().value("leaving").toBool() || !w.s->shade().value("visible").toBool());
     w.run(1000);
     CHECK(!w.s->shade().value("visible").toBool());

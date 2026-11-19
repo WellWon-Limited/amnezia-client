@@ -1086,7 +1086,9 @@ static ShadeRequest sh(ShadeTone t, const char *key, const QStringList &args = {
 
 static void shades()
 {
-    ShadeQueue q;
+    ShadeTiming timing;
+    timing.holdMs = 1500; // this choreography is written for a 1.5 s hold (the default is 2.5 s)
+    ShadeQueue q(timing);
     const qint64 n = 1000;
     ShadeStep s = q.enqueue(sh(ShadeTone::Info, "scan_found", {QStringLiteral("10")}), n);
     CHECK(s.actions.size() == 1 && s.actions.at(0).kind == ShadeActionKind::Show && s.wakeAtMs == n + 1500);
@@ -1445,11 +1447,11 @@ static void extras()
     CHECK(scanReasonKey(QStringLiteral("Leg-DNS 1")) == QLatin1String("leg_dns_1") && scanReasonKey(QStringLiteral("1x")) == QLatin1String("x")
           && scanReasonKey(QString()) == QLatin1String("other"));
     // shade hold from the manifest, with the compiled fallback
-    CHECK(shadeTimingFrom({}).holdMs == 1500);
+    CHECK(shadeTimingFrom({}).holdMs == 2500);
     CHECK(shadeTimingFrom({{QStringLiteral("scan_shade_ms"), 2500}}).holdMs == 2500);
     CHECK(shadeTimingFrom({{QStringLiteral("scan_shade_ms"), 50}}).holdMs == 500);
     CHECK(shadeTimingFrom({{QStringLiteral("scan_shade_ms"), 1e9}}).holdMs == 10000);
-    CHECK(shadeTimingFrom({{QStringLiteral("scan_shade_ms"), std::numeric_limits<double>::infinity()}}).holdMs == 1500);
+    CHECK(shadeTimingFrom({{QStringLiteral("scan_shade_ms"), std::numeric_limits<double>::infinity()}}).holdMs == 2500);
     // seats (plan v2 §2.10): one probe-batch per scan, at most 12, the rest «Не проверено» (batch_cap);
     // include_config only when a full probe may follow; the server's 30 seats per device per minute hold for
     // two scans a minute (the 30 s cooldown), follow-ups included
