@@ -1098,6 +1098,10 @@ PageType {
                                                                              : qsTr("Загружаем серверы…"))
                                   : qsTr("Умный выбор сервера")
                             color: "white"; elide: Text.ElideRight
+                            // the tag and the bars are on this line: a long name steps down to the body size before it is
+                            // cut (device round 13, B1: «Великобритани…»); it is elided only when it is truly too long
+                            fontSizeMode: Text.HorizontalFit
+                            minimumPixelSize: Theme.font.bodyS
                             font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
                         }
                         // Вторая строка: бейдж протокола (5.1.108 — под именем, до подключения тоже) и
@@ -1128,8 +1132,7 @@ PageType {
                                 width: subRow.width - (protoBadge.visible ? protoBadge.width + subRow.spacing : 0)
                                 visible: text.length > 0
                                 elide: Text.ElideRight
-                                text: root.curNode.hasNode ? (root.curNode.auto === true && !root.choiceElsewhere ? qsTr("Авто")
-                                                              : root.choiceFailsHere ? qsTr("в этой сети не отвечает") : "")
+                                text: root.curNode.hasNode ? (root.curNode.auto === true && !root.choiceElsewhere ? qsTr("Авто") : "")
                                       : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Повторяем автоматически")
                                                                                  : qsTr("Секунду…"))
                                       // one text in Auto, as the Auto card of the server list (U4/V5)
@@ -1138,6 +1141,17 @@ PageType {
                                 color: root.slate500
                                 font.family: Theme.font.mono; font.pixelSize: Theme.font.micro
                             }
+                        }
+                        // The chosen server does not answer on this network (no node connected): the line has the whole text column
+                        // under the badge, not what the badge leaves on its row (device round 13, B3: «в этой сети не отве…»)
+                        Text {
+                            width: parent.width
+                            visible: root.curNode.hasNode && !(root.curNode.auto === true && !root.choiceElsewhere) && root.choiceFailsHere
+                            text: qsTr("в этой сети не отвечает")
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            color: root.slate500
+                            font.family: Theme.font.mono; font.pixelSize: Theme.font.micro
                         }
                         // The person's chosen server did not work on this network and the card names the node CONNECTED now
                         // (currentNode.choiceNodeId / choiceName / choiceIsShown from the engine): one yellow line
