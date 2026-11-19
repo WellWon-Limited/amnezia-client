@@ -56,8 +56,7 @@ path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayB
     const qint64 data = qint64(t.warmBytes) + body + 2 * kScanTlsOverheadBytes; // one data connection
     const qint64 access = t.costApiBytes;                                     // a scan opened for this probe
     path::PathRace::Costs c;
-    c.xray = data + qint64(qBound(1, xrayBurst, 6) - 1) * (qint64(t.warmBytes) + kXrayBurstBytes + 2 * kScanTlsOverheadBytes)
-             + access;
+    c.xray = data + qint64(qBound(1, xrayBurst, 6) - 1) * scanXrayBurstPartCostBytes(t) + access;
     c.awg = kScanAwgHandshakeBytes + qint64(t.awgPrimeEchoes) * kScanAwgEchoBytes + data + access;
     c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes /* release */ + access;
     return c;
