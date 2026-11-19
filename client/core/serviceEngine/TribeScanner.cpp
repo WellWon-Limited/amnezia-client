@@ -1900,12 +1900,15 @@ void TribeScanner::fetchPoolIfStale()
         self->chargeOutsideScan(p.bytes, cellular);
         if (p.ok) {
             int own = 0, provider = 0;
+            QStringList per;
             for (const ScanPoolView::Country &c : p.view.countries) {
                 own += c.own;
                 provider += c.provider;
+                per << QStringLiteral("%1:%2+%3").arg(c.countryCode).arg(c.own).arg(c.provider);
             }
-            self->emitLog(QStringLiteral("pool fetched countries=%1 total=%2 own=%3 provider=%4 whitelist=%5")
-                              .arg(p.view.countries.size()).arg(own + provider).arg(own).arg(provider).arg(p.view.whitelist));
+            self->emitLog(QStringLiteral("pool fetched countries=%1 total=%2 own=%3 provider=%4 whitelist=%5 by_country=%6")
+                              .arg(p.view.countries.size()).arg(own + provider).arg(own).arg(provider).arg(p.view.whitelist)
+                              .arg(per.join(QLatin1Char(','))));
             self->dispatch(self->m_m.poolReady(p.view, self->now()));
         }
         else if (p.status == 404)
