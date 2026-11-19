@@ -1955,11 +1955,65 @@ static void providerLegStarvedCheck()
     TuningStore::set({}, {}, {}, {});
 }
 
+// Device round 19.11 08:18:42: a prod API restart answered the session seat's DELETE 502, nothing resent it and the
+// seat stayed its full 15 minutes. The session release follows the one release rule (seatReleaseNext): 502 then 204
+// -> released; 502 x N -> given up after the budget (not confirmed); 404 / 409 -> final at once.
+static void sessionReleaseRetry()
+{
+    struct ReleaseEdge {
+        QTcpServer server;
+        QList<int> statuses; // answered in turn; then 204
+        int deletes = 0;
+        ReleaseEdge()
+        {
+            server.listen(QHostAddress::LocalHost);
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [this]() {
+                while (QTcpSocket *s = server.nextPendingConnection()) {
+                    QObject::connect(s, &QTcpSocket::readyRead, s, [this, s]() {
+                        const QByteArray rq = s->readAll();
+                        if (!rq.startsWith("DELETE /v1/upstream/lease/"))
+                            return;
+                        ++deletes;
+                        const int st = statuses.isEmpty() ? 204 : statuses.takeFirst();
+                        s->write("HTTP/1.1 " + QByteArray::number(st) + " X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        s->disconnectFromHost();
+                    });
+                }
+            });
+        }
+        QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()); }
+    };
+    const auto run = [](QList<int> statuses, qint64 budgetMs, int *deletes) {
+        ReleaseEdge edge;
+        edge.statuses = statuses;
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        const QString base = edge.base();
+        client.configure(&nam, [base] { return base; }, QStringLiteral("00"), [] { return QStringLiteral("token"); });
+        client.releaseRetryBudgetMs = budgetMs;
+        int result = -1; // -1 = not ended, 0 = not confirmed, 1 = confirmed
+        client.onReleaseDone = [&result](quint64, bool confirmed) { result = confirmed ? 1 : 0; };
+        client.release(7, QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID0007"), UpstreamMeter{}, LeaseRoute{});
+        QElapsedTimer t;
+        t.start();
+        while (result < 0 && t.elapsed() < 9000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        *deletes = edge.deletes;
+        return result;
+    };
+    int deletes = 0;
+    CHECK(run({502}, kSeatReleaseRetryBudgetMs, &deletes) == 1 && deletes == 2);          // 502 then 204: released
+    CHECK(run({502, 502, 502, 502, 502}, 2500, &deletes) == 0 && deletes == 3);          // gives up after the bound
+    CHECK(run({404}, kSeatReleaseRetryBudgetMs, &deletes) == 1 && deletes == 1);          // final, no resend
+    CHECK(run({409}, kSeatReleaseRetryBudgetMs, &deletes) == 1 && deletes == 1);
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     providerLegStarvedCheck();
+    sessionReleaseRetry();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();

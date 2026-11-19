@@ -611,6 +611,7 @@ private:
     std::function<QString()> m_radio;
     QHash<QString, HostScan> m_hostScans;    // host scan id -> its state
     QHash<QString, Lease> m_leases;          // candidate id -> its probe lease
+    std::unique_ptr<ScanSeatBatch> m_seatBatch; // the scan's probe-seat batch (its seats not released one by one go with it)
 };
 
 } // namespace avpn

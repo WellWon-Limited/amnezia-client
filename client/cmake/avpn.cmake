@@ -167,6 +167,11 @@ set(AVPN_ENGINE_SRC
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 
+# AVPN Scanner (19.11): ScanQnamHttp asks gzip itself and inflates the answer, so its byte counts and cuts are wire
+# bytes (QNAM's own decoding hides the compressed size). zlib is a conan requirement on every platform (conanfile.py).
+find_package(ZLIB REQUIRED)
+list(APPEND LIBS ZLIB::ZLIB)
+
 # AVPN (волна-3): физический аплинк — nw_path_monitor на macOS-desktop, QNetworkInformation везде ещё.
 if(APPLE AND NOT IOS AND NOT MACOS_NE)
     list(APPEND SOURCES ${AVPN_SE}/UplinkMonitor.mm)

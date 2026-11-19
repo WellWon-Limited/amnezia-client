@@ -78,7 +78,7 @@ static void tunables()
     CHECK(group3 == 5 && !keys.contains(QStringLiteral("scan_auto_race_total_ms"))); // plan v2 C6 / C7; no light bound (19.11)
     // plan v2.2 §2.2b / §6 gap 7: exactly these names and defaults; cost clamps x0.5..x4
     const QMap<QString, int> gap7{{QStringLiteral("scan_cost_api_bytes"), 10240}, {QStringLiteral("scan_cost_manifest_bytes"), 270336},
-                                  {QStringLiteral("scan_cost_batch_bytes"), 12288}, {QStringLiteral("scan_cost_config_bytes"), 262144},
+                                  {QStringLiteral("scan_cost_batch_bytes"), 12288}, {QStringLiteral("scan_cost_config_bytes"), 32768},
                                   {QStringLiteral("scan_cost_tunnel_probe_bytes"), 82944},
                                   {QStringLiteral("scan_cost_outcomes_bytes"), 16384}, {QStringLiteral("scan_cost_netinfo_bytes"), 10240},
                                   {QStringLiteral("scan_drain_ms"), 2000}, {QStringLiteral("scan_freeze_ack_ms"), 1000}};
@@ -89,7 +89,7 @@ static void tunables()
         ++group4;
         CHECK(gap7.value(QLatin1String(s.key), -1) == s.def);
         if (QByteArray(s.key).startsWith("scan_cost_"))
-            CHECK(s.lo == s.def / 2 && s.hi == s.def * 4);
+            CHECK(s.lo == s.def / 2 && s.hi == (QByteArray(s.key) == "scan_cost_config_bytes" ? 1048576 : s.def * 4));
     }
     CHECK(group4 == gap7.size());
     CHECK(ScanTunables::fromNumbers({{QStringLiteral("scan_drain_ms"), 100}}).drainMs == 500
@@ -2040,7 +2040,7 @@ static void planV22()
         m.opened(openOf(w, QStringLiteral("1"), true), kT0);
         const ScanStep s = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
         const ScanAction *b = s.find(ScanActionKind::RequestProbeBatch);
-        CHECK(b && b->includeConfig && b->ids.size() == 4 && b->costBytes == 12288 + 4 * 262144);
+        CHECK(b && b->includeConfig && b->ids.size() == 4 && b->costBytes == 12288 + 4 * ScanTunables().costConfigBytes);
     }
     // seats: one batch sized to the first wave - the pools the providers use; a leg-only host asks 4 on iOS
     {

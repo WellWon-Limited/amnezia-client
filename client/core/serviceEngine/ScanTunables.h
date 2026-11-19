@@ -13,7 +13,8 @@
 //  3. the plan's gap-1 numbers (slow limits, entry-IP spacing, hint life, follow-up time), published since
 //     contract 1.7.0 (the server also publishes scan_light_timeout_ms and scan_cost_light_bytes: the client
 //     ignores them since the Scanner's connection step left it, 19.11);
-//  4. the worst-case costs of the one allowance (clamps x0.5..x4 of the default) and the freeze / drain
+//  4. the worst-case costs of the one allowance (clamps x0.5..x4 of the default; scan_cost_config_bytes x0.5..x32,
+//     19.11) and the freeze / drain
 //     waits (plan v2.2 §2.2b), published since contract 1.7.0.
 // Every default and clamp equals the server's (checked against config.py of 1.7.0; scan_stage2_stall_after_bytes
 // 16384 -> 4096 on 16.11 on both sides, lab seam S2); the compiled values are the fallback for a manifest that
@@ -79,7 +80,7 @@ struct ScanTunables {
     int costApiBytes = 10240;
     int costManifestBytes = 270336;
     int costBatchBytes = 12288;
-    int costConfigBytes = 262144;
+    int costConfigBytes = 32768;
     int costTunnelProbeBytes = 82944;
     int costOutcomesBytes = 16384;
     int costNetinfoBytes = 10240;
@@ -151,7 +152,12 @@ inline const QList<ScanTunableSpec> &scanTunableTable()
         {"scan_cost_api_bytes", &ScanTunables::costApiBytes, 10240, 5120, 40960, "bytes", 4, "worst case of one small API request (scan token, batch release, a 304 manifest revalidation): 8 KiB TLS + 2 KiB"},
         {"scan_cost_manifest_bytes", &ScanTunables::costManifestBytes, 270336, 135168, 1081344, "bytes", 4, "worst case of a full manifest answer (signed manifest cap 256 KiB + TLS)"},
         {"scan_cost_batch_bytes", &ScanTunables::costBatchBytes, 12288, 6144, 49152, "bytes", 4, "worst case of the probe-batch answer without configs (<= 12 items + signature + TLS)"},
-        {"scan_cost_config_bytes", &ScanTunables::costConfigBytes, 262144, 131072, 1048576, "bytes", 4, "worst case of one included config (Wi-Fi only; profile cap 256 KiB)"},
+        // 32 KiB, floor 16 KiB (was 256 KiB / 128 KiB, 19.11): the price of one config on the WIRE - the server gzips
+        // the batch answer (PR #639: a one-profile answer with its config is 7.3-7.9 KB typical, 12.6 KB the largest
+        // of all 230 profiles; 52.9 KB inflated) and the HTTP layer counts wire bytes (ScanQnamHttp). At 256 KiB a
+        // provider probe cost 336 896 B and never fit the race's cellular cap (262 144 B). The ceiling stays 1 MiB (not
+        // x4 of the default like the other costs): a server publishing the old 256 KiB is taken as published.
+        {"scan_cost_config_bytes", &ScanTunables::costConfigBytes, 32768, 16384, 1048576, "bytes", 4, "worst case of one included config on the wire (gzip; the largest measured 12.6 KB)"},
         {"scan_cost_tunnel_probe_bytes", &ScanTunables::costTunnelProbeBytes, 82944, 41472, 331776, "bytes", 4, "worst case of the sized check through the live tunnel (warm + body + 2 x 8 KiB TLS); never below that sum"},
         {"scan_cost_outcomes_bytes", &ScanTunables::costOutcomesBytes, 16384, 8192, 65536, "bytes", 4, "worst case of one outcomes POST (<= 32 items + TLS)"},
         {"scan_cost_netinfo_bytes", &ScanTunables::costNetinfoBytes, 10240, 5120, 40960, "bytes", 4, "worst case of one direct access attempt of the probe host (reserved by the host inside its grant)"},

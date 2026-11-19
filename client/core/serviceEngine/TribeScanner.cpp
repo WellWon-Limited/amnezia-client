@@ -1751,19 +1751,24 @@ void TribeScanner::doProbeBatch(const ScanAction &a)
     const QString reqId = a.requestId;
     const ScanBinding asked = bindingNow();
     QPointer<TribeScanner> self(this);
-    m_api->probeBatch(pids, a.includeConfig, a.costBytes, [self, reqId, candOf, asked](const ScanApiClient::Batch &b) {
+    const bool cellular = m_lastNet.kind == ScanNetKind::Cellular;
+    auto op = std::make_shared<QString>();
+    // A new batch = a new owner with a new operation id; an older batch's owner goes now (seats its scan did not
+    // release one by one are released by its operation id). The owner's own releases are charged outside any scan.
+    m_seatBatch = m_api->probeBatch(pids, a.includeConfig, a.costBytes, [self, reqId, candOf, asked, op](const ScanApiClient::Batch &b) {
         if (!self)
             return;
         self->dispatch(self->m_m.appRequestDone(reqId, b.bytes, self->now())); // the bytes were spent either way
         if (!self->bindingCurrent(asked)) {
             // A reply of an older scan or network (review F5): it never touches the current scan's leases or
-            // candidates; its grants are real seats at the providers - released at once, the bytes accounted.
-            QStringList stale;
+            // candidates; its grants are real seats at the providers - they go with the batch's owner (released by
+            // its operation id; an owner a newer batch replaced released them as the reply came).
+            int granted = 0;
             for (const ScanApiClient::BatchItem &it : b.items)
-                if (it.granted)
-                    stale << it.leaseId;
-            self->emitLog(QStringLiteral("stale probe_batch: %1 seats released, refusals dropped").arg(stale.size()));
-            self->releaseStaleLeases(stale);
+                granted += it.granted ? 1 : 0;
+            self->emitLog(QStringLiteral("stale probe_batch: %1 seats released, refusals dropped").arg(granted));
+            if (self->m_seatBatch && self->m_seatBatch->operationId() == *op)
+                self->m_seatBatch.reset();
             return;
         }
         // Every lease is known before any grant reaches the machine (a late grant is released at once).
@@ -1779,7 +1784,11 @@ void TribeScanner::doProbeBatch(const ScanAction &a)
             else
                 self->dispatch(self->m_m.probeLeaseRefused(cand, it.code, self->now()));
         }
+    }, [self, cellular](qint64 bytes) {
+        if (self && bytes > 0)
+            self->chargeOutsideScan(bytes, cellular);
     });
+    *op = m_seatBatch->operationId();
 }
 
 void TribeScanner::doRelease(const ScanAction &a)
@@ -1792,6 +1801,8 @@ void TribeScanner::doRelease(const ScanAction &a)
             m_leases.remove(id);
         }
     }
+    if (m_seatBatch)
+        m_seatBatch->forget(leaseIds); // released here one by one
     emitLog(QStringLiteral("action release_probe_leases n=%1").arg(leaseIds.size()));
     const QString reqId = a.requestId;
     QPointer<TribeScanner> self(this);
@@ -2056,10 +2067,12 @@ bool TribeScanner::bindingCurrent(const ScanBinding &b) const
     return b.scanId == m_m.scanId() && b.token == m_active.token && b.generation == m_lastNet.generation();
 }
 
-// Seats a stale probe-batch reply granted: released at once (bounded: one request of <= 12 per call), their
-// bytes charged outside any scan at what they really cost.
+// Seats an older scan's refused add carried: released at once by lease id (bounded: one request of <= 12 per call),
+// their bytes charged outside any scan at what they really cost; the batch's owner does not release them again.
 void TribeScanner::releaseStaleLeases(const QStringList &leaseIds)
 {
+    if (m_seatBatch)
+        m_seatBatch->forget(leaseIds);
     for (int k = 0; k < leaseIds.size(); k += kScanProbeBatchMax) {
         const QStringList part = leaseIds.mid(k, kScanProbeBatchMax);
         QPointer<TribeScanner> self(this);

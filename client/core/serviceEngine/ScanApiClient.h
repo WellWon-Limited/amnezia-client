@@ -22,6 +22,12 @@
 //    stored and never used.
 //  - Probe-batch: signed with the lease context, `type: upstream_probe_batch`; only a verified answer grants
 //    anything; every requested profile gets an answer item (missing = refused "lease_failed").
+//  - Probe-batch operation (contract 1.15.0): every batch carries an `operation_id` made before its first send; a
+//    send our own transition cut is sent again with the SAME id (the server answers the same seats); only an answer
+//    echoing that id is used; the seats belong to a ScanSeatBatch owner that releases them by that id when it goes
+//    (also seats whose answer never came). A new batch = a new owner = a new id.
+//  - Byte counts are wire bytes: the HTTP layer asks gzip itself and inflates the answer (QNAM's own decoding
+//    hides the compressed size: its counts are the inflated body, review 19.11).
 // Upstream Amnezia has no counterpart.
 #pragma once
 
@@ -87,9 +93,16 @@ inline bool scanRetryCanceledRequest(int status, bool canceled, int retriesDone)
 // The bytes a request counts before any answer (plan §2.2b: worst cases include one TLS handshake).
 qint64 scanHttpRequestBytes(const IScanHttp::Request &r);
 
+// Inflates a gzip body (RFC 1952, one member) into *out; false for anything else or for more than maxOut bytes.
+inline constexpr qint64 kScanInflateMaxBytes = 8 * 1024 * 1024; // above 12 configs of the 256 KiB profile cap
+bool scanGunzip(const QByteArray &in, qint64 maxOut, QByteArray *out);
+
 // The production layer: the app's QNAM (its edge / connection-cache handling covers these requests), the
 // request bound by armTimeout, the answer counted as it arrives and aborted the moment the count would pass
-// maxBytes.
+// maxBytes. It sends `Accept-Encoding: gzip` itself, so QNAM hands the body over as it came: the count and the cut
+// are wire bytes (an answer QNAM inflated would count 4-7x its transfer: a provider config of 7.5 KB on the wire
+// is 30-53 KB inflated), and the body is inflated here (bounded by kScanInflateMaxBytes; a body that does not
+// inflate is a transport failure).
 class ScanQnamHttp : public QObject, public IScanHttp
 {
     Q_OBJECT
@@ -135,6 +148,38 @@ bool scanManifestEtagValid(const QByteArray &etag);
 QString scanProviderLegConfig(const QJsonObject &manifestBody, const QString &profileId);
 // A fresh probe nonce: 24 chars of [A-Za-z0-9] (the contract allows 8-64 of [A-Za-z0-9._-]).
 QByteArray scanProbeNonce();
+// A fresh probe-batch operation id: 32 hex chars of a random UUID (the contract: ^[A-Za-z0-9_-]{16,64}$).
+QString scanOperationId();
+bool scanOperationIdValid(const QString &id);
+
+class ScanApiClient;
+
+// The owner of one probe-seat batch (contract 1.15.0). ScanApiClient::probeBatch makes it with the batch's
+// operation id; whoever keeps it owns the batch's seats. The seats are released by the operation id (with the lease
+// ids the answer granted) when they may be held and nobody will release them one by one:
+//  - at once when the batch request ends without an answer that can be used (no HTTP answer after the resends, a
+//    signature that fails, another operation's answer): the server may have granted seats the app never saw;
+//  - when the owner is destroyed while granted seats are still held (forget() takes the ones released one by one
+//    by lease id) - a request still in flight then sends no resend; its seats are released once it ends.
+// A release our own transition cut is sent again (ScanApiClient::sendRelease). Destroying the owner never cancels
+// the request: `done` of probeBatch is called exactly once whatever happened.
+class ScanSeatBatch
+{
+public:
+    ~ScanSeatBatch();
+    ScanSeatBatch(const ScanSeatBatch &) = delete;
+    ScanSeatBatch &operator=(const ScanSeatBatch &) = delete;
+    QString operationId() const;
+    // These lease ids were released by their owner one by one: not released again.
+    void forget(const QStringList &leaseIds);
+
+    struct State;
+
+private:
+    friend class ScanApiClient;
+    explicit ScanSeatBatch(std::shared_ptr<State> s) : m_s(std::move(s)) {}
+    std::shared_ptr<State> m_s;
+};
 
 class ScanApiClient : public QObject
 {
@@ -211,18 +256,28 @@ public:
         bool granted = false;
         QString leaseId;   // SECRET
         QString config;    // SECRET (include_config only)
-        QString code;      // refused: no_seat | disabled | rate_limited | not_entitled | over_quota | upstream_unavailable | lease_failed
+        // refused: no_seat | disabled | rate_limited | not_entitled | over_quota | upstream_unavailable | lease_failed |
+        // lease_gone (a resend of the operation: this profile's seat already ended - the candidate has no seat)
+        QString code;
         QString configSha256; // with config: its sha256 (the device-side profile check needs it, as at connect)
     };
     struct Batch {
-        bool ok = false;          // a verified answer (items below), else failCode for every profile
+        bool ok = false;          // a verified answer of this operation (items below), else failCode for every profile
         QString failCode;         // transport | not_entitled | over_quota | disabled | rate_limited | invalid
         QList<BatchItem> items;   // one per requested profile, request order
-        qint64 bytes = 0;
+        qint64 bytes = 0;         // every send of the batch together
         int status = 0;
+        int resends = 0;          // sends again after a cut by our own transition (same operation id)
     };
-    void probeBatch(const QStringList &profileIds, bool includeConfig, qint64 costBytes, std::function<void(const Batch &)> done);
-    void releaseLeases(const QStringList &leaseIds, qint64 costBytes, std::function<void(qint64 bytes)> done);
+    // POST /v1/upstream/lease/probe-batch with a new operation id; costBytes cuts every send of it together. The
+    // returned owner holds the seats (see ScanSeatBatch); releaseBytes gets what its own releases transferred.
+    std::unique_ptr<ScanSeatBatch> probeBatch(const QStringList &profileIds, bool includeConfig, qint64 costBytes,
+                                              std::function<void(const Batch &)> done,
+                                              std::function<void(qint64 bytes)> releaseBytes = {});
+    // POST .../probe-batch/release by lease ids and / or an operation id (at least one). A try with no HTTP answer or a
+    // 5xx is sent again on the shared spacing (UpstreamLeaseWire.h::seatReleaseNext, the session DELETE's rule too).
+    void releaseLeases(const QStringList &leaseIds, qint64 costBytes, std::function<void(qint64 bytes)> done,
+                       const QString &operationId = QString());
 
     // --- outcomes, netinfo -----------------------------------------------------------------------------------
     void sendOutcomes(const QString &networkKey, const QList<ScanOutcomeItem> &items, qint64 costBytes,
@@ -251,10 +306,18 @@ public:
 
     // Journal sink (statuses, counts, byte totals; never secrets or hosts). Default qInfo.
     std::function<void(const QString &)> log;
+    // The spacing budget of a seat release's resends (seatReleaseNext; tests shorten it).
+    qint64 releaseRetryBudgetMs = kSeatReleaseRetryBudgetMs;
 
 private:
-    // One try of a probe-seat release; a try our own tunnel transition cancelled is sent again (upstreamReleaseNext).
-    void sendRelease(const IScanHttp::Request &rq, int leases, int attempt, qint64 spent, std::function<void(qint64)> done);
+    // One try of a probe-seat release; a try with no HTTP answer or a 5xx is sent again (seatReleaseNext).
+    void sendRelease(const IScanHttp::Request &rq, int leases, int attempt, qint64 spent, qint64 spacedMs,
+                     std::function<void(qint64)> done);
+    // One send of a probe-seat batch; a send our own transition cut is sent again with the same body (operation id).
+    void sendBatch(std::shared_ptr<ScanSeatBatch::State> st, IScanHttp::Request rq, int attempt);
+    void finishBatch(std::shared_ptr<ScanSeatBatch::State> st, const IScanHttp::Response &r);
+    friend class ScanSeatBatch;
+    static void releaseBatch(const std::shared_ptr<ScanSeatBatch::State> &st);
     struct Stored {
         bool ok = false;
         QByteArray body;

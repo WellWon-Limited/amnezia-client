@@ -45,9 +45,12 @@ public:
     // Answers (GUI thread). The classification is the pure one (classifyAcquireReply / classifyRenewReply).
     std::function<void(quint64, const AcquireReply &)> onAcquire;
     std::function<void(quint64, const RenewReply &)> onRenew;
-    // A release ended: confirmed = the server answered; false = it never did (its own timeout, a network error,
-    // local resets past the bound, not sendable) - the seat is then left to the server's TTL.
+    // A release ended: confirmed = the server answered it (2xx, or a final 4xx); false = it never did after the
+    // resends of seatReleaseNext (no answer / 5xx past its budget, not sendable) - the seat is then left to the
+    // server's TTL.
     std::function<void(quint64, bool confirmed)> onReleaseDone;
+    // The spacing budget of a release's resends (UpstreamLeaseWire.h::seatReleaseNext; tests shorten it).
+    qint64 releaseRetryBudgetMs = kSeatReleaseRetryBudgetMs;
 
     // IUpstreamLeaseIo
     void acquire(quint64 requestId, const QString &profileId, LeaseKind kind, const QString &standbyConfigSha256,
@@ -104,7 +107,7 @@ public:
 private:
     QString baseFor(const LeaseRoute &route) const;
     void sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route,
-                     int attempt);
+                     int attempt, qint64 spacedMs = 0);
     QNetworkReply *post(const QString &url, const QByteArray &body, const QString &bearer, int timeoutMs);
 
     QPointer<QNetworkAccessManager> m_nam;
