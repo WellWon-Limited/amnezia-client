@@ -3448,12 +3448,13 @@ bool AvpnEngineQml::syncAttempt()
     // G3: a result of an attempt that began before the person's last action on the intent (a connect still running when
     // a Scanner row was tapped, a stop, another choice) says nothing about the newer intent: it ends no request, neither
     // drops nor keeps the intent, and tells the person nothing.
-    const bool resultIsCurrent = result && m_intentEpoch.resultBelongs(result->intentEpoch);
+    const bool resultIsCurrent = result && m_intentEpoch.attemptServesIntent(result->intentEpoch, result->startMode, int(m_engine.transportMode()));
     if (result && !resultIsCurrent) {
         changedAny = true;
-        reliabilityEvent(QStringLiteral("attempt_result_superseded attempt=%1 attempt_epoch=%2 intent_epoch=%3 connected=%4 reason=%5")
+        reliabilityEvent(QStringLiteral("attempt_result_superseded attempt=%1 attempt_epoch=%2 intent_epoch=%3 connected=%4 reason=%5 started_mode=%6 mode_now=%7")
                              .arg(result->attempt).arg(result->intentEpoch).arg(m_intentEpoch.epoch).arg(int(result->connected))
-                             .arg(QLatin1String(avpn::path::failReasonName(result->reason))));
+                             .arg(QLatin1String(avpn::path::failReasonName(result->reason)))
+                             .arg(result->startMode).arg(int(m_engine.transportMode())));
         // the newer intent's start was waiting for this attempt to end: nothing else would start it
         if (m_wantConnected)
             QTimer::singleShot(0, this, [this]() { reconcile(); });

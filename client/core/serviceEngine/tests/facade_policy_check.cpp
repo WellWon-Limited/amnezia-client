@@ -946,6 +946,31 @@ static void exactRowRequestObject()
             const quint64 st = m2.stampForNewAttempt();
             CHECK(!m2.set(sa) && m2.resultBelongs(st));
         }
+        // K1 (round 7): "the person's value did not change" does not imply "the running attempt serves it": the attempt
+        // began under the mode IN FORCE (Auto while Xray was selected, after an adopted AmneziaWG session); the person
+        // taps Xray, the mode in force becomes Xray, the selected mode is Xray -> Xray and the epoch stays. The attempt
+        // is still not what would start now - its result is superseded.
+        {
+            using M = int; // 0 auto, 1 awg, 2 xray (the engine stamps int(TransportMode))
+            IntentEpoch k;
+            k.set(val(true, "server|DE", "xray")); // selected Xray
+            const quint64 stamp = k.stampForNewAttempt();
+            const M startedUnder = 0;              // in force at the start: Auto
+            CHECK(k.attemptServesIntent(stamp, startedUnder, /*modeNow=*/0));   // nothing changed: current
+            CHECK(!k.set(val(true, "server|DE", "xray")));                      // the tap on Xray: the value is the same
+            CHECK(!k.attemptServesIntent(stamp, startedUnder, /*modeNow=*/2));  // ... the mode in force moved: superseded
+            // siblings: selected Amnezia while Auto was in force; the tap on the segment already in force changes nothing;
+            // a server tap that switches the mode to Auto (transport_mode_auto) moves the selected mode itself
+            CHECK(!k.attemptServesIntent(stamp, 0, 1));
+            CHECK(k.attemptServesIntent(stamp, 2, 2));
+            CHECK(k.attemptServesIntent(stamp, -1, 2)); // an attempt of an older stamp-less path: the epoch alone decides
+            IntentEpoch sv;
+            sv.set(val(true, "server|DE", "xray"));
+            const quint64 st2 = sv.stampForNewAttempt();
+            CHECK(sv.set(val(true, "server|FR", "auto")) && !sv.attemptServesIntent(st2, 2, 0));
+            // J2 stays: an adopted attempt is stamped with the mode in force AFTER the adoption judged it
+            CHECK(sv.attemptServesIntent(sv.stampForNewAttempt(), 2, 2));
+        }
         // I7: launch - the first value only seeds; the epoch the engine is given is the facade's from the start
         IntentEpoch e;
         CHECK(!e.set(val(false, "auto", "auto")) && e.epoch == 1);

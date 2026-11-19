@@ -153,9 +153,10 @@ has "$(code "$FACADE")" 'syncIntent(); // I7: the saved choice and mode become t
 [ "$(count "$FACADE" 'syncIntent(); // I7')" -ge 4 ] || bad "I7: every adoption of a live session must sync the intent first"
 sa_fn="$(code "$FACADE" | awk '/^bool AvpnEngineQml::syncAttempt\(\)/{f=1} f{print} f&&/^}/{exit}')"
 printf '%s\n' "$sa_fn" | grep -qF 'syncIntent(); // I1/I2' || bad "I1: syncAttempt must look at the intent before it judges a result"
-printf '%s\n' "$sa_fn" | grep -qF 'm_intentEpoch.resultBelongs(result->intentEpoch)' || bad "G3: syncAttempt must match a result to the intent"
+printf '%s\n' "$sa_fn" | grep -qF 'm_intentEpoch.attemptServesIntent(result->intentEpoch, result->startMode, int(m_engine.transportMode()))' || bad "G3: syncAttempt must match a result to the intent"
 printf '%s\n' "$sa_fn" | grep -qF 'if (const std::optional<avpn::path::AttemptResult> &r = current) {' || bad "G3: the request, the intent rule and the notices read only the current result"
 has "$(code "$ENGINE/ServiceEngine.cpp")" 'm_attemptEpochs.insert(a, m_intentEpoch);' || bad "H3: the engine must stamp every attempt the owner begins"
+has "$(code "$ENGINE/ServiceEngine.cpp")" 'm_attemptModes.insert(a, int(transportMode()));' || bad "K1: the engine must stamp the mode in force an attempt began under"
 # G4 (round 3): the restore asks the pure plan and clears the engine pin when the previous pin was refused.
 rs_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::restoreChoiceBeforeRow/{f=1} f{print} f&&/^}/{exit}')"
 printf '%s\n' "$rs_fn" | grep -qF 'req.restorePlan(applied)' && printf '%s\n' "$rs_fn" | grep -qF 'm_engine.clearPin();' \

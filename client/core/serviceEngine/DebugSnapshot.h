@@ -661,6 +661,14 @@ struct IntentEpoch {
     }
     quint64 stampForNewAttempt() const { return epoch; }
     bool resultBelongs(quint64 resultEpoch) const { return resultEpoch >= epoch; }
+    // K1 (round 7): an unchanged value does not mean the running attempt serves it - the attempt began under the mode IN
+    // FORCE (the engine adjusts it for an adopted session, a pool, a server tap) while the value holds the SELECTED mode.
+    // A result serves the intent when its epoch is current AND the attempt began under the mode in force now, i.e. it is
+    // what a start now would do. (-1 = no stamp: the epoch alone decides.)
+    bool attemptServesIntent(quint64 resultEpoch, int startedUnderMode, int modeInForceNow) const
+    {
+        return resultBelongs(resultEpoch) && (startedUnderMode < 0 || startedUnderMode == modeInForceNow);
+    }
 };
 
 // F2 (round 2): a Scanner row's one request - the exact row and what to restore after it are ONE object with one
