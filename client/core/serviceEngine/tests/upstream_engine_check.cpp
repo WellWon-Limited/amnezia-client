@@ -2013,18 +2013,19 @@ static void sessionReleaseRetry()
     CHECK(run({409}, kSeatReleaseRetryBudgetMs, &deletes) == 1 && deletes == 1);
 }
 
-// Review R4 / R5 of 19.11: ONE ownership rule for a lease id. The server answers an acquire of the profile the device
-// already holds with the SAME lease id, and DELETE ends that lease whoever sends it - so a late or orphan answer may
-// release its lease only while no live owner holds that id and no newer acquire of the profile is still out.
-// The real UpstreamLeaseClient against a loopback server that holds its acquire answers until the test lets them go.
+// Lease id ledger (UpstreamLeaseOwner.h; reviews R4, R5 of 19.11, F3, F4, F9 of round 2): the REAL
+// UpstreamLeaseClient and UpstreamLeaseOwner against a loopback server that holds its answers until the test lets them
+// go. The server hands the same lease id back to the same device and profile and any DELETE ends it, as the real one.
 static void lateGrantOwnership()
 {
     TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {}, {}, {}); // the floor: the wait ends fast
     struct LeaseEdge {
         TestKey key;
         QTcpServer server;
-        QList<QTcpSocket *> posts; // acquire requests, in arrival order, until answered
-        QStringList deletes;
+        QList<QTcpSocket *> posts;   // acquire requests, in arrival order
+        QList<QTcpSocket *> pendingDeletes;
+        QStringList deletes, log;    // lease ids of DELETEs; "POST" / "DELETE" in arrival order
+        bool holdDeletes = false;
         LeaseEdge()
         {
             server.listen(QHostAddress::LocalHost);
@@ -2034,27 +2035,44 @@ static void lateGrantOwnership()
                         const QByteArray rq = s->readAll();
                         if (rq.startsWith("DELETE /v1/upstream/lease/")) {
                             deletes << QString::fromLatin1(rq.mid(26, rq.indexOf(' ', 26) - 26));
-                            s->write("HTTP/1.1 204 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                            s->disconnectFromHost();
+                            log << QStringLiteral("DELETE");
+                            if (holdDeletes)
+                                pendingDeletes << s;
+                            else
+                                finishDelete(s);
                         } else if (rq.startsWith("POST /v1/upstream/lease ")) {
                             posts << s;
+                            log << QStringLiteral("POST");
                         }
                     });
                 }
             });
         }
+        static void finishDelete(QTcpSocket *s)
+        {
+            s->write("HTTP/1.1 204 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            s->disconnectFromHost();
+        }
+        void releaseDeletes()
+        {
+            holdDeletes = false;
+            for (QTcpSocket *s : std::exchange(pendingDeletes, {}))
+                finishDelete(s);
+        }
         QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()); }
         void grant(int i) // the existing lease, as the server hands it back to the same device and profile
         {
-            const QByteArray cfg = "{\"inbounds\":[]}";
-            const QJsonObject o{{"type", "upstream_lease"}, {"lease_id", QLatin1String(kLease)},
-                                {"profile_id", "aaaaaaaaaaaaaaa0"}, {"kind", "session"},
-                                {"expires_at", QDateTime::fromMSecsSinceEpoch(kServerT0 + 900000, QTimeZone::UTC).toString(Qt::ISODateWithMs)},
-                                {"ttl_s", 900}, {"renew_after_s", 300}, {"seq", 0}, {"config", QString::fromUtf8(cfg)},
-                                {"config_sha256", QString::fromLatin1(QCryptographicHash::hash(cfg, QCryptographicHash::Sha256).toHex())},
-                                {"upstream_revision", 5}, {"traffic_accounting_epoch", 1}};
-            const QByteArray b = QJsonDocument(o).toJson(QJsonDocument::Compact);
+            const QByteArray b = QJsonDocument(leaseObject()).toJson(QJsonDocument::Compact);
             answer(i, "200 OK", b, key.sign(QByteArrayLiteral("tribe-upstream-lease-v1\n") + b));
+        }
+        static QString cfgSha() { return QString::fromLatin1(QCryptographicHash::hash("{\"inbounds\":[]}", QCryptographicHash::Sha256).toHex()); }
+        static QJsonObject leaseObject()
+        {
+            return QJsonObject{{"type", "upstream_lease"}, {"lease_id", QLatin1String(kLease)},
+                               {"profile_id", "aaaaaaaaaaaaaaa0"}, {"kind", "session"},
+                               {"expires_at", QDateTime::fromMSecsSinceEpoch(kServerT0 + 900000, QTimeZone::UTC).toString(Qt::ISODateWithMs)},
+                               {"ttl_s", 900}, {"renew_after_s", 300}, {"seq", 0}, {"config", QStringLiteral("{\"inbounds\":[]}")},
+                               {"config_sha256", cfgSha()}, {"upstream_revision", 5}, {"traffic_accounting_epoch", 1}};
         }
         void refuse(int i) { answer(i, "409 X", R"({"code":"no_seat","retry_after_s":30,"upstream_revision":1})", {}); }
         void answer(int i, const QByteArray &status, const QByteArray &body, const QByteArray &sig)
@@ -2068,87 +2086,193 @@ static void lateGrantOwnership()
             s->disconnectFromHost();
         }
     };
+    // The wiring of VpnConnectionTunnelControl, in miniature: the client's facts go to the owner, the owner's
+    // events that need the I/O (ReleaseAfterStop) are applied the way the adapter applies them.
+    struct Rig {
+        LeaseEdge edge;
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        UpstreamLeaseOwner owner;
+        QElapsedTimer clock;
+        SubscriptionNode node = stubOf();
+        Rig()
+        {
+            node.upstream->configSha256 = LeaseEdge::cfgSha();
+            TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {}); // stubOf() reset it
+            clock.start();
+            const QString base = edge.base();
+            client.configure(&nam, [base] { return base; }, edge.key.pubHex(), [] { return QStringLiteral("token"); });
+            owner.setIo(&client);
+            client.onAcquire = [this](quint64 id, const AcquireReply &r) { apply(owner.onAcquireReply(id, r, now())); };
+            client.onReleaseDone = [this](quint64 id, bool) { apply(owner.onReleaseDone(id, now())); };
+            client.onLateGrant = [this](const QString &p, const QString &l, const LeaseRoute &r, bool newer) {
+                apply(owner.lateGrant(p, l, r, newer));
+            };
+            client.onAcquireEnded = [this](const QString &p, const QString &l, bool out) { apply(owner.acquireEnded(p, l, out)); };
+        }
+        qint64 now() const { return clock.elapsed(); }
+        void apply(const QVector<UpstreamOwnerEvent> &ev)
+        {
+            for (const UpstreamOwnerEvent &e : ev)
+                if (e.kind == UpstreamOwnerEventKind::ReleaseAfterStop) {
+                    client.holdReleasesForStopIfRunning();
+                    client.release(e.requestId, e.leaseId, UpstreamMeter{}, e.route);
+                }
+        }
+        void begin() { apply(owner.begin(node, 1, std::nullopt, now(), 1)); }
+        // VpnConnectionTunnelControl::upstreamTunnelDown(endsSession = true)
+        void disconnectedByTheSystem()
+        {
+            client.tunnelStopped();
+            apply(owner.tunnelLost(now()));
+        }
+    };
     const auto pump = [](int ms) {
         QElapsedTimer t;
         t.start();
         while (t.elapsed() < ms)
             QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
     };
-    const QString profile = QStringLiteral("aaaaaaaaaaaaaaa0");
-    // Run: request 1 is held past the attempt's wait (the attempt reports a transport failure, the HTTP request lives
-    // on), request 2 of the same profile is sent after it. `secondFirst`: the second answer comes before the first's.
-    const auto scenario = [&](bool secondAnswersGrant, bool ownerHolds, bool secondStillOutWhenFirstLands) {
-        LeaseEdge edge;
-        QNetworkAccessManager nam;
-        UpstreamLeaseClient client;
-        const QString base = edge.base();
-        client.configure(&nam, [base] { return base; }, edge.key.pubHex(), [] { return QStringLiteral("token"); });
-        bool held = false; // the live owner's view of the lease id (UpstreamLeaseOwner::holdsLease)
-        client.leaseHeld = [&held](const QString &id) { return held && id == QLatin1String(kLease); };
-        int answers = 0;
-        client.onAcquire = [&](quint64 id, const AcquireReply &r) {
-            ++answers;
-            if (id == 2 && r.kind == LeaseReplyKind::Granted && ownerHolds)
-                held = true;
-        };
-        client.acquire(1, profile, LeaseKind::Session, QString(), LeaseRoute{});
-        pump(1700); // past the wait: the attempt moved on (answers == 1), request 1 still held by the server
-        CHECK(answers == 1 && edge.posts.size() == 1);
-        client.acquire(2, profile, LeaseKind::Session, QString(), LeaseRoute{});
-        pump(200);
-        CHECK(edge.posts.size() == 2);
-        if (secondStillOutWhenFirstLands) {
-            edge.grant(0); // the late answer lands while request 2 is still out
-            pump(300);
-            if (secondAnswersGrant)
-                edge.grant(1);
-            else
-                edge.refuse(1);
-        } else {
-            if (secondAnswersGrant)
-                edge.grant(1);
-            else
-                edge.refuse(1);
-            pump(300);
-            edge.grant(0); // the late answer lands after the second one
-        }
-        pump(900);
-        return edge.deletes;
+    // The first request outlives the attempt's wait (the owner's session fails by transport, the HTTP request lives on).
+    const auto firstTimesOut = [&](Rig &r) {
+        r.begin();
+        QElapsedTimer t;
+        t.start();
+        while (r.owner.active() && t.elapsed() < 6000) // the attempt's wait ends: a transport failure for the owner
+            pump(10);
+        CHECK(r.edge.posts.size() == 1 && !r.owner.active());
     };
-    // 1. R4: the second request got the lease and the live owner holds it; the first answer lands late: NOT released.
-    CHECK(scenario(true, true, false).isEmpty());
-    // 2. The late answer lands while the second request is still out and the second then gets the same id: not released.
-    CHECK(scenario(true, true, true).isEmpty());
-    // 3. ... and when the second one is refused instead, the deferred seat has no owner: released once, at its end.
+    // Row R4: the live session holds L (granted by the second request); the first answer lands late -> nothing.
     {
-        const QStringList d = scenario(false, false, true);
-        CHECK(d.size() == 1 && d[0] == QLatin1String(kLease));
+        Rig r;
+        firstTimesOut(r);
+        r.begin();
+        pump(200);
+        CHECK(r.edge.posts.size() == 2);
+        r.edge.grant(1);
+        pump(300);
+        CHECK(r.owner.holdsLease(QLatin1String(kLease)));
+        r.edge.grant(0);
+        pump(900);
+        CHECK(r.edge.deletes.isEmpty());
     }
-    // 4. A late grant nobody holds and nothing else is out: released at once (the original rule stays).
+    // Row R4b: the late answer lands while the second request is still out; the second then gets the same id -> nothing.
     {
-        const QStringList d = scenario(false, false, false);
-        CHECK(d.size() == 1 && d[0] == QLatin1String(kLease));
+        Rig r;
+        firstTimesOut(r);
+        r.begin();
+        pump(200);
+        r.edge.grant(0);
+        pump(300);
+        CHECK(r.edge.deletes.isEmpty());
+        r.edge.grant(1);
+        pump(900);
+        CHECK(r.edge.deletes.isEmpty() && r.owner.holdsLease(QLatin1String(kLease)));
+    }
+    // Row R4c: ... the second one is refused instead -> the deferred seat has no taker: released once, at its end.
+    {
+        Rig r;
+        firstTimesOut(r);
+        r.begin();
+        pump(200);
+        r.edge.grant(0);
+        pump(300);
+        r.edge.refuse(1);
+        pump(900);
+        CHECK(r.edge.deletes == QStringList{ QLatin1String(kLease) });
+    }
+    // Row F3: the late grant lands with NO newer request: released at once, and a connect to the same profile while
+    // that DELETE is in flight (or being resent) waits for it - the same id is never granted under a DELETE.
+    {
+        Rig r;
+        firstTimesOut(r);
+        r.edge.holdDeletes = true; // the DELETE is on its way (slow link / its retry)
+        r.edge.grant(0);
+        pump(300);
+        CHECK(r.edge.deletes.size() == 1);
+        r.begin(); // the person connects to the same profile
+        pump(300);
+        CHECK(r.edge.posts.size() == 1 && r.owner.startQueued()); // no second acquire while the release is pending
+        QElapsedTimer t;
+        t.start();
+        r.edge.releaseDeletes();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 2000)
+            pump(10);
+        CHECK(r.edge.posts.size() == 2 && r.edge.log.indexOf(QStringLiteral("DELETE")) < r.edge.log.lastIndexOf(QStringLiteral("POST")));
+    }
+    // Rows R5 + F4 share the session of a running provider tunnel.
+    const auto runningSession = [&](Rig &r) {
+        r.begin();
+        pump(200);
+        r.edge.grant(0);
+        pump(300);
+        CHECK(r.owner.active() && r.owner.holdsLease(QLatin1String(kLease)));
+        r.client.tunnelStarted();
+        r.owner.tunnelUp(r.now()); // (handed over to the tunnel owner: the extension)
+    };
+    // Row R5: the app stops the tunnel; the extra release waits for the confirmed stop and an acquire of the profile
+    // waits for the release.
+    {
+        Rig r;
+        r.owner.setOptions({}); // iOS: the tunnel owner releases first; the app's own release follows the stop
+        runningSession(r);
+        r.client.holdReleasesForStop();
+        r.apply(r.owner.disconnect(r.now()));
+        CHECK(r.edge.deletes.isEmpty() && r.owner.startBlocked());
+        r.begin();
+        pump(200);
+        CHECK(r.edge.posts.size() == 1);
+        r.client.tunnelStopped(); // the confirmed stop
+        QElapsedTimer t;
+        t.start();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 2000)
+            pump(10);
+        CHECK(r.edge.deletes.size() == 1 && r.edge.posts.size() == 2
+              && r.edge.log.indexOf(QStringLiteral("DELETE")) < r.edge.log.lastIndexOf(QStringLiteral("POST")));
+    }
+    // Row F4: the tunnel is turned off from outside (Disconnected nobody asked for), then the same profile at once:
+    // the release goes out at that Disconnected (nothing waits for a later one) and the acquire follows it - far
+    // inside the start deadline.
+    {
+        Rig r;
+        r.owner.setOptions({});
+        runningSession(r);
+        r.disconnectedByTheSystem();
+        pump(300);
+        CHECK(r.edge.deletes.size() == 1 && !r.owner.active());
+        QElapsedTimer t;
+        t.start();
+        r.begin();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 3000)
+            pump(10);
+        CHECK(r.edge.posts.size() == 2 && t.elapsed() < 1500);
+    }
+    // Row F4b: the old session is still the owner's when the next start comes (no Disconnected seen yet), the stop
+    // already happened before the ReleaseAfterStop is created: it is sent at once, not held for a stop that is past.
+    {
+        Rig r;
+        r.owner.setOptions({});
+        runningSession(r);
+        r.client.tunnelStopped(); // the Disconnected came (not ended the session at the owner)
+        r.begin();                // the new start ends the old session: ReleaseAfterStop
+        pump(400);
+        CHECK(r.edge.deletes.size() == 1);
+    }
+    // Row F9 (the owner event the Android denial produces): the seat is granted, the start never reaches the native
+    // service (the person refuses the VPN permission): the seat goes back at once, with no stop to wait for.
+    {
+        Rig r;
+        r.owner.setOptions({});
+        r.begin();
+        pump(200);
+        r.edge.grant(0);
+        pump(300);
+        CHECK(r.owner.active() && !r.owner.preparing());
+        r.apply(r.owner.abortStart(r.now())); // VpnConnectionTunnelControl::startRefused()
+        pump(500);
+        CHECK(r.edge.deletes == QStringList{ QLatin1String(kLease) } && !r.owner.active());
     }
     TuningStore::set({}, {}, {}, {});
-
-    // R5 (owner side): the app's extra release after the confirmed stop is the owner's own request - an acquire of
-    // its profile waits for it and goes out when it ends (never granted the id the delayed DELETE would then end).
-    {
-        const SubscriptionNode a = stubOf();
-        FakeIo io;
-        UpstreamLeaseOwner o(&io);
-        o.begin(a, 1, std::nullopt, 1000, 1);
-        o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, a.upstream->configSha256), 1300);
-        o.tunnelUp(3000);
-        const QVector<UpstreamOwnerEvent> ev = o.disconnect(60000);
-        const UpstreamOwnerEvent *after = findEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop);
-        CHECK(after && after->requestId != 0 && o.startBlocked());
-        const int calls = io.calls.size();
-        o.begin(a, 1, std::nullopt, 61000, 1); // an immediate reconnect to the same profile
-        CHECK(io.calls.size() == calls && o.startQueued());
-        o.onReleaseDone(after->requestId, 62000); // the delayed DELETE (or its last retry) ended
-        CHECK(io.calls.size() == calls + 1 && io.calls.last().what == QLatin1String("acquire"));
-    }
 }
 
 int main(int argc, char **argv)

@@ -79,6 +79,11 @@ public:
 
     virtual void down() = 0;
 
+    // The native start will never happen for the leg that asked for it (Android: the person refused the VPN
+    // permission): anything the adapter holds for it (a provider seat) goes back now - down() would wait for a stop
+    // that never comes. Default: nothing held.
+    virtual void startRefused() {}
+
     // Path engine (review E2 of 18.11): the native layer reports without a stamp, so the leg travels through the
     // native stream itself. beginNativeOp(leg) is called right before that leg's native start; the adapter puts a
     // marker into the native event stream ahead of the start, and nativeLegSeen() is the leg of the last marker

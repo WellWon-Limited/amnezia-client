@@ -1578,6 +1578,8 @@ bool ServiceEngine::onPermissionDenied()
     attemptJournal(QStringLiteral("permission_denied node=%1 (the attempt ends, nothing recorded)")
                        .arg(m_owner.currentPath().id.id));
     feedOwner(path::AttemptEvent::permissionDenied(nowMs(), m_owner.currentLeg()));
+    if (m_tunnel)
+        m_tunnel->startRefused(); // the attempt ends with no StopPath: the seat taken for it goes back here (review F9)
     return m_state != before;
 }
 

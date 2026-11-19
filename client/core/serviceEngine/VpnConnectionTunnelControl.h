@@ -105,7 +105,7 @@ public:
     // session confirms its seat through the tunnel now.
     void upstreamTunnelUp();
     // The tunnel's stop is confirmed (the facade's Disconnected): the seat releases held for it go now.
-    void upstreamTunnelDown();
+    void upstreamTunnelDown(bool endsSession = true);
     // macOS: adoption of a live upstream session after a GUI restart (decision B, point 9). Called from
     // adoptXrayIfRunning; retryUpstreamAdoption asks the daemon again (the switch turned on later than the
     // startup probe: it is frozen off on a cached config).
@@ -123,6 +123,7 @@ public:
     // configured, a provider session is live): the caller switches the old way.
     quint64 prepareUpstream(const Subscription &sub, const SubscriptionNode &node);
     void cancelUpstreamPrepare();
+    void startRefused() override; // ITunnelControl: the native start never happened (Android permission refused)
     bool upstreamPreparing() const { return m_upOwner.preparing(); }
     // macOS GUI owner (decision B): the facade's existing tick drives renewals at upstreamWakeAtMs().
     void upstreamTick();

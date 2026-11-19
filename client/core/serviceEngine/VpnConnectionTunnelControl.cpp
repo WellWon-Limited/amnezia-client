@@ -73,7 +73,12 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     // renewals (the root daemon has no TLS backend and no token); on iOS / macOS NE the extension does.
     m_leaseClient = new UpstreamLeaseClient(this);
     m_upOwner.setIo(m_leaseClient);
-    m_leaseClient->leaseHeld = [this](const QString &id) { return m_upOwner.holdsLease(id); };
+    m_leaseClient->onLateGrant = [this](const QString &profile, const QString &lease, const LeaseRoute &route, bool newerOut) {
+        applyUpstreamEvents(m_upOwner.lateGrant(profile, lease, route, newerOut));
+    };
+    m_leaseClient->onAcquireEnded = [this](const QString &profile, const QString &lease, bool stillOut) {
+        applyUpstreamEvents(m_upOwner.acquireEnded(profile, lease, stillOut));
+    };
     {
         UpstreamLeaseOwner::Options o;
 #if AVPN_UPSTREAM_GUI_OWNER
@@ -117,6 +122,9 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
         // попадают в health-контур.
         connect(m_conn, &VpnConnection::connectionStateChanged, this,
                 [this](Vpn::ConnectionState st) {
+                    if (m_leaseClient && (st == Vpn::ConnectionState::Connecting || st == Vpn::ConnectionState::Connected
+                                          || st == Vpn::ConnectionState::Reconnecting))
+                        m_leaseClient->tunnelStarted(); // a stop is again something a release can wait for
                     if (st == Vpn::ConnectionState::Connected && !isXrayProto(m_lastUpProto))
                         updateHandshakeEpoch(m_stats, QDateTime::currentSecsSinceEpoch());
                 },
@@ -772,7 +780,7 @@ void VpnConnectionTunnelControl::applyUpstreamEvents(const QVector<UpstreamOwner
             // The seat this process acquired, held by the tunnel owner: given back again after the confirmed stop
             // (the owner's own release with the final report goes first). Without a report (meter seq 0).
             if (m_leaseClient) {
-                m_leaseClient->holdReleasesForStop();
+                m_leaseClient->holdReleasesForStopIfRunning(); // a stop that already happened is not waited for
                 m_leaseClient->release(e.requestId, e.leaseId, UpstreamMeter{}, e.route); // the owner's own request id
             }
             break;
@@ -909,8 +917,15 @@ void VpnConnectionTunnelControl::runAfterUpstreamRelease(std::function<void()> f
         fn(); // decision of 18.11: nothing waits for a release any more - it follows the confirmed stop
 }
 
-void VpnConnectionTunnelControl::upstreamTunnelDown()
+void VpnConnectionTunnelControl::upstreamTunnelDown(bool endsSession)
 {
+    // A Disconnected nobody asked for ends the session that was running on that tunnel at once (the ledger's
+    // tunnelLost): its release goes out now, not at a Disconnected that has already happened (review F4 of 19.11).
+    // A stale event of an older tunnel (endsSession false) only frees what was held for it.
+    if (endsSession && m_leaseClient) {
+        m_leaseClient->tunnelStopped(); // the stop is confirmed: the end below must not hold for another one
+        applyUpstreamEvents(m_upOwner.tunnelLost(upstreamClockMs()));
+    }
     if (m_leaseClient)
         m_leaseClient->tunnelStopped(); // the held releases go now, over the direct path
 }
@@ -950,6 +965,12 @@ quint64 VpnConnectionTunnelControl::prepareUpstream(const Subscription &sub, con
     const quint64 id = m_upOwner.prepareSerial(); // read before the events: their answer carries this id
     applyUpstreamEvents(ev);
     return id;
+}
+
+void VpnConnectionTunnelControl::startRefused()
+{
+    // Android: the person refused the VPN permission - the seat taken for this start goes back now (review F9).
+    applyUpstreamEvents(m_upOwner.abortStart(upstreamClockMs()));
 }
 
 void VpnConnectionTunnelControl::cancelUpstreamPrepare()
