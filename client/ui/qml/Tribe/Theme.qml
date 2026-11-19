@@ -58,14 +58,16 @@ QtObject {
         readonly property color focusRing: Qt.rgba(0x3E / 255, 0x80 / 255, 0xED / 255, 0.18)
         // nav bar (translucent + blur)
         readonly property color nav: Qt.rgba(0x0A / 255, 0x11 / 255, 0x1D / 255, 0.95)
-        // Scanner (plan scanner-client-plan.md §4, artboard vpn-scanner.css): the shade's dark top band
-        // per tone (keeps the white iOS status bar readable, 7.7-12.6 : 1) and its sheen
-        // (Poker Club --hero-plate-sheen: white 11 % -> 0 at 55 % -> black 10 %)
-        readonly property color shadeInfoDeep: "#22344A"
-        readonly property color shadeSuccessDeep: "#1B5A41"
-        readonly property color shadeWarningDeep: "#6E4C14"
-        readonly property color shadeSheenTop: Qt.rgba(1, 1, 1, 0.11)
-        readonly property color shadeSheenBottom: Qt.rgba(0, 0, 0, 0.10)
+        // Top shade (TribeShade): one solid fill per tone, darker than the tone itself so white text and the white iOS
+        // status bar stay readable (white on each: 6.2 - 9.6 : 1). No gradient, no shadow (owner, 2026-11-19).
+        readonly property color shadeSuccess: "#1A6B4B"
+        readonly property color shadeWarning: "#85590F"
+        readonly property color shadeError: "#9E302B"
+        readonly property color shadeInfo: "#2F4E78"
+        readonly property color shadeText: "#FFFFFF"
+        // White-list flag (TribeFlag.whitelist): a white circle with a black globe (owner, 2026-11-19)
+        readonly property color flagWhitelist: "#FFFFFF"
+        readonly property color flagWhitelistGlyph: "#000000"
         // Home scene row buttons («Заменить сервер» | «Сканер» / «Доктор»): the scenic values PageConnectTribe used as
         // literals (artboard --scene-btn-border / --scene-btn-text); new code reads these tokens
         readonly property color sceneButtonText: "#DBEAFE"
@@ -79,14 +81,13 @@ QtObject {
 
     // ─── Shade («шторка», TribeShade): full width from the top edge, bottom corners radius.xl ───
     readonly property QtObject shade: QtObject {
-        readonly property int body: 69          // height below the safe top
+        readonly property int body: 56          // min height below the safe top (one line: 18.5 above and below)
         readonly property int padX: 20
+        readonly property int padY: 12          // = space.md: above / below a text block taller than body - 24
         readonly property int icon: 20
         readonly property int text: 15
         readonly property int textLine: 19
-        readonly property int bandLead: 18      // the dark band ends 18 above the safe top...
-        readonly property int toneLag: 6        // ...and the tone is full 6 below it
-        readonly property real borderAlpha: 0.4 // bottom edge = tone at 40 %
+        readonly property int holdMs: 2500      // how long a shade stays before it slides up (owner, 2026-11-19)
     }
 
     // ─── Typography ───────────────────────────────────────────────────────────
