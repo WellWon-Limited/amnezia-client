@@ -137,6 +137,11 @@ QtObject {
         readonly property int x4: 64
     }
 
+    // ─── Touch targets ────────────────────────────────────────────────────────
+    readonly property QtObject tap: QtObject {
+        readonly property int min: 44           // minimum hit size (iOS HIG)
+    }
+
     // ─── Label badge (TribeLabelBadge: ONLINE, Amnezia / Xray Reality) ───────────
     readonly property QtObject badge: QtObject {
         readonly property int height: 17
@@ -157,7 +162,7 @@ QtObject {
         readonly property int menuWidth: 244
         readonly property int menuRow: 44
         readonly property int menuMaxHeight: 372
-        readonly property int menuButtonMax: 150
+        readonly property int menuButtonMax: 172  // room for the 18 flag + «Белые списки» (was 150, before the white-list flag)
         readonly property int cardRow: 26
         readonly property int cardLabel: 66       // vpn-scanner.css .cc-r .l (the kit caption says 72)
         readonly property int mark: 18            // the header mark after the scan
