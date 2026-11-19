@@ -17,8 +17,10 @@
 //    anything else, the scan's end without an item, an unknown scan -> Inconclusive (never recorded by the race).
 //    Bytes = the item's spent bytes (the host's own count). Every result goes to onResult once, on the GUI thread,
 //    never from inside start().
-//  - cancel(): the probe's result is dropped and the probe is gone; when nothing of the scan is live any more the
-//    host scan is cancelled (its AmneziaWG sessions end before the owner raises a tunnel).
+//  - cancel(): the probe's result is dropped and the probe is gone, and it is stopped AT THE HOST: the host has only
+//    a per-scan cancel, so when other probes still share the scan it is cancelled and the others are re-opened in a
+//    new scan (their progress restarts; a probe's own AmneziaWG session never outlives its cancel - connect
+//    invariant: the leg's node is never probed beside the tunnel with the device's key).
 //  - Provider seats: one batch call per provider probe (the race starts at most providerPerRace of them); never a
 //    session seat. The probe owns its seat (IRaceSeat, production: ScanSeatBatch with its operation id): the seat
 //    goes with the probe - its result, its cancel, the prober's end - also a seat whose answer a tunnel transition
@@ -195,6 +197,7 @@ private:
         int partsDone = 0;
         bool allOk = true;
         qint64 bytes = 0;
+        QList<ScanHostCandidate> sent; // what was handed to the host scan (re-sent when a neighbour's cancel restarts the scan)
     };
     struct HostScan {
         QString id;
@@ -219,6 +222,7 @@ private:
     void onPollReply(const QString &scanId, const QByteArray &reply);
     void closeScan(const QString &scanId);
     void cancelScanIfIdle();
+    void endHostScan();
     void finish(quint64 key, path::PathOutcome outcome, qint64 bytes, const char *why);
     void finishLater(quint64 key, const char *why);
     void armPoll();
