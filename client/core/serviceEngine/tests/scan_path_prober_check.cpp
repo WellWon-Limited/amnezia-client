@@ -48,6 +48,7 @@ struct FakeHost : IScanHost {
     QHash<QString, bool> doneNext;
     QHash<QString, bool> unknownScan;
     bool refuseAdds = false;
+    QHash<QString, bool> drainedNotFinal;      // the next poll says done=true, final=false (the queue drained, the scan stays open)
     qint64 cancelFinalBytes = -1;              // >= 0: the cancel ack carries this final byte total
     bool refuseStarts = false;                 // scan_start is answered with an error
     bool holdAdds = false;                     // scan_add answers wait in `heldAdds` until releaseAdds()
@@ -97,12 +98,13 @@ struct FakeHost : IScanHost {
             if (unknownScan.value(id)) {
                 r = QJsonObject{{"error", "unknown_scan"}, {"scan_id", id}};
             } else {
-                const bool done = doneNext.take(id);
+                const bool drained = drainedNotFinal.take(id);
+                const bool done = doneNext.take(id) || drained;
                 r = QJsonObject{{"type", "scan_progress"}, {"scan_id", id}, {"seq", double(++seq)}, {"phase", done ? "done" : "data"},
                                 {"items", pendingItems.take(id)}, {"bytes_spent", 0}, {"bytes_reserved", 0}, {"mem_mb", 41},
                                 {"done", done}, {"reason", done ? "complete" : ""}, {"access", QJsonValue::Null},
                                 {"access_close", QJsonValue::Null}, {"gen", QJsonValue::Null}};
-                if (done) {
+                if (done && !drained) {
                     r.insert("final", true);
                     scanOpen.insert(id, false);
                 }
@@ -687,6 +689,74 @@ static void caseRound4()
     }
 }
 
+// Round 5 (I4, I5, I6, I8).
+static void caseRound5()
+{
+    g_case = "round5";
+    { // I4: the poll that carries B's result arrives BEFORE the ack of the scan_add that carried B: B's bytes are known
+        World w;
+        w.ready();
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.host.holdAdds = true;
+        w.start(1, 2, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(30);
+        w.host.item(2, true, 8000);
+        spin(40);
+        check(w.resultOf(2) && w.resultOf(2)->outcome == path::PathOutcome::ProbeOk && w.resultOf(2)->bytes == 8000,
+              "a result that comes before its add's ack still carries its bytes (not -1)");
+        w.host.holdAdds = false;
+        w.host.releaseAdds();
+        spin(20);
+    }
+    { // I5: a poll sees the queue drained (done, NOT final) while an add is in flight: the host keeps the scan open and takes B
+        World w;
+        w.ready();
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        const QString s1 = w.host.scanOf(1);
+        w.host.item(1, true);
+        w.host.holdAdds = true;
+        w.start(1, 2, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(20);
+        w.host.drainedNotFinal.insert(s1, true);
+        spin(30); // the drained poll answer arrives while B's add is unanswered
+        w.host.holdAdds = false;
+        w.host.releaseAdds(); // the host took B
+        spin(30);
+        check(!w.resultOf(2), "B is not ended by a drained-but-open scan");
+        w.host.item(2, true, 8000);
+        spin(40);
+        check(w.resultOf(2) && w.resultOf(2)->outcome == path::PathOutcome::ProbeOk, "B reports from the still-open scan");
+        check(w.host.of("scan_start").size() == 1, "no new scan was needed");
+    }
+    { // I6: the access bytes have ONE owner: the scan's final total. A finished probe A (5000) then the scan's total 9096:
+      // exactly the 4096 the probes did not report are charged - never the whole total on top
+        World w;
+        qint64 charged = 0;
+        w.ready();
+        w.prober.chargeApiBytes = [&charged](qint64 b) { charged += b; };
+        w.host.cancelFinalBytes = 9096;
+        w.start(1, 1, QStringLiteral("12:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.host.item(1, true, 5000);
+        spin(60);
+        check(w.resultOf(1) && w.resultOf(1)->bytes == 5000, "A reports its 5000");
+        check(w.host.of("scan_cancel").size() == 1, "the scan nobody wants any more is cancelled to get its final total");
+        check(charged == 4096, "the ledger gets total minus what A reported (4096), once");
+    }
+    { // I8: the accounting table does not grow with refused starts
+        World w;
+        w.host.refuseStarts = true;
+        w.ready();
+        for (int i = 1; i <= 40; ++i) {
+            w.start(1, quint64(i), QStringLiteral("11:xray"), path::PathKind::OwnXray);
+            spin(15);
+        }
+        check(w.host.of("scan_start").size() >= 30 && w.prober.scanLedgerSizeForTest() <= 1, "refused starts leave no entry behind");
+    }
+}
+
 static void caseCancel()
 {
     g_case = "cancel";
@@ -931,6 +1001,7 @@ int main(int argc, char **argv)
     caseReopen();
     caseReopenRound3();
     caseRound4();
+    caseRound5();
     caseScanReplaced();
     caseSession();
     caseBurst();

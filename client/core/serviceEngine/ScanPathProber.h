@@ -230,6 +230,12 @@ private:
     // End the current scan at the host and open a new one with every part of its probes that has not reported: the
     // one function behind a cancelled neighbour and the refusal of an add (the engine closed the scan).
     void retireScan();
+    static constexpr int kScanLedgerMax = 16;
+public:
+    int scanLedgerSizeForTest() const { return int(m_scanReported.size()); }
+private: // scans whose final total may still come
+    QStringList m_scanOrder;
+    void chargeScanRemainder(const QString &scanId, qint64 total);
     QSet<QString> m_cancelSent; // scans a cancel was sent for and whose ack is not in yet
     QHash<QString, qint64> m_scanReported; // scan id -> item bytes attributed to a probe (charged by its result or cancel)
     // One owner of what an answer of a scan that is no longer the current one (or a refusal of the current one) means:
