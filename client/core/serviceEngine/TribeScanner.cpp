@@ -550,7 +550,10 @@ void TribeScanner::notifyNetwork()
     if (n == m_lastNet)
         return;
     m_lastNet = n;
-    emitLog(QStringLiteral("network kind=%1 sources=%2").arg(QLatin1String(scanNetKindName(n.kind))).arg(n.sources.size()));
+    emitLog(QStringLiteral("network kind=%1 key=%2 gen=%3 sources=%4 cached=%5")
+                .arg(QLatin1String(scanNetKindName(n.kind)), n.key, n.generation())
+                .arg(n.sources.size())
+                .arg(cachedFor(n).present()));
     const ScanPhase before = m_m.phase();
     dispatch(m_m.networkChanged(n, cachedFor(n), now()));
     // «Сеть сменилась — проверяем заново» (artboard): only for the person's running scan the change restarted on
