@@ -1108,6 +1108,15 @@ struct World {
         return QVariantMap();
     }
     bool rowFlag(const QString &id, const char *flag) const { return row(id).value("flags").toStringList().contains(QLatin1String(flag)); }
+    // the live row stays unproven after its check ended badly: not verified, and no longer «проверяем загрузку…»
+    bool liveUnprovenSettled(const QString &id) const
+    {
+        bool unproven = false;
+        for (const ScanRowView &r : s->machine().view(clock.t).rows)
+            if (r.id == id)
+                unproven = r.current && !r.verified;
+        return unproven && rowFlag(id, "current") && !rowFlag(id, "live_unverified");
+    }
     qint64 ledgerLast() const
     {
         const auto &e = s->machine().ledger().entries();
@@ -1303,7 +1312,7 @@ static void caseLiveDigest()
     w.run(20000);
     CHECK_EQ(w.phase(), QStringLiteral("done"));
     CHECK_EQ(w.liveProbes.size(), 2);
-    CHECK(w.rowFlag(QStringLiteral("4:xray"), "live_unverified"));
+    CHECK(w.liveUnprovenSettled(QStringLiteral("4:xray")));
 }
 
 // 304: the stored copy is revalidated with its exact ETag; the scan uses the token of POST /v1/scan/token.
@@ -3452,7 +3461,7 @@ static void caseStaleLiveProbe()
     w.run(20000);
     CHECK(w.s->machine().scanId() != a);
     CHECK_EQ(w.liveProbes.size(), 4);
-    CHECK(w.rowFlag(QStringLiteral("4:xray"), "live_unverified")); // only B's own (bad) result counts
+    CHECK(w.liveUnprovenSettled(QStringLiteral("4:xray"))); // only B's own (bad) result counts
     CHECK(w.logsClean());
 }
 
