@@ -12,11 +12,22 @@
 //   I3 no part runs at the host twice at the same time (accepted into a second scan while the first one is live),
 //      and a part is never accepted twice into one scan
 //   I4 a cancelled probe is not running at the host when the dust settles (its scan was cancelled)
-//   I5 a probe the host never accepted anything of ends with NEGATIVE bytes (nothing was sent: nothing is charged)
+//   I5 a probe the host never accepted anything of ends with NEGATIVE bytes (nothing was sent: nothing is charged), and
+//      a probe the host accepted a part of never does (its bytes would be refunded to the race cap)
 //   I6 bytes: what the prober charged (results + the ledger charges) is never more than the host really sent, and never
 //      less except for the stated, bounded exception: scans whose cancel ack carried no final total (their bytes are
 //      unknown to the app) - the shortfall is at most those scans' totals
 //   I7 liveness: a probe whose parts all succeed at the host ends proven (when the host refused nothing)
+//
+// Host contract the model follows (quoted from the real host, recipes/amnezia-libxray/patches/0012-tribe-scan-engine.patch,
+// scan engine loop): "The queue drained: done, "complete", NOT final - the scan stays open for scan_add until the deadline
+// or the app's freeze + cancel." and `closed bool // past the deadline or stopped: scan_add accepts nothing`; the
+// ScanHostContract.h text says the same ("complete" = the host's queue is drained; it stays open for scan_add until its
+// deadline). So a poll may report done=true / final=false while an add is in flight and the add is still accepted; and
+// a poll answer carrying a part's result may arrive BEFORE the ack of the scan_add that carried the part (replies are
+// delivered in any order here). The final byte total of a scan (data + the host's opening and closing /netinfo) comes
+// with the cancel ack or the final poll.
+//
 // Built and run by build_scan_path_prober_model.sh. Env MODEL_RUNS (default 3000) sets the number of sequences.
 #define main prober_check_main
 #include "scan_path_prober_check.cpp"
@@ -43,11 +54,13 @@ struct MScan {
     bool cancelled = false;
     bool ended = false;
     QList<MPart> parts;
-    bool finalDelivered = false;
+    bool finalDelivered = false; // a cancel ack with the final total was delivered
     bool noFinal = false;
+    bool cancelAsked = false;
+    static constexpr qint64 kAccessBytes = 4096; // the host's opening + closing /netinfo, in every scan's total
     qint64 total() const
     {
-        qint64 t = 0;
+        qint64 t = kAccessBytes;
         for (const MPart &p : parts)
             t += p.finished ? p.bytes : p.spent;
         return t;
@@ -83,6 +96,8 @@ struct ModelHost : IScanHost {
     QHash<quint64, QStringList> partsOfProbe; // probe key -> every part id it ever sent
     QSet<quint64> acceptedProbes;             // probes the host accepted a part of
     QHash<QString, int> deliveredItems;       // part id -> delivered ok items (poll answers the prober could use)
+    int newestStart = 0;                      // the highest scan number a start was ever processed for (refused or not)
+    QHash<QString, int> currentItems;         // part id -> items delivered from the scan that was the app's current one
 
     ScanHostCaps knownCaps() const override { return ScanHostCaps(); }
     ScanHostAvailability availability() const override { return ScanHostAvailability::Available; }
@@ -178,6 +193,7 @@ struct ModelHost : IScanHost {
             r = caps;
         } else if (a == "scan_start") {
             learn(o.value("candidates").toArray());
+            newestStart = qMax(newestStart, id.mid(id.lastIndexOf(QLatin1Char('-')) + 1).toInt());
             if (refuseStarts && roll(100) < 35) {
                 r = QJsonObject{{"error", "internal"}, {"scan_id", id}};
             } else {
@@ -217,18 +233,20 @@ struct ModelHost : IScanHost {
                                              {"egress_asn", QJsonValue::Null}, {"net_token", QJsonValue::Null}};
                     allFinished = allFinished && p.finished;
                 }
-                const bool done = s->ended && allFinished;
+                const bool done = allFinished;           // the queue drained (the scan may stay open for scan_add)
+                const bool fin = s->ended && allFinished; // the host scan is over: the total is final
                 r = QJsonObject{{"type", "scan_progress"}, {"scan_id", id}, {"seq", double(seq)}, {"phase", done ? "done" : "data"},
-                                {"items", items}, {"bytes_spent", 0}, {"bytes_reserved", 0}, {"mem_mb", 41}, {"done", done},
-                                {"reason", done ? "complete" : ""}, {"access", QJsonValue::Null}, {"access_close", QJsonValue::Null},
-                                {"gen", QJsonValue::Null}};
-                if (done)
+                                {"items", items}, {"bytes_spent", fin ? double(s->total()) : 0.0}, {"bytes_reserved", 0}, {"mem_mb", 41},
+                                {"done", done}, {"reason", done ? "complete" : ""}, {"access", QJsonValue::Null},
+                                {"access_close", QJsonValue::Null}, {"gen", QJsonValue::Null}};
+                if (fin)
                     r.insert("final", true);
                 ob.final = false;
             }
         } else if (a == "scan_cancel") {
             MScan *s = scanById(id);
             if (s) {
+                s->cancelAsked = true;
                 endScan(*s, true);
                 ob.isCancelAck = true;
                 s->noFinal = roll(100) >= finalAckPercent;
@@ -260,12 +278,22 @@ struct ModelHost : IScanHost {
                 s->finalDelivered = true;
         }
         const QJsonObject o = QJsonDocument::fromJson(ob.bytes).object();
-        if (o.value("type").toString() == "scan_progress")
+        if (o.value("type").toString() == "scan_progress") {
+            // the app's current scan = the newest scan id it has sent a start for (it sends it at once)
+            const auto num = [](const QString &sid) { return sid.mid(sid.lastIndexOf(QLatin1Char('-')) + 1).toInt(); };
+            int newest = newestStart;
+            for (const MScan &s : scans)
+                newest = qMax(newest, num(s.id));
+            for (const Inbox &in : inbox)
+                newest = qMax(newest, num(QJsonDocument::fromJson(in.req).object().value("scan_id").toString()));
             for (const QJsonValue &v : o.value("items").toArray()) {
                 const QJsonObject it = v.toObject();
                 if (it.value("sha_ok").toBool())
                     deliveredItems[it.value("id").toString()] += 1;
+                if (num(ob.scanId) == newest)
+                    currentItems[it.value("id").toString()] += 1;
             }
+        }
         ob.reply(ob.bytes);
         return true;
     }
@@ -309,11 +337,10 @@ static int runModel(unsigned seed, QStringList &broke)
     api.providerConfig = providerProfile();
     ScanPathProber prober(&host, &engine, &api);
     prober.pollIntervalMs = 0;
-    if (std::getenv("MODEL_TRACE"))
-        prober.log = [](const QString &l) { std::fprintf(stderr, "  [prober] %s\n", qPrintable(l)); };
+    QStringList trace; // the prober's own journal of this sequence, shown for the first broken ones (MODEL_VERBOSE)
+    prober.log = [&trace](const QString &l) { trace << l; };
     QList<MResult> results;
     qint64 charged = 0; // the ledger charges (everything but the session fetch)
-    prober.onResult = [&results](const path::ProbeStamp &s, path::PathOutcome o, qint64 b) { results << MResult{s, o, b}; };
     prober.warmUp();
     for (int i = 0; i < 8; ++i) {
         host.processOne();
@@ -329,6 +356,11 @@ static int runModel(unsigned seed, QStringList &broke)
 
     QHash<quint64, path::ProbeStamp> stamps;
     QSet<quint64> cancelled, ended;
+    prober.onResult = [&](const path::ProbeStamp &s, path::PathOutcome o, qint64 b) {
+        if (cancelled.contains(s.probe)) // checked AT the result: a cancelled probe never reports
+            broke << QStringLiteral("I1 probe %1 reported a result after its cancel").arg(s.probe);
+        results << MResult{s, o, b};
+    };
     quint64 nextProbe = 1;
     const int steps = 20 + int(rng() % 60);
     const auto fail = [&](const QString &what) { broke << what; };
@@ -338,8 +370,6 @@ static int runModel(unsigned seed, QStringList &broke)
             if (seen.contains(r.stamp.probe))
                 fail(QStringLiteral("I1 probe %1 ended twice").arg(r.stamp.probe));
             seen.insert(r.stamp.probe);
-            if (cancelled.contains(r.stamp.probe) && !ended.contains(r.stamp.probe))
-                fail(QStringLiteral("I1 probe %1 reported a result after its cancel").arg(r.stamp.probe));
         }
     };
 
@@ -401,8 +431,14 @@ static int runModel(unsigned seed, QStringList &broke)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
         record();
         idle = did ? 0 : idle + 1;
-        if (idle == 20)
+        if (idle == 20) {
+            // quiescence: every probe has ended or been cancelled, so no scan may still be open at the host (a scan nobody
+            // wants any more must have been cancelled: its AmneziaWG sessions would run beside the tunnel)
+            for (const MScan &s : host.scans)
+                if (!s.ended)
+                    fail(QStringLiteral("I4 scan %1 is still open at the host with no probe wanting it").arg(s.id));
             host.closeOne(); // the host's deadline: whatever still runs ends
+        }
     }
     // what is still live now has waited for ever
     QSet<quint64> stuck;
@@ -432,6 +468,11 @@ static int runModel(unsigned seed, QStringList &broke)
             for (const QString &id : parts)
                 if (host.deliveredItems.value(id) < 1)
                     fail(QStringLiteral("I2 probe %1 proven without a delivered result of part %2").arg(r.stamp.probe).arg(id));
+        bool itemDelivered = false; // the app was TOLD (a delivered poll item) that the host ran a part of this probe
+        for (const QString &id : parts)
+            itemDelivered = itemDelivered || host.currentItems.value(id) > 0;
+        if (itemDelivered && r.bytes < 0)
+            fail(QStringLiteral("I5 probe %1: the host reported its parts' spend but the result says no byte was sent (refunded)").arg(r.stamp.probe));
         if (!host.acceptedProbes.contains(r.stamp.probe) && r.bytes >= 0)
             fail(QStringLiteral("I5 probe %1 never reached the host but reports %2 bytes (charged as if sent)").arg(r.stamp.probe).arg(r.bytes));
         if (!refuses && host.refuseAddPercent == 0 && !cancelled.contains(r.stamp.probe) && r.outcome != path::PathOutcome::ProbeOk
@@ -456,8 +497,8 @@ static int runModel(unsigned seed, QStringList &broke)
     qint64 sent = 0, unknown = 0;
     for (const MScan &s : host.scans) {
         sent += s.total();
-        if (!s.finalDelivered)
-            unknown += s.total();
+        if (s.cancelAsked && !s.finalDelivered)
+            unknown += s.total(); // the only scans whose total the app may never learn (a cancel ack without a final total)
     }
     qint64 paid = charged;
     for (const MResult &r : results)
@@ -475,6 +516,18 @@ static int runModel(unsigned seed, QStringList &broke)
     if (paid < sent - unknown)
         fail(QStringLiteral("I6 charged %1 bytes, the host sent %2 (%3 of it in scans without a final total): bytes vanished")
                  .arg(paid).arg(sent).arg(unknown));
+    if (!broke.isEmpty() && std::getenv("MODEL_VERBOSE")) {
+        static int shown = 0;
+        if (shown++ < 3) {
+            std::fprintf(stderr, "--- trace of seed %u\n", seed);
+            for (const QString &l : trace)
+                std::fprintf(stderr, "  %s\n", qPrintable(l));
+            for (const MScan &s : host.scans)
+                std::fprintf(stderr, "  [host] %s total=%lld final=%d cancelled=%d ended=%d parts=%d\n", qPrintable(s.id), (long long)s.total(), int(s.finalDelivered), int(s.cancelled), int(s.ended), int(s.parts.size()));
+            for (const MResult &r : results)
+                std::fprintf(stderr, "  [result] probe=%llu bytes=%lld outcome=%s\n", (unsigned long long)r.stamp.probe, (long long)r.bytes, path::pathOutcomeName(r.outcome));
+        }
+    }
     return broke.isEmpty() ? 0 : 1;
 }
 
@@ -482,10 +535,13 @@ int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     if (qEnvironmentVariableIntValue("MODEL_SEED") > 0) {
-        QStringList broke;
-        runModel(unsigned(qEnvironmentVariableIntValue("MODEL_SEED")), broke);
-        for (const QString &b : broke)
-            std::printf("%s\n", qPrintable(b));
+        const int n = qMax(1, qEnvironmentVariableIntValue("MODEL_COUNT"));
+        for (int k = 0; k < n; ++k) {
+            QStringList broke;
+            runModel(unsigned(qEnvironmentVariableIntValue("MODEL_SEED") + k), broke);
+            for (const QString &b : broke)
+                std::printf("seed %d: %s\n", qEnvironmentVariableIntValue("MODEL_SEED") + k, qPrintable(b));
+        }
         return 0;
     }
     const int runs = qEnvironmentVariableIntValue("MODEL_RUNS") > 0 ? qEnvironmentVariableIntValue("MODEL_RUNS") : 3000;

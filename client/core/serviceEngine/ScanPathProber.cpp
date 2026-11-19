@@ -56,21 +56,26 @@ path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayB
     c.xray = data + qint64(qBound(1, xrayBurst, 6) - 1) * scanXrayBurstPartCostBytes(t) + access;
     c.awg = kScanAwgHandshakeBytes + qint64(t.awgPrimeEchoes) * kScanAwgEchoBytes + data + access;
     c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes /* release */ + access;
-    // Byte accounting of one race probe (one number, two ledgers):
+    // Byte accounting of one race probe. DECISION (fifth review, I6): the host's own opening and closing /netinfo requests
+    // are charged from ONE owner - the scan's final byte total (the cancel ack, or the final poll) - and never as a fixed
+    // share, so no byte is charged twice and none is missed:
     //   part                          race cap (PathRace)   hour ledger (Scanner, raceCharge)
-    //   host data bytes (items)       bytes + fixed         Spent effect (PathRace charge minus *Outside)
-    //   host /netinfo opening+closing fixed (= access)      Spent effect (no one else knows them)
+    //   host data bytes (items)       bytes + fixed         Spent effect = the probe's reported bytes
+    //   host /netinfo opening+closing fixed (= access)      the scan's final total minus every attributed item byte
+    //                                                       (onCancelReply / final poll; an idle scan is cancelled)
     //   session fetch (manifest/token) -                    chargeApiBytes at the fetch (real bytes)
     //   provider seat batch + config  fixed                 chargeApiBytes in the seat callback (real bytes)
     //   provider release              fixed                 chargeApiBytes (release owner, real bytes)
-    // *Outside = the part of `fixed` that chargeApiBytes already put into the hour ledger, so the Spent effect does not
-    // charge it again. A probe's reported bytes are Probe::bytes (one entry per reported part), reported by finish()
-    // whatever the outcome; a cancelled probe's go to chargeApiBytes at once (the race gets no result for it).
-    // what of each projection is spent outside the host (PathRace charges it on top of the host's count)
+    // The cap keeps its worst-case `fixed` (it bounds what a race may START); *Outside = the part of `fixed` the hour
+    // ledger gets elsewhere (the API calls above, the scan's final total), so the Spent effect never carries it. A probe's
+    // reported bytes are Probe::bytes (one entry per reported part), reported by finish() whatever the outcome; a
+    // cancelled probe's go to chargeApiBytes at once (the race gets no result for it).
     c.awgFixed = access;
     c.xrayFixed = access;
     c.providerFixed = qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes + access;
-    c.providerOutside = qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes;
+    c.awgOutside = access;
+    c.xrayOutside = access;
+    c.providerOutside = qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes + access;
     return c;
 }
 
@@ -313,7 +318,13 @@ void ScanPathProber::openScan(quint64 race, const QList<ScanHostCandidate> &cand
 {
     m_scan = HostScan();
     m_scan.id = QStringLiteral("race-%1-%2").arg(race).arg(++m_scanSeq);
-    m_scanReported.insert(m_scan.id, 0); // present until its cancel ack is charged: a repeated ack charges nothing
+    m_scanReported.insert(m_scan.id, 0); // present until its final total is charged (cancel ack / final poll)
+    m_scanOrder << m_scan.id;
+    while (m_scanOrder.size() > kScanLedgerMax) { // bounded: an entry whose final never comes is dropped (its bytes unknown)
+        const QString old = m_scanOrder.takeFirst();
+        m_scanReported.remove(old);
+        m_cancelSent.remove(old);
+    }
     m_scan.race = race;
     m_scan.closed = false;
     m_scan.startSent = true;
@@ -366,6 +377,8 @@ void ScanPathProber::onStartReply(const QString &scanId, const QList<ScanHostCan
     if (r.kind != ScanHostReplyKind::Ack) {
         say(QStringLiteral("race_prober scan_start refused scan=%1 error=%2 %3").arg(scanId, r.errorCode, r.detail));
         m_scan.closed = true;
+        m_scanReported.remove(scanId); // the host never held this scan
+        m_scanOrder.removeAll(scanId);
         for (const ScanHostCandidate &c : cands + m_scan.queued)
             finish(keyOfHostId(c.id), path::PathOutcome::Inconclusive, "start_refused");
         m_scan.queued.clear();
@@ -489,6 +502,8 @@ void ScanPathProber::onPollReply(const QString &scanId, const QByteArray &reply)
         if (!expected)
             continue; // not a part of this probe
         it->doneParts.insert(f.id);
+        it->reachedHost = true; // a result proves the host took the part, whatever order its ack comes in
+        it->acceptedParts.insert(f.id);
         it->bytes += f.spentBytes;
         m_scanReported[scanId] += f.spentBytes;
         const bool ok = scanPathOutcomeOf(f) == path::PathOutcome::ProbeOk;
@@ -496,11 +511,30 @@ void ScanPathProber::onPollReply(const QString &scanId, const QByteArray &reply)
         if (it->doneParts.size() >= it->parts)
             finish(key, it->allOk ? path::PathOutcome::ProbeOk : path::PathOutcome::Inconclusive, it->allOk ? "proven" : (it->parts > 1 ? "burst_part_failed" : scanProbeErrorName(f.error)));
     }
-    if (r.progress.done) {
+    // "The queue drained: done, "complete", NOT final - the scan stays open for scan_add until the deadline or the app's
+    // freeze + cancel" (the host's scan engine): only a final answer, or a done with another reason, ends the scan.
+    if (r.progress.done && (r.progress.finalTotals || r.progress.reason != QLatin1String("complete"))) {
+        if (r.progress.finalTotals && r.progress.bytesSpent >= 0)
+            chargeScanRemainder(scanId, r.progress.bytesSpent);
         closeScan(scanId);
         return;
     }
     armPoll();
+}
+
+// The scan's final byte total minus what the probes' own results and cancels charged: the parts nobody polled, the cancelled
+// probe's parts, the host's opening and closing /netinfo. Once per scan.
+void ScanPathProber::chargeScanRemainder(const QString &scanId, qint64 total)
+{
+    const auto it = m_scanReported.find(scanId);
+    if (it == m_scanReported.end())
+        return;
+    const qint64 extra = total - it.value();
+    m_scanReported.erase(it);
+    m_scanOrder.removeAll(scanId);
+    if (extra > 0 && chargeApiBytes)
+        chargeApiBytes(extra);
+    say(QStringLiteral("race_prober scan_final scan=%1 spent=%2 extra=%3").arg(scanId).arg(total).arg(qMax<qint64>(0, extra)));
 }
 
 void ScanPathProber::closeScan(const QString &scanId)
@@ -581,16 +615,15 @@ void ScanPathProber::endHostScan()
 // is known and nothing is charged - the only bytes the race can under-count, bounded by that scan's reservation.
 void ScanPathProber::onCancelReply(const QString &scanId, const QByteArray &reply)
 {
-    if (!m_cancelSent.remove(scanId) || !m_scanReported.contains(scanId))
+    if (!m_cancelSent.remove(scanId))
         return; // answered already (a repeated ack)
-    const qint64 attributed = m_scanReported.take(scanId);
     const ScanHostReply r = scanDecodeReply(reply);
-    if (r.kind != ScanHostReplyKind::Ack || !r.finalTotals || r.bytesSpent < 0)
+    if (r.kind != ScanHostReplyKind::Ack || !r.finalTotals || r.bytesSpent < 0) {
+        m_scanReported.remove(scanId); // no total will ever come: the entry is done
+        m_scanOrder.removeAll(scanId);
         return;
-    const qint64 extra = r.bytesSpent - attributed;
-    if (extra > 0 && chargeApiBytes)
-        chargeApiBytes(extra);
-    say(QStringLiteral("race_prober scan_cancel_final scan=%1 spent=%2 extra=%3").arg(scanId).arg(r.bytesSpent).arg(extra));
+    }
+    chargeScanRemainder(scanId, r.bytesSpent);
 }
 
 void ScanPathProber::cancelScanIfIdle()
@@ -627,8 +660,8 @@ void ScanPathProber::finish(quint64 key, path::PathOutcome outcome, const char *
             .arg(bytes).arg(QLatin1String(why)));
     if (onResult)
         onResult(p.stamp, outcome, bytes);
-    // A finished probe leaves the scan open: the race may add its next probe at once (the engine closes a scan whose
-    // candidates are all final by itself; only cancel() ends it early).
+    cancelScanIfIdle(); // no probe of the scan is wanted any more: end it so its final byte total (the /netinfo bytes too) comes
+    // A scan no probe is bound to any more is cancelled (cancelScanIfIdle above): the host answers with its final total.
 }
 
 quint64 ScanPathProber::keyOfHostId(const QString &hostId) const
