@@ -1381,7 +1381,13 @@ static void machineRules()
         const ScanStep s = m.manifestReady(manifestInputFrom(manifestArgs(wb)), kT0 + 50);
         const ScanAction *b = s.find(ScanActionKind::RequestProbeBatch);
         CHECK(b && b->ids.size() == 2);
-        CHECK(m.capBytes() == 240608 && m.hostGrant() == 240608 && m.view(kT0 + 50).unverifiedCount == 2); // the rest «Не проверено»
+        CHECK(m.capBytes() == 240608 && m.hostGrant() == 240608); // the rest «Не проверено» (the result: the list shows them at the end)
+        {
+            int nv = 0;
+            for (const ScanRowView &r : m.result(kT0 + 50))
+                nv += r.verified ? 0 : 1;
+            CHECK(nv == 2 && m.view(kT0 + 50).unverifiedCount == 0); // never on the list while the scan runs (owner 19.11)
+        }
         CHECK(m.allowanceBytes() == 300000 && m.allowanceUsed() == 300000 - 0); // grant + app slice = A, nothing left over
         int adds = 0;
         for (const QString &id : b->ids)
@@ -1859,7 +1865,12 @@ static void reviewFixes()
             ns.opened(o2, kT0);
             ns.manifestUnavailable(QStringLiteral("service_off"), kT0 + 50);
             const ScanView nv = ns.view(kT0 + 50);
-            CHECK(ns.phase() == ScanPhase::NoScan && nv.rows.size() == (age <= 600000 ? 1 : 0) && nv.verifiedCount == 0);
+            // shown under the scan's window, it stays while the list is on the screen (owner 19.11: never expires in
+            // front of the person) ...
+            CHECK(ns.phase() == ScanPhase::NoScan && nv.rows.size() == 1 && nv.verifiedCount == 0);
+            // ... and the next list built (the page opened again) judges scan_cache_works_ttl_s
+            ns.shown(o2, kT0 + 60);
+            CHECK(ns.view(kT0 + 60).rows.size() == (age <= 600000 - 60 ? 1 : 0));
         }
         // the local identities never leave the device: not in outcomes, the summary or the report
         bool leaked = false;
@@ -2020,7 +2031,7 @@ static void planV22()
         CHECK(lp && lp->costBytes == 82944);
         // composite providers need their config: on cellular they stay «Не проверено» (config_cellular)
         bool configCellular = false;
-        for (const ScanRowView &r : m.view(kT0 + 50).rows)
+        for (const ScanRowView &r : m.result(kT0 + 50))
             configCellular = configCellular || r.notVerifiedReason == QLatin1String("config_cellular");
         CHECK(configCellular);
         // an app request reports its real bytes: they replace the reservation, also when they are more
@@ -2060,7 +2071,7 @@ static void planV22()
         const ScanAction *b = s.find(ScanActionKind::RequestProbeBatch);
         CHECK(b && b->ids.size() == 4 && !b->includeConfig); // the leg pool's 4 slots (legs only: no full pool)
         bool capped = false;
-        for (const ScanRowView &r : m.view(kT0 + 50).rows)
+        for (const ScanRowView &r : m.result(kT0 + 50))
             capped = capped || r.notVerifiedReason == QLatin1String("batch_cap");
         CHECK(capped && m.probeBatchesThisScan() == 1); // the rest «Не проверено», never a second batch
     }
@@ -2125,7 +2136,10 @@ static void planV22()
             q.hasGen = true;
             q.gen = bump ? ne2 : ne1;
             m.hostProgress(q, kT0 + 900);
-            return !rowOf(scanViewToJson(m.view(kT0 + 900)), up(1)).value(QStringLiteral("flags")).toArray().contains(QStringLiteral("unverified"));
+            for (const ScanRowView &r : m.result(kT0 + 900))
+                if (r.id == up(1))
+                    return r.verified;
+            return true;
         };
         CHECK(run(false)); // verified directly by the opening attempt's facts
         CHECK(!run(true)); // the host's path moved: «Не проверено»
@@ -2689,7 +2703,7 @@ static void contractV23()
         for (const ScanAction &a : sb.actions)
             CHECK(!scanActionTouchesTunnel(a.kind));
         bool nv = false;
-        for (const ScanRowView &r2 : m.view(kT0 + 400).rows)
+        for (const ScanRowView &r2 : m.result(kT0 + 400))
             nv = nv || (r2.id == QLatin1String("4:xray") && !r2.verified && r2.notVerifiedReason == QLatin1String("bind_failed"));
         CHECK(nv); // «Не проверено», reason bind_failed
         CHECK(scanHostFailureReason(ScanHostError::BindFailed) == QLatin1String("host_bind_failed"));
@@ -2784,10 +2798,12 @@ static void contractV23()
             awgInHost = awgInHost || (c.id == QLatin1String("2") && c.kind == ScanProbeKind::AwgMini);
         CHECK(awgInHost);
         m.candidateRefused(QStringLiteral("2"), QStringLiteral("awg_no_address"), kT0 + 60);
-        bool shown = false;
+        bool judged = false, listed = false;
+        for (const ScanRowView &r : m.result(kT0 + 60))
+            judged = judged || (r.id == QLatin1String("2") && r.state == ScanRowState::NotVerified && r.notVerifiedReason == QLatin1String("awg_no_address"));
         for (const ScanRowView &r : m.view(kT0 + 60).rows)
-            shown = shown || (r.id == QLatin1String("2") && r.state == ScanRowState::NotVerified && r.notVerifiedReason == QLatin1String("awg_no_address"));
-        CHECK(shown && m.phase() == ScanPhase::Reach);
+            listed = listed || r.id == QLatin1String("2");
+        CHECK(judged && !listed && m.phase() == ScanPhase::Reach); // «Не проверено» joins the list only at the scan's end
         ScanProbeFacts late = goodData(); // a late item for it is ignored
         late.id = QStringLiteral("2");
         late.seq = 1;
@@ -3262,14 +3278,6 @@ static World randomWorld(std::mt19937 &rng, int k)
     return w;
 }
 
-// Order key of a shown verified row: (speed rank, ms or +inf, then a stable rest) - checked as a non-decreasing
-// sequence; a pair of rows whose keys did not change keeps its relative order between two views.
-static QString rowKey(const QJsonObject &r)
-{
-    const int rank = scanSpeedRank(scanSpeedFrom(r.value(QStringLiteral("speed")).toString()));
-    return QStringLiteral("%1").arg(rank) + QLatin1Char('|') + r.value(QStringLiteral("speed")).toString();
-}
-
 static void properties()
 {
     std::mt19937 rng(20261115);
@@ -3320,33 +3328,7 @@ static void properties()
             for (const ScanMachine::DebugRow &r : all)
                 if (r.tier < maxShownTier)
                     f.check(shown.contains(r.id), w.name + QStringLiteral(": a lower-tier working row left out: ") + r.id);
-        // relative order stability between consecutive views
-        for (int i = 1; i < d.steps.size(); ++i) {
-            const QJsonArray a = d.steps.at(i - 1).view.value(QStringLiteral("rows")).toArray();
-            const QJsonArray b = d.steps.at(i).view.value(QStringLiteral("rows")).toArray();
-            QMap<QString, QPair<int, QString>> pa, pb;
-            for (int x = 0; x < a.size(); ++x)
-                pa.insert(a.at(x).toObject().value(QStringLiteral("id")).toString(),
-                          qMakePair(x, rowKey(a.at(x).toObject()) + QString::number(a.at(x).toObject().value(QStringLiteral("ms")).toInt())
-                                           + a.at(x).toObject().value(QStringLiteral("state")).toString()));
-            for (int x = 0; x < b.size(); ++x)
-                pb.insert(b.at(x).toObject().value(QStringLiteral("id")).toString(),
-                          qMakePair(x, rowKey(b.at(x).toObject()) + QString::number(b.at(x).toObject().value(QStringLiteral("ms")).toInt())
-                                           + b.at(x).toObject().value(QStringLiteral("state")).toString()));
-            const QStringList common = [&] {
-                QStringList c;
-                for (auto it = pa.constBegin(); it != pa.constEnd(); ++it)
-                    if (pb.contains(it.key()) && pb.value(it.key()).second == it.value().second)
-                        c << it.key();
-                return c;
-            }();
-            for (int x = 0; x < common.size(); ++x)
-                for (int y = x + 1; y < common.size(); ++y) {
-                    const bool before = pa.value(common.at(x)).first < pa.value(common.at(y)).first;
-                    const bool after = pb.value(common.at(x)).first < pb.value(common.at(y)).first;
-                    f.check(before == after, w.name + QStringLiteral(": two unchanged rows swapped"));
-                }
-        }
+        // the list's order and lifetime between consecutive views: checkAllSteps (scan_world.h checkListStep)
         for (const QString &x : f.list)
             checkMsg(false, x);
         if (f.list.isEmpty())
@@ -3402,6 +3384,7 @@ static void properties()
         ScanMachine m(w.caps);
         qint64 now = kT0;
         QString prevPhase = QStringLiteral("idle");
+        ListSteps list(m.tunables());
         for (int i = 0; i < 80; ++i) {
             now += qint64(rng() % 1500) - 200;
             const QString e = QLatin1String(names[rng() % 26]);
@@ -3450,9 +3433,10 @@ static void properties()
             const QJsonObject event = ev(e.toUtf8().constData(), now, args);
             const ScanStep s = applyScanEvent(m, event);
             Recorded r{event, s, scanViewToJson(m.view(now)), m.spentBytes(), m.leaseReservedBytes(), m.capBytes(), m.allowanceBytes(),
-                       m.allowanceUsed(), m.draining()};
+                       m.allowanceUsed(), m.draining(), 0, QJsonObject(), m.listBuilds()};
             Fail f;
             checkStepInvariants(r, prevPhase, m, QString(), f, QStringLiteral("fuzz"));
+            list.step(r, f.list, QStringLiteral("fuzz ") + e);
             const QString buckets = summaryBucketsWhy(m.lastSummary()); // lab seam S4, any event stream
             f.check(buckets.isEmpty(), QStringLiteral("fuzz: summary ") + buckets);
             // the current-node check needs the real current: done by checkAllSteps on driven runs

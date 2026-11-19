@@ -422,6 +422,8 @@ struct ScanRowView {
     bool liveChecking = false;          // the connected, unproven row's check is under way («проверяем загрузку…»);
                                         // false with !verified = nothing checks it now: plain «Подключено»
     bool crowdWorks = false;            // «работает у других в вашей сети» (a mark: never order, never verdict)
+    bool unavailable = false;           // a row of the list whose probe in this scan failed: «Не удалось» in its place
+                                        // until the list is rebuilt (never counted, never tappable)
     quint64 arrival = 0;                // grows with every new fresh row (arrive animation once)
     QString notVerifiedReason;
 };
@@ -471,7 +473,9 @@ struct ScanView {
     int waitSeconds = 0;
     int checkedAgoMin = -1;          // caption «Проверено N мин назад» (0 = «только что»); -1 none
     QList<ScanRowView> rows;         // display order, filter applied
-    int verifiedCount = 0;           // fresh verified rows, before the filter (cached rows never count)
+    quint64 listBuild = 0;           // the list's build (ScanMachine::listBuilds): a new value = built from empty, else
+                                     // its rows only joined its end since the last view
+    int verifiedCount = 0;           // fresh verified rows on the list (cached and failed rows never count)
     int unverifiedCount = 0;
     ScanBarView bar;
     ScanEmptyView empty;
@@ -616,6 +620,7 @@ public:
         now = clock(now);
         ScanStep s;
         m_screenOpen = true;
+        m_listRebuild = true; // the page opens: its list is built from empty (syncList)
         m_connectOnOpen = o.connectOnOpen;
         m_net.radio = o.network.radio; // display only, never part of the identity
         if (o.network != m_net || m_rowsKey != o.network.key) {
@@ -658,6 +663,7 @@ public:
         now = clock(now);
         ScanStep s;
         m_screenOpen = true;
+        m_listRebuild = true; // the page opens: its list is built from empty (syncList)
         m_connectOnOpen = o.connectOnOpen;
         m_net.radio = o.network.radio; // display only, never part of the identity
         if (o.network != m_net || m_rowsKey != o.network.key) {
@@ -769,8 +775,9 @@ public:
         now = clock(now);
         ScanStep s;
         if (!scanPhaseScanning(m_phase)) {
+            const QString filterBefore = m_filter, scopeBefore = m_scope;
             bool present = cc.isEmpty();
-            for (const ScanRowView &r : displayRows(now))
+            for (const ScanRowView &r : resultRows(now))
                 present = present || r.countryCode == cc;
             if (present)
                 m_filter = cc;
@@ -782,6 +789,8 @@ public:
                 inPool = inPool || c.countryCode == scope;
             if (inPool || present)
                 m_scope = scope;
+            if (m_filter != filterBefore || m_scope != scopeBefore)
+                m_listRebuild = true; // a scope change builds the list from empty (syncList)
         }
         finishStep(s, now);
         return s;
@@ -816,6 +825,7 @@ private:
     // open page without a result - never another network's result as current.
     void applyNetworkChange(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now, ScanStep &s)
     {
+        m_listRebuild = true; // the list belongs to its network: another network builds it from empty (syncList)
         if (m_phase == ScanPhase::Connecting || m_phase == ScanPhase::Preparing) {
             // Nothing measured yet: the scan simply targets the new network.
             m_net = n;
@@ -1007,7 +1017,7 @@ public:
                 releaseLeases(s);
                 settleUnjudged(false);
                 m_stopReason = why;
-                recordSummary(displayRows(now), now); // the report says why this scan had no result
+                recordSummary(resultRows(now), now); // the report says why this scan had no result
                 recordScanEnd(now, s);
                 toNoScan(why, now, s);
             } else {
@@ -1443,9 +1453,9 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        bool found = false;
-        for (const ScanRowView &r : displayRows(now))
-            if (r.id == id && (m_filter.isEmpty() || r.countryCode == m_filter))
+        bool found = false; // a row the screen shows and takes taps on
+        for (const ListEntry &e : m_list)
+            if (e.id == id && e.row.tappable)
                 found = true;
         const bool currentRow = m_current.working() && m_current.nodeId == id;
         if (!found || !m_connectingId.isEmpty() || currentRow || m_tapFailed.contains(id)) {
@@ -1464,16 +1474,16 @@ public:
             }
             finishKeeping(now, id, s);
         }
-        // The attempt order: the visible rows after the filter, after the tapped one, wrapping.
-        const QList<ScanRowView> rows = filteredRows(now);
+        // The attempt order: the list's rows after the tapped one, wrapping (a row that failed now is no attempt).
+        syncList(now); // the finish above re-judged the list
         int at = -1;
-        for (int i = 0; i < rows.size(); ++i)
-            if (rows.at(i).id == id)
+        for (int i = 0; i < m_list.size(); ++i)
+            if (m_list.at(i).id == id)
                 at = i;
         QStringList order;
-        for (int k = 1; k < rows.size(); ++k) {
-            const ScanRowView &r = rows.at((at + k) % rows.size());
-            if (r.id == id || m_tapFailed.contains(r.id) || (m_current.working() && r.id == m_current.nodeId))
+        for (int k = 1; k < m_list.size(); ++k) {
+            const ScanRowView &r = m_list.at((at + k) % m_list.size()).row;
+            if (r.id == id || m_tapFailed.contains(r.id) || r.unavailable || (m_current.working() && r.id == m_current.nodeId))
                 continue;
             order << r.id;
         }
@@ -1573,6 +1583,7 @@ public:
         v.net = m_net.kind;
         v.moreAvailable = !v.scanning && m_completed && m_moreAvailable;
         v.batch = m_batch;
+        v.listBuild = m_listBuilds;
         v.moreCountry = m_scannedScope; // the scope the series covers: «Германия: проверены все серверы» when exhausted
         v.moreState = v.scanning ? (m_continuation && m_batch > 1 ? QStringLiteral("running") : QString())
                       : !m_completed  ? QString()
@@ -1586,21 +1597,34 @@ public:
         v.netRadio = m_net.kind == ScanNetKind::Cellular ? m_net.radio : QString();
         v.bar.scopeCountries = scopeList();
         v.bar.scopeWhitelist = m_poolWhitelist;
-        v.bar.scannedScope = m_completed || scanPhaseScanning(m_phase) ? m_scannedScope : cachedShown(now) ? m_cachedScope : QString();
+        bool listCache = false; // the list shows a cached result (its scope, its age)
+        qint64 cachedAt = -1;
+        for (const ListEntry &e : m_list) {
+            v.rows << e.row; // the list as the machine keeps it: the page draws it, never re-orders or drops a row
+            if (e.row.fromCache) {
+                listCache = true;
+                cachedAt = qMax(cachedAt, e.cachedAt);
+            }
+        }
+        v.bar.scannedScope = m_completed || scanPhaseScanning(m_phase) ? m_scannedScope : listCache ? m_cachedScope : QString();
         v.bar.scope = m_scope;
         if (m_phase == ScanPhase::Empty)
             v.empty.scopeCc = m_scannedScope;
-        const QList<ScanRowView> all = displayRows(now);
-        for (const ScanRowView &r : all) {
+        for (const ScanRowView &r : v.rows) {
+            if (r.unavailable)
+                continue; // failed now: on the screen, never counted
             if (r.verified && !r.fromCache)
                 ++v.verifiedCount; // a cached row is never counted (plan §2.11a)
             else if (!r.verified && !r.current)
                 ++v.unverifiedCount; // the unproven live row is neither (F2)
         }
-        const QString filter = effectiveFilter(all);
-        for (const ScanRowView &r : all)
-            if (filter.isEmpty() || r.countryCode == filter)
-                v.rows << r;
+        // The bar's country figures count the result (every country of it, whatever the list's scope).
+        const QList<ScanRowView> all = resultRows(now);
+        QString filter;
+        if (!m_filter.isEmpty() && !scanPhaseScanning(m_phase))
+            for (const ScanRowView &r : v.rows)
+                if (r.countryCode == m_filter)
+                    filter = m_filter;
         // Stage line.
         switch (m_phase) {
         case ScanPhase::Preparing:
@@ -1630,7 +1654,7 @@ public:
             break;
         }
         if (v.scanning) {
-            if (all.isEmpty())
+            if (v.rows.isEmpty())
                 v.wait = ScanWaitKey::RowsAppearHere;
             else if (m_phase == ScanPhase::Data && m_deadline >= 0) {
                 const int left = int((m_deadline - now + 999) / 1000);
@@ -1640,11 +1664,7 @@ public:
                 }
             }
         }
-        // Caption.
-        qint64 cachedAt = -1;
-        for (const Row &r : m_rows)
-            if (r.cached && rowShown(r, now))
-                cachedAt = qMax(cachedAt, r.cachedAt);
+        // Caption: the age of the cached rows on the list.
         if (v.scanning)
             v.checkedAgoMin = cachedAt > 0 ? int(qMax<qint64>(0, now - cachedAt) / 60000) : -1;
         else if (m_phase == ScanPhase::Done || m_phase == ScanPhase::Empty)
@@ -1698,7 +1718,7 @@ public:
         // Empty state.
         if (m_phase == ScanPhase::Empty)
             v.empty.variant = cellular ? ScanEmptyVariant::Cellular : ScanEmptyVariant::Wifi;
-        else if (m_phase == ScanPhase::NoScan && all.isEmpty())
+        else if (m_phase == ScanPhase::NoScan && v.rows.isEmpty())
             v.empty.variant = ScanEmptyVariant::NoScan;
         v.empty.reason = m_phase == ScanPhase::NoScan ? m_noScanReason : m_emptyReason;
         v.empty.reportSending = m_reportSending;
@@ -1732,6 +1752,12 @@ public:
     bool reportCheckRunning() const { return m_checking || m_reportSending; }
     double reportCheckProgress() const { return m_checking ? double(m_checkStep) / qMax(1, m_checkTotal) : -1.0; }
     QString connectingId() const { return m_connectingId; }
+    // How many times the list on the screen was built from empty (syncList): between two builds its rows only join
+    // its end and never leave (the invariant of tests/scan_world.h ListSteps).
+    quint64 listBuilds() const { return m_listBuilds; }
+    // The result as it stands (resultRows: every verdict the screen may get, «Не проверено» included while a scan
+    // runs) - the list shows a «Не проверено» row only once the scan ends.
+    QList<ScanRowView> result(qint64 now) const { return resultRows(qMax(now, m_last)); }
     const ScanBudgetLedger &ledger() const { return m_ledger; }
     int outstandingLeases() const
     {
@@ -1955,8 +1981,10 @@ private:
         return -1;
     }
 
-    void finishStep(ScanStep &s, qint64 now) const
+    // Every public step ends here: the list on the screen follows the step (syncList), then the next wake.
+    void finishStep(ScanStep &s, qint64 now)
     {
+        syncList(now);
         qint64 w = -1;
         const auto take = [&w](qint64 t) {
             if (t >= 0 && (w < 0 || t < w))
@@ -2012,6 +2040,7 @@ private:
     void adoptNetwork(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now)
     {
         m_net = n;
+        m_listRebuild = true; // the list belongs to its network (syncList)
         // Fresh rows of the old generation are no longer current evidence: they stay only as cache rows of
         // their own fingerprint (shown with their age if it matches); unproven live rows go.
         for (int i = m_rows.size() - 1; i >= 0; --i) {
@@ -2345,14 +2374,23 @@ private:
             m_worksBase = 0;
         }
         ++m_batch;
-        if (m_batch == 1)
+        if (m_batch == 1) {
             for (Row &r : m_rows)
                 r.batch = 1; // a new series: what stays on the screen belongs to its first batch
+            for (ListEntry &e : m_list) {
+                e.batch = 1;
+                e.joinedUnverified = false;
+            }
+        }
         m_moreAvailable = false;
         m_cands.clear();
         m_unverified.clear();
         m_tapFailed.clear();
         m_scannedScope = m_continuation ? m_moreCountry : m_scope;
+        // A scan over a shown result keeps that list: its rows are judged again in their places, new rows join its
+        // end. Only a list of another scope, or none, is built from empty (syncList).
+        if (m_list.isEmpty() || m_listScope != m_scannedScope)
+            m_listRebuild = true;
         m_fromServer = false;
         m_serverExhausted = false;
         m_candReqId.clear();
@@ -3343,7 +3381,7 @@ private:
         freezeHost(now, s);
         m_hostDone = true;
         settleUnjudged(); // a tap's stop, a failed connect: every candidate in its bucket before the rows are read
-        const QList<ScanRowView> rows = displayRows(now);
+        const QList<ScanRowView> rows = resultRows(now);
         m_phase = rows.isEmpty() ? ScanPhase::Empty : ScanPhase::Done;
         int working = 0;
         ScanCachedResult cache;
@@ -3602,14 +3640,14 @@ private:
         if (scanning) {
             checkStop(now, s);
         } else if (m_phase == ScanPhase::Done || m_phase == ScanPhase::Empty) {
-            if (m_phase == ScanPhase::Empty && !displayRows(now).isEmpty())
+            if (m_phase == ScanPhase::Empty && !resultRows(now).isEmpty())
                 m_phase = ScanPhase::Done;
             ScanAction p = act(ScanActionKind::PersistResults, m_scanNet.key);
-            p.cached = buildCache(displayRows(now), now);
+            p.cached = buildCache(resultRows(now), now);
             s.actions << p;
             // The summary of the finished scan gets the proven rows (its other figures stay as they were).
             if (!m_summary.isEmpty() && m_exclusionRows > 0) {
-                const QJsonObject fresh = buildSummary(displayRows(now), m_finishedAt);
+                const QJsonObject fresh = buildSummary(resultRows(now), m_finishedAt);
                 for (const char *k : {"candidates", "counts", "top", "not_verified_reasons"}) // one bucket per candidate
                     m_summary.insert(QLatin1String(k), fresh.value(QLatin1String(k)));
             }
@@ -3732,7 +3770,90 @@ private:
         return a.id < b.id;
     }
 
-    QList<ScanRowView> displayRows(qint64 now) const
+    bool isCurrentId(const QString &id) const { return m_current.working() && id == m_current.nodeId; }
+
+    // A working row the evidence offers the screen now (a live connection that is gone and was never proven: none).
+    bool rowOffered(const Row &r, qint64 now) const
+    {
+        return scanClassWorking(r.base) && rowShown(r, now) && (rowVerified(r) || isCurrentId(r.id));
+    }
+
+    // What a tap did to a row: «Подключение…» while its attempt runs, «Не удалось» once it failed.
+    void overlayTap(ScanRowView &v) const
+    {
+        if (m_tapFailed.contains(v.id)) {
+            v.state = ScanRowState::Failed;
+            v.dimmed = true;
+            v.tappable = false;
+        }
+        if (!m_connectingId.isEmpty() && v.id == m_connectingId) {
+            v.state = ScanRowState::Connecting;
+            v.verifying = true;
+        }
+    }
+
+    // One working row as the screen draws it: the live connection, a tap's attempt, a failed tap.
+    ScanRowView rowViewOf(const Row &r) const
+    {
+        ScanRowView v;
+        v.id = r.id;
+        v.origin = r.origin;
+        v.label = r.label;
+        v.countryCode = r.countryCode;
+        v.transport = r.transport;
+        v.transportVersion = r.transportVersion;
+        v.speed = r.base == ScanClass::Slow ? ScanSpeed::Slow : r.speed;
+        v.bars = scanSpeedBars(v.speed);
+        v.ms = r.sortMs;
+        v.fromCache = r.cached;
+        v.arrival = r.arrival;
+        v.crowdWorks = r.crowdWorks;
+        v.state = r.base == ScanClass::Slow ? ScanRowState::Slow : ScanRowState::Works;
+        const bool isCurrent = isCurrentId(r.id);
+        if (isCurrent) {
+            v.state = ScanRowState::Connected;
+            v.current = true;
+            v.ms = m_current.liveRttMs;
+        }
+        if (!rowVerified(r)) {
+            // Connected, but not counted as verified until the sized check through the tunnel (F2).
+            v.verified = false;
+            v.notVerifiedReason = QStringLiteral("live_unverified");
+            v.liveChecking = liveProofPending(r.id);
+            v.bars = scanSpeedBars(v.speed);
+        }
+        overlayTap(v);
+        if (isCurrent)
+            v.tappable = false;
+        return v;
+    }
+
+    // A «Не проверено» row (a candidate without a verdict the screen can show).
+    ScanRowView unverifiedViewOf(const ScanCandidate &c, const QString &reason) const
+    {
+        ScanRowView v;
+        v.id = c.id;
+        v.origin = c.origin;
+        v.label = c.label;
+        v.countryCode = c.countryCode;
+        v.transport = c.transport;
+        v.transportVersion = c.transportVersion;
+        v.state = ScanRowState::NotVerified;
+        v.verified = false;
+        v.crowdWorks = c.crowdWorks;
+        v.speed = ScanSpeed::None;
+        v.bars = 0;
+        v.ms = -1;
+        v.notVerifiedReason = reason;
+        overlayTap(v);
+        return v;
+    }
+
+    // The RESULT (what a finished scan persists, counts, summarizes, and what a list built from empty shows, in this
+    // order): working rows per batch of the series - forced rows (live, connecting, failed tap), then tier, fresh
+    // before cached, speed, ms - at most scan_list_target_works per batch; then up to scan_unverified_rows_max
+    // «Не проверено» rows next to a list that is not full. Never the screen's order while a list lives (syncList).
+    QList<ScanRowView> resultRows(qint64 now) const
     {
         struct Item {
             ScanRowView v;
@@ -3745,60 +3866,18 @@ private:
         };
         QList<Item> verified;
         for (const Row &r : m_rows) {
-            if (!scanClassWorking(r.base) || !rowShown(r, now))
+            if (!rowOffered(r, now))
                 continue;
-            const bool liveUnproven = !rowVerified(r);
-            if (liveUnproven && !(m_current.working() && r.id == m_current.nodeId))
-                continue; // a live connection that is gone and was never proven: no row
             Item it;
-            ScanRowView &v = it.v;
-            v.id = r.id;
-            v.origin = r.origin;
-            v.label = r.label;
-            v.countryCode = r.countryCode;
-            v.transport = r.transport;
-            v.transportVersion = r.transportVersion;
-            v.speed = r.base == ScanClass::Slow ? ScanSpeed::Slow : r.speed;
-            v.bars = scanSpeedBars(v.speed);
-            v.ms = r.sortMs;
-            v.fromCache = r.cached;
-            v.arrival = r.arrival;
-            v.crowdWorks = r.crowdWorks;
-            v.state = r.base == ScanClass::Slow ? ScanRowState::Slow : ScanRowState::Works;
-            const bool isCurrent = m_current.working() && r.id == m_current.nodeId;
-            if (isCurrent) {
-                v.state = ScanRowState::Connected;
-                v.current = true;
-                v.ms = m_current.liveRttMs;
-            }
-            if (liveUnproven) {
-                // Connected, but not counted as verified until the sized check through the tunnel (F2).
-                v.verified = false;
-                v.notVerifiedReason = QStringLiteral("live_unverified");
-                v.liveChecking = liveProofPending(r.id);
-                v.bars = scanSpeedBars(v.speed);
-            }
-            if (m_tapFailed.contains(r.id)) {
-                v.state = ScanRowState::Failed;
-                v.dimmed = true;
-                v.tappable = false;
-            }
-            if (!m_connectingId.isEmpty() && r.id == m_connectingId) {
-                v.state = ScanRowState::Connecting;
-                v.verifying = true;
-            }
-            if (isCurrent)
-                v.tappable = false;
+            it.v = rowViewOf(r);
             it.tier = r.tier;
             it.rank = r.rank;
             it.sort = r.sortMs;
-            it.forced = isCurrent || r.id == m_connectingId || m_tapFailed.contains(r.id);
+            it.forced = isCurrentId(r.id) || r.id == m_connectingId || m_tapFailed.contains(r.id);
             it.cached = r.cached;
             it.batch = rowBatch(r);
             verified << it;
         }
-        // Admission, per batch of the series («Найти ещё» adds its rows, never replaces them): forced rows, then
-        // tier first, fresh before cached, speed, ms - at most the cap per batch.
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
             if (a.batch != b.batch)
                 return a.batch < b.batch;
@@ -3821,7 +3900,7 @@ private:
             ++n;
             ++i;
         }
-        // Shown: the batches in their order, each by speed - a row of an earlier batch never moves for a new one.
+        // The batches in their order, each by speed.
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
             if (a.batch != b.batch)
                 return a.batch < b.batch;
@@ -3838,58 +3917,201 @@ private:
             for (const Unverified &u : m_unverified) {
                 if (n >= m_t.unverifiedRowsMax)
                     break;
-                if (ids.contains(u.c.id) || (m_current.working() && u.c.id == m_current.nodeId))
+                if (ids.contains(u.c.id) || isCurrentId(u.c.id))
                     continue;
-                ScanRowView v;
-                v.id = u.c.id;
-                v.origin = u.c.origin;
-                v.label = u.c.label;
-                v.countryCode = u.c.countryCode;
-                v.transport = u.c.transport;
-                v.transportVersion = u.c.transportVersion;
-                v.state = ScanRowState::NotVerified;
-                v.verified = false;
-                v.crowdWorks = u.c.crowdWorks;
-                v.speed = ScanSpeed::None;
-                v.bars = 0;
-                v.ms = -1;
-                v.notVerifiedReason = u.reason;
-                if (m_tapFailed.contains(u.c.id)) {
-                    v.state = ScanRowState::Failed;
-                    v.dimmed = true;
-                    v.tappable = false;
-                }
-                if (!m_connectingId.isEmpty() && u.c.id == m_connectingId) {
-                    v.state = ScanRowState::Connecting;
-                    v.verifying = true;
-                }
-                out << v;
-                ids.insert(v.id);
+                out << unverifiedViewOf(u.c, u.reason);
+                ids.insert(u.c.id);
                 ++n;
             }
         }
         return out;
     }
 
-    QString effectiveFilter(const QList<ScanRowView> &all) const
+    // --- the list on the screen (owner 19.11, device rounds air7-air9: rows jumped, a row appeared and vanished) -----
+    // The machine is the ONE owner of the rows' order and lifetime; the page draws m_list as it is.
+    //  - Built from empty (m_listRebuild) only when the page opens (opened / shown), the scope changes (filterChosen,
+    //    a scan of another scope or with no list) or the network changes: the result's rows in speed order
+    //    (resultRows), of the list's scope; a cached row only within its show window (cachedVisible:
+    //    scan_cache_works_ttl_s, or kScanCacheShowMaxMs under a scan that starts with the list - fig. 18) - its expiry
+    //    is judged here, never while the list is on the screen; nothing when the chosen scope is not the one of the
+    //    shown result (UI 19.11: the scope's summary and the Scan button instead).
+    //  - Otherwise append-only: a FRESH row the list has not got joins its end, in the order rows arrived, while fewer
+    //    than scan_list_target_works rows of its batch are proven on the list; the live connection's row (and a tapped
+    //    row) always joins. A «Не проверено» row joins only once its outcome is final - the scan or batch has ended -
+    //    never provisionally. A cached row never joins later.
+    //  - An entry never leaves and never moves while the list lives. Its row follows its source in place: a row
+    //    proven again turns fresh, one whose probe failed now reads «Не удалось» (unavailable), a «Не проверено» row
+    //    takes its verdict; a source that is gone keeps the entry's last look.
+    struct ListEntry {
+        QString id;
+        int batch = 1;        // the batch of the series it joined in (the per-batch cap)
+        qint64 cachedAt = -1; // a cached row's age (the caption)
+        bool joinedUnverified = false; // joined as «Не проверено» (the per-batch cap of those, whatever it reads later)
+        ScanRowView row;      // what the entry shows now
+    };
+
+    int listIndex(const QString &id) const
     {
-        if (m_filter.isEmpty() || scanPhaseScanning(m_phase))
-            return QString();
-        for (const ScanRowView &r : all)
-            if (r.countryCode == m_filter)
-                return m_filter;
-        return QString();
+        for (int i = 0; i < m_list.size(); ++i)
+            if (m_list.at(i).id == id)
+                return i;
+        return -1;
     }
 
-    QList<ScanRowView> filteredRows(qint64 now) const
+    // A row of the list's scope ("" = every country, a country code, "whitelist" = the rows without a country); the live
+    // connection's row and a tapped row always are.
+    bool listAdmits(const ScanRowView &v) const
     {
-        const QList<ScanRowView> all = displayRows(now);
-        const QString f = effectiveFilter(all);
-        QList<ScanRowView> out;
-        for (const ScanRowView &r : all)
-            if (f.isEmpty() || r.countryCode == f)
-                out << r;
-        return out;
+        if (v.current || v.id == m_connectingId || m_listScope.isEmpty())
+            return true;
+        if (m_listScope == QLatin1String(kScanScopeWhitelist))
+            return v.countryCode.isEmpty();
+        return v.countryCode == m_listScope;
+    }
+
+    // Rows of batch `b` the list shows as proven now (cached and failed rows are none): the per-batch cap.
+    int listProven(int b) const
+    {
+        int n = 0;
+        for (const ListEntry &e : m_list)
+            if (e.batch == b && e.row.verified && !e.row.fromCache && !e.row.unavailable && e.row.state != ScanRowState::Failed)
+                ++n;
+        return n;
+    }
+
+    bool failedThisScan(const QString &id) const
+    {
+        for (const ScanCachedFailure &f : m_failuresThisScan)
+            if (f.id == id)
+                return true;
+        return false;
+    }
+
+    void syncList(qint64 now)
+    {
+        const bool scanning = scanPhaseScanning(m_phase);
+        if (m_listRebuild) {
+            m_listRebuild = false;
+            ++m_listBuilds;
+            m_list.clear();
+            m_listScope = scanning ? m_scannedScope : m_scope;
+            const QString shownScope = m_completed || scanning ? m_scannedScope : cachedShown(now) ? m_cachedScope : QString();
+            m_listPending = !scanning && !scopeList().isEmpty() && m_scope != shownScope;
+            for (const ScanRowView &v : m_listPending ? QList<ScanRowView>() : resultRows(now)) {
+                if ((!v.verified && !v.current && scanning) || !listAdmits(v))
+                    continue; // «Не проверено» only once final
+                ListEntry e;
+                e.id = v.id;
+                e.row = v;
+                e.joinedUnverified = !v.verified && !v.current;
+                const int ri = rowIndex(v.id);
+                e.batch = ri >= 0 ? rowBatch(m_rows.at(ri)) : qMax(1, m_batch);
+                if (v.fromCache) // its show window (cachedVisible) was judged now, when the list is built - never while shown
+                    e.cachedAt = ri >= 0 ? m_rows.at(ri).cachedAt : -1;
+                m_list << e;
+            }
+        }
+        // 1. Every entry follows its source in place.
+        for (ListEntry &e : m_list) {
+            const int ri = rowIndex(e.id);
+            const Row *r = ri >= 0 ? &m_rows.at(ri) : nullptr;
+            const Unverified *u = nullptr;
+            for (const Unverified &x : m_unverified)
+                if (x.c.id == e.id)
+                    u = &x;
+            if (r && !r->cached && rowOffered(*r, now)) {
+                e.row = rowViewOf(*r); // fresh evidence, the live connection
+                e.cachedAt = -1;
+            } else if (failedThisScan(e.id) && !(r && r->id == m_connectingId)) {
+                // its probe failed in this scan: «Не удалось» in its place until the list is rebuilt
+                e.row.state = ScanRowState::Failed;
+                e.row.unavailable = true;
+                e.row.dimmed = true;
+                e.row.tappable = false;
+                e.row.fromCache = false;
+                e.row.current = false;
+                e.row.verifying = false;
+                e.row.speed = ScanSpeed::None;
+                e.row.bars = 0;
+                e.row.ms = -1;
+            } else if (u && (!scanning || !e.row.verified)) {
+                e.row = unverifiedViewOf(u->c, u->reason); // its verdict is «Не проверено» (once final)
+                e.cachedAt = -1;
+            } else if (r && r->cached) {
+                e.row = rowViewOf(*r); // still the cached row (whatever its age now)
+                e.cachedAt = r->cachedAt;
+            } else if (r) {
+                // the live connection is gone and was never proven: «Не проверено», tappable
+                e.row = unverifiedViewOf(ScanCandidate(), QStringLiteral("live_unverified"));
+                const ScanRowView w = rowViewOf(*r);
+                e.row.id = w.id;
+                e.row.origin = w.origin;
+                e.row.label = w.label;
+                e.row.countryCode = w.countryCode;
+                e.row.transport = w.transport;
+                e.row.transportVersion = w.transportVersion;
+                e.row.crowdWorks = w.crowdWorks;
+                overlayTap(e.row);
+            } else if (!e.row.unavailable) {
+                // the source is gone (a cached row the finished scan did not judge again): its last look
+                e.row.current = false;
+                e.row.verifying = false;
+                if (e.row.state == ScanRowState::Connecting || e.row.state == ScanRowState::Connected)
+                    e.row.state = e.row.verified ? ScanRowState::Works : ScanRowState::NotVerified;
+                if (!m_tapFailed.contains(e.id)) {
+                    e.row.dimmed = false;
+                    e.row.tappable = true;
+                }
+                overlayTap(e.row);
+            }
+        }
+        if (m_listPending)
+            return; // the chosen scope is not the shown result's: nothing joins until a scan of it builds the list
+        // 2. Fresh rows join the end, in the order they arrived.
+        const int cap = qMax(1, m_t.listTargetWorks);
+        QList<const Row *> fresh;
+        for (const Row &r : m_rows)
+            if (!r.cached && rowOffered(r, now) && listIndex(r.id) < 0)
+                fresh << &r;
+        std::stable_sort(fresh.begin(), fresh.end(), [](const Row *a, const Row *b) { return a->arrival < b->arrival; });
+        for (const Row *r : fresh) {
+            const ScanRowView v = rowViewOf(*r);
+            if (!listAdmits(v))
+                continue;
+            const int b = rowBatch(*r);
+            const bool forced = v.current || r->id == m_connectingId;
+            if (!forced && listProven(b) >= cap)
+                continue; // the batch's list is full: a later row never pushes a shown one out
+            ListEntry e;
+            e.id = r->id;
+            e.batch = b;
+            e.row = v;
+            m_list << e;
+        }
+        // 3. «Не проверено» rows once their outcome is final: the scan or batch has ended.
+        if (!scanning) {
+            const int b = qMax(1, m_batch);
+            int n = 0;
+            for (const ListEntry &e : m_list)
+                if (e.batch == b && e.joinedUnverified)
+                    ++n;
+            for (const Unverified &u : m_unverified) {
+                if (listProven(b) >= cap || n >= m_t.unverifiedRowsMax)
+                    break;
+                if (listIndex(u.c.id) >= 0 || isCurrentId(u.c.id))
+                    continue;
+                const ScanRowView v = unverifiedViewOf(u.c, u.reason);
+                if (!listAdmits(v))
+                    continue;
+                ListEntry e;
+                e.id = u.c.id;
+                e.batch = b;
+                e.joinedUnverified = true;
+                e.row = v;
+                m_list << e;
+                ++n;
+            }
+        }
     }
 
     // Where «Отправить отчёт в поддержку» is offered: the empty result, «скан невозможен», and a finished scan with
@@ -3947,6 +4169,11 @@ private:
     QString m_scanId;
     quint64 m_serial = 0;
     quint64 m_arrival = 0;
+    QList<ListEntry> m_list;      // the list on the screen, in its order (syncList)
+    bool m_listRebuild = false;   // the next step's end builds the list from empty
+    QString m_listScope;          // the scope the list was built for ("" = all, a country, "whitelist")
+    quint64 m_listBuilds = 0;
+    bool m_listPending = false;   // built empty: the chosen scope is not the one of the shown result
     qint64 m_lastSeq = 0;
     qint64 m_spent = 0;
     qint64 m_cap = -1;
@@ -4250,6 +4477,7 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     for (const ScanRowView &r : v.rows)
         rows << scanRowViewToJson(r);
     o.insert(QStringLiteral("rows"), rows);
+    o.insert(QStringLiteral("list_build"), double(v.listBuild));
     o.insert(QStringLiteral("verified"), v.verifiedCount);
     o.insert(QStringLiteral("unverified"), v.unverifiedCount);
     o.insert(QStringLiteral("more_available"), v.moreAvailable);

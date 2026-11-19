@@ -158,7 +158,6 @@ inline void checkStepInvariants(const Recorded &r, const QString &prevPhase, con
                                 Fail &f, const QString &where)
 {
     const QString e = r.event.value(QLatin1String("event")).toString();
-    const ScanTunables &t = m.tunables();
     for (const ScanAction &a : r.step.actions) {
         if (!scanActionTouchesTunnel(a.kind))
             continue;
@@ -176,39 +175,13 @@ inline void checkStepInvariants(const Recorded &r, const QString &prevPhase, con
         if (a.kind == ScanActionKind::StartHostScan || a.kind == ScanActionKind::AddHostCandidates)
             for (const ScanCandidate &c : a.candidates)
                 f.check(currentId.isEmpty() || c.id != currentId, where + QStringLiteral(": the current node scheduled"));
+    // The list's ORDER, its rows' lifetime and its caps are judged across steps (scan_world.h ListSteps).
     const QJsonArray rows = r.view.value(QLatin1String("rows")).toArray();
-    const int verified = r.view.value(QLatin1String("verified")).toInt();
-    const int unverified = r.view.value(QLatin1String("unverified")).toInt();
-    f.check(verified <= t.listTargetWorks, where + QStringLiteral(": more than the cap of verified rows"));
-    f.check(unverified <= t.unverifiedRowsMax, where + QStringLiteral(": more than the cap of unverified rows"));
-    f.check(unverified == 0 || verified < t.listTargetWorks, where + QStringLiteral(": unverified rows next to a full list"));
     QSet<QString> ids;
-    int lastRank = -1, lastMs = -1;
-    bool seenUnverified = false;
     for (const QJsonValue &v : rows) {
-        const QJsonObject row = v.toObject();
-        const QString id = row.value(QLatin1String("id")).toString();
+        const QString id = v.toObject().value(QLatin1String("id")).toString();
         f.check(!ids.contains(id), where + QStringLiteral(": a row twice ") + id);
         ids.insert(id);
-        const bool unv = row.value(QLatin1String("flags")).toArray().contains(QStringLiteral("unverified"));
-        if (unv) {
-            seenUnverified = true;
-            continue;
-        }
-        f.check(!seenUnverified, where + QStringLiteral(": a verified row after an unverified one"));
-        const int rank = scanSpeedRank(scanSpeedFrom(row.value(QLatin1String("speed")).toString()));
-        const int rawMs = row.value(QLatin1String("ms")).toInt();
-        const int ms = rawMs < 0 ? INT_MAX : rawMs; // no figure sorts last inside its speed class
-        // The current row shows its live ms but keeps the place of its own facts: it is skipped here.
-        const bool current = row.value(QLatin1String("flags")).toArray().contains(QStringLiteral("current"));
-        f.check(rank >= lastRank, where + QStringLiteral(": rows out of speed order"));
-        if (rank != lastRank)
-            lastMs = -1;
-        if (!current && rank == lastRank && lastMs >= 0)
-            f.check(ms >= lastMs, where + QStringLiteral(": rows out of ms order inside a speed class"));
-        lastRank = rank;
-        if (!current)
-            lastMs = ms;
     }
     const double prog = r.view.value(QLatin1String("progress")).toDouble();
     f.check(prog >= -1 && prog <= 1.0001, where + QStringLiteral(": progress out of range"));
@@ -401,6 +374,7 @@ inline void checkAllSteps(const Driver &d, Fail &f, const QString &name)
 {
     QString prev = QStringLiteral("idle");
     QString currentId;
+    ListSteps list(d.m.tunables());
     for (int i = 0; i < d.steps.size(); ++i) {
         const Recorded &r = d.steps.at(i);
         const QString buckets = summaryBucketsWhy(r.summary);
@@ -414,6 +388,7 @@ inline void checkAllSteps(const Driver &d, Fail &f, const QString &name)
             currentId = c.working() ? c.nodeId : QString();
         }
         checkStepInvariants(r, prev, d.m, currentId, f, name + QStringLiteral("#") + QString::number(i));
+        list.step(r, f.list, name + QStringLiteral("#") + QString::number(i));
         prev = phaseOf(r.view);
     }
 }
@@ -484,6 +459,7 @@ inline QJsonObject viewAt(const Driver &d, qint64 offsetMs)
     return v;
 }
 
+
 // --- the scenarios ----------------------------------------------------------------------------------------
 
 struct Scenario {
@@ -513,6 +489,54 @@ inline World baseWorld(const char *name, const ScanHostCaps &caps, ScanNetKind k
     w.nodes = artboardNodes();
     w.out = allWork(w.nodes);
     return w;
+}
+
+// Arrival order != speed order: the probes' durations and rtts scrambled (a slow-to-answer node may be fast, and back),
+// as on the iPhone Air (device rounds air7-air9, 19.11).
+inline World scrambledWorld(const char *name)
+{
+    World w = baseWorld(name, hostMac(), ScanNetKind::Wifi);
+    const int dur[] = {900, 420, 1500, 640, 1100, 380, 1800, 700, 1300, 520, 950, 600, 1200, 800, 1000};
+    const int rtt[] = {41, 49, 57, 90, 101, 58, 128, 66, 112, 47, 101, 70, 44, 140, 55};
+    int k = 0;
+    for (const NodeSpec &n : w.nodes) {
+        Outcome &o = w.out[n.id];
+        o.durMs = dur[k % 15];
+        o.rtt = rtt[k % 15];
+        o.t64 = 120 + 2 * o.rtt;
+        ++k;
+    }
+    return w;
+}
+
+// A cached result of this world's network, saved `ageMs` ago, with these rows (fast, in this order).
+inline ScanCachedResult cachedOf(const World &w, qint64 ageMs, const QStringList &ids)
+{
+    ScanCachedResult c;
+    c.networkKey = w.net.key;
+    c.fingerprint = w.net.fingerprint;
+    c.savedAtMs = kT0 - ageMs;
+    int ms = 40;
+    for (const QString &id : ids) {
+        ScanCachedRow r;
+        r.id = id;
+        r.label = specOf(w, id)->label;
+        r.countryCode = specOf(w, id)->cc;
+        r.origin = specOf(w, id)->provider ? ScanOrigin::Upstream : ScanOrigin::Own;
+        r.speed = ScanSpeed::Fast;
+        r.ms = ms;
+        ms += 5;
+        c.rows << r;
+    }
+    return c;
+}
+
+inline int stepOfBuild(const Driver &d, quint64 build)
+{
+    for (int i = 0; i < d.steps.size(); ++i)
+        if (d.steps.at(i).listBuilds == build)
+            return i;
+    return -1;
 }
 
 inline QList<Scenario> scenarios()
@@ -729,7 +753,14 @@ inline QList<Scenario> scenarios()
                       f.check(v0.value(QLatin1String("stage")).toString() == QLatin1String("connecting"), QStringLiteral("stage connecting"));
                       f.check(v0.value(QLatin1String("checked_ago_min")).toInt() == 12, QStringLiteral("cached 12 min"));
                       f.check(rowIds(v0).size() == 4, QStringLiteral("cached rows at once"));
-                      f.check(!rowIds(lastView(d)).contains(QStringLiteral("77:xray")), QStringLiteral("unverified cached row dropped"));
+                      // the node the server no longer lists: never in the result (the persisted rows, a list built later); on
+                      // the list shown since the open it stays in its place as the old cached row (owner 19.11)
+                      bool persisted77 = false;
+                      for (const ScanAction &a : actionsOf(d, ScanActionKind::PersistResults))
+                          for (const ScanCachedRow &c : a.cached.rows)
+                              persisted77 = persisted77 || c.id == QLatin1String("77:xray");
+                      f.check(!persisted77 && rowOf(lastView(d), QStringLiteral("77:xray")).value(QLatin1String("flags")).toArray().contains(QStringLiteral("cache")),
+                              QStringLiteral("unverified cached row out of the result, kept in place as cache"));
                       f.check(countActions(d, ScanActionKind::UserConnectForScan) == 1, QStringLiteral("one connect"));
                       f.check(countActions(d, ScanActionKind::CancelPendingConnect) == 0, QStringLiteral("never disconnected"));
                       f.check(phaseOf(lastView(d)) == QLatin1String("done"), QStringLiteral("done"));
@@ -1511,6 +1542,120 @@ inline QList<Scenario> scenarios()
                       f.check(a.baseIps == QStringList({QStringLiteral("198.51.100.7"), QStringLiteral("2001:db8::7")}), QStringLiteral("base_ips"));
                   }};
 
+    // The list on the screen (owner 19.11, device rounds air7-air9: rows jumped, a row appeared and vanished). Every
+    // scenario keeps ListSteps (scan_world.h); these four meet its cases head-on («Найти ещё» appending a batch:
+    // scan_core_check.cpp findMoreAppends).
+    // R1. Rows join the end in the order they ARRIVE (not re-sorted when a faster one comes later); the same result
+    // read back after a reopen is built from empty, in speed order.
+    l << Scenario{QStringLiteral("rows_arrival_order"),
+                  {QStringLiteral("append-only in arrival order while the scan runs"), QStringLiteral("speed order only when built from empty")},
+                  [] {
+                      World w = scrambledWorld("rows_arrival_order");
+                      w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+                      w.script << qMakePair(qint64(14000), at("closed"));
+                      w.script << qMakePair(qint64(74000), [w](qint64 t) { return ev("shown", t, openArgs(w, QString(), false)); });
+                      w.runMs = 75000;
+                      return w;
+                  },
+                  [](const Driver &d, Fail &f) {
+                      const QJsonObject scanned = viewAt(d, 13900);
+                      const QJsonArray rows = scanned.value(QLatin1String("rows")).toArray();
+                      bool laterFaster = false; // a row that arrived later is faster than one above it: not re-sorted
+                      for (int i = 0; i < rows.size(); ++i)
+                          for (int j = i + 1; j < rows.size(); ++j)
+                              laterFaster = laterFaster || rows.at(j).toObject().value(QLatin1String("ms")).toInt()
+                                                               < rows.at(i).toObject().value(QLatin1String("ms")).toInt();
+                      f.check(phaseOf(scanned) == QLatin1String("done") && rows.size() >= 5 && laterFaster, QStringLiteral("arrival order kept"));
+                      const QJsonObject reopened = lastView(d);
+                      f.check(d.steps.last().listBuilds == d.steps.at(stepOfBuild(d, 1)).listBuilds + 1, QStringLiteral("one build per open"));
+                      QStringList a = rowIds(scanned), b = rowIds(reopened);
+                      std::sort(a.begin(), a.end());
+                      std::sort(b.begin(), b.end());
+                      f.check(a == b && rowIds(scanned) != rowIds(reopened), QStringLiteral("the same rows, now in speed order"));
+                  }};
+    // R2. A new scan over a shown result («Сканировать» with last result on the screen): the shown rows stay in their
+    // places and are judged again there - proven again (fresh), or «Не удалось» when their reach fails now; rows the
+    // result did not have join the end. The list is not built again.
+    l << Scenario{QStringLiteral("rescan_over_shown_result"),
+                  {QStringLiteral("shown rows judged again in place"), QStringLiteral("a failed row stays, «Не удалось»"),
+                   QStringLiteral("new rows join the end")},
+                  [] {
+                      World w = baseWorld("rescan_over_shown_result", hostMac(), ScanNetKind::Wifi);
+                      w.nodes = ownOnly(w.nodes);
+                      w.out = allWork(w.nodes);
+                      for (const char *id : {"4:xray", "9:xray"}) // dead since the last result
+                          w.out[QLatin1String(id)].reachOk = false, w.out[QLatin1String(id)].works = false;
+                      const ScanCachedResult c = cachedOf(w, 3 * 60000, {QStringLiteral("4:xray"), QStringLiteral("2:xray"), QStringLiteral("9:xray"),
+                                                                          QStringLiteral("5:xray")});
+                      w.script << qMakePair(qint64(0), [w, c](qint64 t) { return ev("shown", t, openArgs(w, QString(), false, c)); });
+                      w.script << qMakePair(qint64(1000), at("retry"));
+                      w.runMs = 14000;
+                      return w;
+                  },
+                  [](const Driver &d, Fail &f) {
+                      const QJsonObject shown = d.steps.value(0).view;
+                      const QJsonObject end = lastView(d);
+                      const QStringList before = rowIds(shown), after = rowIds(end);
+                      f.check(before.size() == 4 && after.mid(0, 4) == before && after.size() > 4, QStringLiteral("shown rows first, new rows after"));
+                      f.check(d.steps.last().listBuilds == d.steps.value(0).listBuilds, QStringLiteral("the scan kept the list"));
+                      for (const char *id : {"4:xray", "9:xray"}) {
+                          const QJsonObject r = rowOf(end, QLatin1String(id));
+                          f.check(r.value(QLatin1String("state")).toString() == QLatin1String("failed")
+                                      && r.value(QLatin1String("flags")).toArray().contains(QStringLiteral("not_tappable")),
+                                  QStringLiteral("dead row «Не удалось» in place: ") + QLatin1String(id));
+                      }
+                      for (const char *id : {"2:xray", "5:xray"})
+                          f.check(!rowOf(end, QLatin1String(id)).value(QLatin1String("flags")).toArray().contains(QStringLiteral("cache")),
+                                  QStringLiteral("proven again: fresh in place: ") + QLatin1String(id));
+                      f.check(end.value(QLatin1String("verified")).toInt() == after.size() - 2, QStringLiteral("failed rows never counted"));
+                  }};
+    // R3. A provider leg answers first with «Не проверено» (its DNS plan unproven) and its full follow-up then fails:
+    // the row never appears - a «Не проверено» row joins only once final, a failed one never joins. A leg whose
+    // follow-up proves it joins once, as a working row.
+    l << Scenario{QStringLiteral("leg_early_then_fails"),
+                  {QStringLiteral("no provisional «Не проверено» row"), QStringLiteral("a row never appears and vanishes")},
+                  [] {
+                      World w = scrambledWorld("leg_early_then_fails");
+                      for (const char *id : {"4:xray", "9:xray", "10:xray"})
+                          w.out[QLatin1String(id)].reachOk = false, w.out[QLatin1String(id)].handshake = false;
+                      w.out[up(3)].fullWorks = 0; // the leg's full follow-up says no
+                      w.out[up(3)].durMs = 250;   // ... but its leg answers first
+                      w.leaseDelayMs = 20;
+                      w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+                      w.runMs = 14000;
+                      return w;
+                  },
+                  [](const Driver &d, Fail &f) {
+                      bool everShown = false, legAnswered = false;
+                      for (const Recorded &r : d.steps) {
+                          everShown = everShown || rowIds(r.view).contains(up(3));
+                          for (const QJsonValue &it : r.event.value(QLatin1String("args")).toObject().value(QLatin1String("reply")).toObject()
+                                                          .value(QLatin1String("items")).toArray())
+                              legAnswered = legAnswered || it.toObject().value(QLatin1String("id")).toString() == up(3);
+                      }
+                      f.check(legAnswered && !everShown, QStringLiteral("the failing leg never on the list"));
+                      f.check(phaseOf(lastView(d)) == QLatin1String("done"), QStringLiteral("done"));
+                  }};
+    // R4. A cached result never expires in front of the person: shown at 8 min, still there at 13 min; the next list
+    // built (the page opened again) judges scan_cache_works_ttl_s.
+    l << Scenario{QStringLiteral("cache_kept_while_shown"),
+                  {QStringLiteral("expiry judged when the list is built, never while shown")},
+                  [] {
+                      World w = baseWorld("cache_kept_while_shown", hostMac(), ScanNetKind::Wifi);
+                      const ScanCachedResult c = cachedOf(w, 8 * 60000, {QStringLiteral("2:xray"), QStringLiteral("5:xray")});
+                      w.script << qMakePair(qint64(0), [w, c](qint64 t) { return ev("shown", t, openArgs(w, QString(), false, c)); });
+                      w.script << qMakePair(qint64(5 * 60000), at("tick"));
+                      w.script << qMakePair(qint64(5 * 60000 + 1000), [w, c](qint64 t) { return ev("shown", t, openArgs(w, QString(), false, c)); });
+                      w.runMs = 5 * 60000 + 2000;
+                      return w;
+                  },
+                  [](const Driver &d, Fail &f) {
+                      const QJsonObject later = viewAt(d, 5 * 60000);
+                      f.check(rowIds(d.steps.value(0).view).size() == 2 && rowIds(later).size() == 2
+                                  && later.value(QLatin1String("checked_ago_min")).toInt() == 13,
+                              QStringLiteral("still shown at 13 min"));
+                      f.check(rowIds(lastView(d)).isEmpty(), QStringLiteral("gone from the next list built"));
+                  }};
     return l;
 }
 
