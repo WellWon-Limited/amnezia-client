@@ -73,6 +73,7 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     // renewals (the root daemon has no TLS backend and no token); on iOS / macOS NE the extension does.
     m_leaseClient = new UpstreamLeaseClient(this);
     m_upOwner.setIo(m_leaseClient);
+    m_leaseClient->leaseHeld = [this](const QString &id) { return m_upOwner.holdsLease(id); };
     {
         UpstreamLeaseOwner::Options o;
 #if AVPN_UPSTREAM_GUI_OWNER
@@ -772,7 +773,7 @@ void VpnConnectionTunnelControl::applyUpstreamEvents(const QVector<UpstreamOwner
             // (the owner's own release with the final report goes first). Without a report (meter seq 0).
             if (m_leaseClient) {
                 m_leaseClient->holdReleasesForStop();
-                m_leaseClient->release(0, e.leaseId, UpstreamMeter{}, e.route);
+                m_leaseClient->release(e.requestId, e.leaseId, UpstreamMeter{}, e.route); // the owner's own request id
             }
             break;
         }

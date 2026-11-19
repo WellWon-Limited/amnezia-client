@@ -2013,12 +2013,151 @@ static void sessionReleaseRetry()
     CHECK(run({409}, kSeatReleaseRetryBudgetMs, &deletes) == 1 && deletes == 1);
 }
 
+// Review R4 / R5 of 19.11: ONE ownership rule for a lease id. The server answers an acquire of the profile the device
+// already holds with the SAME lease id, and DELETE ends that lease whoever sends it - so a late or orphan answer may
+// release its lease only while no live owner holds that id and no newer acquire of the profile is still out.
+// The real UpstreamLeaseClient against a loopback server that holds its acquire answers until the test lets them go.
+static void lateGrantOwnership()
+{
+    TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {}, {}, {}); // the floor: the wait ends fast
+    struct LeaseEdge {
+        TestKey key;
+        QTcpServer server;
+        QList<QTcpSocket *> posts; // acquire requests, in arrival order, until answered
+        QStringList deletes;
+        LeaseEdge()
+        {
+            server.listen(QHostAddress::LocalHost);
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [this]() {
+                while (QTcpSocket *s = server.nextPendingConnection()) {
+                    QObject::connect(s, &QTcpSocket::readyRead, s, [this, s]() {
+                        const QByteArray rq = s->readAll();
+                        if (rq.startsWith("DELETE /v1/upstream/lease/")) {
+                            deletes << QString::fromLatin1(rq.mid(26, rq.indexOf(' ', 26) - 26));
+                            s->write("HTTP/1.1 204 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            s->disconnectFromHost();
+                        } else if (rq.startsWith("POST /v1/upstream/lease ")) {
+                            posts << s;
+                        }
+                    });
+                }
+            });
+        }
+        QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()); }
+        void grant(int i) // the existing lease, as the server hands it back to the same device and profile
+        {
+            const QByteArray cfg = "{\"inbounds\":[]}";
+            const QJsonObject o{{"type", "upstream_lease"}, {"lease_id", QLatin1String(kLease)},
+                                {"profile_id", "aaaaaaaaaaaaaaa0"}, {"kind", "session"},
+                                {"expires_at", QDateTime::fromMSecsSinceEpoch(kServerT0 + 900000, QTimeZone::UTC).toString(Qt::ISODateWithMs)},
+                                {"ttl_s", 900}, {"renew_after_s", 300}, {"seq", 0}, {"config", QString::fromUtf8(cfg)},
+                                {"config_sha256", QString::fromLatin1(QCryptographicHash::hash(cfg, QCryptographicHash::Sha256).toHex())},
+                                {"upstream_revision", 5}, {"traffic_accounting_epoch", 1}};
+            const QByteArray b = QJsonDocument(o).toJson(QJsonDocument::Compact);
+            answer(i, "200 OK", b, key.sign(QByteArrayLiteral("tribe-upstream-lease-v1\n") + b));
+        }
+        void refuse(int i) { answer(i, "409 X", R"({"code":"no_seat","retry_after_s":30,"upstream_revision":1})", {}); }
+        void answer(int i, const QByteArray &status, const QByteArray &body, const QByteArray &sig)
+        {
+            QTcpSocket *s = posts.value(i);
+            if (!s)
+                return;
+            s->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: "
+                     + QByteArray::number(body.size()) + "\r\n" + (sig.isEmpty() ? QByteArray() : "X-Tribe-Sig: " + sig + "\r\n")
+                     + "Connection: close\r\n\r\n" + body);
+            s->disconnectFromHost();
+        }
+    };
+    const auto pump = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    };
+    const QString profile = QStringLiteral("aaaaaaaaaaaaaaa0");
+    // Run: request 1 is held past the attempt's wait (the attempt reports a transport failure, the HTTP request lives
+    // on), request 2 of the same profile is sent after it. `secondFirst`: the second answer comes before the first's.
+    const auto scenario = [&](bool secondAnswersGrant, bool ownerHolds, bool secondStillOutWhenFirstLands) {
+        LeaseEdge edge;
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        const QString base = edge.base();
+        client.configure(&nam, [base] { return base; }, edge.key.pubHex(), [] { return QStringLiteral("token"); });
+        bool held = false; // the live owner's view of the lease id (UpstreamLeaseOwner::holdsLease)
+        client.leaseHeld = [&held](const QString &id) { return held && id == QLatin1String(kLease); };
+        int answers = 0;
+        client.onAcquire = [&](quint64 id, const AcquireReply &r) {
+            ++answers;
+            if (id == 2 && r.kind == LeaseReplyKind::Granted && ownerHolds)
+                held = true;
+        };
+        client.acquire(1, profile, LeaseKind::Session, QString(), LeaseRoute{});
+        pump(1700); // past the wait: the attempt moved on (answers == 1), request 1 still held by the server
+        CHECK(answers == 1 && edge.posts.size() == 1);
+        client.acquire(2, profile, LeaseKind::Session, QString(), LeaseRoute{});
+        pump(200);
+        CHECK(edge.posts.size() == 2);
+        if (secondStillOutWhenFirstLands) {
+            edge.grant(0); // the late answer lands while request 2 is still out
+            pump(300);
+            if (secondAnswersGrant)
+                edge.grant(1);
+            else
+                edge.refuse(1);
+        } else {
+            if (secondAnswersGrant)
+                edge.grant(1);
+            else
+                edge.refuse(1);
+            pump(300);
+            edge.grant(0); // the late answer lands after the second one
+        }
+        pump(900);
+        return edge.deletes;
+    };
+    // 1. R4: the second request got the lease and the live owner holds it; the first answer lands late: NOT released.
+    CHECK(scenario(true, true, false).isEmpty());
+    // 2. The late answer lands while the second request is still out and the second then gets the same id: not released.
+    CHECK(scenario(true, true, true).isEmpty());
+    // 3. ... and when the second one is refused instead, the deferred seat has no owner: released once, at its end.
+    {
+        const QStringList d = scenario(false, false, true);
+        CHECK(d.size() == 1 && d[0] == QLatin1String(kLease));
+    }
+    // 4. A late grant nobody holds and nothing else is out: released at once (the original rule stays).
+    {
+        const QStringList d = scenario(false, false, false);
+        CHECK(d.size() == 1 && d[0] == QLatin1String(kLease));
+    }
+    TuningStore::set({}, {}, {}, {});
+
+    // R5 (owner side): the app's extra release after the confirmed stop is the owner's own request - an acquire of
+    // its profile waits for it and goes out when it ends (never granted the id the delayed DELETE would then end).
+    {
+        const SubscriptionNode a = stubOf();
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, std::nullopt, 1000, 1);
+        o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, a.upstream->configSha256), 1300);
+        o.tunnelUp(3000);
+        const QVector<UpstreamOwnerEvent> ev = o.disconnect(60000);
+        const UpstreamOwnerEvent *after = findEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop);
+        CHECK(after && after->requestId != 0 && o.startBlocked());
+        const int calls = io.calls.size();
+        o.begin(a, 1, std::nullopt, 61000, 1); // an immediate reconnect to the same profile
+        CHECK(io.calls.size() == calls && o.startQueued());
+        o.onReleaseDone(after->requestId, 62000); // the delayed DELETE (or its last retry) ended
+        CHECK(io.calls.size() == calls + 1 && io.calls.last().what == QLatin1String("acquire"));
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     providerLegStarvedCheck();
     sessionReleaseRetry();
+    lateGrantOwnership();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();

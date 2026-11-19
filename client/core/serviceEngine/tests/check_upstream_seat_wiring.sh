@@ -131,6 +131,16 @@ rel="$(body_of "$SE/UpstreamLeaseClient.cpp" 'void UpstreamLeaseClient::release(
 has "$rel" 'const LeaseRoute direct = upstreamReleaseRoute(route);' && has "$rel" 'sendRelease(requestId, leaseId, meter, direct, /*attempt=*/0);' \
     || bad "R1: a release must go over the direct path"
 
+# R4 / R5 of 19.11 (one lease-id ownership rule, behaviour in upstream_engine_check lateGrantOwnership): the adapter
+# tells the client which lease id the live owner holds, and the after-stop release carries the owner's own request id
+# (never 0 - an unregistered release would not hold back an acquire of the same profile).
+has "$(grep -F 'leaseHeld' "$ADP")" 'm_upOwner.holdsLease(id)' || bad "R4: the adapter must give the client the owner's lease view (leaseHeld)"
+has "$(grep -F 'm_leaseClient->release(' "$ADP")" 'e.requestId' || bad "R5: the after-stop release must carry the owner's request id"
+! grep -qF 'm_leaseClient->release(0,' "$ADP" || bad "R5: a release with request id 0 bypasses the owner's bookkeeping"
+lateb="$(body_of "$CLI" 'void UpstreamLeaseClient::settleLateSeat(')"
+has "$lateb" 'leaseHeld(leaseId)' && has "$lateb" 'm_acquiresOut' || bad "R4: a late grant must check the live owner and the newer acquires before releasing"
+! has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'sendRelease(0' || bad "R4: acquire() must not release a late grant itself"
+
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"
     exit 1

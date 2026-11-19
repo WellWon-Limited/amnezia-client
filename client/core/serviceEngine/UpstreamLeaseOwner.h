@@ -85,6 +85,7 @@ struct UpstreamOwnerEvent {
     QJsonObject lease;       // BringUp (absent on provisional) / HandOver: upstream_lease
     quint64 prepareId = 0;   // Prepared / PrepareFailed: the prepare() they answer (prepareSerial at its start)
     QString leaseId;         // ReleaseAfterStop (secret: never logged)
+    quint64 requestId = 0;   // ReleaseAfterStop: the release's request id (registered by the owner; onReleaseDone ends it)
     LeaseRoute route;        // ReleaseAfterStop: the lease's bearer (the release goes over the direct path)
     UpstreamLeaseRecord record;
     qint64 revision = 0;
@@ -408,6 +409,10 @@ private:
             r.kind = UpstreamOwnerEventKind::ReleaseAfterStop;
             r.leaseId = a->leaseId;
             r.route = a->route;
+            r.requestId = a->requestId;
+            // Review R5 of 19.11: this release is ours like any other - registered, so an acquire of its profile
+            // waits for it (the server hands the same lease id back, and the release would then end the new session).
+            m_releasesOut.insert(a->requestId, a->profileId);
             ev << r;
         }
         if (m_opt.keepOwnership) {
@@ -655,6 +660,11 @@ public:
             if (it.value() == m_profileId)
                 return true;
         return false;
+    }
+    // The live session holds this lease id (a late or orphan answer of the same id must not release it).
+    bool holdsLease(const QString &leaseId) const
+    {
+        return m_active && !leaseId.isEmpty() && m_machine.leaseId() == leaseId;
     }
     bool startQueued() const { return m_active && m_startQueued; }
     int requestsOutstanding() const { return (m_orphanAcquire ? 1 : 0) + int(m_releasesOut.size()); }
