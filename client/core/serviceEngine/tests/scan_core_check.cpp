@@ -116,6 +116,25 @@ static ScanProbeFacts goodData(int rtt = 60, int t64 = 160, int ttfb1 = 320)
     return f;
 }
 
+// The host items of an own Xray probe answered alike on every connection (the Xray burst, ScanPlan.h): the data item,
+// then its burst parts "<id>.<n>" (4 KB bodies when it carried its whole body) with the seqs that follow its own.
+// Any other item as it is.
+static QList<ScanProbeFacts> withBurst(const ScanProbeFacts &f)
+{
+    QList<ScanProbeFacts> l{f};
+    if (f.stage != ScanStage::Data || !f.id.endsWith(QLatin1String(":xray")))
+        return l;
+    for (int n = 1; n < kScanXrayBurstParts; ++n) {
+        ScanProbeFacts b = f;
+        b.id = f.id + QStringLiteral(".%1").arg(n);
+        b.seq = f.seq > 0 ? f.seq + n : 0;
+        if (f.bytesReceived == f.bytesRequested && f.bytesReceived > 0)
+            b.bytesRequested = b.bytesReceived = kScanXrayBurstBytes;
+        l << b;
+    }
+    return l;
+}
+
 static ScanClassifyInput ownIn(const ScanProbeFacts &f, ScanProbeKind kind = ScanProbeKind::XrayFull)
 {
     ScanClassifyInput in;
@@ -577,10 +596,50 @@ static void plan()
         CHECK(c.reachAtMs == -1);
     // projection = sum of costs
     p = buildScanPlan(planInput(hostMac()));
-    qint64 sum = 0;
-    for (const ScanCandidate &c : p.probe)
-        sum += c.costBytes;
+    qint64 sum = 0, burst = 0;
+    for (const ScanCandidate &c : p.probe) {
+        sum += scanProbeTotalCostBytes(c, planInput(hostMac()).tunables);
+        burst += scanXrayBurstPartsOf(c) > 1 ? 1 : 0;
+    }
     CHECK(p.projectedBytes == sum && sum > 0);
+    // an own Xray probe is projected with its 3 burst parts (warm + 4 KB + TLS each); providers and AWG stay single
+    CHECK(burst > 0);
+    for (const ScanCandidate &c : p.probe)
+        CHECK(scanXrayBurstPartsOf(c) == (c.origin == ScanOrigin::Own && c.kind != ScanProbeKind::AwgMini ? 4 : 1)
+              && scanProbeTotalCostBytes(c, ScanTunables()) - c.costBytes == (scanXrayBurstPartsOf(c) - 1) * (1024 + 4096 + 16384));
+    // the parts must run at once: as many as the pool runs together (a pool of 1 = the single connection)
+    for (const auto &[caps, want] : {std::pair<ScanHostCaps, int>{hostIosMinimal(), 1}, {hostMacMinimal(), 2}}) {
+        bool seen = false;
+        for (const ScanCandidate &c : buildScanPlan(planInput(caps)).probe)
+            if (c.origin == ScanOrigin::Own && c.kind == ScanProbeKind::XrayFull) {
+                seen = true;
+                CHECK(scanXrayBurstPartsOf(c) == want);
+            }
+        CHECK(seen);
+    }
+    // the shape: data part as given, parts "<id>.<n>" with 4 KB bodies, no reach, no entry IP, their own cost
+    {
+        ScanHostCandidate d;
+        d.id = QStringLiteral("4:xray");
+        d.kind = ScanProbeKind::XrayFull;
+        d.config = QStringLiteral("{}");
+        d.entryIp = QStringLiteral("10.0.0.1");
+        d.entryPort = 443;
+        d.reachAtMs = 300;
+        d.costBytes = 83456;
+        const QList<ScanHostCandidate> parts = scanXrayBurstOf(d, 4, ScanTunables());
+        CHECK(parts.size() == 4 && parts.at(0).id == d.id && parts.at(0).costBytes == 83456 && parts.at(0).reachAtMs == 300);
+        for (int n = 1; n < parts.size(); ++n)
+            CHECK(parts.at(n).id == QStringLiteral("4:xray.%1").arg(n) && parts.at(n).bytes == 4096 && parts.at(n).reachAtMs == -1
+                  && parts.at(n).entryIp.isEmpty() && parts.at(n).entryPort == 0 && parts.at(n).config == d.config
+                  && parts.at(n).costBytes == 1024 + 4096 + 16384);
+        CHECK(scanXrayBurstOf(d, 1, ScanTunables()).size() == 1);
+        int part = -1;
+        CHECK(scanXrayBurstBaseOf(QStringLiteral("4:xray.3"), &part) == d.id && part == 3);
+        CHECK(scanXrayBurstBaseOf(d.id, &part) == d.id && part == 0);
+        CHECK(scanXrayBurstBaseOf(QStringLiteral("up:a.b"), &part) == QStringLiteral("up:a.b") && part == 0);
+        CHECK(scanXrayBurstBaseOf(QStringLiteral("x.0"), &part) == QStringLiteral("x.0") && part == 0);
+    }
     // upstream not eligible
     in = planInput(hostMac());
     in.manifest.upstreamEligible = false;
@@ -1201,7 +1260,7 @@ static void machineRules()
         f.id = QStringLiteral("2:xray");
         f.egressNode = QStringLiteral("2");
         f.seq = 1;
-        p.items << f;
+        p.items << withBurst(f);
         m.hostProgress(p, kT0 + 600);
         CHECK(m.rowTapped(QStringLiteral("1"), kT0 + 700).actions.isEmpty());       // the live connection
         CHECK(m.rowTapped(QStringLiteral("nope"), kT0 + 700).actions.isEmpty());
@@ -1468,11 +1527,17 @@ static ScanHostProgress progressOf(const ScanMachine &m, QList<ScanProbeFacts> i
     ScanHostProgress p;
     p.scanId = m.scanId();
     p.phase = done ? QStringLiteral("done") : QStringLiteral("data");
+    QList<ScanProbeFacts> all;
     qint64 seq = 0;
-    for (ScanProbeFacts &f : items)
+    for (const ScanProbeFacts &f : items)
+        for (const ScanProbeFacts &x : withBurst(f)) {
+            all << x;
+            seq = qMax(seq, x.seq);
+        }
+    for (ScanProbeFacts &f : all)
         if (f.seq == 0)
             f.seq = ++seq;
-    p.items = items;
+    p.items = all;
     p.seq = seq;
     p.bytesSpent = spent;
     p.bytesReserved = reserved;
@@ -3071,7 +3136,7 @@ static void overruns()
             if (n.id == QLatin1String("1") || n.id == QLatin1String("4:xray"))
                 two << n;
         wh.nodes = two;
-        const qint64 cap = 5242880, left = 560000;
+        const qint64 cap = 5242880, left = 640000; // the projection (one own Xray burst) and the app side fit
         QJsonArray ledger;
         ledger << QJsonObject{{QStringLiteral("at_ms"), double(kT0 - 20 * 60000)}, {QStringLiteral("bytes"), double(cap - left)}, {QStringLiteral("cellular"), true}};
         ScanMachine m(wh.caps);
@@ -3992,6 +4057,118 @@ static void rowsAfter17Nov()
     }
 }
 
+// The Xray burst (device 18.11): own Xray goes to the host as its data part plus 3 burst parts "<id>.<n>"; the row is
+// proven only when every part carried data, else it takes the first failed part's class. Driven directly (literal
+// part ids): a machine that judged the data part alone shows the row as working although a part got nothing.
+static void xrayBurst()
+{
+    const QString id = QStringLiteral("4:xray");
+    const auto facts = [&](const QString &probeId, qint64 seq, int body, bool answered) {
+        ScanProbeFacts f;
+        f.id = probeId;
+        f.stage = ScanStage::Data;
+        f.seq = seq;
+        f.bytesRequested = body;
+        f.durationMs = 600;
+        if (!answered) {
+            f.error = ScanProbeError::TtfbTimeout; // its ClientHello never completed
+            return f;
+        }
+        f.httpStatus = 200;
+        f.bytesReceived = body;
+        f.shaOk = true;
+        f.ttfb1Ms = 320;
+        f.rttMs = 60;
+        f.t64Ms = 160;
+        f.egressClass = QStringLiteral("tribe-node");
+        f.egressNode = scanHostPartOf(id);
+        return f;
+    };
+    for (const int failPart : {0, 2, -1}) { // 0 = every part through, 2 = burst part 2 without data, -1 = the same, it arrives first
+        World w = baseWorld("burst", hostMacMinimal(), ScanNetKind::Wifi);
+        w.caps.maxFullConcurrent = 4; // the in-app iPhone host's full pool: the 4 parts run at once
+        w.nodes = {*specOf(w, id)};
+        ScanMachine m(w.caps);
+        ScanOpen o;
+        o.network = w.net;
+        m.opened(o, kT0);
+        ScanStep st = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 80);
+        const ScanAction *a = st.find(ScanActionKind::StartHostScan);
+        CHECK(a && a->candidates.size() == 1);
+        if (!a || a->candidates.size() != 1)
+            continue;
+        const QString scanId = a->scanId;
+        // the projection holds the whole burst: the data part plus 3 parts of warm + 4 KB + TLS
+        CHECK(scanProbeTotalCostBytes(a->candidates.at(0), m.tunables())
+              == a->candidates.at(0).costBytes + 3 * (qint64(m.tunables().warmBytes) + 4096 + 2 * kScanTlsOverheadBytes));
+        ScanHostProgress p;
+        p.scanId = scanId;
+        p.phase = QStringLiteral("data");
+        const int bad = failPart < 0 ? 2 : failPart;
+        qint64 seq = 0;
+        if (failPart < 0)
+            p.items << facts(id + QStringLiteral(".2"), ++seq, 4096, false);
+        p.items << facts(id, ++seq, 65536, true);
+        for (int n = 1; n <= 3; ++n)
+            if (!(failPart < 0 && n == 2))
+                p.items << facts(id + QStringLiteral(".%1").arg(n), ++seq, 4096, n != bad || failPart == 0);
+        // the data part alone is no verdict yet
+        ScanHostProgress first = p;
+        first.items = failPart < 0 ? p.items.mid(0, 0) : p.items.mid(0, 1);
+        if (failPart >= 0) {
+            m.hostProgress(first, kT0 + 900);
+            CHECK(rowOf(scanViewToJson(m.view(kT0 + 900)), id).isEmpty());
+        }
+        p.seq = seq;
+        p.bytesSpent = 120000;
+        st = m.hostProgress(p, kT0 + 1000);
+        QList<ScanStep> steps{st};
+        if (!st.has(ScanActionKind::PersistResults))
+            steps << m.hostFreezeAck(scanId, 120000, 0, kT0 + 1100);
+        const ScanAction *persist = nullptr;
+        for (const ScanStep &x : steps)
+            if (x.find(ScanActionKind::PersistResults))
+                persist = x.find(ScanActionKind::PersistResults);
+        CHECK(persist != nullptr);
+        const QJsonObject row = rowOf(scanViewToJson(m.view(kT0 + 1200)), id);
+        const QString state = row.value(QLatin1String("state")).toString();
+        if (failPart == 0) {
+            checkMsg(state == QLatin1String("works") || state == QLatin1String("slow"), QStringLiteral("every part through: available (%1)").arg(state));
+            CHECK(persist && persist->cached.failures.isEmpty());
+        } else {
+            checkMsg(state != QLatin1String("works") && state != QLatin1String("slow"),
+                     QStringLiteral("a burst part without data: not available (failPart %1, state %2)").arg(failPart).arg(state));
+            CHECK(persist && persist->cached.failures.size() == 1 && persist->cached.failures.at(0).id == id
+                  && persist->cached.failures.at(0).cls == ScanClass::NoData);
+            CHECK(m.lastSummary().value(QLatin1String("counts")).toObject().value(QLatin1String("no_data")).toInt() == 1);
+        }
+    }
+    // the fake host answers per part (a whole scan on the fake clock, every per-step invariant): one part the network
+    // drops keeps that row off the list; every other row as before
+    for (const bool drop : {false, true}) {
+        World w = baseWorld("burst_world", hostMac(), ScanNetKind::Wifi);
+        w.current = QStringLiteral("1");
+        if (drop)
+            w.out[id].burstNoData = 3;
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
+        w.runMs = 12000;
+        Driver d(w);
+        d.run();
+        Fail f;
+        checkAllSteps(d, f, w.name);
+        checkMsg(f.list.isEmpty(), QStringLiteral("burst world invariants: %1").arg(f.list.join(QLatin1String("; "))));
+        const QJsonObject v = lastView(d);
+        const QString state = rowOf(v, id).value(QLatin1String("state")).toString();
+        checkMsg(drop ? state != QLatin1String("works") && state != QLatin1String("slow") : state == QLatin1String("works"),
+                 QStringLiteral("burst world drop=%1: %2 is %3").arg(drop).arg(id, state));
+        CHECK(rowOf(v, QStringLiteral("5:xray")).value(QLatin1String("state")).toString() == QLatin1String("works"));
+        int parts = 0;
+        for (const Driver::HC &h : d.hq)
+            parts += h.probeId.startsWith(id + QLatin1Char('.')) ? 1 : 0;
+        CHECK(parts == 3);
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -4014,6 +4191,7 @@ int main(int argc, char **argv)
     labSeams();
     cooldownRule();
     rowsAfter17Nov();
+    xrayBurst();
     findMore();
     findMoreAppends();
     serverBatches();

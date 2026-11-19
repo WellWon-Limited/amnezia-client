@@ -606,7 +606,7 @@ struct FakeHost : IScanHost {
             if (!s.gate.admit(p.c.id, p.c.costBytes))
                 continue;
             p.launchAt = now;
-            const Outcome o = outcomes.value(p.c.id.section(QLatin1Char('#'), 0, 0), Outcome());
+            const Outcome o = outcomes.value(scanXrayBurstBaseOf(p.c.id.section(QLatin1Char('#'), 0, 0)), Outcome()); // a burst part as its probe
             p.finishAt = now + o.durMs;
         }
     }
@@ -617,9 +617,10 @@ struct FakeHost : IScanHost {
         f.id = p.c.id;
         f.stage = ScanStage::Data;
         f.seq = ++s.seq;
-        const QString cid = p.c.id.section(QLatin1Char('#'), 0, 0);
+        const QString cid = scanXrayBurstBaseOf(p.c.id.section(QLatin1Char('#'), 0, 0)); // a burst part answers as its probe
         const Outcome o = outcomes.value(cid, Outcome());
-        f.bytesRequested = s.bytes;
+        const int bytes = p.c.bytes > 0 ? p.c.bytes : s.bytes;
+        f.bytesRequested = bytes;
         f.startMs = p.launchAt - s.startAt;
         f.endMs = qMax(f.startMs, (err == ScanProbeError::None ? p.finishAt : ev->clock->t) - s.startAt);
         f.error = err;
@@ -630,7 +631,7 @@ struct FakeHost : IScanHost {
             f.rttMs = o.rtt;
             f.t64Ms = 120;
             f.durationMs = o.durMs;
-            f.bytesReceived = s.bytes;
+            f.bytesReceived = bytes;
             f.shaOk = true;
             if (cid.startsWith(QLatin1String("up:"))) {
                 f.egressClass = QStringLiteral("other");
@@ -645,7 +646,7 @@ struct FakeHost : IScanHost {
             f.httpStatus = 503;
             f.durationMs = o.durMs;
         }
-        const qint64 used = qMin<qint64>(p.c.costBytes, err == ScanProbeError::None ? s.bytes + 1024 + 8192 : 4096);
+        const qint64 used = qMin<qint64>(p.c.costBytes, err == ScanProbeError::None ? bytes + 1024 + 8192 : 4096);
         f.spentBytes = used;
         s.gate.finish(p.c.id, used);
         p.emitted = true;
@@ -2682,7 +2683,7 @@ static void caseHostNotNow()
 static void caseHeldAddOfOlderScan()
 {
     g_case = QStringLiteral("held_add_older_scan");
-    World w(capsMac(), ScanNetKind::Wifi, 4);
+    World w(capsMac(), ScanNetKind::Wifi, 2); // one own Xray burst (4 legs) leaves the leg pool room for the adds
     w.host.addNotNow = {kStopPending};             // A's first add is refused for a moment
     for (const QString &pid : kPids)               // B's provider probes still run when A's held add comes due
         w.host.outcomes[QStringLiteral("up:") + pid].durMs = 4000;
@@ -3043,7 +3044,7 @@ static void caseRecordBound()
 static void caseLateAddRefusal()
 {
     g_case = QStringLiteral("r1_add_refusal_after_network_change");
-    World w(capsMac(), ScanNetKind::Wifi, 4);
+    World w(capsMac(), ScanNetKind::Wifi, 2); // one own Xray burst (4 legs) leaves the leg pool room for the adds
     w.host.addNotNow = {kStopPending};
     for (const QString &pid : kPids)               // B's provider probes still run when A's refusal arrives
         w.host.outcomes[QStringLiteral("up:") + pid].durMs = 4000;

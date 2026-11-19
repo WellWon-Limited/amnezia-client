@@ -944,6 +944,19 @@ ScanAction TribeScanner::withoutWithheldAwg(const ScanAction &a, QList<QPair<QSt
     return out;
 }
 
+// Own Xray probes go out as their burst (ScanPlan.h scanXrayBurstOf): the parts reuse the data part's config, so
+// configOf ran once, for the candidate's own id; the machine joins the parts' items to the candidate.
+QList<ScanHostCandidate> TribeScanner::withXrayBursts(const QList<ScanCandidate> &cands, const QList<ScanHostCandidate> &built) const
+{
+    QHash<QString, int> parts;
+    for (const ScanCandidate &c : cands)
+        parts.insert(scanProbeIdOf(c), scanXrayBurstPartsOf(c));
+    QList<ScanHostCandidate> out;
+    for (const ScanHostCandidate &h : built)
+        out << scanXrayBurstOf(h, parts.value(h.id, 1), m_m.tunables());
+    return out;
+}
+
 // The AWG session input: the engine's node data (the device's own key and config) + the probe base's host and
 // one of its IPs (the session dials the API without DNS) + the echo target the builder takes from the
 // candidate. An unknown node gives an empty input: the builder refuses it (awg_no_address).
@@ -984,9 +997,10 @@ void TribeScanner::doStartHost(const ScanAction &a)
     m_hostScans.insert(a.scanId, hs);
     QList<QPair<QString, QString>> refused;
     const ScanAction sa = withoutWithheldAwg(a, &refused);
-    const ScanStartRequest req = scanBuildStartRequest(
+    ScanStartRequest req = scanBuildStartRequest(
         sa, m_active.token, m_active.tunnelBase, ScanAccess(), [this](const ScanCandidate &c) { return configOf(c); },
         [this](const ScanCandidate &c) { return awgInputOf(c); }, &refused);
+    req.candidates = withXrayBursts(sa.candidates, req.candidates);
     emitLog(QStringLiteral("action start_host_scan candidates=%1 max_bytes=%2").arg(req.candidates.size()).arg(req.maxBytes));
     HostAsk ask = askNow(a.scanId);
     for (const ScanHostCandidate &c : req.candidates)
@@ -1184,9 +1198,9 @@ void TribeScanner::doAddHost(const ScanAction &a)
     if (!m_host || m_host->availability() != ScanHostAvailability::Available)
         return; // the host scan is gone; its candidates end with the machine's deadline
     QList<QPair<QString, QString>> refused;
-    const QList<ScanHostCandidate> cands = scanBuildHostCandidates(
+    const QList<ScanHostCandidate> cands = withXrayBursts(a.candidates, scanBuildHostCandidates(
         withoutWithheldAwg(a, &refused).candidates, [this](const ScanCandidate &c) { return configOf(c); },
-        [this](const ScanCandidate &c) { return awgInputOf(c); }, &refused);
+        [this](const ScanCandidate &c) { return awgInputOf(c); }, &refused));
     for (const auto &x : refused)
         dispatch(m_m.candidateRefused(x.first, x.second, now()));
     if (cands.isEmpty())

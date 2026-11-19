@@ -445,6 +445,7 @@ private:
     void doStartHost(const ScanAction &a);
     void doAddHost(const ScanAction &a);
     ScanAction withoutWithheldAwg(const ScanAction &a, QList<QPair<QString, QString>> *refused) const;
+    QList<ScanHostCandidate> withXrayBursts(const QList<ScanCandidate> &cands, const QList<ScanHostCandidate> &built) const;
     bool m_awgWithheld = false; // the last scan_caps reply withheld AWG probes for this scan
     QString m_awgWithheldReason; // its reason (the field's value)
 

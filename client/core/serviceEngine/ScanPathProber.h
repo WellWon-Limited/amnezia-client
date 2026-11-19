@@ -39,6 +39,7 @@
 
 #include "IScanHost.h"
 #include "ScanHostContract.h"
+#include "ScanPlan.h" // the Xray burst
 #include "ScanTunables.h"
 #include "ScanTypes.h"
 #include "TribeScanner.h" // IScanEngine
@@ -155,12 +156,10 @@ public:
     int liveProbes() const { return int(m_probes.size()); }
     QString openScanId() const { return m_scan.id; }
     int pollIntervalMs = 200;
-    // Own Xray is probed the way a tunnel opens it (device 18.11, the Estonia capture: the real tunnel opened ~9
-    // connections within a second and the network cut most of them, while a single probe connection passed): the
-    // data probe plus xrayBurst-1 small parallel ones (4 KB bodies) through the same listener; proven only if every
-    // one of them carried its body. 1 = the single connection of before.
-    int xrayBurst = 4;
-    static constexpr int kXrayBurstBytes = 4096;
+    // Own Xray is probed the way a tunnel opens it (ScanPlan.h scanXrayBurstOf, shared with the Scanner): the data
+    // probe plus xrayBurst-1 small parallel ones; proven only if every one of them carried its body. 1 = a single
+    // connection (tests only).
+    int xrayBurst = kScanXrayBurstParts;
     // The race's data body (device 18.11: 190 KB - 1.4 MB per race with the Scanner's 64 KB body, the cellular hour
     // ran out within a few connects): 24 KB still proves data through the path (a 15-20 KB flow freeze cuts it).
     static constexpr int kRaceProbeBytes = 24576;

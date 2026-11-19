@@ -522,7 +522,7 @@ static void caseBurst()
         int small = 0;
         for (const QJsonObject &rq : w.host.requests)
             for (const QJsonValue &v : rq.value("candidates").toArray())
-                small += v.toObject().value("bytes").toInt() == ScanPathProber::kXrayBurstBytes ? 1 : 0;
+                small += v.toObject().value("bytes").toInt() == kScanXrayBurstBytes ? 1 : 0;
         check(small == 3, "the burst's extra connections carry small bodies");
         const QString scan = w.host.scanOf(1);
         for (int i = 0; i < parts.size(); ++i) {
