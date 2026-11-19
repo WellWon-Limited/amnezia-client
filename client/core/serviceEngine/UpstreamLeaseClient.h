@@ -50,9 +50,11 @@ public:
     // resends of seatReleaseNext (no answer / 5xx past its budget, not sendable) - the seat is then left to the
     // server's TTL.
     std::function<void(quint64, bool confirmed)> onReleaseDone;
-    // Who can be using this lease id right now (the app-side owner holds it). A late or orphan grant of a held
-    // id is never released here (settleLateSeat). Unset = nobody.
-    std::function<bool(const QString &leaseId)> leaseHeld;
+    // Facts for the lease-id ledger (UpstreamLeaseOwner.h): an acquire answered AFTER the attempt stopped waiting
+    // (the grant it carries has no taker unless the owner says so), and the end of any acquire request.
+    // newerOut / stillOut = another acquire of the same profile is still alive.
+    std::function<void(const QString &profileId, const QString &leaseId, const LeaseRoute &route, bool newerOut)> onLateGrant;
+    std::function<void(const QString &profileId, const QString &grantedLeaseId, bool stillOut)> onAcquireEnded;
     // The spacing budget of a release's resends (UpstreamLeaseWire.h::seatReleaseNext; tests shorten it).
     qint64 releaseRetryBudgetMs = kSeatReleaseRetryBudgetMs;
 
@@ -66,6 +68,10 @@ public:
     // tunnelStopped() (the confirmed teardown; never a timer - review E5 of 18.11) and then go over the direct path.
     void holdReleasesForStop();
     void tunnelStopped();
+    // The release after a confirmed stop (ReleaseAfterStop): holds for the stop only while a tunnel is believed
+    // running - a Disconnected that already happened is not waited for again (review F4 of 19.11).
+    void holdReleasesForStopIfRunning();
+    void tunnelStarted() { m_tunnelDown = false; } // the adapter saw the native tunnel come up / connecting
     int heldReleases() const { return int(m_held.size()); }
 
     // GET /v1/upstream/standby?network_key= with the device token on the direct base. done(httpStatus,
@@ -112,8 +118,9 @@ private:
     QString baseFor(const LeaseRoute &route) const;
     void sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route,
                      int attempt, qint64 spacedMs = 0, quint64 bgKey = 0);
-    void settleLateSeat(const QString &profileId, const QString &leaseId, const LeaseRoute &route);
-    void resolveDeferredSeat(const QString &profileId, const QString &grantedLeaseId, const LeaseRoute &route);
+    bool acquireOutFor(const QString &profileId) const;
+    void reportLateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route);
+    void reportAcquireEnded(const QString &profileId, const QString &grantedLeaseId);
     QNetworkReply *post(const QString &url, const QByteArray &body, const QString &bearer, int timeoutMs);
 
     QPointer<QNetworkAccessManager> m_nam;
@@ -129,12 +136,8 @@ private:
         LeaseRoute route;
     };
     QList<HeldRelease> m_held;
-    struct DeferredSeat {
-        QString leaseId;
-        LeaseRoute route;
-    };
     QHash<quint64, QString> m_acquiresOut; // acquire request id -> profile, until its HTTP request ends
-    QHash<QString, DeferredSeat> m_lateSeat; // profile -> a late grant waiting for the newer request's end
+    bool m_tunnelDown = true; // the last tunnel event was a confirmed stop (or none yet)
     bool m_stopPending = false;
     qint64 m_heldSinceMs = 0;
     void flushHeld(bool tunnelDown);

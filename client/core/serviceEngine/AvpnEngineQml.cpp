@@ -5688,7 +5688,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
                              .arg(int(s)).arg(m_tunnel.nativeLegSeen()).arg(m_engine.attemptLeg()));
         if (s == Vpn::Disconnected) {
             syncControlPlaneEdge(false);
-            m_tunnel.upstreamTunnelDown();
+            m_tunnel.upstreamTunnelDown(/*endsSession=*/false); // an older tunnel's stop: frees what it held, ends nothing
         }
         return;
     }

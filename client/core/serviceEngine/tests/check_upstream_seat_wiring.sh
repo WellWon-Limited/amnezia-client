@@ -125,20 +125,32 @@ has "$down" 'QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedCo
     || bad "R1: the core stop must not wait for the release"
 has "$(body_of "$FAC" 'void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s)')" 'm_tunnel.upstreamTunnelDown();' \
     || bad "R1: the facade must tell the adapter that the stop is confirmed"
-has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::upstreamTunnelDown()')" 'm_leaseClient->tunnelStopped();' \
+has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::upstreamTunnelDown(bool endsSession)')" 'm_leaseClient->tunnelStopped();' \
     || bad "R1: a confirmed stop must send the held releases"
 rel="$(body_of "$SE/UpstreamLeaseClient.cpp" 'void UpstreamLeaseClient::release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,')"
 has "$rel" 'const LeaseRoute direct = upstreamReleaseRoute(route);' && has "$rel" 'sendRelease(requestId, leaseId, meter, direct, /*attempt=*/0);' \
     || bad "R1: a release must go over the direct path"
 
-# R4 / R5 of 19.11 (one lease-id ownership rule, behaviour in upstream_engine_check lateGrantOwnership): the adapter
-# tells the client which lease id the live owner holds, and the after-stop release carries the owner's own request id
-# (never 0 - an unregistered release would not hold back an acquire of the same profile).
-has "$(grep -F 'leaseHeld' "$ADP")" 'm_upOwner.holdsLease(id)' || bad "R4: the adapter must give the client the owner's lease view (leaseHeld)"
+# Lease id ledger (reviews R4, R5 of 19.11 and F3, F4, F9 of round 2; the rule and its transition table are the comment
+# block "Lease id ledger" in UpstreamLeaseOwner.h, the behaviour is tested in upstream_engine_check lateGrantOwnership):
+# every DELETE is a decision of the owner, so the adapter only forwards.
+ctor="$(body_of "$ADP" 'VpnConnectionTunnelControl::VpnConnectionTunnelControl(')"
+has "$ctor" 'm_upOwner.lateGrant(profile, lease, route, newerOut)' || bad "ledger: a late grant must be decided by the owner (lateGrant)"
+has "$ctor" 'm_upOwner.acquireEnded(profile, lease, stillOut)' || bad "ledger: the end of an acquire must reach the owner (acquireEnded)"
+has "$ctor" 'm_leaseClient->tunnelStarted();' || bad "ledger: a native tunnel coming up must tell the client (a stop is waited for only while one runs)"
 has "$(grep -F 'm_leaseClient->release(' "$ADP")" 'e.requestId' || bad "R5: the after-stop release must carry the owner's request id"
+has "$(grep -F 'holdReleasesForStopIfRunning' "$ADP")" 'holdReleasesForStopIfRunning' || bad "F4: the after-stop release must not wait for a stop that already happened"
 ! grep -qF 'm_leaseClient->release(0,' "$ADP" || bad "R5: a release with request id 0 bypasses the owner's bookkeeping"
-lateb="$(body_of "$CLI" 'void UpstreamLeaseClient::settleLateSeat(')"
-has "$lateb" 'leaseHeld(leaseId)' && has "$lateb" 'm_acquiresOut' || bad "R4: a late grant must check the live owner and the newer acquires before releasing"
+tdn="$(body_of "$ADP" 'void VpnConnectionTunnelControl::upstreamTunnelDown(bool endsSession)')"
+has "$tdn" 'm_upOwner.tunnelLost(' || bad "F4: a Disconnected nobody asked for must end the session at once (tunnelLost)"
+has "$(body_of "$FAC" 'void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s)')" 'upstreamTunnelDown(/*endsSession=*/false)' \
+    || bad "F4: the stale-event branch must not end the live session"
+has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::startRefused()')" 'm_upOwner.abortStart(' \
+    || bad "F9: a start that never reached the native service must give its seat back (abortStart)"
+has "$(body_of "$SE/ServiceEngine.cpp" 'bool ServiceEngine::onPermissionDenied()')" 'm_tunnel->startRefused();' \
+    || bad "F9: the Android permission denial ends the attempt without StopPath - it must tell the tunnel adapter"
+lateb="$(body_of "$CLI" 'void UpstreamLeaseClient::reportLateGrant(')"
+has "$lateb" 'onLateGrant(' || bad "R4/F3: a late grant must be reported to the owner"
 ! has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'sendRelease(0' || bad "R4: acquire() must not release a late grant itself"
 
 if [ "$fail" -ne 0 ]; then

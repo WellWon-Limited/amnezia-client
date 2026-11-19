@@ -641,6 +641,79 @@ private:
     }
 
 public:
+    // ===== Lease id ledger (reviews R4, R5 of 19.11 and F3, F4, F9 of round 2: ONE question - who holds lease id L
+    // right now, and who must release it) =====
+    // The server hands the SAME lease id back to the same device for the same profile (upstream_pool.acquire_lease:
+    // "Idempotent re-acquire ... same lease") and DELETE ends the lease whoever sends it. So an id has exactly one
+    // fate at a time and every DELETE is a decision of THIS owner; nothing else sends one.
+    //   state            meaning                                   how it is known
+    //   requested        an acquire of the profile is alive        machine in flight / orphan / client's HTTP request
+    //   held             a live session uses L                     m_active && machine.leaseId() == L (holdsLease)
+    //   release pending  our DELETE of L is out or being resent    m_releasesOut (request id -> profile), until
+    //                    (seatReleaseNext: about 20 s at most)     onReleaseDone
+    //   gone             answered / given up / never sent          nothing
+    //   event                                     transition                                      who sends the DELETE
+    //   session end (stop, switch, refusal)       held -> release pending                          machine (SendRelease)
+    //   stop with the tunnel owner holding L      held -> release pending after the confirmed stop endSession (ReleaseAfterStop)
+    //   a Disconnected nobody asked for           held -> release pending AT ONCE (tunnelLost)      tunnelLost
+    //   a refused permission (Android), start     held -> release pending at once, nothing to       abortStart
+    //     never reached the native service        wait for
+    //   a grant nobody waits for (late/orphan)    L held by a live session: stays. Another acquire  lateGrant / acquireEnded
+    //                                             of the profile alive: judged at its end.
+    //                                             Otherwise: release pending at once.
+    //   an acquire of profile P                   goes out only when no release of P is pending     startBlocked (queued, sent by
+    //                                                                                               onReleaseDone)
+    // Every row registers its request id in m_releasesOut BEFORE the DELETE leaves; the wait is bounded by the
+    // release rule (seatReleaseNext) and never on an event that already happened.
+
+    // A grant that arrived after the attempt stopped waiting (UpstreamLeaseClient::onLateGrant).
+    QVector<UpstreamOwnerEvent> lateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route,
+                                          bool newerAcquireOut)
+    {
+        QVector<UpstreamOwnerEvent> ev;
+        if (holdsLease(leaseId))
+            return ev; // the live session's seat
+        if (newerAcquireOut) {
+            m_deferredSeat.insert(profileId, DeferredSeat{leaseId, route});
+            return ev;
+        }
+        releaseThroughLedger(profileId, leaseId, route);
+        return ev;
+    }
+
+    // An acquire request of the profile ended (any outcome).
+    QVector<UpstreamOwnerEvent> acquireEnded(const QString &profileId, const QString &grantedLeaseId, bool stillOut)
+    {
+        QVector<UpstreamOwnerEvent> ev;
+        const auto it = m_deferredSeat.find(profileId);
+        if (it == m_deferredSeat.end() || stillOut)
+            return ev;
+        const DeferredSeat d = it.value();
+        m_deferredSeat.erase(it);
+        if (d.leaseId == grantedLeaseId || holdsLease(d.leaseId))
+            return ev; // the newer request took the same seat over
+        releaseThroughLedger(profileId, d.leaseId, d.route);
+        return ev;
+    }
+
+    // The native tunnel of the running session is gone and the app did not ask for it (Disconnected from the
+    // system, iOS Settings): the session ends now; its release is not waited for any later stop.
+    QVector<UpstreamOwnerEvent> tunnelLost(qint64 nowMs)
+    {
+        if (!m_active || m_prepareOnly || !m_tunnelIsUp)
+            return {};
+        return endSession(nowMs);
+    }
+
+    // The start never reached the native service (the person refused the VPN permission, Android): whatever seat
+    // the session holds goes back at once - there is no stop to wait for.
+    QVector<UpstreamOwnerEvent> abortStart(qint64 nowMs)
+    {
+        if (!m_active || m_prepareOnly || m_tunnelIsUp)
+            return {};
+        return endSession(nowMs);
+    }
+
     // ONE acquisition in flight per owner, decided by seat identity (review round 2 of 17.11, N1 + F2):
     //  - an acquire cancelled by a session's end stays out until its answer; meanwhile a new session's acquire
     //    waits (a newer pick replaces the waiting one) - unless it is for the same profile: then it takes the
@@ -679,6 +752,17 @@ public:
     }
 
 private:
+
+    // A release of this owner outside the machine's own actions: registered first, then sent (the request id is in
+    // the high range so it never meets the machine's counter).
+    void releaseThroughLedger(const QString &profileId, const QString &leaseId, const LeaseRoute &route)
+    {
+        if (!m_io)
+            return;
+        const quint64 id = (quint64(1) << 62) | ++m_ownSerial;
+        m_releasesOut.insert(id, profileId);
+        m_io->release(id, leaseId, UpstreamMeter{}, route);
+    }
 
     void noteReleasesSent(const LeaseStep &s)
     {
@@ -726,6 +810,12 @@ private:
     // Requests that outlive their session (never reset with it - startBlocked):
     quint64 m_orphanAcquire = 0;          // the acquire a session's end cancelled, until its answer
     QString m_orphanProfile;
+    struct DeferredSeat {
+        QString leaseId;
+        LeaseRoute route;
+    };
+    QHash<QString, DeferredSeat> m_deferredSeat; // profile -> a late grant judged when the newer acquire ends
+    quint64 m_ownSerial = 0;
     QHash<quint64, QString> m_releasesOut; // releases sent (request id -> profile), until onReleaseDone
     bool m_startQueued = false;            // this session's acquire waits (startBlocked)
     qint64 m_queuedRevision = 0;
