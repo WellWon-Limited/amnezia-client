@@ -1080,6 +1080,7 @@ private:
     QString m_sessionEdge;                    // E10: the session edge in force ("" = the stored edge)
     bool m_scanNetCompareArmed = false;
     QString m_scanNetKeyTold; // the network key (kind|reporting key|gateway hash) of the Scanner's last notice
+    quint64 m_intentAttempt = 0;       // G3: the owner's attempt count at the last action on the intent (noteIntentChange)
     avpn::ExactRowRequest m_exactReq;  // F2: a Scanner row's one request - the exact row, the choice before it (R3), the
                                        // live session before it (S6); armed by pinAndReconnectImpl, ended by noteIntentChange
                                        // (any other action), endExactRowRequest (the owner's result) or the stop's restore

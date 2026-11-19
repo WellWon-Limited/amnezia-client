@@ -237,6 +237,7 @@ public:
     // Stage 2: a race that runs before the owner's first leg is part of the attempt (the orb is busy, reconcile waits).
     bool attemptRunning() const { return m_owner.running() || m_raceFirst; }
     // B1: the owner has a leg the platform may be running (starting, checking, connected or being stopped).
+    quint64 attemptNumber() const { return m_owner.attempt(); } // the owner's running count of attempts begun
     bool ownerHoldsNativeLeg() const { return m_owner.phase() != path::AttemptPhase::Idle; }
 
     // ---- Stage 2: the probe race in front of the owner (path/PathRace.h) ----
