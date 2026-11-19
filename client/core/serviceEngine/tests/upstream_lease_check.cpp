@@ -1133,24 +1133,36 @@ static void dispatch()
     CHECK(UpstreamLeaseTiming::fromTuning().defaultRenewS == 300);
 }
 
-// Owner's iPhone 16.11 (build 140): both seat releases ended "net_error 5" 40-80 ms after they were sent - aborted
-// by the API reset of the tunnel transition they preceded - and were never sent again. One resend, only for an
-// abort of our own (not the release's own 1.5 s timeout, not an answer).
+// One rule for every seat release (session DELETE, probe-batch release): owner's iPhone 16.11 - the transition's API
+// reset cut both releases (net_error 5) and nothing resent them; device round 19.11 08:18:42 - a prod API restart
+// answered the DELETE 502, nothing resent it, the seat stayed 15 minutes. No answer / 5xx: resent on the data check's
+// growing spacing within the budget; 2xx / 4xx: final.
 static void releaseResend()
 {
-    // Owner's iPhone 16.11 (build 140): both seat releases ended "net_error 5" 40-80 ms after they were sent - cut
-    // by the API reset of the tunnel transition they preceded. Review F3 of 17.11: the next node's Connected cuts
-    // the retry too - every try cut by OUR reset is sent again. Review round 2: only an HTTP answer is "released";
-    // a timeout, an error or a reset storm ends as NotConfirmed (left to the server's TTL, journaled), never done.
     using T = UpstreamReleaseTry;
-    for (int done = 0; done < kUpstreamReleaseMaxResends; ++done)
-        CHECK(upstreamReleaseNext(done, /*canceled=*/true, /*timedOut=*/false, /*answered=*/false) == T::Resend);
-    CHECK(upstreamReleaseNext(kUpstreamReleaseMaxResends, true, false, false) == T::NotConfirmed); // reset storm
-    CHECK(upstreamReleaseNext(0, true, true, false) == T::NotConfirmed);   // its own timeout
-    CHECK(upstreamReleaseNext(0, false, false, false) == T::NotConfirmed); // a network error, no answer
-    CHECK(upstreamReleaseNext(0, false, false, true) == T::Answered);      // 204 (or any HTTP answer)
-    CHECK(upstreamReleaseNext(3, false, false, true) == T::Answered);
-    CHECK(kUpstreamReleaseMaxResends >= 4);
+    CHECK(seatReleaseNext(204, 0, 0).kind == T::Answered);
+    CHECK(seatReleaseNext(200, 3, 2100).kind == T::Answered);
+    CHECK(seatReleaseNext(404, 0, 0).kind == T::Answered && seatReleaseNext(409, 0, 0).kind == T::Answered
+          && seatReleaseNext(422, 0, 0).kind == T::Answered); // 4xx: final, no resend
+    const SeatReleaseNext a = seatReleaseNext(502, 0, 0);
+    CHECK(a.kind == T::Resend && a.delayMs == dataCheckRetryDelayMs(1)); // 502 -> resend after 300 ms
+    CHECK(seatReleaseNext(0, 0, 0).kind == T::Resend);   // no HTTP answer (network error, timeout, our own reset)
+    CHECK(seatReleaseNext(503, 0, 0).kind == T::Resend);
+    // 502 x N: resent on the growing spacing until the budget is used, then NotConfirmed (journalled by the caller)
+    int resends = 0;
+    qint64 spaced = 0;
+    for (;;) {
+        const SeatReleaseNext n = seatReleaseNext(502, resends, spaced);
+        if (n.kind != T::Resend)
+            break;
+        CHECK(n.delayMs == dataCheckRetryDelayMs(resends + 1));
+        spaced += n.delayMs;
+        ++resends;
+        CHECK(resends < 64);
+    }
+    CHECK(resends >= 8 && spaced <= kSeatReleaseRetryBudgetMs && spaced >= 15000); // a deploy restart of a few seconds is covered
+    CHECK(seatReleaseNext(502, resends, spaced).kind == T::NotConfirmed);
+    CHECK(seatReleaseNext(204, resends, spaced).kind == T::Answered); // an answer after the last resend is still final
 }
 
 // Decision of 18.11 (owner's iPhone, rounds 1-2): a failed provider leg's seat release never rides the tunnel being

@@ -274,7 +274,8 @@ public:
     std::unique_ptr<ScanSeatBatch> probeBatch(const QStringList &profileIds, bool includeConfig, qint64 costBytes,
                                               std::function<void(const Batch &)> done,
                                               std::function<void(qint64 bytes)> releaseBytes = {});
-    // POST .../probe-batch/release by lease ids and / or an operation id (at least one).
+    // POST .../probe-batch/release by lease ids and / or an operation id (at least one). A try with no HTTP answer or a
+    // 5xx is sent again on the shared spacing (UpstreamLeaseWire.h::seatReleaseNext, the session DELETE's rule too).
     void releaseLeases(const QStringList &leaseIds, qint64 costBytes, std::function<void(qint64 bytes)> done,
                        const QString &operationId = QString());
 
@@ -305,10 +306,13 @@ public:
 
     // Journal sink (statuses, counts, byte totals; never secrets or hosts). Default qInfo.
     std::function<void(const QString &)> log;
+    // The spacing budget of a seat release's resends (seatReleaseNext; tests shorten it).
+    qint64 releaseRetryBudgetMs = kSeatReleaseRetryBudgetMs;
 
 private:
-    // One try of a probe-seat release; a try our own tunnel transition cancelled is sent again (upstreamReleaseNext).
-    void sendRelease(const IScanHttp::Request &rq, int leases, int attempt, qint64 spent, std::function<void(qint64)> done);
+    // One try of a probe-seat release; a try with no HTTP answer or a 5xx is sent again (seatReleaseNext).
+    void sendRelease(const IScanHttp::Request &rq, int leases, int attempt, qint64 spent, qint64 spacedMs,
+                     std::function<void(qint64)> done);
     // One send of a probe-seat batch; a send our own transition cut is sent again with the same body (operation id).
     void sendBatch(std::shared_ptr<ScanSeatBatch::State> st, IScanHttp::Request rq, int attempt);
     void finishBatch(std::shared_ptr<ScanSeatBatch::State> st, const IScanHttp::Response &r);

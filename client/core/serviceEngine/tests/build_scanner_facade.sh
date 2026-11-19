@@ -81,6 +81,7 @@ if [ "${1:-}" = "--mutate" ]; then
     "unseen-seats-kept@@ScanApiClient.cpp@@    if (unseen || (!st->owned && !st->held.isEmpty())) {@@    if (!st->owned && !st->held.isEmpty()) {"
     "owner-gone-seats-kept@@ScanApiClient.cpp@@    if (unseen || (!st->owned && !st->held.isEmpty())) {@@    if (unseen) {"
     "owner-dtor-keeps-seats@@ScanApiClient.cpp@@    if (!m_s->inFlight && !m_s->held.isEmpty())\n        ScanApiClient::releaseBatch(m_s);@@"
+    "release-not-resent@@ScanApiClient.cpp@@        const bool again = next.kind == UpstreamReleaseTry::Resend;@@        const bool again = false;"
     "qnam-implicit-gzip@@ScanApiClient.cpp@@        rq.headers << qMakePair(QByteArrayLiteral(\"Accept-Encoding\"), QByteArrayLiteral(\"gzip\"));@@        ;"
     "gzip-not-inflated@@ScanApiClient.cpp@@            if (scanGunzip(r.body, kScanInflateMaxBytes, &plain)) {\n                r.body = plain;@@            if (scanGunzip(r.body, kScanInflateMaxBytes, &plain)) {"
     "revision-refetch-skipped@@ScanApiClient.cpp@@        if (rev > run->stored.revision && !run->refetched) {@@        if (false) {"

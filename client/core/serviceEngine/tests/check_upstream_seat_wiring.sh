@@ -85,12 +85,13 @@ has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::down()')" '++m_statsSess
 has "$(body_of "$ADP" 'bool VpnConnectionTunnelControl::invokeConnect(')" '++m_statsSession;' \
     || bad "F6: every connect must start a new statistics session"
 
-# F3 (rounds 1-2): a release cut locally is sent again with the attempt count; only an HTTP answer reports it
+# F3 (rounds 1-2) + device round 19.11 (a 502 during a deploy): a release with no answer or a 5xx is sent again on
+# the shared spacing (seatReleaseNext, one rule with the probe-batch release); only an HTTP answer reports it
 # confirmed, everything else reports "not confirmed" (left to the server's TTL) - never a silent "done".
 rel="$(body_of "$CLI" 'void UpstreamLeaseClient::sendRelease(')"
-has "$rel" 'switch (upstreamReleaseNext(attempt, r->error() == QNetworkReply::OperationCanceledError,' \
-    && has "$rel" 'sendRelease(requestId, leaseId, meter, route, attempt + 1);' \
-    || bad "F3: a release cut locally must be sent again with the attempt count (upstreamReleaseNext)"
+has "$rel" 'const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs);' \
+    && has "$rel" 'sendRelease(requestId, leaseId, meter, route, attempt + 1, spacedMs + next.delayMs);' \
+    || bad "F3: a release with no answer or a 5xx must be sent again on the shared spacing (seatReleaseNext)"
 has "$rel" 'onReleaseDone(requestId, true);' && has "$rel" 'onReleaseDone(requestId, false);' \
     || bad "F3: sendRelease must report whether the server answered (onReleaseDone confirmed / not confirmed)"
 [ "$(printf '%s\n' "$rel" | grep -cF 'onReleaseDone(requestId, true);')" = "1" ] \

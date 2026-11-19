@@ -15,6 +15,7 @@
 // Tests: tests/upstream_lease_check.cpp (build_upstream_lease.sh).
 #pragma once
 
+#include "DataCheckRetry.h" // the shared growing spacing of a retry
 #include "SignedContext.h"
 #include "UpstreamNode.h"
 
@@ -245,14 +246,6 @@ inline bool upstreamLeaseIdValid(const QString &id)
     return re.match(id).hasMatch();
 }
 
-// What happens after one try of a seat release (DELETE). A try cut by the app's own API reset of a tunnel transition
-// (DebugSnapshot.h::transitionNetAction - canceled, not its own 1.5 s timeout) is sent again over the new path, like
-// every other API request (DebugSnapshot.h::reissueAfterOwnAbort): review F3 of 17.11 - Disconnected cut the release
-// and the next node's Connected cut the retry. Any HTTP answer ends it as Answered (the server's DELETE is
-// idempotent). Everything else - its own timeout, a network error, or kUpstreamReleaseMaxResends local resets in a
-// row (a reset storm) - ends it as NotConfirmed: never reported as released; the seat is left to the server's TTL
-// and the journal says so (review round 2). No new timer: nothing is kept owed.
-inline constexpr int kUpstreamReleaseMaxResends = 8;
 // Decision of 18.11 (owner's iPhone, rounds 1-2: releases timed out inside provider paths that carried no data,
 // and through a working provider tunnel api.tribevpn.com is often unreachable): a seat release never rides the
 // tunnel that is being abandoned. It goes over the app's direct API path - the route's tunnel_api_base serves the
@@ -282,14 +275,37 @@ inline UpstreamReleaseDue upstreamReleaseDue(bool stopPending, qint64 heldSinceM
     return d;
 }
 
+// What happens after one try of a seat release - ONE rule for both kinds of seat: the session seat's DELETE
+// (UpstreamLeaseClient) and the probe seats' POST .../probe-batch/release (ScanApiClient). The server answers both
+// idempotently, so a try that may not have reached it is sent again:
+//  - no HTTP answer (a network error, the try's own timeout, the app's own API reset of a tunnel transition -
+//    review F3 of 17.11: Disconnected cut the release, the next node's Connected cut the retry) or a 5xx (device round
+//    19.11, 08:18:42: a prod API restart during a deploy answered the DELETE 502, nothing sent it again and the seat
+//    stayed its full 15 minutes) -> Resend after the data check's growing spacing (DataCheckRetry.h: 300, 600, 1200,
+//    2000 ms ...) while kSeatReleaseRetryBudgetMs of spacing is left; past it -> NotConfirmed (never reported as
+//    released; the seat is left to the server's TTL and the journal says so);
+//  - any other HTTP answer -> Answered: 2xx released, 4xx final (404 the seat is already gone, 409 / 422 a resend
+//    cannot change it).
+// The budget counts the spacing, not the wall clock: a retry pending while iOS suspends the app goes when it wakes.
+inline constexpr qint64 kSeatReleaseRetryBudgetMs = 20000;
 enum class UpstreamReleaseTry { Resend, Answered, NotConfirmed };
-inline UpstreamReleaseTry upstreamReleaseNext(int attemptsDone, bool canceled, bool timedOut, bool httpAnswered)
+struct SeatReleaseNext {
+    UpstreamReleaseTry kind = UpstreamReleaseTry::NotConfirmed;
+    qint64 delayMs = 0; // Resend: wait this long first
+};
+// httpStatus 0 = no HTTP answer; retriesSoFar / spacedMs = resends already made and the spacing they waited.
+inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 spacedMs,
+                                       qint64 budgetMs = kSeatReleaseRetryBudgetMs)
 {
-    if (httpAnswered)
-        return UpstreamReleaseTry::Answered;
-    if (canceled && !timedOut && attemptsDone < kUpstreamReleaseMaxResends)
-        return UpstreamReleaseTry::Resend;
-    return UpstreamReleaseTry::NotConfirmed;
+    SeatReleaseNext n;
+    if (httpStatus > 0 && httpStatus < 500) {
+        n.kind = UpstreamReleaseTry::Answered;
+        return n;
+    }
+    const DataCheckRetry d = decideDataCheckRetry(/*notYet=*/true, retriesSoFar, budgetMs - spacedMs);
+    n.kind = d.retry ? UpstreamReleaseTry::Resend : UpstreamReleaseTry::NotConfirmed;
+    n.delayMs = d.delayMs;
+    return n;
 }
 
 // standbyConfigSha256 non-empty = a standby acquire: the device already runs that profile from its

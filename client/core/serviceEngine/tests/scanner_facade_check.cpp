@@ -227,6 +227,8 @@ struct Server {
     int leaseSerial = 0;
     QStringList releasedLeases;
     int cancelReleases = 0; // the next N probe-seat releases are cut by our own tunnel transition (canceled, no answer)
+    QList<int> releaseStatuses; // the next probe-seat releases are answered with these statuses (nothing released)
+    int releaseTries = 0;
     // Contract 1.15.0: a batch's operation id. The server's side of an operation: its answer items (a resend gets
     // the same seats), the lease ids it granted (released by the id).
     int cancelBatches = 0;  // the next N probe-batch sends are cut by our own transition AFTER the server granted
@@ -359,6 +361,11 @@ struct Server {
             return out;
         }
         if (path == QLatin1String("/v1/upstream/lease/probe-batch/release")) {
+            ++releaseTries;
+            if (!releaseStatuses.isEmpty()) {
+                out.status = releaseStatuses.takeFirst(); // e.g. 502 of an API restart: nothing released
+                return out;
+            }
             if (cancelReleases > 0) {
                 --cancelReleases;
                 out.canceled = true; // status 0: never reached the server
@@ -3806,45 +3813,76 @@ static void caseScanCanceledRetryRule()
 }
 
 
-// Device round of 19.11 (iPhone Air 06:31:22, 06:32:04): a probe-seat release our own tunnel transition cut (status 0,
-// canceled) is sent again after the transition; a timeout / network error is not. Before: one try, the seats stayed
-// until the server's probe TTL.
+// Device round of 19.11 (iPhone Air 06:31:22, 06:32:04: a release our own tunnel transition cut; 08:18:42: a 502 of a
+// prod API restart): a seat release with no HTTP answer or a 5xx is sent again on the shared spacing
+// (seatReleaseNext) until its budget is used, then given up and journalled; 2xx / 4xx are final.
 static void caseReleaseSurvivesTransition()
 {
     g_case = QStringLiteral("release_survives_transition");
-    World w;
-    w.start();
     const QStringList ids{QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID9001"), QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID9002")};
-    w.server.cancelReleases = 2;
-    bool done = false;
-    qint64 bytes = 0;
-    w.s->api()->releaseLeases(ids, 4096, [&](qint64 b) {
-        done = true;
-        bytes = b;
-    });
-    QElapsedTimer t;
-    t.start();
-    while (!done && t.elapsed() < 6000) {
-        w.run(50);
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    const auto release = [&ids](World &w) {
+        bool done = false;
+        qint64 bytes = 0;
+        w.s->api()->releaseLeases(ids, ScanTunables().costApiBytes, [&](qint64 b) {
+            done = true;
+            bytes = b;
+        });
+        QElapsedTimer t;
+        t.start();
+        while (!done && t.elapsed() < 9000) {
+            w.run(50);
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        }
+        CHECK(done);
+        return bytes;
+    };
+    const auto logged = [](const World &w, const char *what) {
+        for (const QString &l : w.logs)
+            if (l.contains(QLatin1String(what)))
+                return true;
+        return false;
+    };
+    { // cut twice by our own transition, then answered
+        World w;
+        w.start();
+        w.server.cancelReleases = 2;
+        CHECK(release(w) > 0);
+        CHECK_EQ(w.server.cancelReleases, 0);
+        CHECK_EQ(w.server.releasedLeases, ids); // released once, by the third try
     }
-    CHECK(done);
-    CHECK_EQ(w.server.cancelReleases, 0);
-    CHECK_EQ(w.server.releasedLeases, ids); // released once, by the third try
-    CHECK(bytes > 0);
-    // a cut that never ends: bounded by kScanCanceledRetries, then the seat is the server's TTL's
-    w.server.releasedLeases.clear();
-    w.server.cancelReleases = kScanCanceledRetries + 1;
-    done = false;
-    w.s->api()->releaseLeases(ids, 4096, [&](qint64) { done = true; });
-    t.restart();
-    while (!done && t.elapsed() < 9000) {
-        w.run(50);
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    { // 502 then 204 -> released
+        World w;
+        w.start();
+        w.server.releaseStatuses = {502};
+        release(w);
+        CHECK_EQ(w.server.releaseTries, 2);
+        CHECK_EQ(w.server.releasedLeases, ids);
     }
-    CHECK(done);
-    CHECK(w.server.releasedLeases.isEmpty());
-    CHECK_EQ(w.server.cancelReleases, 0);
+    { // 502 x N: resent until the spacing budget is used, then given up and journalled
+        World w;
+        w.start();
+        w.s->api()->releaseRetryBudgetMs = 2500; // 300 + 600 ms of spacing: three tries
+        w.server.releaseStatuses = {502, 502, 502, 502, 502, 502};
+        release(w);
+        CHECK_EQ(w.server.releaseTries, 3);
+        CHECK(w.server.releasedLeases.isEmpty() && logged(w, "gave_up=1"));
+        w.server.releaseStatuses.clear();
+        w.server.releaseTries = 0;
+        w.server.cancelReleases = 10; // a cut that never ends: the same bound
+        release(w);
+        CHECK_EQ(w.server.releaseTries, 3);
+        CHECK(w.server.releasedLeases.isEmpty());
+    }
+    { // 404 / 409: final, no resend
+        for (const int status : {404, 409}) {
+            World w;
+            w.start();
+            w.server.releaseStatuses = {status, 204};
+            release(w);
+            CHECK_EQ(w.server.releaseTries, 1);
+            CHECK(w.server.releasedLeases.isEmpty() && !logged(w, "gave_up=1"));
+        }
+    }
 }
 
 // Contract 1.15.0 (device round 19.11: the race's batch was cut as a tunnel came up, its seats stayed until their
