@@ -423,8 +423,11 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                                    m_ledger.view(e.report.network, e.report.path, nowMs()).state))));
             break;
         case path::EffectType::Yield:
-            attemptJournal(QStringLiteral("leg_preempted_for_proof node=%1 to=%2 (no first byte, a proven path waits)")
-                               .arg(e.path.id.id, e.toPath));
+            attemptJournal(e.phase == path::AttemptPhase::Starting
+                               ? QStringLiteral("leg_preempted_for_proof node=%1 to=%2 phase=starting (raised blind, not up)")
+                                     .arg(e.path.id.id, e.toPath)
+                               : QStringLiteral("leg_preempted_for_proof node=%1 to=%2 (no first byte, a proven path waits)")
+                                     .arg(e.path.id.id, e.toPath));
             m_checkStarved = false;
             break;
         case path::EffectType::StopUnconfirmed:
