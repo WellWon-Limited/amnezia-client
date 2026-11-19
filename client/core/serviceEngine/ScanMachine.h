@@ -1034,6 +1034,10 @@ public:
             }
             c.finalDone = true;
             const QString r = reason.isEmpty() ? QStringLiteral("config") : reason;
+            // This host cannot probe it (its config cannot be built here): the next batch would offer it again and
+            // refuse it again, so «Найти ещё» never reached its end (device round air9, 19.11: «Германия» kept
+            // offering one refused profile). It joins the judged rows of the series, as the host's other limits do.
+            m_shownNet.insert(c.c.id);
             addUnverified(c.c, r);
             judge(c.c.id, ScanClass::NotVerified, r);
             pumpProviders(now, s);

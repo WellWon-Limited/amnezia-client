@@ -1013,8 +1013,10 @@ void TribeScanner::doStartHost(const ScanAction &a)
     if (m_nextPollAt < 0)
         m_nextPollAt = t + m_m.tunables().pollMs;
     // A probe whose config could not be built never reached the host: «Не проверено» with the builder's reason.
-    for (const auto &x : refused)
+    for (const auto &x : refused) {
+        emitLog(QStringLiteral("candidate refused id=%1 reason=%2").arg(x.first, x.second));
         dispatch(m_m.candidateRefused(x.first, x.second, now()));
+    }
 }
 
 // --- host exchanges: the context of a message is captured when it is SENT (invariant 1) ---------------------------
@@ -1200,8 +1202,10 @@ void TribeScanner::doAddHost(const ScanAction &a)
     const QList<ScanHostCandidate> cands = withXrayBursts(a.candidates, scanBuildHostCandidates(
         withoutWithheldAwg(a, &refused).candidates, [this](const ScanCandidate &c) { return configOf(c); },
         [this](const ScanCandidate &c) { return awgInputOf(c); }, &refused));
-    for (const auto &x : refused)
+    for (const auto &x : refused) {
+        emitLog(QStringLiteral("candidate refused id=%1 reason=%2").arg(x.first, x.second));
         dispatch(m_m.candidateRefused(x.first, x.second, now()));
+    }
     if (cands.isEmpty())
         return;
     emitLog(QStringLiteral("action add_host_candidates n=%1").arg(cands.size()));

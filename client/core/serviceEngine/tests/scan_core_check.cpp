@@ -3885,6 +3885,70 @@ static void countrylessRows()
     CHECK(!blank && v.bar.countries.size() == 1 && v.bar.total == 2);
 }
 
+static void refusedEndsScope()
+{
+    // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
+    // проверено» outside `seen`, the server offered it again, it was refused again - «Найти ещё» never ended.
+    World w = baseWorld("srv_refused", hostMac(), ScanNetKind::Wifi);
+    w.nodes = ownOnly(w.nodes);
+    w.numbers.insert(QStringLiteral("scan_stop_works"), 1);
+    const auto actionOf = [](const ScanStep &s, ScanActionKind k) {
+        for (const ScanAction &a : s.actions)
+            if (a.kind == k)
+                return a;
+        return ScanAction();
+    };
+    const auto works = [](const QString &id) {
+        ScanProbeFacts f = goodData();
+        f.id = id;
+        f.egressNode = id.section(QLatin1Char(':'), 0, 0);
+        return f;
+    };
+    ScanMachine m(w.caps);
+    m.opened(openOf(w, QString(), false), kT0);
+    const ScanAction start1 = actionOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50), ScanActionKind::StartHostScan);
+    CHECK(start1.candidates.size() >= 3);
+    if (start1.candidates.size() < 3)
+        return;
+    m.hostProgress(progressOf(m, {works(start1.candidates.at(0).id)}), kT0 + 900);
+    m.tick(kT0 + 50 + 8100);
+    m.moreTapped(QString(), kT0 + 31000);
+    const ScanAction rc = actionOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050), ScanActionKind::RequestCandidates);
+    ScanManifestView mv;
+    scanManifestViewFromJson(manifestBody(w), mv);
+    ScanCandidatesView cv;
+    cv.exhausted = true; // nothing of the scope beyond this batch
+    for (const ScanManifestNode &n : mv.nodes)
+        if (n.nodeId != start1.candidates.at(0).id && cv.nodes.size() < 2
+            && std::any_of(start1.candidates.begin(), start1.candidates.end(), [&n](const ScanCandidate &c) { return c.id == n.nodeId; }))
+            cv.nodes << n;
+    CHECK(cv.nodes.size() == 2);
+    if (cv.nodes.size() < 2)
+        return;
+    const ScanAction start2 = actionOf(m.candidatesReady(rc.requestId, cv, 4000, kT0 + 31300), ScanActionKind::StartHostScan);
+    CHECK(start2.candidates.size() == 2);
+    if (start2.candidates.size() < 2)
+        return;
+    const QString refused = start2.candidates.at(0).id;
+    m.candidateRefused(refused, QStringLiteral("config"), kT0 + 31310); // the coordinator could not build its config
+    m.hostProgress(progressOf(m, {works(start2.candidates.at(1).id)}), kT0 + 32000);
+    m.tick(kT0 + 31300 + 8100);
+    const ScanView v = m.view(kT0 + 39500);
+    CHECK(!v.scanning && v.moreState == QLatin1String("exhausted"));
+    // and a scope that is not exhausted never offers the refused row again: it is in the next `seen`
+    ScanMachine m2(w.caps);
+    m2.opened(openOf(w, QString(), false), kT0);
+    const ScanAction s21 = actionOf(m2.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50), ScanActionKind::StartHostScan);
+    if (s21.candidates.size() < 3)
+        return;
+    m2.candidateRefused(s21.candidates.at(1).id, QStringLiteral("config"), kT0 + 60);
+    m2.hostProgress(progressOf(m2, {works(s21.candidates.at(0).id)}), kT0 + 900);
+    m2.tick(kT0 + 50 + 8100);
+    m2.moreTapped(QString(), kT0 + 31000);
+    const ScanAction rc2 = actionOf(m2.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050), ScanActionKind::RequestCandidates);
+    CHECK(!rc2.requestId.isEmpty() && rc2.ids.contains(s21.candidates.at(1).id));
+}
+
 static void rowsAfter17Nov()
 {
     // the manifest's `kind`: absent = Unspecified, unknown = auto
@@ -4225,6 +4289,7 @@ int main(int argc, char **argv)
     cooldownRule();
     rowsAfter17Nov();
     countrylessRows();
+    refusedEndsScope();
     xrayBurst();
     findMore();
     findMoreAppends();
