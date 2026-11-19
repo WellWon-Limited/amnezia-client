@@ -1328,6 +1328,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             [this](const QString &line) { reliabilityEvent(line); }, Qt::QueuedConnection);
     connect(IosController::Instance(), &IosController::tunnelEngineDown, this,
             &AvpnEngineQml::onTunnelEngineDown, Qt::QueuedConnection);
+    // Floor 19.11: the AmneziaWG stage "extension Connected -> handshake seen by the status poll" (fast while a start
+    // is in flight, IosNativePolicy.h::statusPollIntervalMs) - one journal line per awaited handshake.
+    connect(IosController::Instance(), &IosController::handshakeConfirmed, this,
+            [this](qint64 awaitedMs) {
+                reliabilityEvent(QStringLiteral("ios_handshake_seen awaited_ms=%1 node=%2")
+                                     .arg(awaitedMs).arg(m_engine.currentNodeId()));
+            },
+            Qt::QueuedConnection);
 #endif
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     connect(IosController::Instance(), &IosController::sessionMetadataChanged, this,

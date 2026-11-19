@@ -1334,9 +1334,12 @@ void IosController::checkStatus()
                          (rxBytes >= handshakeRxThreshold));
 
                 if (hasFreshHandshake) {
+                    // AVPN (floor 19.11): the stage NE Connected -> handshake seen, for the journal (before invalidate)
+                    const qint64 awaitedMs = m_handshakeTimer.isValid() ? m_handshakeTimer.elapsed() : -1;
                     m_handshakeConfirmed = true;
                     m_handshakeAwaiting = false;
                     m_handshakeTimer.invalidate();
+                    emit handshakeConfirmed(awaitedMs);
                     m_handshakeTimeouts = 0;
                     qDebug() << "IosController::checkStatus : handshake confirmed";
                     emitConnectionStateIfChanged(Vpn::ConnectionState::Connected);

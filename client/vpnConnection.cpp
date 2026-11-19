@@ -29,6 +29,7 @@
 
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     #include "platforms/ios/ios_controller.h"
+    #include "platforms/ios/IosNativePolicy.h" // AVPN (floor 19.11): statusPollIntervalMs
 #endif
 
 #include "core/serviceEngine/CidrValidate.h" // AVPN: IPv6-CIDR для split-фильтра (header-only)
@@ -204,8 +205,15 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
         state == Vpn::ConnectionState::Reconnecting) {
         // AVPN (Task 8): перечитать интервал перед стартом — в конструкторе конфиг ещё мог не
         // примениться (numberOr => вкомпиленный 1000), здесь уже свежий TuningStore-снапшот.
-        m_checkTimer.setInterval(qBound(250, (int)avpn::TuningStore::numberOr(QStringLiteral("status_poll_ms"), 1000), 5000)); // AVPN: server-tunable
-        m_checkTimer.start();
+        // AVPN (floor 19.11): a start in flight (Connecting) polls fast, so the AmneziaWG handshake is seen
+        // within ~0.1 s instead of up to 1 s (IosNativePolicy.h::statusPollIntervalMs); every other state - the
+        // normal cadence.
+        const int normalPollMs = qBound(250, (int)avpn::TuningStore::numberOr(QStringLiteral("status_poll_ms"), 1000), 5000); // AVPN: server-tunable
+        const int pollMs = avpn_ios::statusPollIntervalMs(state == Vpn::ConnectionState::Connecting, normalPollMs);
+        if (!m_checkTimer.isActive() || m_checkTimer.interval() != pollMs) {
+            m_checkTimer.setInterval(pollMs);
+            m_checkTimer.start();
+        }
     } else {
         m_checkTimer.stop();
     }

@@ -102,6 +102,22 @@ inline bool showEstablishedAsConnected(bool connectPending, bool previouslyLive,
     return !connectPending && !previouslyLive && connectedForMs >= kEstablishedSessionMs;
 }
 
+// Floor of "tap -> data" (19.11.2026): AmneziaWG is Connected only when the status poll sees the handshake
+// (last_handshake_time_sec > 0 or rx above the threshold), and the extension cannot tell the app about a handshake
+// (the Go engine has no handshake event; the NE's own Connected comes before it). With the 1 s poll of upstream
+// Amnezia (VpnConnection::m_checkTimer) the app saw the handshake up to 1 s late - 0.3-0.65 s on Wi-Fi, up to
+// 1.45 s on LTE in the iPhone Air logs of 18-19.11. So the existing poll runs at kStartStatusPollMs while a start is
+// in flight (the observed state is Connecting: before the NE's Connected a tick reads the NE status and sends
+// nothing; after it, one status message per tick - one in flight at most, IosStatusRequest) and at the normal
+// cadence in every other state (Connected, Reconnecting, Disconnected). The fast window ends with the handshake,
+// with the attempt owner's leg deadline (AmneziaWG 4.5 s) or with the handshake budget (Reconnecting). Each status
+// message is one IPC to the extension: a wg UAPI read, the roaming counters and a small JSON reply.
+inline constexpr int kStartStatusPollMs = 125;
+inline int statusPollIntervalMs(bool startInFlight, int normalMs)
+{
+    return (startInFlight && normalMs > kStartStatusPollMs) ? kStartStatusPollMs : normalMs;
+}
+
 // Owner test 06.11 (device 36, build 135): the app was relaunched while the NE held a session that
 // had NEVER completed a handshake (node unreachable from that Wi-Fi: tx=1493 rx=0 for ~2 min). iOS
 // reported it Connected, the cold-start rule above showed it Connected, the app adopted it - and every

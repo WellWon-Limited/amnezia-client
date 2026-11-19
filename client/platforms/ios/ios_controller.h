@@ -182,6 +182,9 @@ signals:
     // (HealthLoop). Значение уже парсится в checkStatus из UAPI last_handshake_time_sec; здесь лишь
     // отдаём его наружу (раньше использовалось только для подтверждения коннекта). См. VpnConnectionTunnelControl.
     void handshakeChanged(qint64 lastHandshakeEpochSec);
+    // AVPN (floor 19.11): the awaited AmneziaWG handshake was seen - awaitedMs from the NE's Connected to this
+    // status reply (the stage between "extension Connected" and the app's Connected; journal ios_handshake_seen).
+    void handshakeConfirmed(qint64 awaitedMs);
     // AVPN (девайс-разбор 2026-09-02): текст причины, по которой ядро Xray не поднялось в NE.
     // Слушает VpnConnectionTunnelControl → лог + диагностика; без него отказ был безымянным.
     void xrayStartFailed(const QString &reason);
