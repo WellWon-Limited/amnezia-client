@@ -4015,6 +4015,41 @@ static void cachedResultKeepsEveryShownRow()
     CHECK(scanCachedResultFromJson(scanCachedResultToJson(big)).rows.size() == big.rows.size()); // the reader never drops
 }
 
+// Review of 142 (finding 1): connecting a restored row keeps its batch; 14 cached rows stay 14 after the page is reopened.
+static void connectedRestoredRowKeepsItsBatch()
+{
+    World w = baseWorld("restored", hostMac(), ScanNetKind::Wifi);
+    w.nodes = ownOnly(w.nodes);
+    ScanCachedResult c;
+    c.networkKey = w.net.key;
+    c.fingerprint = w.net.fingerprint;
+    c.savedAtMs = kT0 - 60000;
+    c.scope = QStringLiteral("DE");
+    for (int i = 0; i < 14; ++i) {
+        ScanCachedRow r;
+        r.id = QStringLiteral("%1:xray").arg(100 + i);
+        r.label = QStringLiteral("Германия %1").arg(i + 1);
+        r.countryCode = QStringLiteral("DE");
+        r.speed = ScanSpeed::Fast;
+        r.ms = 40 + 5 * i;
+        r.batch = i < 10 ? 1 : 2;
+        c.rows << r;
+    }
+    ScanMachine m(w.caps);
+    ScanOpen o = openOf(w, QString(), false);
+    o.cached = c;
+    m.shown(o, kT0);
+    CHECK(m.view(kT0 + 10).rows.size() == 14);
+    ScanOpen conn = openOf(w, QStringLiteral("112:xray"), true);
+    m.vpnState(conn.current, kT0 + 1000);
+    m.closed(kT0 + 2000);
+    ScanOpen again = conn;
+    again.cached = c;
+    m.shown(again, kT0 + 3000);
+    CHECK(m.view(kT0 + 3010).rows.size() == 14);
+    CHECK(m.view(kT0 + 3010).rows.first().id == QLatin1String("112:xray"));
+}
+
 static void scanStartsNewList()
 {
     const QString de = QStringLiteral("DE");
@@ -4252,8 +4287,9 @@ static void exhaustedScopeSaysWhatIsMissing()
         for (const ScanRowView &r : v.rows)
             shown += r.countryCode == QLatin1String("DE") ? 1 : 0;
         CHECK(v.moreState == QLatin1String("exhausted"));
-        CHECK(v.moreUnshown == qMax(0, pool - shown) && v.moreUnshown > 0);
-        CHECK(scanViewToJson(v).value(QStringLiteral("more")).toObject().value(QStringLiteral("unshown")).toInt() == v.moreUnshown);
+        // review of 142 (finding 3): nothing failed, so nothing "did not answer" - whatever the menu counts beyond the list
+        CHECK(shown < pool && v.moreUnshown == 0);
+        CHECK(!scanViewToJson(v).value(QStringLiteral("more")).toObject().contains(QStringLiteral("unshown")));
     }
 }
 
@@ -4828,6 +4864,7 @@ int main(int argc, char **argv)
     scanStartsNewList();
     connectedFirstInEveryList();
     cachedResultKeepsEveryShownRow();
+    connectedRestoredRowKeepsItsBatch();
     exhaustedScopeSaysWhatIsMissing();
     serverBatches();
     overruns();

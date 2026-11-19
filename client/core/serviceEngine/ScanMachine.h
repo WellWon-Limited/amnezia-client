@@ -2291,7 +2291,10 @@ private:
                     r.cached = false;
                     r.fromLive = true;
                     r.liveVerified = false; // a cached verdict is not current evidence
+                    const int keptBatch = r.batch; // its batch stays: re-stamping put it in the first batch and took a place there
                     stampArrival(r);
+                    if (keptBatch > 0)
+                        r.batch = keptBatch;
                 }
                 r.generation = m_net.generation();
                 r.fingerprint = m_net.fingerprint;
@@ -2540,8 +2543,10 @@ private:
         m_deadline = -1;
         m_emptyReason.clear();
         m_noScanReason.clear();
-        if (!keepRows)
+        if (!keepRows) {
             m_failuresThisScan.clear();
+            m_failureCountry.clear();
+        }
         m_verdicts.clear();
         m_nvReasonOf.clear();
         m_liveReasons.clear();
@@ -3057,6 +3062,7 @@ private:
             if (ri >= 0 && m_rows.at(ri).cached && c.c.id != m_connectingId)
                 m_rows.removeAt(ri);
             m_failuresThisScan << ScanCachedFailure{c.c.id, v.cls, m_last};
+            m_failureCountry.insert(c.c.id, c.c.countryCode);
         } else if (v.exclusionCandidate) {
             // Data proven, path not comparable: «Не проверено» unless the exclusion proof holds at the end.
             c.exclusionPending = true;
@@ -3528,6 +3534,11 @@ private:
         int working = 0;
         for (const ScanRowView &r : rows)
             working += r.verified ? 1 : 0;
+        // One bound for the series, the screen and the store: a batch adds at most scan_list_target_works rows, and the cache
+        // keeps kScanCacheRowsMax - so «Найти ещё» ends (honestly: «проверены все серверы») before a batch could show a row
+        // the cache would not keep.
+        if (working + m_t.listTargetWorks > kScanCacheRowsMax)
+            m_moreAvailable = false;
         ScanCachedResult cache = buildCache(rows, now);
         if (!connectStep)
             recordSummary(rows, now);
@@ -4295,6 +4306,7 @@ private:
     QList<Row> m_rows;
     QList<Unverified> m_unverified;
     QList<ScanCachedFailure> m_failuresThisScan;
+    QHash<QString, QString> m_failureCountry; // failed candidate id -> its country ("" = white list / none), this series
     QSet<QString> m_tapFailed;
     QString m_filter;
     QString m_scanId;
@@ -4381,23 +4393,22 @@ private:
     bool m_fromServer = false;       // this scan probes the server's batch
     bool m_serverExhausted = false;
 
-    // What the scope menu counts for a scope and the list does not show (the menu counts the pool's servers: a server whose
-    // probe failed here, one this host cannot probe, a refused one never reaches the list). The honest end message says
-    // how many (the menu cannot know before a scan which of them answer).
+    // The servers of a scope whose probe FAILED in this series and that the list does not show (review of 142: the first
+    // version counted «the menu's count minus the rows shown», which called working rows hidden by the display limit, or a
+    // pool the menu counted differently, «did not answer»). Counted from the probe results only: never negative, and a
+    // failed row the list still shows (as «Не удалось») is not counted twice.
     int unshownInScope(const QString &scope) const
     {
-        int pool = 0;
-        if (scope == QLatin1String(kScanScopeWhitelist))
-            pool = qMax(0, m_poolWhitelist);
-        else
-            for (const ScanCountryView &c : scopeList())
-                if (c.countryCode == scope)
-                    pool += c.count;
-        int shown = 0;
-        for (const ListEntry &e : m_list)
-            if (scope == QLatin1String(kScanScopeWhitelist) ? e.row.countryCode.isEmpty() : e.row.countryCode == scope)
-                ++shown;
-        return qMax(0, pool - shown);
+        const bool wl = scope == QLatin1String(kScanScopeWhitelist);
+        int n = 0;
+        for (const ScanCachedFailure &f : m_failuresThisScan) {
+            const QString cc = m_failureCountry.value(f.id);
+            if (wl ? !cc.isEmpty() : cc != scope)
+                continue;
+            if (listIndex(f.id) < 0)
+                ++n;
+        }
+        return n;
     }
 
     QList<ScanCountryView> scopeList() const { return m_poolCountries.isEmpty() ? m_scopeCountries : m_poolCountries; }
