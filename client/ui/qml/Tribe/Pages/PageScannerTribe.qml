@@ -11,10 +11,11 @@ import "../../Controls2" // PageType
 // plan scanner-client-plan.md §1, §4; owner review 18.11): header «Сканер» (+ the 18 px mark after the scan), the
 // two status chips (last check, network), the rings with one status line and a thin bar while scanning (they
 // collapse in 360 ms), then the list - one line of what is connected now (variant B: the card «Ваше подключение»
-// and its check left for Support), rows by speed, the crowd legend - and the pinned bar (country
+// and its check left for Support), the machine's rows in its order, the crowd legend - and the pinned bar (country
 // menu left of «Повторить» / «Остановить»). The empty result and the «Скан сейчас невозможен» reasons are drawn from
 // the same kit parts. The screen only DRAWS the view: TribeScanner.view = ScanView JSON (ScanMachine.h
-// scanViewToJson); every decision (order, filter, stop, cooldown, budget, card, shades) is the pure machine's.
+// scanViewToJson); every decision (order, row lifetime, scope, stop, cooldown, budget, card, shades) is the pure
+// machine's.
 // Non-tab page (goToTabBarPageUrl); back returns to where it was opened from. After a row tap the user STAYS here.
 PageType {
     id: root
@@ -97,15 +98,14 @@ PageType {
     // the bar is up in every state but blocked / empty: on page open too (idle) - it holds the one Scan button
     readonly property bool showBar: !blocked && !emptyResult
     // Owner 19.11 (device test, iPhone Air): the country is the SCOPE of the next scan over the whole pool, never a
-    // filter of rows found before. A scope the shown result does not cover = nothing of that result is shown, only
-    // the scope's summary («Германия · 12 серверов») and the Scan button; its own result appears after its scan.
+    // filter of rows found before. A scope the shown result does not cover = the machine's list is empty: only the
+    // scope's summary («Германия · 12 серверов») and the Scan button; its own result appears after its scan.
     readonly property string scope: String(barView.scope || "")
-    readonly property bool scopeKnown: barView.scope !== undefined && Array.isArray(barView.scope_countries)
-    readonly property bool scopePending: scopeKnown && !scanning && scope !== String(barView.scanned_scope || "")
-    onScopePendingChanged: syncRows()
     // nothing of this scope on the screen yet (page open without results, or a scope not scanned): its summary
-    readonly property bool scopeStart: !scanning && !blocked && !emptyResult && (scopePending || rowsModel.count === 0)
+    readonly property bool scopeStart: !scanning && !blocked && !emptyResult && rowsModel.count === 0
     function scopeCount(cc) {
+        if (cc === "whitelist")
+            return Number(barView.scope_whitelist || 0)
         const list = Array.isArray(barView.scope_countries) ? barView.scope_countries : []
         let n = 0
         for (let i = 0; i < list.length; ++i)
@@ -193,82 +193,41 @@ PageType {
             bars: Number(r.bars || 0), ms: r.ms === undefined ? -1 : Number(r.ms),
             fromCache: f.cache === true, dimmed: f.dimmed === true, tappable: f.not_tappable !== true,
             verifying: f.verifying === true, current: f.current === true,
-            unverified: f.unverified === true, liveUnverified: f.live_unverified === true, crowd: f.crowd === true,
-            leaving: false
+            unverified: f.unverified === true, liveUnverified: f.live_unverified === true, crowd: f.crowd === true
         }
     }
-    // Calm list (owner 18.11 and 19.11 «передёргивание», iPhone Air s12: rows overlapped and slid while a scan ran).
-    // The view (ScanMachine displayRows) is re-sorted by speed at every update, so a faster result arrives ABOVE rows
-    // already shown, and it holds «Не проверено» rows only while fewer than the list cap are proven. The list here:
-    //  - a row on the screen keeps its place and its height until the list is rebuilt (page open, a scope change);
-    //    a new row joins the END; the view's order is taken only when the list starts empty;
-    //  - a «Не проверено» row (flag unverified, not the live connection) is the scan's last word, not a result:
-    //    while rows arrive (a scan or «Найти ещё» runs) it is not added; when the scan ends, those the view still
-    //    holds join the end (a row whose follow-up later proves it arrives as an ordinary row);
-    //  - a row the view drops fades out where it stands, then the rows under it close the gap together - at no
-    //    frame do two rows overlap, and nothing moves because another row arrived.
-    readonly property bool moreRunning: !!view.more && view.more.state === "running"
-    readonly property bool arriving: scanning || moreRunning
-    onArrivingChanged: Qt.callLater(syncRows)       // the held «Не проверено» rows join when the scan ends
+    // The list is the machine's (ScanMachine.h syncList, owner 19.11): between two builds of it (view.list_build) its
+    // rows only join its END - a row keeps its index until the list is built again (page open, a scope change, a new
+    // network) and never leaves while a scan runs; «Не проверено» rows join only once final. So the model follows the
+    // view index by index: a row changes in place, a new one is appended; a new build replaces the model.
+    property real listBuild: -1
     function sameItem(a, b) {
         for (const k in a)
             if (a[k] !== b[k]) return false
         return true
     }
     function syncRows() {
-        const src = root.scopePending ? [] : (view.rows || [])
+        const src = view.rows || []
         const vmap = src.some(r => r.transport === "awg" && r.version === undefined) ? versionMap() : {}
-        const at = {}                                   // rid -> model index of a row on the screen
-        for (let j = 0; j < rowsModel.count; ++j) {
-            const m = rowsModel.get(j)
-            if (!m.leaving) at[m.rid] = j
+        const build = Number(view.list_build || 0)
+        if (build !== listBuild || src.length < rowsModel.count) {
+            rowsModel.clear()
+            listBuild = build
         }
         let cacheAll = true, crowd = false, liveL = "", liveC = ""
-        const items = []
-        const byId = {}
         for (let i = 0; i < src.length; ++i) {
             const it = toItem(src[i], vmap)
-            if (root.arriving && it.unverified && !it.current && at[it.rid] === undefined)
-                continue                                // not a result yet: shown when the scan ends
             cacheAll = cacheAll && it.fromCache
             crowd = crowd || it.crowd
             if (it.current && liveL === "") { liveL = it.label; liveC = it.cc }
-            byId[it.rid] = it
-            items.push(it)
+            if (i >= rowsModel.count) rowsModel.append(it)
+            else if (rowsModel.get(i).rid !== it.rid) { rowsModel.remove(i, rowsModel.count - i); rowsModel.append(it) }
+            else if (!sameItem(it, rowsModel.get(i))) rowsModel.set(i, it)
         }
-        if (items.length === 0) {
-            // nothing to show (a new scope, a new network, a scan without the last result): no rows to keep calm
-            leaveTimer.stop()
-            rowsModel.clear()
-        } else {
-            let left = false
-            for (let j = rowsModel.count - 1; j >= 0; --j) {
-                const m = rowsModel.get(j)
-                if (m.leaving || byId[m.rid] !== undefined) continue
-                if (Theme.motion.reduceMotion) rowsModel.remove(j, 1)
-                else { rowsModel.setProperty(j, "leaving", true); left = true }
-            }
-            for (let i = 0; i < items.length; ++i) {
-                const it = items[i]
-                const j = at[it.rid]
-                if (j === undefined) rowsModel.append(it)
-                else if (!sameItem(it, rowsModel.get(j))) rowsModel.set(j, it)
-            }
-            if (left) leaveTimer.restart()
-        }
-        allCache = items.length > 0 && cacheAll
+        allCache = src.length > 0 && cacheAll
         anyCrowd = crowd
         liveLabel = liveL
         liveCc = liveC
-    }
-    // the faded rows leave the model together; the rows under them then glide up into the gap (delegate y)
-    Timer {
-        id: leaveTimer
-        interval: Theme.motion.fast
-        onTriggered: {
-            for (let j = rowsModel.count - 1; j >= 0; --j)
-                if (rowsModel.get(j).leaving) rowsModel.remove(j, 1)
-        }
     }
 
     // ── rings collapse (360 ms) into the header mark, and grow back the same way on «Повторить» ──
@@ -595,9 +554,9 @@ PageType {
                     lineHeight: 15
                     lineHeightMode: Text.FixedHeight
                 }
-                // The rows place THEMSELVES: y = index x pitch. Rows only join the end (syncRows), so an index changes
-                // only when a dropped row has faded out and left the model - then the rows under it glide up together
-                // into the gap. A new row fades in at its own place, rising from one gap below (never over a row).
+                // The rows place THEMSELVES: y = index x pitch. Rows only join the end (the machine's list), so an
+                // index never changes while the list lives. A new row fades in at its own place, rising from one gap
+                // below (never over a row).
                 Item {
                     id: rowsBox
                     readonly property real pitch: Theme.scan.rowHeight + content.spacing
@@ -620,10 +579,6 @@ PageType {
                             width: rowsBox.width
                             height: Theme.scan.rowHeight
                             y: index * rowsBox.pitch
-                            Behavior on y {
-                                enabled: !Theme.motion.reduceMotion
-                                NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutCubic }
-                            }
                             opacity: Theme.motion.reduceMotion ? 1 : 0
                             Component.onCompleted: if (!Theme.motion.reduceMotion) arrive.start()
                             ParallelAnimation {
@@ -631,10 +586,6 @@ PageType {
                                 NumberAnimation { target: rowWrap; property: "opacity"; from: 0; to: 1; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                                 NumberAnimation { target: lift; property: "y"; from: content.spacing; to: 0; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                             }
-                            // dropped by the view: fades out where it stands (syncRows removes it after Theme.motion.fast)
-                            readonly property bool leaving: rowWrap.model.leaving === true
-                            onLeavingChanged: if (leaving) { arrive.stop(); leave.start() }
-                            NumberAnimation { id: leave; target: rowWrap; property: "opacity"; to: 0; duration: Theme.motion.fast; easing.type: Easing.OutCubic }
                             TribeScanRow {
                                 id: rowItem
                                 anchors.fill: parent
@@ -647,9 +598,11 @@ PageType {
                                 speed: rowWrap.model.speed
                                 bars: rowWrap.model.bars
                                 ms: rowWrap.model.ms
-                                cached: rowWrap.model.fromCache && root.lastResult
+                                // a cached row is drawn as cache whenever no scan runs: the whole last result, or a
+                                // row of it the finished scan did not judge again (it stays in its place)
+                                cached: rowWrap.model.fromCache && !root.scanning
                                 dimmed: rowWrap.model.dimmed
-                                tappable: rowWrap.model.tappable && !rowWrap.leaving
+                                tappable: rowWrap.model.tappable
                                 verifying: rowWrap.model.verifying
                                 liveUnverified: rowWrap.model.liveUnverified
                                 unverified: rowWrap.model.unverified

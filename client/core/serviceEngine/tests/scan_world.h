@@ -236,15 +236,17 @@ inline ScanStep applyScanEvent(ScanMachine &m, const QJsonObject &ev, bool *know
     const QJsonObject a = ev.value(QLatin1String("args")).toObject();
     if (known)
         *known = true;
-    if (e == QLatin1String("opened")) {
+    if (e == QLatin1String("opened") || e == QLatin1String("shown")) {
         ScanOpen o;
         o.network = netFrom(a.value(QLatin1String("network")).toObject());
         o.current = currentFrom(a.value(QLatin1String("current")).toObject());
         o.cached = scanCachedResultFromJson(a.value(QLatin1String("cached")).toObject());
         o.withCheck = a.value(QLatin1String("with_check")).toBool();
         o.connectOnOpen = a.value(QLatin1String("connect_on_open")).toBool(true);
-        return m.opened(o, now);
+        // shown: the page opens without a scan (the Scan button starts one); opened: the page opens and scans
+        return e == QLatin1String("shown") ? m.shown(o, now) : m.opened(o, now);
     }
+    if (e == QLatin1String("more")) return m.moreTapped(a.value(QLatin1String("cc")).toString(), now);
     if (e == QLatin1String("connect_and_scan_tapped")) return m.connectAndScanTapped(now);
     if (e == QLatin1String("live_probe_result"))
         return m.liveProbeResult(a.value(QLatin1String("node_id")).toString(), factsFrom(a.value(QLatin1String("facts")).toObject()), now);
@@ -532,6 +534,123 @@ struct Recorded {
     bool draining = false;     // a scan still settling its host bytes (must always have a wake)
     qint64 overrunBound = 0;   // what the reports so far may have put past the allowance (overruns x one chunk)
     QJsonObject summary;       // the machine's lastSummary() right after this step (the Doctor `scan` block)
+    quint64 listBuilds = 0;    // the machine's listBuilds(): how many times its list was built from empty so far
+};
+
+// The rows' order and lifetime (owner 19.11, device rounds air7-air9: rows jumped, a row appeared and vanished). The
+// machine owns them; the page draws the view's rows as they are. ListSteps judges every step against the one before:
+//  - within one list (no build between the two steps) rows only JOIN ITS END: an emitted row never changes its index
+//    and never disappears - not while a scan runs, not when it ends;
+//  - a «Не проверено» row never joins while a scan runs (only once its outcome is final); the live connection's row
+//    («Подключено», flag current) is the one row there before its proof;
+//  - a list is built from empty only by the page's open, a scope choice, a network change, or a scan that had no list
+//    or covers another scope; right after a build its rows are in speed order (verified rows by speed class, then
+//    ms; «Не проверено» rows after them) - the order of a finished result read back.
+inline bool scanPhaseNameScanning(const QString &p)
+{
+    return p == QLatin1String("preparing") || p == QLatin1String("connecting") || p == QLatin1String("reach")
+           || p == QLatin1String("data");
+}
+
+// One run's steps in order: step() judges each against the one before (the first against an empty screen).
+struct ListSteps {
+    explicit ListSteps(const ScanTunables &t) : t(&t) {}
+    const ScanTunables *t;
+    QJsonObject prevView;
+    quint64 prevBuilds = 0;
+    QSet<QString> base;   // rows on the list when it was built or its series began: admitted under earlier caps
+    QSet<QString> joined; // rows that joined since
+    int joinedVerified = 0, joinedUnverified = 0;
+
+    void step(const Recorded &r, QStringList &fails, const QString &where)
+    {
+        const auto check = [&fails](bool ok, const QString &what) {
+            if (!ok)
+                fails << what;
+        };
+        const auto flagged = [](const QJsonObject &row, const char *flag) {
+            return row.value(QLatin1String("flags")).toArray().contains(QLatin1String(flag));
+        };
+        const auto idOf = [](const QJsonValue &v) { return v.toObject().value(QLatin1String("id")).toString(); };
+        const QString e = r.event.value(QLatin1String("event")).toString();
+        const QJsonArray a = prevView.value(QLatin1String("rows")).toArray();
+        const QJsonArray b = r.view.value(QLatin1String("rows")).toArray();
+        const bool scanning = scanPhaseNameScanning(r.view.value(QLatin1String("phase")).toString());
+        const int batch = qMax(1, r.view.value(QLatin1String("batch")).toInt());
+        const int prevBatch = qMax(1, prevView.value(QLatin1String("batch")).toInt());
+        const bool scanStart = e == QLatin1String("retry") || e == QLatin1String("connect_and_scan_tapped") || e == QLatin1String("more")
+                               || e == QLatin1String("opened") || e == QLatin1String("network_changed");
+        const bool built = r.listBuilds != prevBuilds;
+        if (!built) {
+            check(b.size() >= a.size(), where + QStringLiteral(": a row left the list"));
+            for (int i = 0; i < a.size(); ++i)
+                check(i < b.size() && idOf(b.at(i)) == idOf(a.at(i)), where + QStringLiteral(": an emitted row moved or left: ") + idOf(a.at(i)));
+            for (int i = a.size(); i < b.size(); ++i)
+                check(!(scanning && flagged(b.at(i).toObject(), "unverified")),
+                      where + QStringLiteral(": a «Не проверено» row joined while the scan runs: ") + idOf(b.at(i)));
+        } else {
+            // A build: only on the events that may start a new list.
+            const QString prevScope = prevView.value(QLatin1String("more_country")).toString();
+            const QString scope = r.view.value(QLatin1String("more_country")).toString();
+            const QString prevChosen = prevView.value(QLatin1String("bar")).toObject().value(QLatin1String("scope")).toString();
+            check(e == QLatin1String("opened") || e == QLatin1String("shown") || e == QLatin1String("filter") || e == QLatin1String("network_changed")
+                      || (scanStart && (a.isEmpty() || prevScope != scope || prevChosen != scope)),
+                  where + QStringLiteral(": the list was rebuilt on ") + e);
+            int lastRank = -1, lastMs = -1, verified = 0, unverified = 0;
+            bool seenUnverified = false;
+            for (const QJsonValue &v : b) {
+                const QJsonObject row = v.toObject();
+                if (flagged(row, "unverified")) {
+                    seenUnverified = true;
+                    ++unverified;
+                    continue;
+                }
+                verified += flagged(row, "cache") ? 0 : 1;
+                check(!seenUnverified, where + QStringLiteral(": a verified row after an unverified one in a built list"));
+                const int rank = scanSpeedRank(scanSpeedFrom(row.value(QLatin1String("speed")).toString()));
+                const int rawMs = row.value(QLatin1String("ms")).toInt();
+                const int ms = rawMs < 0 ? INT_MAX : rawMs; // no figure sorts last inside its speed class
+                // The current row shows its live ms but keeps the place of its own facts: it is skipped here.
+                const bool current = flagged(row, "current");
+                check(rank >= lastRank, where + QStringLiteral(": a built list out of speed order"));
+                if (rank != lastRank)
+                    lastMs = -1;
+                if (!current && rank == lastRank && lastMs >= 0)
+                    check(ms >= lastMs, where + QStringLiteral(": a built list out of ms order inside a speed class"));
+                lastRank = rank;
+                if (!current)
+                    lastMs = ms;
+            }
+            check(verified <= t->listTargetWorks * batch, where + QStringLiteral(": a built list above the cap of verified rows"));
+            check(unverified <= t->unverifiedRowsMax, where + QStringLiteral(": a built list above the cap of «Не проверено» rows"));
+        }
+        // Caps of what JOINS a list (judged when it joins): scan_list_target_works proven rows and scan_unverified_rows_max
+        // «Не проверено» rows per batch of the series. Rows shown before - judged again in place - are never dropped.
+        if (built || batch < prevBatch || (scanStart && scanning && batch == 1)) {
+            base.clear();
+            for (const QJsonValue &v : built ? b : a)
+                base.insert(idOf(v));
+            joined.clear();
+            joinedVerified = joinedUnverified = 0;
+        }
+        for (const QJsonValue &v : b) {
+            const QString id = idOf(v);
+            if (base.contains(id) || joined.contains(id))
+                continue;
+            joined.insert(id);
+            const QJsonObject row = v.toObject();
+            if (flagged(row, "current"))
+                continue; // the live connection's row always joins
+            if (flagged(row, "unverified"))
+                ++joinedUnverified;
+            else if (!flagged(row, "cache"))
+                ++joinedVerified;
+        }
+        check(joinedVerified <= t->listTargetWorks * batch, where + QStringLiteral(": more proven rows joined than the cap"));
+        check(joinedUnverified <= t->unverifiedRowsMax * batch, where + QStringLiteral(": more «Не проверено» rows joined than the cap"));
+        prevView = r.view;
+        prevBuilds = r.listBuilds;
+    }
 };
 
 // The driver: the coordinator + host + engine stand-in, all on the fake clock.
@@ -606,7 +725,7 @@ public:
         }
         const ScanStep s = applyScanEvent(m, e);
         Recorded r{e, s, scanViewToJson(m.view(now)), m.spentBytes(), m.leaseReservedBytes(), m.capBytes(), m.allowanceBytes(), m.allowanceUsed(),
-                   m.draining(), overruns * kScanAppOvershootMaxBytes, m.lastSummary()};
+                   m.draining(), overruns * kScanAppOvershootMaxBytes, m.lastSummary(), m.listBuilds()};
         steps << r;
         react(s);
         return s;

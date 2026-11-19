@@ -151,6 +151,7 @@ QtObject {
     readonly property string supportChecking: qsTr("Проверяем подключение…")             // the bar while the stages run
     readonly property string supportSending: qsTr("Отправляем отчёт…")                    // the bar: no connection, the report alone / the last stage
     readonly property string supportCheckingSub: qsTr("До 20 секунд — отчёт сам придёт в чат") // its second line while running
+    readonly property string whitelists: qsTr("Белые списки")  // the country menu's white-list scope (rows without a country), «Белые списки · N»
     // ELSEWHERE: «Не удалось сохранить отчёт на устройстве — он не отправлен» - chat toast, TribeSupportChat.cpp (queue lane)
     // NO FRAME, existing texts reused (no new wording; listed so the owner sees every fallback):
     //  - stage «preparing» (manifest requested): stageReachShort without the counts + an indeterminate bar

@@ -2395,7 +2395,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Hasta 20 segundos: el informe llegará al chat</translation>
     </message>
     <message>
-        <location line="-42"/>
+        <location line="+1"/>
+        <source>Белые списки</source>
+        <translation>Listas blancas</translation>
+    </message>
+    <message>
+        <location line="-43"/>
         <source>Запустить службу</source>
         <translation>Iniciar el servicio</translation>
     </message>
@@ -3126,7 +3131,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4272"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4278"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3226,7 +3231,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-3026"/>
+        <location line="-3020"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3291,7 +3296,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>El modo de conexión ahora es «Auto» para conectar el servidor elegido</translation>
     </message>
     <message>
-        <location line="+157"/>
+        <location line="+151"/>
         <source>«%1» в этой сети не работает — подключено через другой сервер</source>
         <translation>«%1» no funciona en esta red: conectado mediante otro servidor</translation>
     </message>
@@ -3499,12 +3504,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
     <message>
-        <location line="+672"/>
+        <location line="+676"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>
     <message>
-        <location line="+629"/>
+        <location line="+646"/>
         <source>Введите код доступа</source>
         <translation>Introduce tu código de acceso</translation>
     </message>

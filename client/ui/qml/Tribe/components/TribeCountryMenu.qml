@@ -22,6 +22,7 @@ Item {
 
     property var countries: []          // ScanView bar.countries: [{cc, count, name?}]
     property int total: 0
+    property int whitelist: 0           // ScanView bar.scope_whitelist: the pool's white-list rows (0 = no such entry)
     property string selected: ""        // "" = «Все страны»
     property real menuLift: 4
     property real maxButtonWidth: Theme.scan.menuButtonMax   // the bar narrows it on small screens
@@ -32,6 +33,8 @@ Item {
     implicitHeight: Theme.scan.barHeight
 
     function nameOf(cc) {
+        if (cc === "whitelist")
+            return ScanTexts.whitelists
         for (let i = 0; i < countries.length; ++i)
             if (countries[i].cc === cc)
                 return countries[i].name || cc
@@ -41,12 +44,15 @@ Item {
     function close() { panel.close(false) }
     function toggle() { if (panel.opened) panel.close(false); else panel.open() }
 
-    // The menu's rows: «Все страны» + the pool's countries. A pool entry without a country code (a provider group
-    // without a country) is not a row of its own - it would read «Все страны» a second time; its servers are in
-    // the «Все страны» count. Rebuilt only when the content changes (see the header).
+    // The menu's rows: «Все страны», «Белые списки» (the pool's white-list rows: a scope without a country,
+    // chooseCountry("whitelist"); only when the pool has them) + the pool's countries. A pool entry without a country
+    // code is not a row of its own - it would read «Все страны» a second time; its servers are in the «Все страны»
+    // count. Rebuilt only when the content changes (see the header).
     property var entries: []
     function rebuildEntries() {
         const list = [{ cc: "", count: root.total }]
+        if (root.whitelist > 0)
+            list.push({ cc: "whitelist", count: root.whitelist, name: ScanTexts.whitelists })
         for (let i = 0; i < root.countries.length; ++i) {
             const c = root.countries[i]
             if (c && String(c.cc || "") !== "")
@@ -57,6 +63,7 @@ Item {
     }
     onCountriesChanged: rebuildEntries()
     onTotalChanged: rebuildEntries()
+    onWhitelistChanged: rebuildEntries()
     Component.onCompleted: rebuildEntries()
 
     onEnabledChanged: if (!enabled) panel.close(false)
@@ -83,7 +90,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Theme.space.sm
             TribeFlag {
-                visible: root.selected !== ""
+                visible: root.selected !== "" && root.selected !== "whitelist"
                 Layout.preferredWidth: 18; Layout.preferredHeight: 18
                 code: root.selected
             }
@@ -202,7 +209,7 @@ Item {
                             anchors.rightMargin: 10
                             spacing: 10
                             TribeFlag {
-                                visible: (mrow.modelData.cc || "") !== ""
+                                visible: (mrow.modelData.cc || "") !== "" && mrow.modelData.cc !== "whitelist"
                                 Layout.preferredWidth: 22; Layout.preferredHeight: 22
                                 code: mrow.modelData.cc || ""
                             }

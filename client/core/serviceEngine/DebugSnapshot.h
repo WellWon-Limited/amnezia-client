@@ -744,6 +744,17 @@ inline bool networkChangeIsOwnTunnel(bool ownOpInFlight, qint64 lastOwnOpMs, qin
     return ownOpInFlight || (lastOwnOpMs > 0 && nowMs - lastOwnOpMs < kApiTransitionWindowMs);
 }
 
+// AVPN Scanner (coordinator 18.11 (c), device round air9 19.11 10:08): a settled network notice reaches the Scanner
+// when the path engine's network generation moved (one rule with the attempt owner) OR the network's key as the
+// Scanner reads it moved (kind, reporting key, gateway hash: its cached results are stored under them). The key
+// can complete after the generation moved (the Wi-Fi key published, the gateway known) with no new generation;
+// gated on the generation alone the Scanner stayed on the incomplete key and the cached result never came back.
+// `keyTold` = the key of the last notice the Scanner got ("" = none yet).
+inline bool scanNetworkNoticeDue(quint64 genBefore, quint64 genAfter, const QString &keyTold, const QString &keyNow)
+{
+    return genAfter != genBefore || keyNow != keyTold;
+}
+
 // P2-4: один координатор выхода на экран. Реагируем на возврат после реальной заморозки/скрытия
 // (Suspended/Hidden) или после долгого Inactive (десктоп: фокус в браузере после оплаты), не на
 // Inactive→Active-мигание (Пункт управления, системный алерт); подписка — с троттлом, конфиг —

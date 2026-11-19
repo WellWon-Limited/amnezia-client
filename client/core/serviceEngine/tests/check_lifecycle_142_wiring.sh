@@ -59,12 +59,15 @@ has "$(body "$FACADE" 'void AvpnEngineQml::reconcile()')" 'if (m_engine.attemptR
 [ "$(code "$ENGINE/TunnelWatchResume.h" | grep -cF 'm_ops.reenterVerifying()')" = "1" ] || bad "§33: reenterVerifying has more than one caller in TunnelWatchResume"
 [ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "1" ] || bad "§33: the facade calls reenterVerifying outside the hand-over's op"
 
-# Coordinator 18.11 (c): the Scanner hears a network change only when the path engine's network generation moved
-# (one rule with the attempt owner); our own tunnel going up or down is compared once it settled.
+# Coordinator 18.11 (c): the Scanner hears a network change when the path engine's network generation moved (one
+# rule with the attempt owner) or the network's key as the Scanner reads it moved (device round air9 19.11 10:08: the
+# key completed with the same generation, the cached result never came back) - scanNetworkNoticeDue, tested in
+# facade_policy_check; our own tunnel going up or down is compared once it settled.
 scan_net="$(code "$FACADE" | awk '/^void AvpnEngineQml::scanNotifyNetwork\(\)/{f=1} f{print} f&&/^}/{exit}')"
 has "$scan_net" 'networkChangeIsOwnTunnel(' && has "$scan_net" 'm_engine.observeNetwork(currentNetworkObservation());' \
-    && has "$scan_net" 'if (m_engine.network().generation != before)' \
-    || bad "(c): scanNotifyNetwork must filter our own tunnel and notify only on a new network generation"
+    && has "$scan_net" 'if (!scanNetworkNoticeDue(before, m_engine.network().generation, m_scanNetKeyTold, key))' \
+    && has "$scan_net" 'const ScanNetFacts f = m_scanAdapter->network();' && has "$scan_net" 'm_scanNetKeyTold = key;' \
+    || bad "(c): scanNotifyNetwork must filter our own tunnel and notify on a new generation or a new Scanner key"
 # Review E1/E2 of 18.11: the facade drops obsolete native events first and settles its operation in one place.
 for slot in 'void AvpnEngineQml::onConnectionStateChanged(' 'void AvpnEngineQml::onVpnProtocolError('; do
     first="$(code "$FACADE" | awk -v s="$slot" 'index($0,s)==1{f=1;n=0} f{n++; if(n>1 && $0 !~ /^[{[:space:]]*$/){print; exit}}')"
