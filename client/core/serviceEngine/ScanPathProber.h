@@ -197,6 +197,8 @@ private:
         QSet<QString> doneParts; // host ids of the parts that reported data, in whatever scan (a repeat is ignored)
         bool allOk = true;
         qint64 bytes = 0;
+        QSet<QString> acceptedParts; // part ids the CURRENT scan's host acknowledged (cleared when a probe is bound to a new scan)
+        bool reachedHost = false; // the host accepted at least one part: otherwise no byte of this probe ever moved
         QHash<QString, QString> partScan; // part host id -> the scan its last message named (pending or accepted)
         QList<ScanHostCandidate> sent; // the probe's host candidates (all its parts), kept for the probe's life; a reopen sends those not in doneParts
     };
@@ -224,6 +226,12 @@ private:
     void closeScan(const QString &scanId);
     void cancelScanIfIdle();
     void endHostScan();
+    void onCancelReply(const QString &scanId, const QByteArray &reply);
+    // End the current scan at the host and open a new one with every part of its probes that has not reported: the
+    // one function behind a cancelled neighbour and the refusal of an add (the engine closed the scan).
+    void retireScan();
+    QSet<QString> m_cancelSent; // scans a cancel was sent for and whose ack is not in yet
+    QHash<QString, qint64> m_scanReported; // scan id -> item bytes attributed to a probe (charged by its result or cancel)
     // One owner of what an answer of a scan that is no longer the current one (or a refusal of the current one) means:
     // every named part that is neither reported nor already named in another scan goes into the current scan.
     void placeParts(const QString &fromScan, const QList<ScanHostCandidate> &cands);

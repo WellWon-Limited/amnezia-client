@@ -310,6 +310,7 @@ void ScanPathProber::openScan(quint64 race, const QList<ScanHostCandidate> &cand
 {
     m_scan = HostScan();
     m_scan.id = QStringLiteral("race-%1-%2").arg(race).arg(++m_scanSeq);
+    m_scanReported.insert(m_scan.id, 0); // present until its cancel ack is charged: a repeated ack charges nothing
     m_scan.race = race;
     m_scan.closed = false;
     m_scan.startSent = true;
@@ -318,6 +319,7 @@ void ScanPathProber::openScan(quint64 race, const QList<ScanHostCandidate> &cand
         if (m_probes.contains(key)) {
             Probe &p = m_probes[key]; // the one place a probe is bound to a scan: first open and every reopen alike
             p.scanId = m_scan.id;
+            p.acceptedParts.clear();
             for (const ScanHostCandidate &pc : cands)
                 if (keyOfHostId(pc.id) == key)
                     p.partScan.insert(pc.id, m_scan.id);
@@ -367,6 +369,13 @@ void ScanPathProber::onStartReply(const QString &scanId, const QList<ScanHostCan
         return;
     }
     m_scan.acked = true;
+    for (const ScanHostCandidate &c : cands) {
+        const auto p = m_probes.find(keyOfHostId(c.id));
+        if (p != m_probes.end()) {
+            p->reachedHost = true;
+            p->acceptedParts.insert(c.id);
+        }
+    }
     const QList<ScanHostCandidate> queued = m_scan.queued;
     m_scan.queued.clear();
     if (!queued.isEmpty()) {
@@ -384,11 +393,21 @@ void ScanPathProber::onAddReply(const QString &scanId, const QList<ScanHostCandi
     if (scanId == m_scan.id) {
         const ScanHostReply r = scanDecodeReply(reply);
         if (r.kind == ScanHostReplyKind::Ack && r.accepted == cands.size()) {
+            for (const ScanHostCandidate &c : cands) {
+                const auto p = m_probes.find(keyOfHostId(c.id));
+                if (p != m_probes.end()) {
+                    p->reachedHost = true;
+                    p->acceptedParts.insert(c.id);
+                }
+            }
             armPoll();
             return;
         }
-        // The engine closed that scan (every candidate final, its deadline, a Scanner start replaced it): a new scan.
-        m_scan.closed = true;
+        // The engine closed that scan (every candidate final, its deadline, a Scanner start replaced it): a part it had
+        // already accepted gets no further answer either, so the whole scan is retired and every part that has not
+        // reported goes into a new one.
+        retireScan();
+        return;
     }
     // An older scan's answer, or the refusal of the current one: each named part is resolved from its probe's own state.
     placeParts(scanId, cands);
@@ -468,6 +487,7 @@ void ScanPathProber::onPollReply(const QString &scanId, const QByteArray &reply)
             continue; // not a part of this probe
         it->doneParts.insert(f.id);
         it->bytes += f.spentBytes;
+        m_scanReported[scanId] += f.spentBytes;
         const bool ok = scanPathOutcomeOf(f) == path::PathOutcome::ProbeOk;
         it->allOk = it->allOk && ok;
         if (it->doneParts.size() >= it->parts)
@@ -486,10 +506,19 @@ void ScanPathProber::closeScan(const QString &scanId)
         return;
     m_scan.closed = true;
     m_pollTimer.stop();
+    if (!m_cancelSent.contains(scanId))
+        m_scanReported.remove(scanId); // the host ended it by itself: every part it ran is in a poll
     const QList<quint64> keys = m_probes.keys();
     for (quint64 key : keys) {
         const Probe &p = m_probes.value(key);
-        if (p.scanId == scanId && !p.hostId.isEmpty())
+        if (p.scanId != scanId || p.hostId.isEmpty())
+            continue;
+        // The host ended the scan: a part it acknowledged and never reported is lost with it. A part whose add is still
+        // unanswered is not: its answer (a refusal) places it in a new scan.
+        bool allAccepted = true;
+        for (const ScanHostCandidate &sc : p.sent)
+            allAccepted = allAccepted && (p.doneParts.contains(sc.id) || p.acceptedParts.contains(sc.id));
+        if (allAccepted)
             finish(key, path::PathOutcome::Inconclusive, "scan_ended");
     }
 }
@@ -509,14 +538,20 @@ void ScanPathProber::cancel(const path::ProbeStamp &stamp)
     }
     // The host stops per scan only: end the scan (the cancelled probe, an AmneziaWG session included, ends with it)
     // and re-open the probes that are still wanted in a new scan.
+    retireScan();
+}
+
+void ScanPathProber::retireScan()
+{
     const quint64 race = m_scan.race;
     QList<ScanHostCandidate> again;
     for (const Probe &p : m_probes)
         if (p.scanId == m_scan.id)
             for (const ScanHostCandidate &sc : p.sent)
                 if (!p.doneParts.contains(sc.id))
-                    again << sc; // only the parts that have not reported: a reported part is never run (or counted) twice
-    endHostScan();
+                    again << sc; // accepted or not: a part that has not reported runs again, never twice at the host
+    if (!m_scan.closed)
+        endHostScan(); // a scan the host already ended needs no cancel
     if (!again.isEmpty())
         openScan(race, again);
 }
@@ -526,9 +561,33 @@ void ScanPathProber::endHostScan()
     const QString scanId = m_scan.id;
     m_scan.closed = true;
     m_pollTimer.stop();
-    if (m_scan.startSent)
-        m_host->sendMessage(scanCompact(scanEncodeCancel(scanId)), [](const QByteArray &) {});
+    if (m_scan.startSent) {
+        m_cancelSent.insert(scanId);
+        const std::weak_ptr<bool> alive = m_alive;
+        m_host->sendMessage(scanCompact(scanEncodeCancel(scanId)), [this, alive, scanId](const QByteArray &reply) {
+            if (alive.lock())
+                onCancelReply(scanId, reply);
+        });
+    }
     say(QStringLiteral("race_prober scan_cancel scan=%1").arg(scanId));
+}
+
+// The cancel ack carries the scan's final byte total. What the probes' own results and cancels did not charge (parts that
+// finished at the host after the last poll, the cancelled probe's parts, the host's opening and closing /netinfo) is
+// charged to the hour ledger here, once. No final total (an answer that never came, a host that sends none): nothing
+// is known and nothing is charged - the only bytes the race can under-count, bounded by that scan's reservation.
+void ScanPathProber::onCancelReply(const QString &scanId, const QByteArray &reply)
+{
+    if (!m_cancelSent.remove(scanId) || !m_scanReported.contains(scanId))
+        return; // answered already (a repeated ack)
+    const qint64 attributed = m_scanReported.take(scanId);
+    const ScanHostReply r = scanDecodeReply(reply);
+    if (r.kind != ScanHostReplyKind::Ack || !r.finalTotals || r.bytesSpent < 0)
+        return;
+    const qint64 extra = r.bytesSpent - attributed;
+    if (extra > 0 && chargeApiBytes)
+        chargeApiBytes(extra);
+    say(QStringLiteral("race_prober scan_cancel_final scan=%1 spent=%2 extra=%3").arg(scanId).arg(r.bytesSpent).arg(extra));
 }
 
 void ScanPathProber::cancelScanIfIdle()
@@ -558,7 +617,7 @@ void ScanPathProber::finish(quint64 key, path::PathOutcome outcome, const char *
     if (it == m_probes.end())
         return;
     const Probe p = it.value(); // its seat is released as the last copy goes, after the result below
-    const qint64 bytes = p.bytes;
+    const qint64 bytes = p.reachedHost ? p.bytes : -1; // -1: no byte of this probe ever reached the host
     m_probes.erase(it);
     say(QStringLiteral("race_prober result race=%1 probe=%2 node=%3 outcome=%4 bytes=%5 why=%6")
             .arg(p.stamp.race).arg(p.stamp.probe).arg(p.path.id.id, QLatin1String(path::pathOutcomeName(outcome)))
