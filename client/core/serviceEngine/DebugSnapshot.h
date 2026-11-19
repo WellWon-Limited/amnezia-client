@@ -1138,6 +1138,8 @@ struct ScanRowStep {
     bool connected = false;
     QString connectedNode;
     bool ended = false;
+    bool superseded = false; // another action took the tunnel: the request is over without a failure (told once)
+    QString supersededNode;
 };
 inline void scanRowAttemptBegin(ScanRowAttempt &a, const QString &nodeId, quint64 intentSerial)
 {
@@ -1157,6 +1159,8 @@ inline ScanRowStep scanRowAttemptObserve(ScanRowAttempt &a, quint64 intentSerial
         return st;
     if (intentSerial != a.intentSerial) { // another action took the tunnel: not this chain any more
         a.active = false;
+        st.superseded = true;
+        st.supersededNode = a.tapped;
         return st;
     }
     auto fail = [&a, &st](const QString &n) {

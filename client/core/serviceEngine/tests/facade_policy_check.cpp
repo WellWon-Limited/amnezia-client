@@ -1072,10 +1072,14 @@ static void scannerRowChain()
     scanRowAttemptBegin(a, QStringLiteral("9"), 4);
     st = scanRowAttemptObserve(a, 4, QStringLiteral("9"), false, /*gaveUp=*/true);
     CHECK(st.ended && st.failed == QStringList{QStringLiteral("9")});
-    // Another action took the tunnel (orb, another tap): silent, no failure reported.
+    // Another action took the tunnel (orb Stop, another tap): no failure is reported (the row did not fail), but the
+    // request is over and the Scanner is told so (device round 13, C1: the row stayed «Подключение…» for good).
     scanRowAttemptBegin(a, QStringLiteral("9"), 5);
     st = scanRowAttemptObserve(a, /*intentSerial=*/6, QStringLiteral("10"), false, true);
     CHECK(st.failed.isEmpty() && !st.ended && !st.connected && !a.active);
+    CHECK(st.superseded && st.supersededNode == QLatin1String("9"));
+    st = scanRowAttemptObserve(a, 6, QStringLiteral("10"), false, true); // told once
+    CHECK(!st.superseded);
     // R4 (device round 4): the session before the tap (data on another node, the sibling «Эстония 3») is not a row
     // of this chain: nothing is reported for it, before or after the tapped row fails.
     scanRowAttemptBegin(a, QStringLiteral("9"), 7);

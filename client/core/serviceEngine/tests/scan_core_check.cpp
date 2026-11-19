@@ -1296,6 +1296,31 @@ static void machineRules()
         CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 2100).actions.isEmpty()); // failed row
         CHECK(m.attemptEnded(kT0 + 2200).actions.isEmpty());                      // chain already over
     }
+    // Device round 13, C1: the person's Stop (or any action that takes the tunnel) ends the row's request without a
+    // failure: the row leaves «Подключение…» at once, is not marked failed, and takes a tap again.
+    {
+        ScanMachine m(w.caps);
+        m.opened(openOf(w, QStringLiteral("1"), true), kT0);
+        m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+        ScanHostProgress p;
+        p.scanId = m.scanId();
+        p.phase = QStringLiteral("data");
+        ScanProbeFacts f = goodData();
+        f.id = QStringLiteral("2:xray");
+        f.egressNode = QStringLiteral("2");
+        f.seq = 1;
+        p.items << withBurst(f);
+        m.hostProgress(p, kT0 + 600);
+        CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 700).has(ScanActionKind::ConnectRow));
+        CHECK(m.connectingId() == QLatin1String("2:xray"));
+        m.connectRefused(QString(), kT0 + 900); // superseded: no node named
+        CHECK(m.connectingId().isEmpty());
+        bool stuck = false;
+        for (const ScanRowView &r : m.view(kT0 + 950).rows)
+            stuck = stuck || (r.id == QLatin1String("2:xray") && (r.state == ScanRowState::Connecting || r.state == ScanRowState::Failed));
+        CHECK(!stuck);
+        CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 1000).has(ScanActionKind::ConnectRow));
+    }
     // R6 (review of 141): the tapped row is an exact request. Its failure ends the chain at once: the old pair
     // connectFailed + attemptEnded moved the chain to the next row and marked THAT row failed, untried.
     for (const bool exact : {false, true}) {
