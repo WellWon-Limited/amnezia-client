@@ -4091,10 +4091,9 @@ static void caseServerScope()
             const int callsBefore = w.engine.rowCalls.size();
             w.s->tapRow(QStringLiteral("up:abcdefabcdefabcd"));
             CHECK(w.engine.rowCalls.size() == callsBefore + 1);
-            bool again = false;
-            for (int i = offeredBefore; i < w.engine.offered.size(); ++i)
-                again = again || w.engine.offered.at(i).toObject().value("node_id").toString() == QLatin1String("up:abcdefabcdefabcd");
-            CHECK(again);
+            // the tapped row is offered LAST (the engine keeps its newest 48), and the re-offer is bounded
+            CHECK(w.engine.offered.size() > offeredBefore && w.engine.offered.size() - offeredBefore <= 24
+                  && w.engine.offered.last().toObject().value("node_id").toString() == QLatin1String("up:abcdefabcdefabcd"));
         }
 
         const QString state = QJsonObject::fromVariantMap(w.s->view().value(QStringLiteral("more")).toMap()).value("state").toString();

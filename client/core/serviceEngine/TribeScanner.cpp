@@ -3,6 +3,8 @@
 #include "DoctorReport.h"    // doctor::countryDisplayName: the app's country names (ru / es tables, QLocale)
 #include "ScanPlan.h"        // scanAwgMiniFlag
 #include "TuningStore.h"
+
+#include <algorithm>
 #include "UpstreamVerdict.h" // upstreamUnverifiableStrictTuned
 #include "XrayProfileSanitizer.h" // upstreamProfileCheck: the connect's profile rule
 
@@ -352,13 +354,19 @@ void TribeScanner::execute(const ScanAction &a)
     case ScanActionKind::ConnectRow: {
         // A batch row's stub may have left the engine's offered pool (newest 48 only): offer the tapped row and its
         // chain again first, so the connect knows every node it may try.
+        // At most kScanReofferMax, the tapped row LAST: the engine keeps its newest offered stubs (48), so a long chain
+        // offered first-to-last evicted the tapped row again (device round air9: «Финляндия 20» of batch ~20, chain
+        // of 193 rows -> scan_connect_ignored why=pin).
         QJsonArray again;
-        QStringList ids{a.nodeId};
-        ids << a.ids;
-        ids.removeDuplicates();
+        QStringList ids;
+        for (const QString &id : a.ids)
+            if (id != a.nodeId && m_batchStubs.contains(id) && !ids.contains(id) && ids.size() < kScanReofferMax - 1)
+                ids << id;
+        std::reverse(ids.begin(), ids.end()); // the nearest fallback ends up newer than the far ones
+        if (m_batchStubs.contains(a.nodeId))
+            ids << a.nodeId;
         for (const QString &id : ids)
-            if (m_batchStubs.contains(id))
-                again << m_batchStubs.value(id);
+            again << m_batchStubs.value(id);
         if (!again.isEmpty())
             m_engine->offerScanNodes(again);
         emitLog(QStringLiteral("action connect_row order=%1 user_origin=%2 force=%3 reoffered=%4")

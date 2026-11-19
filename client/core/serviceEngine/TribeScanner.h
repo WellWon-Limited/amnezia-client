@@ -601,6 +601,7 @@ private:
     QHash<QString, QJsonObject> m_batchStubs;
     QStringList m_batchStubOrder;    // oldest first; bounded by kScanBatchStubsMax
     static constexpr int kScanBatchStubsMax = 512; // the `seen` cap of one series
+    static constexpr int kScanReofferMax = 24;     // stubs offered again per row connect: half the engine's 48
     bool m_fetchPoolOnOpen = true;
     bool m_hostGenFolded = false;
     ScanNetSource m_hostGen;
