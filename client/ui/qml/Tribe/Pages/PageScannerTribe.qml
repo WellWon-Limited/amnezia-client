@@ -198,7 +198,7 @@ PageType {
     }
     // The list is the machine's (ScanMachine.h syncList, owner 19.11): between two builds of it (view.list_build) its
     // rows only join its END - a row keeps its index until the list is built again (page open, a scope change, a new
-    // network) and never leaves while a scan runs; «Не проверено» rows join only once final. So the model follows the
+    // network, or a scan the person starts: «Сканировать» clears the old rows and builds from empty) and never leaves while a scan runs; «Не проверено» rows join only once final. So the model follows the
     // view index by index: a row changes in place, a new one is appended; a new build replaces the model.
     property real listBuild: -1
     function sameItem(a, b) {

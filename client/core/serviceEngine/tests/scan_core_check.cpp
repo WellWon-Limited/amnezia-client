@@ -3642,6 +3642,7 @@ static void findMoreAppends()
     m.tick(kT0 + 50 + 8000);
     ScanView v = m.view(kT0 + 8100);
     CHECK(!v.scanning && ids(v) == QStringList{a} && v.moreState == QLatin1String("available"));
+    const quint64 listBuilds = m.listBuilds();
 
     // (a) inside the re-scan cooldown: «Повторить через N с», and «Найти ещё» starts at once
     CHECK(v.bar.button == ScanBarButton::RetryInSeconds && v.moreBlocked.isEmpty());
@@ -3666,6 +3667,7 @@ static void findMoreAppends()
     m.tick(kT0 + 9100 + 8000);
     v = m.view(kT0 + 17200);
     CHECK(!v.scanning && v.batch == 2 && ids(v) == (QStringList{a, b}) && v.verifiedCount == 2); // (b) 1 + 1, in place
+    CHECK(m.listBuilds() == listBuilds); // «Найти ещё» appends to the list it continues: never builds a new one
 
     // (a) the cellular hour used up: the button says why, a tap does nothing
     {
@@ -3711,6 +3713,106 @@ static void findMoreAppends()
     sv.candidatesReady(rs.requestId, cv, 2000, kT0 + 9100);
     const ScanView ev = sv.view(kT0 + 9200);
     CHECK(!ev.scanning && ev.moreState == QLatin1String("exhausted") && ids(ev).size() == 1);
+}
+
+// A scan always starts a new list (owner 19.11, device test: «Czechia stayed at the top, dark, the new countries below»).
+// «Сканировать» clears the previous result's rows (the live connection's row stays), the scan builds the list from empty,
+// append-only; «Найти ещё» appends; a cached result is shown only for the scope it covered (one slot per scope).
+static int stepAfter(const Driver &d, const char *event, qint64 offsetMs)
+{
+    for (int i = 0; i < d.steps.size(); ++i)
+        if (d.steps.at(i).event.value(QLatin1String("event")).toString() == QLatin1String(event)
+            && qint64(d.steps.at(i).event.value(QLatin1String("now_ms")).toDouble()) - kT0 >= offsetMs)
+            return i;
+    return -1;
+}
+
+static void scanStartsNewList()
+{
+    const QString de = QStringLiteral("DE");
+    // (a) a Germany result is cached; «Все страны» is chosen: no Germany rows from that result as an all-countries one
+    {
+        World w = baseWorld("fresh_a", hostMac(), ScanNetKind::Wifi);
+        w.nodes = ownOnly(w.nodes);
+        ScanCachedResult cde = cachedOf(w, 3 * 60000, {QStringLiteral("4:xray"), QStringLiteral("9:xray")});
+        cde.scope = de;
+        w.script << qMakePair(qint64(0), [w, cde](qint64 t) { return ev("shown", t, openArgs(w, QString(), false, cde)); });
+        w.script << qMakePair(qint64(1000), at("filter", {{QStringLiteral("cc"), QString()}}));
+        w.runMs = 2000;
+        Driver d(w);
+        d.run();
+        const int i0 = stepAfter(d, "shown", 0), i1 = stepAfter(d, "filter", 0);
+        CHECK(i0 >= 0 && i1 >= 0);
+        if (i0 >= 0 && i1 >= 0) {
+            CHECK(rowIds(d.steps.at(i0).view) == (QStringList{QStringLiteral("4:xray"), QStringLiteral("9:xray")})); // shown under Germany
+            CHECK(rowIds(d.steps.at(i1).view).isEmpty());
+            CHECK(d.steps.at(i1).view.value(QLatin1String("bar")).toObject().value(QLatin1String("scope")).toString().isEmpty());
+        }
+        // ... unless an all-countries result is cached for this network: that one comes, and Germany's back when chosen
+        ScanCachedResult call = cachedOf(w, 5 * 60000, {QStringLiteral("2:xray"), QStringLiteral("5:xray"), QStringLiteral("4:xray")});
+        call.scope = QString();
+        cde.otherScopes.push_back(call);
+        World w2 = w;
+        w2.script.clear();
+        w2.script << qMakePair(qint64(0), [w2, cde](qint64 t) { return ev("shown", t, openArgs(w2, QString(), false, cde)); });
+        w2.script << qMakePair(qint64(1000), at("filter", {{QStringLiteral("cc"), QString()}}));
+        w2.script << qMakePair(qint64(2000), at("filter", {{QStringLiteral("cc"), de}}));
+        w2.runMs = 4000;
+        Driver d2(w2);
+        d2.run();
+        const QList<int> at3 = {stepAfter(d2, "shown", 0), stepAfter(d2, "filter", 1000), stepAfter(d2, "filter", 2000)};
+        CHECK(!at3.contains(-1));
+        if (!at3.contains(-1)) {
+            QStringList all = rowIds(d2.steps.at(at3.at(1)).view), want{QStringLiteral("2:xray"), QStringLiteral("4:xray"), QStringLiteral("5:xray")};
+            all.sort();
+            CHECK(all == want); // (d) the all-countries slot
+            CHECK(rowIds(d2.steps.at(at3.at(2)).view) == (QStringList{QStringLiteral("4:xray"), QStringLiteral("9:xray")})); // (d) Germany's slot back
+        }
+    }
+    // (b) rows on screen -> «Сканировать»: the first view after the tap has none of them but the live connection's row
+    {
+        World w = baseWorld("fresh_b", hostMac(), ScanNetKind::Wifi);
+        w.nodes = ownOnly(w.nodes);
+        const ScanCachedResult c = cachedOf(w, 3 * 60000, {QStringLiteral("4:xray"), QStringLiteral("2:xray"), QStringLiteral("9:xray")});
+        w.script << qMakePair(qint64(0), [w, c](qint64 t) { return ev("shown", t, openArgs(w, QStringLiteral("2:xray"), true, c)); });
+        w.script << qMakePair(qint64(1000), at("retry"));
+        w.script << qMakePair(qint64(90000), at("retry")); // again over the finished scan's own rows
+        w.runMs = 110000;
+        Driver d(w);
+        d.run();
+        const int i0 = stepAfter(d, "shown", 0), i1 = stepAfter(d, "retry", 0), i2 = stepAfter(d, "retry", 90000);
+        CHECK(i0 >= 0 && i1 >= 0 && i2 >= 0);
+        if (i0 >= 0 && i1 >= 0 && i2 >= 0) {
+            CHECK(rowIds(d.steps.at(i0).view).size() == 3);
+            CHECK(rowIds(d.steps.at(i1).view) == QStringList{QStringLiteral("2:xray")}); // only the live row
+            const QJsonObject done = d.steps.at(i2 - 1).view;
+            CHECK(phaseOf(done) == QLatin1String("done") && rowIds(done).size() > 1);
+            CHECK(rowIds(d.steps.at(i2).view) == QStringList{QStringLiteral("2:xray")});
+            const QJsonObject end = lastView(d);
+            CHECK(rowIds(end).value(0) == QLatin1String("2:xray") && rowIds(end).size() > 1);
+            for (const QJsonValue &v : end.value(QLatin1String("rows")).toArray())
+                CHECK(!v.toObject().value(QLatin1String("flags")).toArray().contains(QStringLiteral("cache")));
+            CHECK(d.steps.at(i1).listBuilds == d.steps.at(i0).listBuilds + 1); // built by the scan, from empty
+        }
+    }
+    // the slots survive the store: the persisted JSON carries the other scopes (at most kScanCacheScopeSlots - 1), never nested
+    {
+        World w = baseWorld("fresh_json", hostMac(), ScanNetKind::Wifi);
+        ScanCachedResult c = cachedOf(w, 60000, {QStringLiteral("4:xray")});
+        c.scope = de;
+        for (int i = 0; i < 6; ++i) {
+            ScanCachedResult o = cachedOf(w, 120000 + i, {QStringLiteral("2:xray")});
+            o.scope = QStringLiteral("S%1").arg(i);
+            o.otherScopes.push_back(c); // a nested one is never read back
+            c.otherScopes.push_back(o);
+        }
+        const ScanCachedResult back = scanCachedResultFromJson(scanCachedResultToJson(c));
+        CHECK(back.scope == de && int(back.otherScopes.size()) == kScanCacheScopeSlots - 1);
+        CHECK(back.otherScopes.at(0).scope == QLatin1String("S0") && back.otherScopes.at(0).rows.size() == 1);
+        for (const ScanCachedResult &o : back.otherScopes)
+            CHECK(o.otherScopes.empty());
+    }
+    // (c) «Найти ещё» keeps appending to the current list: findMoreAppends (rows appended, the list built once)
 }
 
 // The server's side of the scope and «Найти ещё» (contract 1.14.0): /v1/scan/pool feeds the scope menu,
@@ -4403,6 +4505,7 @@ int main(int argc, char **argv)
     xrayBurst();
     findMore();
     findMoreAppends();
+    scanStartsNewList();
     serverBatches();
     overruns();
     properties();

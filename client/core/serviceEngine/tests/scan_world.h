@@ -543,8 +543,8 @@ struct Recorded {
 //    and never disappears - not while a scan runs, not when it ends;
 //  - a «Не проверено» row never joins while a scan runs (only once its outcome is final); the live connection's row
 //    («Подключено», flag current) is the one row there before its proof;
-//  - a list is built from empty only by the page's open, a scope choice, a network change, or a scan that had no list
-//    or covers another scope; right after a build its rows are in speed order (verified rows by speed class, then
+//  - a list is built from empty only by the page's open, a scope choice, a network change, or a scan the person starts
+//    («Сканировать» always; «Найти ещё» only with no list or another scope); right after a build its rows are in speed order (verified rows by speed class, then
 //    ms; «Не проверено» rows after them) - the order of a finished result read back.
 inline bool scanPhaseNameScanning(const QString &p)
 {
@@ -594,6 +594,7 @@ struct ListSteps {
             const QString scope = r.view.value(QLatin1String("more_country")).toString();
             const QString prevChosen = prevView.value(QLatin1String("bar")).toObject().value(QLatin1String("scope")).toString();
             check(e == QLatin1String("opened") || e == QLatin1String("shown") || e == QLatin1String("filter") || e == QLatin1String("network_changed")
+                      || e == QLatin1String("retry") || e == QLatin1String("connect_and_scan_tapped") // «Сканировать» always builds its own list
                       || (scanStart && (a.isEmpty() || prevScope != scope || prevChosen != scope)),
                   where + QStringLiteral(": the list was rebuilt on ") + e);
             int lastRank = -1, lastMs = -1, verified = 0, unverified = 0;
@@ -625,7 +626,7 @@ struct ListSteps {
             check(unverified <= t->unverifiedRowsMax, where + QStringLiteral(": a built list above the cap of «Не проверено» rows"));
         }
         // Caps of what JOINS a list (judged when it joins): scan_list_target_works proven rows and scan_unverified_rows_max
-        // «Не проверено» rows per batch of the series. Rows shown before - judged again in place - are never dropped.
+        // «Не проверено» rows per batch of the series. Rows shown before in the same list are never dropped.
         if (built || batch < prevBatch || (scanStart && scanning && batch == 1)) {
             base.clear();
             for (const QJsonValue &v : built ? b : a)
