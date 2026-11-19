@@ -4287,8 +4287,9 @@ static void exhaustedScopeSaysWhatIsMissing()
         for (const ScanRowView &r : v.rows)
             shown += r.countryCode == QLatin1String("DE") ? 1 : 0;
         CHECK(v.moreState == QLatin1String("exhausted"));
-        CHECK(v.moreUnshown == qMax(0, pool - shown) && v.moreUnshown > 0);
-        CHECK(scanViewToJson(v).value(QStringLiteral("more")).toObject().value(QStringLiteral("unshown")).toInt() == v.moreUnshown);
+        // review of 142 (finding 3): nothing failed, so nothing "did not answer" - whatever the menu counts beyond the list
+        CHECK(shown < pool && v.moreUnshown == 0);
+        CHECK(!scanViewToJson(v).value(QStringLiteral("more")).toObject().contains(QStringLiteral("unshown")));
     }
 }
 
