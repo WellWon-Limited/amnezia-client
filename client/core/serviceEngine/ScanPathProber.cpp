@@ -41,7 +41,10 @@ path::ProberCaps ScanPathProber::caps() const
 {
     const bool usable = m_host && m_api && m_api->configured() && m_capsKnown
                         && m_host->availability() == ScanHostAvailability::Available && !(hostBusy && hostBusy());
-    return scanPathProberCaps(m_caps, usable);
+    path::ProberCaps c = scanPathProberCaps(m_caps, usable);
+    c.ready = sessionReady(); // the race starts probes only when they can really leave (ServiceEngine::beginRaceForTap)
+    c.preparing = m_sessionFetching;
+    return c;
 }
 
 path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayBurst)

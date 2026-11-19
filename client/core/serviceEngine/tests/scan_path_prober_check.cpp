@@ -758,6 +758,10 @@ static void caseSession()
     World x; // no warm-up: the first probe waits for the session
     x.prober.warmUp();
     check(!x.prober.sessionReady(), "fetching");
+    {   // the race is told the truth: not ready, and a fetch is under way (no probe may be started on it)
+        const path::ProberCaps pc = x.prober.caps();
+        check(!pc.ready && pc.preparing, "caps while the session is fetched: not ready, preparing");
+    }
     x.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
     spin(40);
     check(x.host.of("scan_start").size() == 1 && x.api.sessions == 1, "the probe waited for the one fetch");
@@ -769,6 +773,18 @@ static void caseSession()
     x.start(3, 3, QStringLiteral("11:xray"), path::PathKind::OwnXray);
     spin(40);
     check(x.api.sessions == 2, "fetched for the new network");
+    {
+        spin(30);
+        const path::ProberCaps pc = x.prober.caps();
+        check(pc.ready && !pc.preparing, "caps with the session in hand: ready");
+    }
+    {   // a session that failed: not ready and nothing coming - the engine ends the race `no_session` at once
+        World f;
+        f.api.sessionOk = false;
+        f.ready();
+        const path::ProberCaps pc = f.prober.caps();
+        check(!pc.ready && !pc.preparing, "caps after a failed session: not ready, not preparing");
+    }
 
     RaceScanSession s;
     s.ok = true;

@@ -31,6 +31,9 @@ cd "$HERE"
 # and the lease I/O through at the expected places (source level; the rules are tested by behaviour).
 "$HERE/check_upstream_seat_wiring.sh"
 
+# Device round 19.11 (race session): the Scanner's API client follows the control plane's per-request edge.
+"$HERE/check_scan_edge_wiring.sh"
+
 # Build 142 (owner's iPhone, build 140, 16.11): the Scanner cancel, the re-check of an unproven adopted session,
 # the AmneziaWG ban and its readers are called at the expected places (source level; the rules are tested by
 # behaviour in facade_policy_check, tunnel_watch_check, transport_pick_check, upstream_engine_check, harness).
