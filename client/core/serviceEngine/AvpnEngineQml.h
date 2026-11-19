@@ -1184,7 +1184,7 @@ private:
     void verifyAttempt(int epoch);
     // failReason: reason for ServiceEngine::verifyFailed (empty = the xray probe's own reason).
     void finishVerify(int epoch, bool ok, const QString &failReason = QString());
-    // Plan v3 step 5 (features.node_scan): the engine puts every transport into Verifying and the
+    // The path engine puts every transport into Verifying (RunDataCheck) and, for our nodes, the
     // verification step is GET /v1/whoami through the tunnel (same API client as every /v1 call:
     // m_nam, Bearer, armTimeout; whoami uses at most 60 % of xray_verify_timeout_ms, at most 2
     // requests). Verdict (WhoamiVerdict.h): Works -> verifySucceeded + network memory;
@@ -1192,7 +1192,7 @@ private:
     // (no new timer, no new watchdog); CheckLimited (429/404) -> finishVerifyInconclusive: Connected
     // without the mark and without resetting the give-up streak; Inconclusive (no answer, other
     // statuses) -> the existing generate_204 check with the rest of the budget is the tiebreak
-    // (passes -> CheckLimited, fails -> NoData). Without the flag only xray verifies, as before.
+    // (passes -> CheckLimited, fails -> NoData). Upstream nodes: startUpstreamVerification.
     void startDataPathVerification();
     // Upstream nodes (decision D): one sized GET /v1/probe on the lease's tunnel_api_base through the
     // tunnel, digest computed locally (tribe-probe-v1), verdict UpstreamVerdict.h::judgeUpstreamCheck;

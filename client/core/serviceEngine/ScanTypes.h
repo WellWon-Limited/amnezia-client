@@ -746,7 +746,8 @@ struct ScanCandidate {
     bool followUp = false;    // a full probe scheduled to confirm a provider leg whose DNS plan was not proven
     QString awgEchoTarget;    // awg_mini: the prime echo target (the node's, else the manifest's; "" = none)
     qint64 reachAtMs = -1;    // earliest reach socket open, ms after the host start (-1 = no reach stage)
-    qint64 costBytes = 0;     // projected bytes of its probe
+    qint64 costBytes = 0;     // projected bytes of its probe (an own Xray probe: of its data part)
+    int burstParts = 1;       // host parts of its probe: an own Xray burst (ScanPlan.h scanXrayBurstOf), else 1
 
     QString outcomeKind() const { return origin == ScanOrigin::Upstream ? QStringLiteral("upstream") : QStringLiteral("node"); }
     QString outcomeId() const { return origin == ScanOrigin::Upstream ? profileId : id; }

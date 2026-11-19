@@ -41,13 +41,16 @@
 //    leg's server) get reachAtMs = their slot x scan_stage1_stagger_ms, pushed so that two opens to one
 //    entry IP are at least scan_entry_ip_spacing_ms apart. The host enforces the same spacing for every
 //    data connection and the per-entry-IP limit (scan_stage1_per_entry_ip) at run time.
-//  - Projection = sum of scanProbeCostBytes of the probed candidates (an upper bound: the scan stops at
-//    scan_stop_works).
+//  - Xray burst: an own Xray probe goes out as its data part plus burst parts (scanXrayBurstOf below), as many parts
+//    as its pool runs at once, at most kScanXrayBurstParts (burstParts; 1 on a pool of 1). Everything else: 1.
+//  - Projection = sum of scanProbeTotalCostBytes of the probed candidates - an own Xray probe with its burst parts
+//    (an upper bound: the scan stops at scan_stop_works). costBytes stays the data part's own cost.
 //
 // Upstream Amnezia has no counterpart.
 #pragma once
 
 #include "ScanBudget.h"
+#include "ScanHostContract.h" // ScanHostCandidate (the Xray burst)
 #include "ScanTunables.h"
 #include "ScanTypes.h"
 #include "TuningStore.h"
@@ -173,6 +176,7 @@ inline ScanCandidate scanFollowUpOf(const ScanCandidate &leg, const ScanTunables
     ScanCandidate f = leg;
     f.kind = ScanProbeKind::XrayFull;
     f.followUp = true;
+    f.burstParts = 1;
     f.reachAtMs = -1;
     f.costBytes = scanProbeCostBytes(ScanProbeKind::XrayFull, false, t);
     return f;
@@ -181,6 +185,61 @@ inline ScanCandidate scanFollowUpOf(const ScanCandidate &leg, const ScanTunables
 inline QString scanProbeIdOf(const ScanCandidate &c)
 {
     return c.followUp ? c.id + QStringLiteral("#full") : c.id;
+}
+
+// --- the Xray burst (device 18.11, the Estonia capture) ---------------------------------------------------------
+// A tunnel opens several connections to its server within a second, and some networks drop the second TCP segment
+// of a ClientHello when several open at once, while a single probe connection passes. So an own Xray path is probed
+// the way a tunnel opens it: its data part plus kScanXrayBurstParts-1 burst parts - small parallel connections
+// (kScanXrayBurstBytes bodies) through the same config, ids "<data id>.<n>", no reach stage and no entry IP (the
+// host's entry-IP spacing would serialise them). Proven only when every part carried its body. One shape for the
+// connect race (ScanPathProber) and the Scanner (TribeScanner expands, ScanMachine joins the parts to their row).
+// Provider and AmneziaWG probes stay single. The parts must run at once to be a burst: the planner gives an own Xray
+// probe as many as its pool runs together, at most kScanXrayBurstParts (a pool of 1 = the single connection).
+inline constexpr int kScanXrayBurstParts = 4;
+inline constexpr int kScanXrayBurstBytes = 4096;
+
+// Host parts of this candidate's probe (the planner sets burstParts; at least 1).
+inline int scanXrayBurstPartsOf(const ScanCandidate &c) { return qMax(1, c.burstParts); }
+
+inline qint64 scanXrayBurstPartCostBytes(const ScanTunables &t)
+{
+    return qint64(t.warmBytes) + kScanXrayBurstBytes + 2 * kScanTlsOverheadBytes;
+}
+
+// What a candidate's whole probe may cost: its data part (costBytes) plus its burst parts.
+inline qint64 scanProbeTotalCostBytes(const ScanCandidate &c, const ScanTunables &t)
+{
+    return c.costBytes + qint64(scanXrayBurstPartsOf(c) - 1) * scanXrayBurstPartCostBytes(t);
+}
+
+// The host jobs of one probe: `data` as given, then parts-1 burst parts (parts <= 1: `data` alone).
+inline QList<ScanHostCandidate> scanXrayBurstOf(const ScanHostCandidate &data, int parts, const ScanTunables &t)
+{
+    QList<ScanHostCandidate> out{data};
+    for (int i = 1; i < parts; ++i) {
+        ScanHostCandidate b = data;
+        b.id = data.id + QStringLiteral(".%1").arg(i);
+        b.bytes = kScanXrayBurstBytes;
+        b.reachAtMs = -1;
+        b.entryIp.clear();
+        b.entryPort = 0;
+        b.costBytes = scanXrayBurstPartCostBytes(t);
+        out << b;
+    }
+    return out;
+}
+
+// The data probe id of a burst part: "<id>.<n>" -> "<id>" with *part = n (n >= 1); any other id as it is, part 0.
+inline QString scanXrayBurstBaseOf(const QString &probeId, int *part = nullptr)
+{
+    const int dot = probeId.lastIndexOf(QLatin1Char('.'));
+    bool ok = false;
+    const int n = dot > 0 ? probeId.mid(dot + 1).toInt(&ok) : 0;
+    const bool isPart = ok && n >= 1 && probeId.mid(dot + 1) == QString::number(n);
+    if (part)
+        *part = isPart ? n : 0;
+    return isPart ? probeId.left(dot) : probeId;
 }
 
 // The app host's order (owner's review 18.11: «большая часть нод наша, а не all vpn»): own and provider candidates
@@ -407,7 +466,9 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
             c.reachAtMs = at;
         }
         c.costBytes = scanProbeCostBytes(c.kind, c.hasReach(), t);
-        p.projectedBytes += c.costBytes;
+        const bool ownXray = c.origin == ScanOrigin::Own && (c.kind == ScanProbeKind::XrayLeg || c.kind == ScanProbeKind::XrayFull);
+        c.burstParts = ownXray ? qBound(1, p.concurrencyFor(c.kind), kScanXrayBurstParts) : 1;
+        p.projectedBytes += scanProbeTotalCostBytes(c, t);
     }
     return p;
 }

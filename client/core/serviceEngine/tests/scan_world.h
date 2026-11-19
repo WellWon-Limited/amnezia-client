@@ -350,6 +350,8 @@ struct Outcome {
     bool handshake = true;     // awg
     QString egressNode;        // "" = the candidate's own host; "-" = no header
     bool egressOther = false;  // class "other" (exit not in the whoami map)
+    int burstNoData = 0;       // own Xray: this burst part (1..3) gets no answer - a network that drops the second
+                               // ClientHello segment when several connections open at once; 0 = every part passes
 };
 
 struct World {
@@ -555,8 +557,10 @@ public:
 
     // fake host
     struct HC {
-        ScanCandidate c;
+        ScanCandidate c;         // the candidate; a burst part's own reach, entry and cost
         QString probeId;
+        int part = 0;            // the Xray burst part (0 = the data part)
+        int bodyBytes = 65536;   // the body it asks
         qint64 addedAt = 0;
         qint64 reachAt = -1;   // when its reach item is due (-1 none)
         bool reachEmitted = false;
@@ -1007,22 +1011,33 @@ public:
         return p;
     }
 
+    // The coordinator's host jobs of one candidate (TribeScanner::withXrayBursts): own Xray as its burst.
     void hostAdd(const ScanCandidate &c, qint64 at)
     {
-        HC h;
-        h.c = c;
-        h.probeId = scanProbeIdOf(c);
-        h.addedAt = at;
-        const Outcome o = w.out.value(c.id);
-        if (c.hasReach()) {
-            h.reachAt = hostT0 + c.reachAtMs + o.reachMs;
-            if (h.reachAt < at)
-                h.reachAt = at + o.reachMs;
-            h.reachOk = o.reachOk;
-        } else {
-            h.readyAt = at;
+        const QList<ScanHostCandidate> parts = scanXrayBurstOf(scanHostCandidateOf(c, QString()), scanXrayBurstPartsOf(c), m.tunables());
+        for (int n = 0; n < parts.size(); ++n) {
+            const ScanHostCandidate &p = parts.at(n);
+            HC h;
+            h.c = c;
+            h.c.reachAtMs = p.reachAtMs;
+            h.c.entryIp = p.entryIp;
+            h.c.entryPort = p.entryPort;
+            h.c.costBytes = p.costBytes;
+            h.probeId = p.id;
+            h.part = n;
+            h.bodyBytes = p.bytes > 0 ? p.bytes : 65536;
+            h.addedAt = at;
+            const Outcome o = w.out.value(c.id);
+            if (h.c.hasReach()) {
+                h.reachAt = hostT0 + h.c.reachAtMs + o.reachMs;
+                if (h.reachAt < at)
+                    h.reachAt = at + o.reachMs;
+                h.reachOk = o.reachOk;
+            } else {
+                h.readyAt = at;
+            }
+            hq << h;
         }
-        hq << h;
     }
 
     int poolOf(const HC &h) const
@@ -1064,12 +1079,14 @@ public:
             f.spentBytes = qMin<qint64>(h.c.costBytes, 2048 + 300 * f.echoSent + 1024 + f.bytesReceived + 16384);
         } else {
             const bool works = h.c.followUp && o.fullWorks >= 0 ? o.fullWorks == 1 : o.works;
-            f.bytesRequested = 65536;
+            f.bytesRequested = h.bodyBytes;
             if (o.error != ScanProbeError::None) {
                 f.error = o.error;
+            } else if (h.part > 0 && h.part == o.burstNoData) {
+                f.error = ScanProbeError::TtfbTimeout; // its ClientHello never completed: no answer at all
             } else if (works) {
                 f.httpStatus = 200;
-                f.bytesReceived = 65536;
+                f.bytesReceived = h.bodyBytes;
                 f.shaOk = true;
                 f.ttfb1Ms = o.ttfb1;
                 f.rttMs = o.rtt;
@@ -1086,7 +1103,7 @@ public:
                 f.dnsExercised = h.c.kind == ScanProbeKind::XrayLeg && o.dnsOk && h.c.dnsThroughLeg && h.c.dnsResolvers > 0;
             } else {
                 f.httpStatus = 200;
-                f.bytesReceived = 20000;
+                f.bytesReceived = qMin(20000, h.bodyBytes / 2);
                 f.ttfb1Ms = o.ttfb1;
                 f.error = ScanProbeError::Stalled;
             }

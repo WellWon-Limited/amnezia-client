@@ -5679,7 +5679,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // AVPN awg31-xray-v1 (инвариант волны §4.3): xray поднят платформой → движок в Verifying —
         // «Подключено» и все его эффекты (пуши/чипы/живой RTT/история) ТОЛЬКО после первой удачной
         // пробы через туннель (startXrayVerification → finishVerify → onTunnelUpEffects). awg — сразу.
-        // Plan v3 step 5: with features.node_scan awg verifies too (whoami) - startDataPathVerification.
+        // The path engine checks every path (RunDataCheck -> Verifying): startDataPathVerification.
         if (m_engine.isVerifying()) {
             startDataPathVerification();
         } else {
@@ -8306,9 +8306,8 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok, const QString &failReason)
     QTimer::singleShot(0, this, [this]() { reconcile(); });
 }
 
-// Plan v3 step 5: one verification phase, two ways to prove it. features.node_scan (fixed per start
-// in guardedStart -> ServiceEngine::setVerifyEveryTransport): every transport verifies with ONE
-// GET /v1/whoami; flag off: only xray verifies, with the generate_204 loop (as before).
+// The one data check of every raised path (the path engine's RunDataCheck puts every transport into Verifying):
+// an upstream node - its sized /v1/probe; our node - ONE GET /v1/whoami (generate_204 only as its tiebreak).
 void AvpnEngineQml::startDataPathVerification()
 {
     m_upstreamFallbackVerify = false;

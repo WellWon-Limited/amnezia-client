@@ -160,16 +160,8 @@ void ScanPathProber::launch(quint64 key)
             return;
         }
         c.costBytes = qint64(t.warmBytes) + kRaceProbeBytes + 2 * kScanTlsOverheadBytes;
-        const int burst = qBound(1, xrayBurst, 6);
-        it->parts = burst;
-        QList<ScanHostCandidate> parts{c};
-        for (int i = 1; i < burst; ++i) {
-            ScanHostCandidate b = c;
-            b.id = c.id + QStringLiteral(".%1").arg(i);
-            b.bytes = kXrayBurstBytes;
-            b.costBytes = qint64(t.warmBytes) + kXrayBurstBytes + 2 * kScanTlsOverheadBytes;
-            parts << b;
-        }
+        const QList<ScanHostCandidate> parts = scanXrayBurstOf(c, qBound(1, xrayBurst, 6), t);
+        it->parts = int(parts.size());
         for (const ScanHostCandidate &part : parts)
             sendCandidate(key, part);
         return;
@@ -509,8 +501,9 @@ void ScanPathProber::finish(quint64 key, path::PathOutcome outcome, qint64 bytes
 quint64 ScanPathProber::keyOfHostId(const QString &hostId) const
 {
     // "race<r>-<probe>" or a burst part "race<r>-<probe>.<n>"
-    const int dash = hostId.lastIndexOf(QLatin1Char('-'));
-    return dash < 0 ? 0 : hostId.mid(dash + 1).section(QLatin1Char('.'), 0, 0).toULongLong();
+    const QString dataId = scanXrayBurstBaseOf(hostId);
+    const int dash = dataId.lastIndexOf(QLatin1Char('-'));
+    return dash < 0 ? 0 : dataId.mid(dash + 1).toULongLong();
 }
 
 } // namespace avpn

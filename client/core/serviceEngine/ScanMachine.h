@@ -1075,15 +1075,16 @@ public:
                 continue;
             m_lastSeq = f.seq;
             bool isFollowUp = false;
-            const int i = candIndexForProbe(f.id, &isFollowUp);
+            int part = 0;
+            const int i = candIndexForProbe(f.id, &isFollowUp, &part);
             if (i < 0 || m_cands.at(i).finalDone || !m_cands.at(i).inHost)
                 continue;
             if (isFollowUp ? m_cands.at(i).followUp != FollowUp::Active : m_cands.at(i).probeDone)
                 continue;
             Cand &c = m_cands[i];
             if (f.stage == ScanStage::Reach) {
-                if (isFollowUp)
-                    continue; // a follow-up has no reach stage
+                if (isFollowUp || part > 0)
+                    continue; // a follow-up and a burst part have no reach stage
                 c.reachDone = true;
                 c.reachOk = f.reachOk;
                 if (!f.reachOk) {
@@ -1094,9 +1095,22 @@ public:
                 }
             } else {
                 data = true;
+                // Every part is judged as the candidate's own probe (its path, its reach); the first part without
+                // data decides the row, the data part's verdict stands only once every part carried its body.
                 ScanClassifyInput in = classifyInput(c, isFollowUp);
                 in.data = f;
-                onFinal(i, scanClassify(in, m_t), f, ScanOutcomeStage::Data, isFollowUp, now, s);
+                const ScanVerdict v = scanClassify(in, m_t);
+                if (!isFollowUp && c.parts > 1 && scanClassWorking(v.cls)) {
+                    c.partsOk |= 1u << part;
+                    if (part == 0) {
+                        c.dataVerdict = v;
+                        c.dataFacts = f;
+                    }
+                    if (c.partsOk == (1u << c.parts) - 1)
+                        onFinal(i, c.dataVerdict, c.dataFacts, ScanOutcomeStage::Data, false, now, s);
+                    continue;
+                }
+                onFinal(i, v, f, ScanOutcomeStage::Data, isFollowUp, now, s);
             }
         }
         if (data && m_phase == ScanPhase::Reach)
@@ -1792,9 +1806,16 @@ private:
         bool exclusionPending = false; // Unverifiable for lack of access facts: may be proven by exclusion
         ScanVerdict pendingVerdict;
         ScanProbeFacts pendingFacts;
+        // The Xray burst (ScanPlan.h scanXrayBurstOf): the probe's host parts, the parts that carried data so far
+        // (bit n = part n), and the data part's verdict that stands once every part did.
+        int parts = 1;
+        quint32 partsOk = 0;
+        ScanVerdict dataVerdict;
+        ScanProbeFacts dataFacts;
 
-        // The pool the candidate occupies right now.
+        // The pool the candidate occupies right now, and how many of its slots.
         ScanProbeKind pool() const { return followUp == FollowUp::None ? c.kind : ScanProbeKind::XrayFull; }
+        int hostSlots() const { return followUp == FollowUp::None ? parts : 1; }
         bool busy() const
         {
             if (followUp == FollowUp::Active)
@@ -1886,11 +1907,26 @@ private:
         return -1;
     }
 
-    // A host item id is a probe id: the candidate id, or "<id>#full" for a follow-up.
-    int candIndexForProbe(const QString &probeId, bool *followUp) const
+    // A host item id is a probe id: the candidate id, "<id>#full" for a follow-up, or "<id>.<n>" for part n of an
+    // own Xray burst (ScanPlan.h scanXrayBurstOf; *part = n, 0 for the data part).
+    int candIndexForProbe(const QString &probeId, bool *followUp, int *part = nullptr) const
     {
         *followUp = probeId.endsWith(QLatin1String("#full"));
-        return candIndex(*followUp ? probeId.left(probeId.size() - 5) : probeId);
+        if (part)
+            *part = 0;
+        if (*followUp)
+            return candIndex(probeId.left(probeId.size() - 5));
+        const int i = candIndex(probeId);
+        if (i >= 0)
+            return i;
+        int n = 0;
+        const QString dataId = scanXrayBurstBaseOf(probeId, &n);
+        const int j = n > 0 ? candIndex(dataId) : -1;
+        if (j < 0 || n >= m_cands.at(j).parts)
+            return -1;
+        if (part)
+            *part = n;
+        return j;
     }
 
     int rowIndex(const QString &id) const
@@ -2458,6 +2494,7 @@ private:
         for (const ScanCandidate &c : plan.probe) {
             Cand x;
             x.c = c;
+            x.parts = scanXrayBurstPartsOf(c);
             m_cands << x;
         }
         for (const ScanCandidate &c : plan.orderOnly)
@@ -2566,8 +2603,9 @@ private:
                 continue;
             if (c.c.needsLease && c.lease != Lease::Requested)
                 continue;
-            if (cheapest < 0 || c.c.costBytes < cheapest)
-                cheapest = c.c.costBytes;
+            const qint64 cost = scanProbeTotalCostBytes(c.c, m_t);
+            if (cheapest < 0 || cost < cheapest)
+                cheapest = cost;
         }
         return cheapest;
     }
@@ -2681,7 +2719,7 @@ private:
         qint64 committed = 0;
         for (const Cand &c : m_cands)
             if (!c.c.needsLease && !c.finalDone)
-                committed += c.c.costBytes;
+                committed += scanProbeTotalCostBytes(c.c, m_t);
         for (Cand &c : m_cands) {
             if (c.lease != Lease::Requested)
                 continue;
@@ -2893,7 +2931,7 @@ private:
         int n = 0;
         for (const Cand &c : m_cands)
             if (!c.finalDone && c.busy() && c.pool() == pool)
-                ++n;
+                n += c.hostSlots(); // an own Xray burst holds one host slot per part
         return n;
     }
 
