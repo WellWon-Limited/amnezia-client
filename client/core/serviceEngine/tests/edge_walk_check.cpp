@@ -71,5 +71,16 @@ int main(int argc, char **argv)
         // a pinned dev backend keeps its base
         CHECK(avpn::apiSessionEdgeFor(ApiRoute::Tunnel, true, hk).isEmpty(), "pinned dev backend -> its own base");
     }
+    {
+        // R9: the pause between unsuccessful rounds grows and is capped
+        CHECK(avpn::edgeRoundPauseMs(1) == 10000, "round 1: 10 s");
+        CHECK(avpn::edgeRoundPauseMs(2) == 20000, "round 2: 20 s");
+        CHECK(avpn::edgeRoundPauseMs(4) == 80000, "round 4: 80 s");
+        CHECK(avpn::edgeRoundPauseMs(5) == 120000, "round 5: capped");
+        CHECK(avpn::edgeRoundPauseMs(1000) == 120000, "a huge round number stays capped");
+        CHECK(avpn::edgeRoundPauseMs(0) == 10000, "round 0 is treated as 1");
+        CHECK(avpn::edgeRoundPauseMs(3, 100, 400) == 400, "server numbers: base 100, cap 400");
+        CHECK(avpn::edgeRoundPauseMs(1, 500, 100) == 500, "a cap below the base never shortens the base");
+    }
     return g_fail ? 1 : 0;
 }

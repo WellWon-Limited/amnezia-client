@@ -20,7 +20,7 @@ namespace avpn {
 ConfigService::ConfigService(QNetworkAccessManager *nam, const QString &baseUrl,
                              const QString &pubKeyHex, const QStringList &bakedEdges,
                              QObject *parent, bool pinned)
-    : QObject(parent), m_nam(nam), m_pubKeyHex(pubKeyHex), m_bakedEdges(bakedEdges), m_refreshTimer(this),
+    : QObject(parent), m_nam(nam), m_pubKeyHex(pubKeyHex), m_bakedEdges(bakedEdges), m_refreshTimer(this), m_walkPause(this),
       m_pinned(pinned && !baseUrl.isEmpty())
 {
     // 5.1.108: a pinned control plane (AVPN_API_URL) is used as is. Before, the stored active edge of
@@ -36,6 +36,9 @@ ConfigService::ConfigService(QNetworkAccessManager *nam, const QString &baseUrl,
     m_refreshTimer.setInterval(15 * 60 * 1000);
     connect(&m_refreshTimer, &QTimer::timeout, this, &ConfigService::fetchConfig);
 #endif
+    m_walkPause.setObjectName(QStringLiteral("edgeRoundPause"));
+    m_walkPause.setSingleShot(true);
+    connect(&m_walkPause, &QTimer::timeout, this, &ConfigService::walkPauseElapsed);
 }
 
 void ConfigService::start()
@@ -159,6 +162,9 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     rejudgeCachedXray();
     if (!m_nam || m_configInFlight)
         return;
+    if (m_walkPause.isActive())
+        return; // R9: backing off after a full unsuccessful round; the pause timer, a network change or the
+                // foreground (resumeEdgeWalk) and any HTTP answer end it
     m_configInFlight = true;
     m_lastFetchMs = nowMs();
     const quint64 seq = m_configSeq;
@@ -170,7 +176,7 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     // answered yet gets kFastEdgeFirstTryMs to start answering (headers); silence = the edge is unreachable from here
     // and the walk steps at once - not after three 15 s failures. Once an edge answered, the usual rules apply.
     if (!m_pinned && m_sessionEdge.isEmpty() && !m_edgeAnswered) {
-        QTimer::singleShot(kFastEdgeFirstTryMs, reply, [reply]() {
+        QTimer::singleShot(m_fastEdgeMs, reply, [reply]() {
             if (reply->isRunning() && !reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()) {
                 reply->setProperty("avpn_fast_edge", true);
                 reply->abort();
@@ -179,13 +185,36 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     }
     connect(reply, &QNetworkReply::finished, this, [this, reply, seq, order, startedByApiSuccess]() {
         reply->deleteLater();
-        if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid())
+        if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()) {
             m_edgeAnswered = true;
+            m_walkSilent = 0; // an answer: the network reaches the API, the walk's back-off is over
+            m_walkRounds = 0;
+            m_walkPause.stop();
+        }
         if (reply->property("avpn_fast_edge").toBool() && seq == m_configSeq) {
             m_configInFlight = false;
-            qWarning() << "avpn config: edge" << activeBaseUrl() << "silent for" << kFastEdgeFirstTryMs
+            qWarning() << "avpn config: edge" << activeBaseUrl() << "silent for" << m_fastEdgeMs
                        << "ms on its first try - the next edge now";
             emit transportFailed();
+            // R9: one full round of silent edges = the network cannot reach the API now. Back off instead of
+            // walking for ever; each edge still gets its quick first try inside a round.
+            const int edges = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges).size();
+            if (edges >= 2 && ++m_walkSilent >= edges) {
+                m_walkSilent = 0;
+                ++m_walkRounds;
+                const qint64 base = m_pauseBaseTest >= 0 ? m_pauseBaseTest
+                    : static_cast<qint64>(numberOr(m_config, QStringLiteral("edge_round_pause_base_ms"),
+                                                   static_cast<double>(kEdgeRoundPauseBaseMs)));
+                const qint64 cap = m_pauseCapTest >= 0 ? m_pauseCapTest
+                    : static_cast<qint64>(numberOr(m_config, QStringLiteral("edge_round_pause_cap_ms"),
+                                                   static_cast<double>(kEdgeRoundPauseCapMs)));
+                const qint64 pause = edgeRoundPauseMs(m_walkRounds, base, cap);
+                qWarning() << "avpn config: every edge silent - round" << m_walkRounds << "over, next round in"
+                           << pause << "ms";
+                m_lastFetchMs = -1;
+                m_walkPause.start(static_cast<int>(pause));
+                return;
+            }
             if (!switchToNextEdge())
                 m_lastFetchMs = -1;
             return;
@@ -330,6 +359,9 @@ void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64, 
 bool ConfigService::reportNetworkSuccess()
 {
     m_failStreak = 0;
+    m_walkSilent = 0; // R9: any API answer ends the edge walk's back-off
+    m_walkRounds = 0;
+    m_walkPause.stop();
     rejudgeCachedXray();
     // 5.1.109 (defect of 12.11.2026 on 138): an API path works again - if this process is still on the
     // cached config and the config is owed (its own request of the usual kind got no answer), ask now
@@ -373,6 +405,23 @@ void ConfigService::reportNetworkFailure()
         return;
     m_failStreak = 0;
     switchToNextEdge();
+}
+
+// R9: the pause after a full unsuccessful round is over: the next round starts at the next edge.
+void ConfigService::walkPauseElapsed()
+{
+    if (!switchToNextEdge())
+        fetchConfig();
+}
+
+void ConfigService::resumeEdgeWalk()
+{
+    const bool paused = m_walkPause.isActive();
+    m_walkSilent = 0;
+    m_walkRounds = 0;
+    m_walkPause.stop();
+    if (paused)
+        fetchConfig(); // a new round now, from the edge the last one ended on
 }
 
 void ConfigService::setSessionEdge(const QString &edge)

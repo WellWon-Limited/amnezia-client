@@ -2,6 +2,7 @@
 // AVPN: чистая логика перебора фолбэк-входов control plane.
 #pragma once
 #include <QString>
+#include <QtGlobal>
 #include <QStringList>
 #include <QUrl>
 
@@ -19,6 +20,24 @@ namespace avpn {
 //    tunnel we raise (our exits and the providers alike): the edge reachable from foreign exits.
 // A pinned dev backend keeps its base for both. Empty result = the walk's direct edge.
 enum class ApiRoute { Direct, Tunnel };
+
+// 19.11.2026 (review of 141, R9): the fast failover (ConfigService, kFastEdgeFirstTryMs) leaves a silent edge after
+// 2.5 s. One full round over all edges with no HTTP answer from any is evidence that the network cannot reach the API
+// right now; after it the walk waits before the next round, the pause growing with every unsuccessful round
+// (same shape as DataCheckRetry.h::dataCheckRetryDelayMs): base, 2*base, 4*base ... capped. Reset at once by any HTTP
+// answer, a network change and the app coming to the foreground. Both numbers are server-driven
+// (numbers.edge_round_pause_base_ms / edge_round_pause_cap_ms) next to edge_fail_threshold.
+inline constexpr qint64 kEdgeRoundPauseBaseMs = 10000;
+inline constexpr qint64 kEdgeRoundPauseCapMs = 120000;
+
+// Pause after the n-th consecutive unsuccessful round (n >= 1).
+inline qint64 edgeRoundPauseMs(int roundNumber, qint64 baseMs = kEdgeRoundPauseBaseMs,
+                               qint64 capMs = kEdgeRoundPauseCapMs)
+{
+    const int n = qBound(1, roundNumber, 20);
+    const qint64 base = qMax<qint64>(baseMs, 1);
+    return qMin<qint64>(base << (n - 1), qMax<qint64>(capMs, base));
+}
 inline ApiRoute apiRouteNow(bool tunnelReportsConnected, bool engineCarrying)
 {
     return tunnelReportsConnected && engineCarrying ? ApiRoute::Tunnel : ApiRoute::Direct;

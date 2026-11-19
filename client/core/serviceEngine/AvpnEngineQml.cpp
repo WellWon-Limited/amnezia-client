@@ -1718,6 +1718,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                             reliabilityEvent(QStringLiteral("network_change_ignored own_tunnel"));
                         } else {
                             invalidateNetworkMeasurements();
+                            if (m_configSvc)
+                                m_configSvc->resumeEdgeWalk(); // R9: a new network - a backed-off edge walk retries now
                         }
                         if (r == QNetworkInformation::Reachability::Online) {
                             kickBootstrap();
@@ -1835,6 +1837,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         };
         connect(ni, &QNetworkInformation::reachabilityChanged, this, netKey);
         connect(ni, &QNetworkInformation::transportMediumChanged, this, netKey);
+        connect(ni, &QNetworkInformation::transportMediumChanged, this, [this]() {
+            if (m_configSvc && !networkChangeIsOwnTunnel(m_op != Op::None, m_lastOwnOpMs,
+                                                         QDateTime::currentMSecsSinceEpoch()))
+                m_configSvc->resumeEdgeWalk(); // R9: Wi-Fi <-> cellular
+        });
         connect(ni, &QNetworkInformation::transportMediumChanged, this, [this]() { scanNotifyNetwork(); }); // AVPN Scanner
     }
     // Ответы control plane: метод, путь без идентификаторов, код. Только пути API (/v1, /admin) —
@@ -9569,8 +9576,10 @@ void AvpnEngineQml::onForegroundDebounced()
         refreshSubscription();
         refreshAccount(); // ревью: удалённое включение журнала, ID в чате поддержки, бейдж группы
     }
-    if (m_configSvc)
+    if (m_configSvc) {
+        m_configSvc->resumeEdgeWalk(); // R9: the app is back - a backed-off edge walk starts a new round now
         m_configSvc->refreshIfStale(kFgConfigThrottleMs);
+    }
     // 5.1.109 (S4.1): on macOS the service may have got tun2socks while the app was hidden; a choice
     // that waited is admitted if nothing is running.
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
