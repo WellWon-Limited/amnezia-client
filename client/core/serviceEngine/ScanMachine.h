@@ -1563,14 +1563,18 @@ public:
     }
 
     // The engine refused the tapped row before it touched the tunnel (device test of 142: the pin failed - the node
-    // left the subscription). Nothing was attempted, so nothing is marked failed and no outcome is sent: the row
-    // goes back to what it showed and the list takes taps again (before: m_connectingId stayed set, the row read
-    // «Подключение…» after reopening and rowTapped ignored every later tap).
+    // left the subscription). Nothing was attempted, so no outcome is sent and the list takes taps again (before:
+    // m_connectingId stayed set, the row read «Подключение…» after reopening and rowTapped ignored every later tap).
+    // A refusal that NAMES the row means this row cannot be connected now: it reads «Не удалось» until the list is
+    // rebuilt (a row that cannot be connected is not shown as available - device round 13, A10). An empty node =
+    // the request was superseded (the person's Stop, another action): the row goes back to what it showed.
     ScanStep connectRefused(const QString &nodeId, qint64 now)
     {
         now = clock(now);
         ScanStep s;
         if (!m_connectingId.isEmpty() && (nodeId.isEmpty() || nodeId == m_connectingId)) {
+            if (!nodeId.isEmpty())
+                m_tapFailed.insert(nodeId);
             m_connectingId.clear();
             m_chainOrder.clear();
             m_chainLaterShown = false;
@@ -1944,7 +1948,8 @@ private:
     // The batch a row is shown in (displayRows): a series' batches follow each other - the rows of the batches
     // before keep their places and their order, a new batch's rows join after them. A cached row, and a fresh
     // row that no batch of this series made (the live connection before the first scan), go with the newest.
-    int rowBatch(const Row &r) const { return r.cached || r.batch < 1 ? qMax(1, m_batch) : r.batch; }
+    // A cached row keeps the batch it was shown in (a reopened list has the same rows, each batch under its own cap).
+    int rowBatch(const Row &r) const { return r.batch < 1 ? qMax(1, m_batch) : r.batch; }
 
     struct Unverified {
         ScanCandidate c;
@@ -2169,6 +2174,7 @@ private:
             r.speed = cr.speed;
             r.sortMs = cr.ms;
             r.cached = true;
+            r.batch = cr.batch;
             r.cachedAt = cached.savedAtMs;
             r.crowdWorks = cr.crowdWorks;
             r.fingerprint = cached.fingerprint;
@@ -3541,7 +3547,9 @@ private:
                 cr.speed = x.speed;
                 cr.ms = x.sortMs;
                 cr.crowdWorks = x.crowdWorks;
-                cache.rows << cr;
+                cr.batch = rowBatch(x);
+                if (cache.rows.size() < kScanCacheRowsMax)
+                    cache.rows << cr;
             }
         cache.failures = m_failuresThisScan;
         addSlot(cache, now);

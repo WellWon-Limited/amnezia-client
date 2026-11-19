@@ -438,6 +438,7 @@ private:
 
     ScanNetwork buildNetwork() const;
     ScanCachedResult cachedFor(const ScanNetwork &n) const;
+    ScanCachedResult cachedWithStubs(const ScanNetwork &n); // the cached result + its rows' stubs, read together
     void persistCache(const ScanCachedResult &c);
     void notifyNetwork();
     void loadCachedStubs(const QString &cacheKey);

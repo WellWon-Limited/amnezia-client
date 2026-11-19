@@ -1320,6 +1320,12 @@ static void machineRules()
             stuck = stuck || (r.id == QLatin1String("2:xray") && (r.state == ScanRowState::Connecting || r.state == ScanRowState::Failed));
         CHECK(!stuck);
         CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 1000).has(ScanActionKind::ConnectRow));
+        // the engine refuses the row by name (its node is not in the pool): it cannot be connected, so it is not offered
+        m.connectRefused(QStringLiteral("2:xray"), kT0 + 1100);
+        bool offered = false;
+        for (const ScanRowView &r : m.view(kT0 + 1200).rows)
+            offered = offered || (r.id == QLatin1String("2:xray") && r.tappable);
+        CHECK(!offered && m.connectingId().isEmpty());
     }
     // R6 (review of 141): the tapped row is an exact request. Its failure ends the chain at once: the old pair
     // connectFailed + attemptEnded moved the chain to the next row and marked THAT row failed, untried.
@@ -3944,6 +3950,59 @@ static void connectedFirstInEveryList()
     CHECK(firstRow(m, kT0 + 45100) == tapped);
 }
 
+// Device round 13, A10: a result of a «Найти ещё» series (14 rows in two batches) is kept whole across the store and
+// shown whole when the page is opened again; the cache is bounded (kScanCacheRowsMax); a result stored by an earlier
+// build (no batch numbers) still reads as one batch.
+static void cachedResultKeepsEveryShownRow()
+{
+    World w = baseWorld("cache14", hostMac(), ScanNetKind::Wifi);
+    w.nodes = ownOnly(w.nodes);
+    ScanCachedResult c;
+    c.networkKey = w.net.key;
+    c.fingerprint = w.net.fingerprint;
+    c.savedAtMs = kT0 - 60000;
+    c.scope = QStringLiteral("DE");
+    QStringList ids;
+    for (int i = 0; i < 14; ++i) {
+        ScanCachedRow r;
+        r.id = QStringLiteral("%1:xray").arg(100 + i);
+        r.label = QStringLiteral("Германия %1").arg(i + 1);
+        r.countryCode = QStringLiteral("DE");
+        r.speed = ScanSpeed::Fast;
+        r.ms = 40 + 5 * i;
+        r.batch = i < 10 ? 1 : 2;
+        c.rows << r;
+        ids << r.id;
+    }
+    const ScanCachedResult back = scanCachedResultFromJson(scanCachedResultToJson(c));
+    CHECK(back.rows.size() == 14 && back.rows.at(12).batch == 2 && back.rows.at(0).batch == 1);
+    const auto shownIds = [&](const ScanCachedResult &cr) {
+        ScanMachine m(w.caps);
+        ScanOpen o = openOf(w, QString(), false);
+        o.cached = cr;
+        m.shown(o, kT0);
+        QStringList out;
+        for (const ScanRowView &r : m.view(kT0 + 20).rows)
+            out << r.id;
+        return out;
+    };
+    CHECK(shownIds(back) == ids); // every row the person saw is back, in the order of the cached speeds
+    ScanCachedResult legacy = back;
+    for (ScanCachedRow &r : legacy.rows)
+        r.batch = 0;
+    CHECK(shownIds(legacy).size() == 10); // an earlier build's result: one batch, the old cap
+    // the bound
+    ScanCachedResult big = c;
+    big.rows.clear();
+    for (int i = 0; i < 2 * kScanCacheRowsMax; ++i) {
+        ScanCachedRow r = c.rows.first();
+        r.id = QStringLiteral("%1:xray").arg(1000 + i);
+        r.batch = 1 + i / 10;
+        big.rows << r;
+    }
+    CHECK(scanCachedResultFromJson(scanCachedResultToJson(big)).rows.size() == big.rows.size()); // the reader never drops
+}
+
 static void scanStartsNewList()
 {
     const QString de = QStringLiteral("DE");
@@ -4725,6 +4784,7 @@ int main(int argc, char **argv)
     findMoreTruncatedSeen();
     scanStartsNewList();
     connectedFirstInEveryList();
+    cachedResultKeepsEveryShownRow();
     serverBatches();
     overruns();
     properties();
