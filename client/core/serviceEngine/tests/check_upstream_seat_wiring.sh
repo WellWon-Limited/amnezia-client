@@ -174,6 +174,11 @@ has "$(body_of "$OWN" '    void sendAcquire(const LeaseAction &a)')" 'withdrawId
 has "$ctor" 'm_upOwner.releaseWanted(id,' || bad "S1: the adapter must give the client the owner's releaseWanted"
 [ "$(grep -c 'releaseWanted' "$CLI")" -ge 3 ] || bad "S1: the client must ask releaseWanted before a resend, a timer resend and a held send"
 
+# S3: evidence about a path only for something really sent - the engine asks the adapter before it records a provider
+# leg's no_handshake, and the adapter answers from the owner's own fact.
+has "$(grep -n 'upstreamRequestSent' "$SE/ServiceEngine.cpp")" 'upstreamRequestSent' || bad "S3: the Report effect must check that the provider leg sent something"
+has "$(grep 'upstreamRequestSent' "$ADH")" 'm_upOwner.requestSent()' || bad "S3: the adapter must answer upstreamRequestSent from the owner"
+
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"
     exit 1

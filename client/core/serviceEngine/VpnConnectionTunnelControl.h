@@ -123,6 +123,7 @@ public:
     // configured, a provider session is live): the caller switches the old way.
     quint64 prepareUpstream(const Subscription &sub, const SubscriptionNode &node);
     void cancelUpstreamPrepare();
+    bool upstreamRequestSent() const override { return m_upOwner.requestSent(); }
     void startRefused() override; // ITunnelControl: the native start never happened (Android permission refused)
     bool upstreamPreparing() const { return m_upOwner.preparing(); }
     // macOS GUI owner (decision B): the facade's existing tick drives renewals at upstreamWakeAtMs().

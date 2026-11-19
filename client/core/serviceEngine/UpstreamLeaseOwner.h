@@ -375,7 +375,7 @@ private:
         m_lastAcquire = AcquireReply();
         m_lastRenewal = UpstreamRenewal();
         m_hasRenewal = false;
-        m_active = m_bringUp = m_tunnelIsUp = m_handedOver = m_adopted = m_rebasePending = m_bringUpSent = false;
+        m_active = m_bringUp = m_tunnelIsUp = m_handedOver = m_adopted = m_rebasePending = m_bringUpSent = m_requestSent = false;
         m_prepareOnly = m_prepared = false;
         m_releaseSent = false;
         m_configChanged = false;
@@ -499,6 +499,7 @@ private:
                     }
                     ev << b;
                     m_bringUpSent = true;
+                    m_requestSent = true;
                     break;
                 }
                 if (m_prepareOnly) {
@@ -615,6 +616,7 @@ private:
             m_handedOver = true; // renewals belong to the tunnel owner from now (its envelope carries the lease)
         ev << b;
         m_bringUpSent = true;
+        m_requestSent = true;
         if (m_opt.keepOwnership)
             ev << persistEvent(nowMs, 0);
     }
@@ -772,6 +774,7 @@ public:
         return m_active && !leaseId.isEmpty() && m_machine.phase() == LeasePhase::Active && m_machine.leaseId() == leaseId;
     }
     bool startQueued() const { return m_active && m_startQueued; }
+    bool requestSent() const { return m_requestSent; }
     int withdrawnCount() const { return int(m_withdrawn.size()); }
     int gatedAcquires() const { return int(m_gatedAcquires.size()); }
     int requestsOutstanding() const { return (m_orphanAcquire ? 1 : 0) + int(m_releasesOut.size()); }
@@ -861,6 +864,7 @@ private:
             return;
         }
         withdrawIdleReleases(a.profileId);
+        m_requestSent = true; // something really left for the server: evidence about the path may follow
         if (m_io)
             m_io->acquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route);
     }
@@ -937,6 +941,7 @@ private:
     quint64 m_lastAcquireRequest = 0;
     qint64 m_lastAcquireSentMs = 0, m_grantSentMs = 0, m_wallAtStart = 0, m_monoAtStart = 0;
     qint64 m_adoptedStartedWallMs = 0;
+    bool m_requestSent = false; // an acquire or the native start really went out in this session (upstreamRequestSent)
     bool m_bringUpSent = false; // the native start was asked for (BringUp event): a Disconnected can now be this session's
     bool m_active = false, m_bringUp = false, m_tunnelIsUp = false, m_handedOver = false, m_adopted = false;
     bool m_rebasePending = false, m_releaseSent = false, m_configChanged = false, m_haveBytes = false;

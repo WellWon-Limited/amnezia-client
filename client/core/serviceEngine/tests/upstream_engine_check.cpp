@@ -2034,6 +2034,47 @@ static void sessionReleaseRetry()
     CHECK(run({409}, kSeatReleaseRetryBudgetMs, &deletes) == 1 && deletes == 1);
 }
 
+// S3 (device round 10): a provider leg that never put a lease request or a tunnel start on the network (held by our own
+// bookkeeping, refused locally) must not be written as the path's no_handshake - the server proven a minute ago was
+// pushed behind every untried one by exactly that. A leg that really sent and got nothing is still recorded.
+static void localRefusalRecordsNothing()
+{
+    struct QuietTunnel : SeatTunnel {
+        bool sent = false;
+        bool upstreamRequestSent() const override { return sent; }
+    };
+    for (const bool sent : {false, true}) {
+        TuningStore::set({}, {{QStringLiteral("upstream_nodes"), true}, {QStringLiteral("xray_client"), true}}, {}, {});
+        const QJsonArray pool{stubNode("aaaaaaaaaaaaaaa0", 1, 0)};
+        const QString provider = QStringLiteral("up:aaaaaaaaaaaaaaa0");
+        ServiceEngine eng;
+        QuietTunnel tun;
+        tun.sent = sent;
+        eng.setTunnel(&tun);
+        eng.setNowMsForTest([&tun] { return tun.now; });
+        QString err;
+        CHECK(eng.loadSubscription(body(pool), err));
+        path::NetworkObservation wifi;
+        wifi.medium = path::NetMedium::Wifi;
+        wifi.gateway = QStringLiteral("192.168.9.1");
+        eng.observeNetwork(wifi);
+        CHECK(eng.connect(err) && tun.ups == QStringList{ provider });
+        for (int i = 0; i < 30 && eng.attemptRunning() && eng.pathStateHere(provider) == QLatin1String("unknown"); ++i) {
+            tun.now += 1000; // past the leg's start deadline: the leg ends with no_handshake
+            eng.attemptTick();
+        }
+        QStringList journal = eng.takeAttemptJournal();
+        bool noted = false;
+        for (const QString &l : journal)
+            noted = noted || l.contains(QStringLiteral("leg_nothing_sent"));
+        if (sent)
+            CHECK(eng.pathStateHere(provider) != QLatin1String("unknown") && !noted);
+        else
+            CHECK(eng.pathStateHere(provider) == QLatin1String("unknown") && noted);
+    }
+    TuningStore::set({}, {}, {}, {});
+}
+
 // Lease id ledger (UpstreamLeaseOwner.h; reviews R4, R5 of 19.11, F3, F4, F9 of round 2): the REAL
 // UpstreamLeaseClient and UpstreamLeaseOwner against a loopback server that holds its answers until the test lets them
 // go. The server hands the same lease id back to the same device and profile and any DELETE ends it, as the real one.
@@ -2797,6 +2838,7 @@ int main(int argc, char **argv)
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     providerLegStarvedCheck();
     sessionReleaseRetry();
+    localRefusalRecordsNothing();
     lateGrantOwnership();
     ledgerModel();
     earlyRefusals();

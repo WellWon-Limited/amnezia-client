@@ -428,20 +428,31 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
             if (m_tunnel)
                 m_tunnel->down();
             break;
-        case path::EffectType::Report:
-            if (e.report.outcome == path::PathOutcome::NoHandshake)
+        case path::EffectType::Report: {
+            // S3: evidence about a path is only for something really sent to it. A provider leg whose own bookkeeping
+            // (or a local refusal) kept the lease request and the native start from ever leaving says nothing.
+            path::PathOutcome outcome = e.report.outcome;
+            const SubscriptionNode *reported = findNode(e.report.path.id);
+            if (outcome == path::PathOutcome::NoHandshake && reported && isUpstreamNode(*reported) && m_tunnel
+                && !m_tunnel->upstreamRequestSent()) {
+                outcome = path::PathOutcome::Inconclusive;
+                attemptJournal(QStringLiteral("leg_nothing_sent node=%1 (no lease request and no tunnel start went out - no evidence about the path)")
+                                   .arg(e.report.path.id));
+            }
+            if (outcome == path::PathOutcome::NoHandshake)
                 ++m_legStartFailures;
-            if (findNode(e.report.path.id) && m_net.isCurrent(e.report.networkGeneration)
-                && m_ledger.record(e.report.network, e.report.path, e.report.outcome, nowMs(), e.report.connectMs,
+            if (reported && m_net.isCurrent(e.report.networkGeneration)
+                && m_ledger.record(e.report.network, e.report.path, outcome, nowMs(), e.report.connectMs,
                                    e.report.ttfbMs))
                 m_ledgerDirty = true;
             attemptJournal(QStringLiteral("path_outcome net=%1 net_gen=%2 node=%3 rev=%4 outcome=%5 connect_ms=%6 ttfb_ms=%7 state=%8")
                                .arg(e.report.network).arg(e.report.networkGeneration).arg(e.report.path.id,
-                                    e.report.path.revision, QLatin1String(path::pathOutcomeName(e.report.outcome)))
+                                    e.report.path.revision, QLatin1String(path::pathOutcomeName(outcome)))
                                .arg(e.report.connectMs).arg(e.report.ttfbMs)
                                .arg(QLatin1String(path::pathStateName(
                                    m_ledger.view(e.report.network, e.report.path, nowMs()).state))));
             break;
+        }
         case path::EffectType::Yield:
             attemptJournal(e.phase == path::AttemptPhase::Starting
                                ? QStringLiteral("leg_preempted_for_proof node=%1 to=%2 phase=starting (raised blind, not up)")
