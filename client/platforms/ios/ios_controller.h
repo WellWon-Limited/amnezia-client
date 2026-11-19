@@ -289,9 +289,6 @@ private:
     NSDictionary *providerMetadata();
 
     NSString *m_serverAddress {};
-    mutable std::mutex m_ownPeerLock;  // AVPN (path engine): ownStartLivePeer, written by connectVpn
-    int m_ownPeerKind = 0;
-    QJsonObject m_ownPeer;
     bool isOurManager(NETunnelProviderManager *manager);
     void sendVpnExtensionMessage(NETunnelProviderManager *tunnel, NSDictionary *message,
                                  std::function<void(NSDictionary *)> callback = nullptr);
@@ -304,6 +301,12 @@ private:
     void *m_currentTunnelStorage {};
     void *m_serverAddressStorage {};
 #endif
+
+    // AVPN (path engine): ownStartLivePeer, written by connectVpn. Plain C++ members live OUTSIDE the __OBJC__ block
+    // above, so the class has one layout in every translation unit (the harness checks sizeof from a C++ unit).
+    mutable std::mutex m_ownPeerLock;
+    int m_ownPeerKind = 0;
+    QJsonObject m_ownPeer;
 
     amnezia::Proto m_proto = amnezia::Proto::Awg;   // AVPN: дефолт до connectVpn (AWG-only продукт; иначе uninit enum)
     QJsonObject m_rawConfig;
