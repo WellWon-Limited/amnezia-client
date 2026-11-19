@@ -343,6 +343,46 @@ private slots:
         service.resumeEdgeWalk();                                  // while no pause is running: harmless
         QCOMPARE(edgeA.configRequests + edgeB.configRequests, 4);
     }
+    // F7: a pause must never end with "nothing owed, nothing sent". All edges silent -> pause; then another request
+    // succeeds / the network changes / the app returns: a config request goes out at once and its answer is applied.
+    // Edge B answers its second config request (the first of round 1 is silent).
+    void pauseExitsSendTheConfigAtOnceAndApplyIt_data()
+    {
+        QTest::addColumn<int>("exit");
+        QTest::newRow("another request succeeded") << 0;
+        QTest::newRow("network change") << 1;
+        QTest::newRow("foreground") << 2;
+        QTest::newRow("two exits coincide") << 3;
+    }
+    void pauseExitsSendTheConfigAtOnceAndApplyIt()
+    {
+        QFETCH(int, exit);
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int n) {
+            return n < 2 ? QByteArray() : httpAnswer("200 OK", R"({"features":{"xray_client":true}})");
+        });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.setEdgeWalkTimingForTest(50, 5000, 5000);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(edgeA.configRequests + edgeB.configRequests, 2, 2000); // round 1, then the pause
+        QTest::qWait(300);
+        QCOMPARE(edgeA.configRequests + edgeB.configRequests, 2);
+        service.refreshIfStale(0); // a config request of another trigger, held back by the pause: no request, no queue
+        QCOMPARE(edgeA.configRequests + edgeB.configRequests, 2);
+        QVERIFY(!service.isFresh());
+        if (exit == 0 || exit == 3)
+            service.reportNetworkSuccess();
+        if (exit == 1 || exit == 2 || exit == 3)
+            service.resumeEdgeWalk();
+        QTRY_VERIFY_WITH_TIMEOUT(service.isFresh(), 1000); // at once (the pause was 5 s), and applied
+        QVERIFY(service.config().features.value("xray_client", false));
+        QTest::qWait(300);
+        QCOMPARE(edgeA.configRequests, 1);
+        QCOMPARE(edgeB.configRequests, 2); // exactly one request went out: no duplicate from the second exit
+    }
     // Decision 2026-11-05: small calls succeed on the edge (they reset the edge walk), but two
     // /v1/subscription transport failures in a row on it switch the active edge; a delivered
     // subscription in between resets that streak.

@@ -187,15 +187,17 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
         reply->deleteLater();
         if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()) {
             m_edgeAnswered = true;
-            m_walkSilent = 0; // an answer: the network reaches the API, the walk's back-off is over
-            m_walkRounds = 0;
-            m_walkPause.stop();
+            leaveWalkPause(); // an answer: the network reaches the API, the walk's back-off is over
         }
         if (reply->property("avpn_fast_edge").toBool() && seq == m_configSeq) {
             m_configInFlight = false;
             qWarning() << "avpn config: edge" << activeBaseUrl() << "silent for" << m_fastEdgeMs
                        << "ms on its first try - the next edge now";
             emit transportFailed();
+            // F7: a config request that got no answer is a config owed (as for a timeout or a 5xx): whatever ends
+            // the pause that may follow - or a later API success - finds the debt in the state.
+            if (!m_fresh)
+                m_refetchOwed = true;
             // R9: one full round of silent edges = the network cannot reach the API now. Back off instead of
             // walking for ever; each edge still gets its quick first try inside a round.
             const int edges = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges).size();
@@ -359,10 +361,13 @@ void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64, 
 bool ConfigService::reportNetworkSuccess()
 {
     m_failStreak = 0;
-    m_walkSilent = 0; // R9: any API answer ends the edge walk's back-off
-    m_walkRounds = 0;
-    m_walkPause.stop();
     rejudgeCachedXray();
+    // R9/F7: any API answer ends the edge walk's back-off; the config the walk was after is asked for at once.
+    if (leaveWalkPause()) {
+        m_refetchOwed = false;
+        m_lastRefetchMs = nowMs();
+        return true;
+    }
     // 5.1.109 (defect of 12.11.2026 on 138): an API path works again - if this process is still on the
     // cached config and the config is owed (its own request of the usual kind got no answer), ask now
     // instead of waiting for the next return to the screen (iOS has no periodic config refresh). Rides
@@ -414,14 +419,27 @@ void ConfigService::walkPauseElapsed()
         fetchConfig();
 }
 
-void ConfigService::resumeEdgeWalk()
+// F7: the one way out of a pause (an answer to any request, a network change, the foreground). The walk exists to
+// obtain a config: leaving a pause while the app is still on the cached copy sends the config request now - from the
+// edge the last round ended on - so a pause never ends with "nothing owed, nothing sent". A second exit finds no
+// pause and sends nothing; a request already in flight is not doubled. true = a request went out here.
+bool ConfigService::leaveWalkPause()
 {
     const bool paused = m_walkPause.isActive();
     m_walkSilent = 0;
     m_walkRounds = 0;
     m_walkPause.stop();
-    if (paused)
-        fetchConfig(); // a new round now, from the edge the last one ended on
+    if (!paused || m_fresh || m_configInFlight || !m_nam)
+        return false;
+    m_lastRefetchMs = nowMs();
+    m_refetchOwed = false;
+    requestConfig(/*startedByApiSuccess=*/false);
+    return m_configInFlight;
+}
+
+void ConfigService::resumeEdgeWalk()
+{
+    leaveWalkPause(); // a new round now
 }
 
 void ConfigService::setSessionEdge(const QString &edge)

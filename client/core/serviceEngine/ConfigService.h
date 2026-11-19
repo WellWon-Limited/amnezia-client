@@ -112,6 +112,7 @@ private:
     int          m_walkRounds = 0;
     QTimer       m_walkPause;
     void walkPauseElapsed();
+    bool leaveWalkPause();
     QString      m_pubKeyHex;
     QStringList  m_bakedEdges;
     RemoteConfig m_config;
