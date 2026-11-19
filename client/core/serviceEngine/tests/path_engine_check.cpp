@@ -452,6 +452,94 @@ static void testSelect()
 
 // --- AttemptOwner unit: stale events, user stop, budget --------------------------------------------------
 
+// Device round 19.11: a chosen server implies its country; kinds take turns inside an attempt; the race spreads over
+// kinds.
+static void testChoiceCountryAndLanes()
+{
+    const auto prov = [](const char *id, const char *cc) {
+        PathCandidate c;
+        c.id.id = QString::fromLatin1(id);
+        c.kind = PathKind::Provider;
+        c.providerKind = UpstreamKind::Country;
+        c.country = QString::fromLatin1(cc);
+        c.tier = 1;
+        return c;
+    };
+    const auto own = [](const char *id, const char *cc, PathKind k) {
+        PathCandidate c;
+        c.id.id = QString::fromLatin1(id);
+        c.kind = k;
+        c.country = QString::fromLatin1(cc);
+        return c;
+    };
+    const auto ids = [](const QList<RankedPath> &l) {
+        QStringList o;
+        for (const RankedPath &r : l)
+            o << r.path.id.id;
+        return o;
+    };
+    const auto workingView = [](qint64 at, int speedMs = 3000) {
+        PathView v;
+        v.state = PathState::Working;
+        v.strength = EvidenceStrength::Data;
+        v.lastSuccessMs = at;
+        v.speedMs = speedMs;
+        return v;
+    };
+    // 1. the person chose Czechia 2; it was tried; Poland 1 and Czechia 5 both carried data here: Czechia first
+    {
+        SelectInput in;
+        in.pool = { prov("up:cz2", "CZ"), prov("up:cz5", "CZ"), prov("up:cz7", "CZ"), prov("up:pl1", "PL"),
+                    own("17", "EE", PathKind::OwnAwg) };
+        in.choice = UserChoice::preferServer(QStringLiteral("CZ"), { QStringLiteral("up:cz2") });
+        in.evidence.insert(QStringLiteral("up:pl1"), workingView(2000, 1000));
+        in.evidence.insert(QStringLiteral("up:cz5"), workingView(1000, 4000));
+        in.evidence.insert(QStringLiteral("17"), workingView(3000, 1000));
+        CHECK(ids(selectPaths(in)).first() == QLatin1String("up:cz2")); // the choice itself
+        in.tried.insert(QStringLiteral("up:cz2"));
+        const QStringList o = ids(selectPaths(in));
+        CHECK(o.first() == QLatin1String("up:cz5")); // the country's working path before faster ones elsewhere
+        CHECK(o.indexOf(QStringLiteral("up:cz7")) > o.indexOf(QStringLiteral("17"))); // untried Czechia: after what works
+        CHECK(o.indexOf(QStringLiteral("up:cz7")) < o.size()); // and still offered
+        // a country preference (no server) is unchanged: every path of the country is "preferred"
+        in.choice = UserChoice::preferCountry(QStringLiteral("CZ"));
+        in.tried.clear();
+        const QList<RankedPath> r = selectPaths(in);
+        CHECK(r.first().preferred && !r.first().sameCountry);
+    }
+    // 2. kinds take turns: three AmneziaWG servers and a provider all "work" here by older proof
+    {
+        SelectInput in;
+        in.pool = { own("15", "EE", PathKind::OwnAwg), own("17", "EE", PathKind::OwnAwg), own("10", "US", PathKind::OwnAwg),
+                    prov("up:pl1", "PL"), prov("up:de3", "DE") };
+        in.evidence.insert(QStringLiteral("15"), workingView(5000, 1000));
+        in.evidence.insert(QStringLiteral("17"), workingView(4000, 1000));
+        in.evidence.insert(QStringLiteral("10"), workingView(3000, 1000));
+        in.evidence.insert(QStringLiteral("up:pl1"), workingView(1000, 4000));
+        CHECK(ids(selectPaths(in)).first() == QLatin1String("15")); // nothing tried: speed and freshness decide
+        in.tried.insert(QStringLiteral("15")); // AmneziaWG had its turn and failed now
+        CHECK(ids(selectPaths(in)).first() == QLatin1String("up:pl1")); // the other kind, although slower and older
+        in.tried.insert(QStringLiteral("up:pl1"));
+        CHECK(ids(selectPaths(in)).first() == QLatin1String("17")); // one each: AmneziaWG again
+        in.tried.insert(QStringLiteral("17")); // the second AmneziaWG server failed in this attempt
+        const QStringList o = ids(selectPaths(in));
+        CHECK(o.first() == QLatin1String("up:de3")); // the kind is failing NOW: an untried provider path first
+        CHECK(o.last() == QLatin1String("10"));      // its last "working" server waits behind
+    }
+    // 3. the race takes one of each kind before the second of any
+    {
+        const QList<PathCandidate> order = { own("11:xray", "FI", PathKind::OwnXray), own("12:xray", "DE", PathKind::OwnXray),
+                                             own("15:xray", "EE", PathKind::OwnXray), prov("up:pl1", "PL"),
+                                             own("17", "EE", PathKind::OwnAwg), prov("up:de3", "DE") };
+        QStringList o;
+        for (const PathCandidate &c : raceSpread(order))
+            o << c.id.id;
+        CHECK(o == QStringList({ "11:xray", "up:pl1", "17", "12:xray", "up:de3", "15:xray" }));
+        // with the cellular cap: our Xray (116,736) + a provider (107,520) + AmneziaWG (54,572) fit one race
+        CHECK(116736 + 107520 + 54572 <= RaceTimings().cellularMaxBytes);
+    }
+}
+
 static void testOwnerStale()
 {
     const NetworkObservation home = wifi("192.168.1.1");
@@ -1132,9 +1220,10 @@ static void scenarioTrace1911()
     CHECK(run(1).result.connected && run(1).yields == 1 && ms(1) >= 5100 && ms(1) <= 6100);
     CHECK(run(3).result.connected && run(3).legs.first() == QLatin1String("16") && ms(3) >= 7000 && ms(3) <= 8700);
     CHECK(run(4).result.connected && run(4).yields == 1 && ms(4) >= 5100 && ms(4) <= 6100);
-    // Current on LTE: the leg after the proof of Finland 1 Xray went to an Estonia AmneziaWG path (the choice after
-    // the stop, when later probe proofs ranked first) - the device's d1b_1-3.
-    CHECK(run(4).legs.size() == 2 && run(4).legs.at(1) != QLatin1String("11:xray"));
+    // Current on LTE: on the device (d1b_1-3) the leg after the proof of Finland 1 Xray went to an Estonia AmneziaWG
+    // path (the choice after the stop, when later probe proofs ranked first). Since kinds take turns inside one
+    // attempt (PathSelect.h 5a) the emulation picks the other kind after the AmneziaWG leg failed: Finland 1 Xray.
+    CHECK(run(4).legs.size() == 2 && run(4).legs.at(1) == QLatin1String("11:xray"));
     // Proposed: no leg is raised blind on either trace (the first proof comes before the race's wait is over), so no leg
     // yields - the yield of a blind leg stays for networks where nothing proves within the wait (race 1, "race wait
     // over"). The first leg is the path the race proved first, and it beats the
@@ -1543,6 +1632,7 @@ int main()
     testNetworkKey();
     testLedger();
     testSelect();
+    testChoiceCountryAndLanes();
     testSpeedOrder();
     testOwnerStale();
     testOwnerLive();

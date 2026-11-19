@@ -66,7 +66,10 @@ struct RaceTimings {
     int hedgeMs = -1;
     int spareProofs = 1;        // proofs kept after the winner, then the race stops (no probing on)
     int knownFreshMin = 30;     // a known path that carried data here this recently: no race at all
-    int cellularMaxBytes = 262144; // bytes one race may spend on cellular (the Scanner's hour budget stays its own)
+    // bytes one race may spend on cellular (the Scanner's hour budget stays its own): one probe of each kind fits -
+    // AmneziaWG 54,572 + our Xray with its burst 116,736 + a provider profile 107,520 = 278,828 (upper bounds;
+    // measured races spent 98-165 KB)
+    int cellularMaxBytes = 327680;
 
     // How long the owner waits for a first proof before it starts blind: the last probe of the first parallel wave has
     // started (stagger x (parallelism - 1)) and has had half of a probe's own bound to answer. Defaults: 750 + 2000 =

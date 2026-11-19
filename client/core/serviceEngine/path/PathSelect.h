@@ -18,12 +18,19 @@
 //     ahead of the regular unknown paths elsewhere - a preference is a person's choice, as a pin of a location
 //     is today. Evidence is stronger than the preference (review E9 of 18.11): a preferred path that failed on
 //     this network goes behind every working or untried path of any country. The attempt reports the fallback
-//     (AttemptResult::fallbackNotice).
+//     (AttemptResult::fallbackNotice). A chosen SERVER implies its country (device round 19.11: the person chose a
+//     server of Czechia, it failed, the fallback went to Poland): in each evidence group the other paths of that
+//     country go right after the server's own and before the other countries'.
 //  5. Auto order:
 //       a. working on this network: data proof before probe proof, then faster (the measured time to proof of that
 //          strength, PathLedger.h "Speed", in steps of kSpeedStepMs: closer than a step is the same speed), then the
 //          newest proof first, then by prior. Device round 19.11 (LTE): with "newest first" the path that connected last
 //          led for ever (Estonia 3 AmneziaWG, median 5.0 s) although Finland 1 Xray carried data there in 3.7 s;
+//          before all of that a kind takes turns inside one attempt, as in (b): a working path whose kind was
+//          already tried in this attempt waits for the working paths of the other kinds, and once kLaneFailingNow
+//          paths of a kind were tried in this attempt its remaining working paths go behind the untried unknown
+//          ones (device round 19.11, LTE: the operator began to drop AmneziaWG and the walk spent 4.5 s on each of
+//          four "working" AmneziaWG servers in a row before a provider path);
 //       b. unknown, regular: by crowd prior, then server prior (tier: ours -> main provider -> reserve provider,
 //          provider priority, transport rank, weight), INTERLEAVED by kind (AmneziaWG / our Xray / provider
 //          country / provider whitelist / provider balancer) so that one blocked protocol cannot fill the
@@ -105,6 +112,7 @@ struct RankedPath {
     PathView view;
     SelectGroup group = SelectGroup::Unknown;
     bool preferred = false; // inside the preferred country
+    bool sameCountry = false; // not the chosen server itself, but a path of its country
 };
 
 struct SelectInput {
@@ -132,6 +140,13 @@ inline bool isPreferred(const UserChoice &choice, const PathCandidate &c)
     return !c.country.isEmpty() && c.country == choice.country;
 }
 
+// A chosen server's country: another path of it (the fallback stays in the country the person asked for).
+inline bool isSameCountryAsChoice(const UserChoice &choice, const PathCandidate &c)
+{
+    return choice.kind == UserChoice::Kind::PreferCountry && !choice.pathIds.isEmpty() && !choice.country.isEmpty()
+        && c.country == choice.country && !choice.pathIds.contains(c.id.id);
+}
+
 inline bool modeAllows(PathKind k, TransportMode mode)
 {
     switch (mode) {
@@ -144,6 +159,9 @@ inline bool modeAllows(PathKind k, TransportMode mode)
 
 // Two working paths whose measured times differ by less than about this are equally fast (the newest proof leads).
 constexpr int kSpeedStepMs = 500;
+// This many paths of one kind tried in one attempt: the kind is failing on this network NOW, whatever older proof
+// says - its remaining working paths wait behind the untried paths of the other kinds.
+constexpr int kLaneFailingNow = 2;
 
 namespace detail {
 
@@ -224,8 +242,9 @@ inline QList<RankedPath> interleaved(QList<RankedPath> in, const QHash<QString, 
 inline QList<RankedPath> selectPaths(const SelectInput &in)
 {
     QList<RankedPath> exact, quarantined;
-    // [preferred][group] for the sections before the quarantined tail
-    QList<RankedPath> sec[2][5]; // 0 Working, 1 Unknown, 2 LastWave, 3 Suspect, 4 QuarantineOver
+    // [preference level][group] for the sections before the quarantined tail; level 0 = the choice itself,
+    // 1 = the chosen server's country, 2 = the rest
+    QList<RankedPath> sec[3][5]; // 0 Working, 1 Unknown, 2 LastWave, 3 Suspect, 4 QuarantineOver
     for (const PathCandidate &c : in.pool) {
         if (!modeAllows(c.kind, in.mode) || in.tried.contains(c.id.id))
             continue;
@@ -240,7 +259,8 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
             continue;
         }
         r.preferred = isPreferred(in.choice, c);
-        const int p = r.preferred ? 0 : 1;
+        r.sameCountry = isSameCountryAsChoice(in.choice, c);
+        const int p = r.preferred ? 0 : r.sameCountry ? 1 : 2;
         if (r.preferred && in.preferredRetryAfterMs > 0 && !r.view.inQuarantine && !r.view.refused
             && (r.view.state == PathState::Suspect || r.view.state == PathState::Dead)
             && in.nowMs - r.view.lastFailureMs >= in.preferredRetryAfterMs) {
@@ -291,7 +311,10 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
         if (in.tried.contains(c.id.id))
             ++lanesTried[detail::laneOf(c)];
     const auto prior = [&crowd](const RankedPath &a, const RankedPath &b) { return detail::priorLess(a, b, crowd); };
+    const auto triedOfLane = [&lanesTried](const RankedPath &r) { return lanesTried.value(detail::laneOf(r.path)); };
     const auto working = [&](const RankedPath &a, const RankedPath &b) {
+        if (triedOfLane(a) != triedOfLane(b))
+            return triedOfLane(a) < triedOfLane(b); // a kind that had its turn in this attempt waits for the others
         if (a.view.strength != b.view.strength)
             return a.view.strength > b.view.strength;
         if (detail::speedStep(a.view) != detail::speedStep(b.view))
@@ -313,23 +336,53 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
     // The preference applies INSIDE each evidence group (review E9 of 18.11): every path that carried data or is
     // untried here - preferred first - goes before any path that failed on this network, whatever its country,
     // so a preferred country's failed paths never burn the budget before the fallback.
-    for (auto &s : sec) {
+    // working paths of a kind that is failing now (kLaneFailingNow tried in this attempt): behind the unknown ones
+    QList<RankedPath> failingNow[3];
+    for (int p = 0; p < 3; ++p) {
+        auto &s = sec[p];
+        QList<RankedPath> keep;
+        for (const RankedPath &r : s[0])
+            (!r.preferred && triedOfLane(r) >= kLaneFailingNow ? failingNow[p] : keep) << r;
+        s[0] = keep;
         std::sort(s[0].begin(), s[0].end(), working);
+        std::sort(failingNow[p].begin(), failingNow[p].end(), working);
         std::sort(s[3].begin(), s[3].end(), byTime(&PathView::lastFailureMs));
         std::sort(s[4].begin(), s[4].end(), byTime(&PathView::quarantineUntilMs));
     }
+    const auto unknown = [&](int p, int g) { return detail::interleaved(sec[p][g], crowd, lanes, lanesTried); };
     QList<RankedPath> out;
-    out << sec[0][0] << detail::interleaved(sec[0][1], crowd, lanes, lanesTried) << sec[1][0]
-        << detail::interleaved(sec[1][1], crowd, lanes, lanesTried)
-        << detail::interleaved(sec[0][2], crowd, lanes, lanesTried) << detail::interleaved(sec[1][2], crowd, lanes, lanesTried)
-        << sec[0][3] << sec[1][3] << sec[0][4] << sec[1][4];
+    // the choice itself; then what carried data here - the chosen country's first; then the untried paths the
+    // same way; then the working paths of the kinds failing now; the last wave; what failed here
+    out << sec[0][0] << unknown(0, 1) << sec[1][0] << sec[2][0] << unknown(1, 1) << unknown(2, 1)
+        << failingNow[0] << failingNow[1] << failingNow[2]
+        << unknown(0, 2) << unknown(1, 2) << unknown(2, 2)
+        << sec[0][3] << sec[1][3] << sec[2][3] << sec[0][4] << sec[1][4] << sec[2][4];
     const auto byQuarantine = byTime(&PathView::quarantineUntilMs);
     std::sort(quarantined.begin(), quarantined.end(), [&](const RankedPath &a, const RankedPath &b) {
         if (a.preferred != b.preferred)
             return a.preferred;
+        if (a.sameCountry != b.sameCountry)
+            return a.sameCountry;
         return byQuarantine(a, b);
     });
     out << quarantined;
+    return out;
+}
+
+// The order a probe race takes its candidates in: one of each kind before the second of any (stable inside a kind).
+// A race with a byte cap (cellular) then spends it on DIFFERENT kinds instead of on several servers that share one
+// fate - device round 19.11, LTE in Xray mode: two probes of our Xray listeners (one entry, closed by the operator
+// at that hour) took the whole cap and no provider path was probed at all.
+inline QList<PathCandidate> raceSpread(const QList<PathCandidate> &order)
+{
+    QHash<QString, int> seen;
+    QList<std::pair<int, PathCandidate>> keyed;
+    for (const PathCandidate &c : order)
+        keyed.append({ seen[detail::laneOf(c)]++, c });
+    std::stable_sort(keyed.begin(), keyed.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+    QList<PathCandidate> out;
+    for (const auto &k : keyed)
+        out << k.second;
     return out;
 }
 

@@ -526,6 +526,7 @@ void ServiceEngine::beginRaceForTap()
     QList<path::PathCandidate> race;
     for (int i = known ? 1 : 0; i < order.size(); ++i)
         race << order.at(i).path;
+    race = path::raceSpread(race); // one of each kind before the second of any: the byte cap covers different kinds
     qint64 bytesLeft = m_probeBytesLeft ? m_probeBytesLeft() : -1;
     // B3d: on cellular one race spends at most cellularMaxBytes (the Scanner's hour budget stays its own)
     if (m_net.current().cellular())
