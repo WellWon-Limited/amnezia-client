@@ -97,7 +97,8 @@ PageType {
     // scope's summary («Германия · 12 серверов») and the Scan button; its own result appears after its scan.
     readonly property string scope: String(barView.scope || "")
     // nothing of this scope on the screen yet (page open without results, or a scope not scanned): its summary
-    readonly property bool scopeStart: !scanning && !blocked && !emptyResult && rowsModel.count === 0
+    // (the live connection's row, when there is one, is always above it and does not count)
+    readonly property bool scopeStart: !scanning && !blocked && !emptyResult && otherCount === 0
     function scopeCount(cc) {
         if (cc === "whitelist")
             return Number(barView.scope_whitelist || 0)
@@ -109,7 +110,11 @@ PageType {
     }
     readonly property bool showMark: phase === "done" || phase === "empty"
     property bool allCache: false         // every shown row is a cached one (set by syncRows)
-    readonly property bool lastResult: !scanning && rowsModel.count > 0 && (blocked || allCache)
+    readonly property bool lastResult: !scanning && otherCount > 0 && (blocked || allCache)
+    // the live connection's row (view.rows[0] with the «current» flag) is drawn first, above everything else of the list;
+    // otherCount = the rows besides it (set by syncRows)
+    property bool liveFirst: false
+    readonly property int otherCount: rowsModel.count - (liveFirst ? 1 : 0)
     property bool anyCrowd: false
     property bool leaving: false
 
@@ -185,7 +190,7 @@ PageType {
             rstate: String(r.state || "works"), speed: String(r.speed || "none"),
             bars: Number(r.bars || 0), ms: r.ms === undefined ? -1 : Number(r.ms),
             fromCache: f.cache === true, dimmed: f.dimmed === true, tappable: f.not_tappable !== true,
-            verifying: f.verifying === true,
+            verifying: f.verifying === true, current: f.current === true,
             unverified: f.unverified === true, liveUnverified: f.live_unverified === true, crowd: f.crowd === true
         }
     }
@@ -216,6 +221,7 @@ PageType {
             else if (rowsModel.get(i).rid !== it.rid) { rowsModel.remove(i, rowsModel.count - i); rowsModel.append(it) }
             else if (!sameItem(it, rowsModel.get(i))) rowsModel.set(i, it)
         }
+        liveFirst = rowsModel.count > 0 && rowsModel.get(0).current === true
         allCache = src.length > 0 && cacheAll
         anyCrowd = crowd
     }
@@ -469,6 +475,26 @@ PageType {
                     }
                 }
 
+                // the live connection's row: always the first thing of the list, drawn like every other row
+                Item {
+                    id: liveBox
+                    visible: root.liveFirst
+                    width: parent.width
+                    height: root.liveFirst ? Theme.scan.rowHeight : 0
+                    Repeater {
+                        model: rowsModel
+                        delegate: ScanRowSlot {
+                            liveSlot: true
+                            liveFirst: root.liveFirst
+                            scanning: root.scanning
+                            rowWidth: liveBox.width
+                            pitch: Theme.scan.rowHeight + content.spacing
+                            gap: content.spacing
+                            onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
+                        }
+                    }
+                }
+
                 // «Все страны · 46 серверов» / «Германия · 12 серверов» + what the Scan button does: page open
                 // without results, or a scope the shown result does not cover (the kit's empty-state pattern: icon,
                 // title, text; the action is the bar's Scan button - one button, one meaning)
@@ -518,8 +544,9 @@ PageType {
 
                 Text {
                     id: sectionLabel
-                    visible: rowsModel.count > 0
-                    // the list's first child (the connected row is the first row under it): no top padding
+                    visible: root.otherCount > 0
+                    // under the connected row (when there is one) .sec-label.in-list margin-top 4; else the list's first child
+                    topPadding: root.liveFirst ? Theme.space.xs : 0
                     text: root.lastResult ? ScanTexts.sectionLast : ScanTexts.sectionNow
                     textFormat: Text.PlainText
                     color: Theme.color.text3
@@ -530,15 +557,16 @@ PageType {
                     lineHeight: 15
                     lineHeightMode: Text.FixedHeight
                 }
-                // The rows place THEMSELVES: y = index x pitch. Rows only join the end (the machine's list), so an
-                // index never changes while the list lives. A new row fades in at its own place, rising from one gap
-                // below (never over a row).
+                // The other rows place THEMSELVES: y = place x pitch (place = index, less the live row above). Rows only
+                // join the end (the machine's list), so an index never changes while the list lives. A new row fades in
+                // at its own place, rising from one gap below (never over a row). One delegate (ScanRowSlot) serves the
+                // live row's repeater above and this one: a slot shows itself or hides by index 0 + liveFirst.
                 Item {
                     id: rowsBox
                     readonly property real pitch: Theme.scan.rowHeight + content.spacing
-                    visible: rowsModel.count > 0
+                    visible: root.otherCount > 0
                     width: parent.width
-                    height: Math.max(0, rowsModel.count * pitch - content.spacing)
+                    height: Math.max(0, root.otherCount * pitch - content.spacing)
                     // the lines under the rows (wait line, legend, «Найти ещё») slide with the list's growth
                     Behavior on height {
                         enabled: !Theme.motion.reduceMotion
@@ -546,48 +574,14 @@ PageType {
                     }
                     Repeater {
                         model: rowsModel
-                        // the wrapper takes the arrive / move animations, so the row keeps its own opacity (cached 55 %,
-                        // failed 50 %)
-                        delegate: Item {
-                            id: rowWrap
-                            required property var model
-                            required property int index
-                            width: rowsBox.width
-                            height: Theme.scan.rowHeight
-                            y: index * rowsBox.pitch
-                            opacity: Theme.motion.reduceMotion ? 1 : 0
-                            Component.onCompleted: if (!Theme.motion.reduceMotion) arrive.start()
-                            ParallelAnimation {
-                                id: arrive
-                                NumberAnimation { target: rowWrap; property: "opacity"; from: 0; to: 1; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
-                                NumberAnimation { target: lift; property: "y"; from: content.spacing; to: 0; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
-                            }
-                            TribeScanRow {
-                                id: rowItem
-                                anchors.fill: parent
-                                transform: Translate { id: lift }
-                                label: rowWrap.model.label
-                                countryCode: rowWrap.model.cc
-                                transport: rowWrap.model.transport
-                                version: rowWrap.model.version
-                                rowState: rowWrap.model.rstate
-                                speed: rowWrap.model.speed
-                                bars: rowWrap.model.bars
-                                ms: rowWrap.model.ms
-                                // a cached row is drawn as cache whenever no scan runs: the whole last result, or a
-                                // row of it the finished scan did not judge again (it stays in its place)
-                                cached: rowWrap.model.fromCache && !root.scanning
-                                dimmed: rowWrap.model.dimmed
-                                tappable: rowWrap.model.tappable
-                                verifying: rowWrap.model.verifying
-                                liveUnverified: rowWrap.model.liveUnverified
-                                unverified: rowWrap.model.unverified
-                                crowd: rowWrap.model.crowd
-                                whitelist: rowWrap.model.cc === ""
-                                onTapped: {
-                                    if (root.hasScanner) TribeScanner.tapRow(rowWrap.model.rid)
-                                }
-                            }
+                        delegate: ScanRowSlot {
+                            liveSlot: false
+                            liveFirst: root.liveFirst
+                            scanning: root.scanning
+                            rowWidth: rowsBox.width
+                            pitch: rowsBox.pitch
+                            gap: content.spacing
+                            onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
                         }
                     }
                 }
@@ -692,6 +686,30 @@ PageType {
         }
     }
 
+    // ── empty result: the live connection's row first, then the advice ──
+    Item {
+        id: emptyLive
+        visible: root.emptyResult && root.liveFirst
+        y: chipsRow.y + chipsRow.height + list.padTop
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Theme.space.xl
+        anchors.rightMargin: Theme.space.xl
+        height: Theme.scan.rowHeight
+        Repeater {
+            model: rowsModel
+            delegate: ScanRowSlot {
+                liveSlot: true
+                liveFirst: root.liveFirst
+                scanning: root.scanning
+                rowWidth: emptyLive.width
+                pitch: Theme.scan.rowHeight + Theme.space.sm
+                gap: Theme.space.sm
+                onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
+            }
+        }
+    }
+
     // ── empty result: advice, «Понял…», «Повторить», the report link ──
     ColumnLayout {
         id: emptyBlock
@@ -700,7 +718,8 @@ PageType {
         anchors.right: parent.right
         anchors.leftMargin: Theme.space.xxl
         anchors.rightMargin: Theme.space.xxl
-        y: chipsRow.y + chipsRow.height + (root.height - chipsRow.y - chipsRow.height - implicitHeight) / 2
+        readonly property real topEdge: emptyLive.visible ? emptyLive.y + emptyLive.height + Theme.space.md : chipsRow.y + chipsRow.height
+        y: topEdge + (root.height - topEdge - implicitHeight) / 2
         spacing: Theme.space.lg
         readonly property bool cell: (root.view.net || "") === "cellular"
         // a country scan found nothing (owner 18.11, the menu as the scan's scope). WAITS FOR THE ENGINE:
@@ -795,6 +814,65 @@ PageType {
         onRetryTapped: if (root.hasScanner) TribeScanner.retry()
         onConnectAndScanTapped: if (root.hasScanner) TribeScanner.connectAndScan()
         onCountryChosen: (cc) => { if (root.hasScanner) TribeScanner.chooseCountry(cc) }
+    }
+
+    // One list row (flag, name, badges, bars, ms) with its arrive animation, for the model's row at `index`. liveSlot:
+    // the slot of the live connection's row (index 0 while liveFirst) above the list; else every other row. A slot that
+    // is not its row's (the other repeater's) loads nothing; one that becomes its row's plays the arrive animation.
+    component ScanRowSlot: Item {
+        id: slot
+        required property var model
+        required property int index
+        property bool liveSlot: false
+        property bool liveFirst: false
+        property bool scanning: false
+        property real rowWidth: 0
+        property real pitch: 0
+        property real gap: 0
+        signal rowTapped(string rid)
+        readonly property bool mine: liveSlot ? (liveFirst && index === 0) : !(liveFirst && index === 0)
+        width: rowWidth
+        height: Theme.scan.rowHeight
+        y: liveSlot ? 0 : (index - (liveFirst ? 1 : 0)) * pitch
+        visible: mine
+        Loader {
+            anchors.fill: parent
+            active: slot.mine
+            // the wrapper takes the arrive animation, so the row keeps its own opacity (cached 55 %, failed 50 %)
+            sourceComponent: Item {
+                id: rowWrap
+                opacity: Theme.motion.reduceMotion ? 1 : 0
+                Component.onCompleted: if (!Theme.motion.reduceMotion) arrive.start()
+                ParallelAnimation {
+                    id: arrive
+                    NumberAnimation { target: rowWrap; property: "opacity"; from: 0; to: 1; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
+                    NumberAnimation { target: lift; property: "y"; from: slot.gap; to: 0; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
+                }
+                TribeScanRow {
+                    anchors.fill: parent
+                    transform: Translate { id: lift }
+                    label: slot.model.label
+                    countryCode: slot.model.cc
+                    transport: slot.model.transport
+                    version: slot.model.version
+                    rowState: slot.model.rstate
+                    speed: slot.model.speed
+                    bars: slot.model.bars
+                    ms: slot.model.ms
+                    // a cached row is drawn as cache whenever no scan runs: the whole last result, or a row of it the
+                    // finished scan did not judge again (it stays in its place)
+                    cached: slot.model.fromCache && !slot.scanning
+                    dimmed: slot.model.dimmed
+                    tappable: slot.model.tappable
+                    verifying: slot.model.verifying
+                    liveUnverified: slot.model.liveUnverified
+                    unverified: slot.model.unverified
+                    crowd: slot.model.crowd
+                    whitelist: slot.model.cc === ""
+                    onTapped: slot.rowTapped(slot.model.rid)
+                }
+            }
+        }
     }
 
     // titles wrap balanced (artboard text-wrap: balance): the narrowest width that keeps the greedy line count,
