@@ -211,6 +211,7 @@ PageType {
         if (build !== listBuild || src.length < rowsModel.count) {
             rowsModel.clear()
             listBuild = build
+            if (!hero) bandHeld = false
         }
         let cacheAll = true, crowd = false
         for (let i = 0; i < src.length; ++i) {
@@ -229,7 +230,13 @@ PageType {
     // ── rings collapse (360 ms) into the header mark, and grow back the same way on «Повторить» ──
     // heroFrac 1 = rings + status line shown, 0 = gone; the block and the list under it follow it every frame
     property real heroFrac: 0
+    // Nothing moves the rows when a scan ends (device round 13, A5: all rows jumped up by the block's height): the rings
+    // and the status line fade out, the block keeps its height under the chips while the list is the one the scan built,
+    // and gives it back when the list is built again (view.list_build: page open, a scope, a new scan, a new network).
+    property bool bandHeld: false
+    onHeroFracChanged: if (heroFrac >= 1) bandHeld = false     // the rings are back: the block is its own again
     onHeroChanged: {
+        if (!hero) bandHeld = rowsModel.count > 0
         heroAnim.to = hero ? 1 : 0
         heroAnim.restart()
     }
@@ -322,7 +329,7 @@ PageType {
         anchors.left: parent.left
         anchors.right: parent.right
         readonly property real full: Theme.scan.hero + status.implicitHeight
-        height: full * root.heroFrac
+        height: full * (root.bandHeld ? 1 : root.heroFrac)   // held at full while the finished list is on the screen
         clip: true
         visible: height > 0
         SignalRing {
