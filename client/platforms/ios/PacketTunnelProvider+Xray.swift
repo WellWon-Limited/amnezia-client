@@ -185,6 +185,25 @@ extension PacketTunnelProvider {
         }
     }
 
+    // AVPN (floor 19.11, §28 on the Xray path): the list file named by the app (features.ios_userspace_split) becomes
+    // one routing rule of the core (XrayDirectSplit.swift). Returns the ranges routed direct: 0 = no file key (the
+    // routes path), -1 = the file could not be read or had no valid range - everything goes through the tunnel and
+    // the start goes on, as on the AmneziaWG path. Journal: ne `direct_split` with ranges and proto.
+    func applyXrayDirectSplit(_ xrayConfig: XrayConfig, jsonDict: inout [String: Any]) -> Int {
+        guard let fileName = xrayConfig.directSplitFile else { return 0 }
+        var ranges = [String]()
+        if fileName == (fileName as NSString).lastPathComponent,
+           let container = FileManager.default.containerURL(
+               forSecurityApplicationGroupIdentifier: "group.hk.wellwon.tribe"),
+           let text = try? String(contentsOf: container.appendingPathComponent(fileName), encoding: .utf8) {
+            ranges = XrayDirectSplit.ranges(fromList: text)
+        }
+        let routed = XrayDirectSplit.inject(into: &jsonDict, ranges: ranges) ? ranges.count : -1
+        TribeSharedState.appGroup?.recordAsync(source: "ne", event: "direct_split",
+                                               fields: ["ranges": routed, "proto": "xray"])
+        return routed
+    }
+
     // Обе половины сплита фильтруют один и тот же список: v4-строки отсеет IPv6RouteSpec,
     // v6-строки — IPv4RouteSpec. Кормить NEIPv6Route развёрнутым CIDR из ru_prefixes.h нельзя,
     // ему нужен канон RFC 5952 и сетевой адрес префикса.
@@ -326,6 +345,9 @@ extension PacketTunnelProvider {
             tribeUpstream.socks = (port: port, user: socksCredentials.username, pass: socksCredentials.password)
             // AVPN (upstream nodes): per-outbound counters for meter_scope "proxy" (merged, never replacing).
             mergeUpstreamStatsKeys(into: &jsonDict)
+            // AVPN (floor 19.11, §28 on the Xray path): the RU split inside the core (no system routes for it).
+            let directRanges = applyXrayDirectSplit(xrayConfig, jsonDict: &jsonDict)
+            xrayLog(.info, message: "Tribe split (xray): type=\(xrayConfig.splitTunnelType ?? 0) routes=\(xrayConfig.splitTunnelSites?.count ?? 0) userspace=\(directRanges)")
 
             // AVPN (девайс-разбор 2026-09-02): без файла ядро пишет в stderr NE — то есть в никуда,
             // и REALITY-ошибки/отказы дозвона не видит никто. Кладём лог рядом с конфигом и

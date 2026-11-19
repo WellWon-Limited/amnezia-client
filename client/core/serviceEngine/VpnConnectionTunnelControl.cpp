@@ -380,6 +380,13 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         m_lastConfigReport.insert(QStringLiteral("ru_node"), ruNodeFact);
         m_lastConfigReport.insert(QStringLiteral("split_dns"), false);
         m_lastConfigReport.insert(QStringLiteral("dns_fwd"), false);
+#if defined(Q_OS_IOS)
+        // AVPN (floor 19.11, §28 on the Xray path): the same flag as AmneziaWG - the RU split inside the core, not as
+        // ~10,800 system routes (ios_controller::setupXray -> XrayDirectSplit.swift). Off by default: routes, as before.
+        if (avpn::TuningStore::flag(QStringLiteral("ios_userspace_split"), false))
+            xcfg.insert(QStringLiteral("directSplit"), QStringLiteral("1"));
+#endif
+        m_lastConfigReport.insert(QStringLiteral("userspace_split"), xcfg.contains(QStringLiteral("directSplit")));
         m_lastUpProto = QStringLiteral("xray");
         // Свежая сессия: статистика xray-пути начинается с нуля (кумулятивы демона/NE — с подъёма).
         m_stats = TunnelStats{};
