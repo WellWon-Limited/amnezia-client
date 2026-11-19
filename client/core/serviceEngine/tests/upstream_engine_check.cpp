@@ -1900,6 +1900,11 @@ static void providerLegStarvedCheck()
         cell.gateway = QStringLiteral("10.64.0.1");
         r.eng.observeNetwork(cell);
         r.eng.setProber(&r.prober);
+        // The leg raised beside the race at once (race_hedge_ms = 0): this block is about a starving check of a leg
+        // that is up, whatever raised it (with the default the owner would wait for the race's first proof).
+        path::RaceTimings atOnce;
+        atOnce.hedgeMs = 0;
+        r.eng.setRaceTimingsForTest(atOnce);
         CHECK(r.eng.connect(err) && r.tun.ups == QStringList{ provider } && r.eng.raceRunning());
         for (int i = 0; i < 3; ++i) { // the race's stagger: the own path's probe starts too
             r.tun.now += 500;

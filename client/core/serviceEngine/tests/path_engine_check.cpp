@@ -1053,6 +1053,103 @@ static ProberCaps hostCaps()
     return c;
 }
 
+// Device round 19.11: the Wi-Fi and the LTE trace (see scenarioRace, 8). Returns the time from the tap to data.
+struct TraceRun {
+    AttemptResult result;
+    qint64 ms = 0;
+    QStringList legs;
+    int yields = 0;
+    QStringList picks; // the paths the owner raised, "*" = the lead of a proof
+};
+
+static TraceRun runTrace1911(bool lteNet, Sim::Rule rule)
+{
+    const NetworkObservation net = lteNet ? cell("25099", "lte") : wifi("192.168.19.1");
+    const QString k = key(net);
+    World w;
+    if (lteNet) {
+        w.set(k, QStringLiteral("16"), Behaviour::noData(2000));        // shakes hands at 1.95-2.15 s, carries nothing
+        w.setProbe(k, QStringLiteral("16"), ProbeBehaviour::silent()); // its probe never proved (d1_1-3: no probe_ok)
+        w.set(k, QStringLiteral("11:xray"), Behaviour::works(1900, 1500, 700));
+        w.setProbe(k, QStringLiteral("11:xray"), ProbeBehaviour::ok(1240)); // probe_ms 1098-1360
+        w.set(k, QStringLiteral("17"), Behaviour::works(2110, 1400, 600));
+        w.setProbe(k, QStringLiteral("17"), ProbeBehaviour::ok(950));       // 928-979
+        w.set(k, QStringLiteral("15"), Behaviour::works(2160, 1200, 400));
+        w.setProbe(k, QStringLiteral("15"), ProbeBehaviour::ok(920));       // 634-938
+    } else {
+        w.set(k, QStringLiteral("16"), Behaviour::works(2150, 1600, 600));  // the blind leg WORKS on this Wi-Fi
+        w.setProbe(k, QStringLiteral("16"), ProbeBehaviour::ok(750));       // AmneziaWG probes 624-832 ms here
+        w.set(k, QStringLiteral("11:xray"), Behaviour::works(2060, 1500, 700));
+        w.setProbe(k, QStringLiteral("11:xray"), ProbeBehaviour::ok(1040)); // 1033-1049
+        w.set(k, QStringLiteral("17"), Behaviour::works(2070, 1310, 500));
+        w.setProbe(k, QStringLiteral("17"), ProbeBehaviour::ok(830));       // 624-832
+        w.set(k, QStringLiteral("15"), Behaviour::works(2100, 1300, 400));
+        w.setProbe(k, QStringLiteral("15"), ProbeBehaviour::ok(900));
+    }
+    const QList<PathCandidate> pool = { awg("16", "RS", false, 3.0), xray("11:xray", "FI"), awg("17", "EE"),
+                                        awg("15", "EE") };
+    Sim s(pool, w, net);
+    s.caps = hostCaps();
+    s.stopMs = 850;
+    s.starveShareMs = 1000;
+    s.rule = rule;
+    TraceRun t;
+    t.result = s.raceTap(UserChoice::automatic());
+    t.ms = s.lastTapWallMs();
+    t.legs = legPaths(s);
+    t.yields = s.yields;
+    return t;
+}
+
+static void scenarioTrace1911()
+{
+    struct Case {
+        const char *name;
+        bool lte;
+        Sim::Rule rule;
+    };
+    const Case cases[] = {
+        { "trace 19.11 Wi-Fi, old (blind at once, starve only)", false, Sim::Rule::Old },
+        { "trace 19.11 Wi-Fi, current (blind yields to a proof)", false, Sim::Rule::Current },
+        { "trace 19.11 Wi-Fi, proposed (race first, proof leads)", false, Sim::Rule::Proposed },
+        { "trace 19.11 LTE, old (blind at once, starve only)", true, Sim::Rule::Old },
+        { "trace 19.11 LTE, current (blind yields to a proof)", true, Sim::Rule::Current },
+        { "trace 19.11 LTE, proposed (race first, proof leads)", true, Sim::Rule::Proposed },
+    };
+    QHash<QString, TraceRun> runs;
+    for (const Case &c : cases) {
+        const TraceRun t = runTrace1911(c.lte, c.rule);
+        runs.insert(QString::fromLatin1(c.name), t);
+        g_rows.append({ QString::fromLatin1(c.name),
+                        t.result.connected ? QStringLiteral("connected ") + t.result.path.id.id : QStringLiteral("failed"),
+                        t.ms, t.result.paths, t.legs.join(QLatin1Char(' ')) });
+    }
+    const auto ms = [&](int i) { return runs.value(QString::fromLatin1(cases[i].name)).ms; };
+    const auto run = [&](int i) { return runs.value(QString::fromLatin1(cases[i].name)); };
+    // The emulation of the earlier builds reproduces the device (calibration of the stage numbers): Wi-Fi old 3.7-3.9 s,
+    // current 5.56 s; LTE old 7.5-8.2 s, current 5.59 s - each within half a second.
+    CHECK(run(0).result.connected && run(0).legs == QStringList({ "16" }) && ms(0) >= 3300 && ms(0) <= 4300);
+    CHECK(run(1).result.connected && run(1).yields == 1 && ms(1) >= 5100 && ms(1) <= 6100);
+    CHECK(run(3).result.connected && run(3).legs.first() == QLatin1String("16") && ms(3) >= 7000 && ms(3) <= 8700);
+    CHECK(run(4).result.connected && run(4).yields == 1 && ms(4) >= 5100 && ms(4) <= 6100);
+    // Current on LTE: the leg after the proof of Finland 1 Xray went to an Estonia AmneziaWG path (the choice after
+    // the stop, when later probe proofs ranked first) - the device's d1b_1-3.
+    CHECK(run(4).legs.size() == 2 && run(4).legs.at(1) != QLatin1String("11:xray"));
+    // Proposed: no leg is raised blind on either trace (the first proof comes before the race's wait is over), so no leg
+    // yields - the yield of a blind leg stays for networks where nothing proves within the wait (race 1, "race wait
+    // over"). The first leg is the path the race proved first, and it beats the
+    // current rule on both networks and the old rule on LTE; on Wi-Fi it pays at most the first proof over the old
+    // rule's lucky blind leg (the price of not betting).
+    for (int i : { 2, 5 }) {
+        CHECK(run(i).result.connected && run(i).yields == 0 && run(i).legs.size() == 1);
+        CHECK(ms(i) < ms(i - 1));
+    }
+    CHECK(ms(5) < ms(3));
+    CHECK(ms(2) <= ms(0) + 1000);
+    CHECK(run(2).legs.first() == QLatin1String("16")); // Wi-Fi: Serbia 1 proved first (it works here) and leads
+    CHECK(run(5).legs.first() != QLatin1String("16")); // LTE: never the path that carries nothing
+}
+
 static void scenarioRace()
 {
     const NetworkObservation home = wifi("192.168.9.1");
@@ -1167,48 +1264,12 @@ static void scenarioRace()
         CHECK(s.providerProbes <= s.race.timings().providerPerRace && s.lostSeatAnswers <= s.race.timings().providerPerRace);
     }
 
-    // 8. Device round 19.11, iPhone Air on LTE, Auto, empty ledger: the hedged leg (Serbia 1, AmneziaWG) shakes hands at
-    //    ~2.0 s and carries no data; the race proves Finland 1 Xray at ~1.0-1.7 s. The leg has shown nothing of its own
-    //    when the proof comes (not up, not proven): it yields at once and the proven path is next. Before: the leg was
-    //    left only by its starving data check (~4.1 s) and the attempt took 7.5-8.2 s.
-    {
-        const NetworkObservation lte = cell("25099", "lte");
-        const QString kl = key(lte);
-        World w;
-        w.set(kl, QStringLiteral("16"), Behaviour::noData(2000));
-        w.setProbe(kl, QStringLiteral("16"), ProbeBehaviour::silent());
-        w.set(kl, QStringLiteral("11:xray"), Behaviour::works(1900, 1600, 800));
-        w.setProbe(kl, QStringLiteral("11:xray"), ProbeBehaviour::ok(1000));
-        w.set(kl, QStringLiteral("17"), Behaviour::works(2900, 1450, 600));
-        w.setProbe(kl, QStringLiteral("17"), ProbeBehaviour::ok(1400));
-        const QList<PathCandidate> pool = { awg("16", "RS", false, 3.0), xray("11:xray", "FI"), awg("17", "EE") };
-        Sim s(pool, w, lte);
-        s.caps = hostCaps();
-        const AttemptResult r = s.raceTap(UserChoice::automatic());
-        row("race 8: LTE 19.11, hedged leg no data, Xray proven first", s, r, 0);
-        CHECK(r.connected && r.path.id.id == QLatin1String("11:xray"));
-        CHECK(legPaths(s) == QStringList({ "16", "11:xray" }) && s.yields == 1);
-        CHECK(s.lastTapWallMs() < 6000);
-        CHECK(stateOf(s, awg("16", "RS")) == PathState::Unknown); // yielded: nothing recorded against it
-        CHECK(!s.raceLog.contains(QStringLiteral("probe:16")));    // the leg's own node is never probed beside it
-        // The same phone's Wi-Fi: the hedged leg is up (2.15 s) before the race proves another path (2.6 s) - it keeps
-        // its data check and wins (3.9 s on the device), nothing yields.
-        const NetworkObservation home = wifi("192.168.19.1");
-        const QString kw = key(home);
-        World ww;
-        ww.set(kw, QStringLiteral("16"), Behaviour::works(2150, 1700, 900));
-        ww.set(kw, QStringLiteral("11:xray"), Behaviour::works(1900, 1600, 800));
-        ww.setProbe(kw, QStringLiteral("11:xray"), ProbeBehaviour::ok(2600));
-        ww.set(kw, QStringLiteral("17"), Behaviour::works(2100, 1500, 700));
-        ww.setProbe(kw, QStringLiteral("17"), ProbeBehaviour::silent());
-        Sim sw(pool, ww, home);
-        sw.caps = hostCaps();
-        const AttemptResult rw = sw.raceTap(UserChoice::automatic());
-        row("race 8: Wi-Fi 19.11, hedged leg up before any proof", sw, rw, 0);
-        CHECK(rw.connected && rw.path.id.id == QLatin1String("16") && sw.yields == 0 && rw.paths == 1);
-        CHECK(sw.lastTapWallMs() <= 3900);
-    }
-
+    // 8. Device round 19.11 (iPhone Air, Auto, empty ledger, race on) - the two traces under the three rules (Sim::Rule).
+    //    Stage numbers from the journals of build 74da6399f (air8: d2_1-3 Wi-Fi, d1b_1-3 LTE; leg start -> tunnel up,
+    //    tunnel up -> data proven, probe start -> proof), a stop ~0.85 s (0.41-1.12 s yield -> next leg), the starving
+    //    share of the data check 1 s (WhoamiVerdict.h). Device: Wi-Fi 3.7-3.9 s (Old), 5.56 s (Current); LTE 7.5-8.2 s
+    //    (Old), 5.59 s (Current). Pool in the device's order: Serbia 1 AmneziaWG (16) first, Finland 1 own Xray, Estonia.
+    scenarioTrace1911();
     // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when its projection fits; real bytes
     // never refund the cap; a candidate the cap cannot pay is left to the owner's walk and the cheaper ones still start.
     {
@@ -1249,17 +1310,76 @@ static void scenarioRace()
         CHECK(started.contains(QStringLiteral("x2")));    // the provider that cannot be paid does not block the next
     }
 
-    // B3a: the first candidate works - the race (hedge at once) is never slower than no race
+    // B3a: the first candidate works. With no evidence the race goes first: the first leg waits for the first proof
+    // (here that candidate's own probe) and costs at most that probe over no race - never a dropped leg. A known path
+    // (the second tap) starts at once: never slower than no race.
     {
         World w;
         w.set(k, QStringLiteral("a1"), Behaviour::works(900, 400, 120));
+        w.setProbe(k, QStringLiteral("a1"), ProbeBehaviour::ok(700));
         Sim plain({ awg("a1", "EE"), awg("a2", "NL") }, w, home);
         plain.tap(UserChoice::automatic());
         Sim s({ awg("a1", "EE"), awg("a2", "NL") }, w, home);
         s.caps = hostCaps();
         const AttemptResult r = s.raceTap(UserChoice::automatic());
         row("race B3a: first candidate works", s, r, 0);
-        CHECK(r.connected && s.lastTapWallMs() <= plain.lastTapWallMs());
+        CHECK(r.connected && r.paths == 1 && s.lastTapWallMs() <= plain.lastTapWallMs() + 700 + s.tickMs);
+        CHECK(s.raceLog.contains(QStringLiteral("owner:winner")) && s.yields == 0);
+        stopLive(s);
+        stopLive(plain);
+        const int from = int(s.legs.size());
+        plain.tap(UserChoice::automatic());
+        const AttemptResult r2 = s.raceTap(UserChoice::automatic());
+        CHECK(r2.connected && legPaths(s, from) == QStringList({ "a1" }) && s.lastTapWallMs() <= plain.lastTapWallMs());
+    }
+    // Nothing proven by the race's wait (PathRace.h hedgeAfterMs, 2750 ms by default): the owner starts its first
+    // choice blind and the race runs on beside it. That leg's own probe proved nothing in the wait; a proof that comes
+    // while it starts is better evidence than the bet - the leg yields and the proven path is next (the lead).
+    {
+        World w;
+        w.set(k, QStringLiteral("x2"), Behaviour::works(900, 400, 120));
+        w.setProbe(k, QStringLiteral("x2"), ProbeBehaviour::ok(3000)); // proof at 3.25 s, the blind leg is starting
+        const QList<PathCandidate> pool = { awg("a1", "EE", false, 2.0), xray("x2", "NL") }; // a1: no handshake here
+        Sim s(pool, w, home);
+        s.caps = hostCaps();
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        row("race wait over: blind first choice, proof later", s, r, 0);
+        CHECK(s.race.timings().hedgeAfterMs() == 2750 && s.raceLog.contains(QStringLiteral("owner:hedge")));
+        CHECK(s.ownerStartedMs >= 2750 && s.ownerStartedMs <= 2750 + s.tickMs);
+        CHECK(r.connected && r.path.id.id == QLatin1String("x2") && s.yields == 1 && legPaths(s) == QStringList({ "a1", "x2" }));
+        CHECK(s.lastTapWallMs() < 2750 + 4500); // before the blind leg's own start deadline
+    }
+    // Lead: the leg after a proof goes to THAT path even when, by its start, a later proof ranks first (device round
+    // 19.11 LTE: the choice after the stop took an Estonia AmneziaWG probe proof over the Finland 1 Xray proof).
+    {
+        World w;
+        w.set(k, QStringLiteral("x1"), Behaviour::works(900, 400, 120));
+        w.set(k, QStringLiteral("a2"), Behaviour::works(900, 400, 120));
+        Sim s({ xray("x1", "FI"), awg("a2", "EE") }, w, home);
+        s.ledger.record(k, awg("a2", "EE").id, PathOutcome::ProbeOk, s.wall(), 300);  // faster probe, outranks x1
+        s.ledger.record(k, xray("x1", "FI").id, PathOutcome::ProbeOk, s.wall(), 1200);
+        const auto fx = s.owner.handle(AttemptEvent::userStart(0, UserChoice::automatic(), TransportMode::Auto,
+                                                               s.tracker.current(), QStringLiteral("x1")), s.ctx());
+        bool leadStart = false;
+        for (const AttemptEffect &e : fx)
+            leadStart = leadStart || (e.type == EffectType::StartPath && e.path.id.id == QLatin1String("x1") && e.lead);
+        CHECK(leadStart);
+        // a lead that is not a working path here, or is behind a preferred path, does not override the order
+        AttemptOwner o2;
+        const auto fx2 = o2.handle(AttemptEvent::userStart(0, UserChoice::preferCountry(QStringLiteral("EE")),
+                                                           TransportMode::Auto, s.tracker.current(), QStringLiteral("x1")),
+                                   s.ctx());
+        bool preferredFirst = false;
+        for (const AttemptEffect &e : fx2)
+            preferredFirst = preferredFirst || (e.type == EffectType::StartPath && e.path.id.id == QLatin1String("a2") && !e.lead);
+        CHECK(preferredFirst);
+        AttemptOwner o3;
+        const auto fx3 = o3.handle(AttemptEvent::userStart(0, UserChoice::automatic(), TransportMode::Awg,
+                                                           s.tracker.current(), QStringLiteral("x1")), s.ctx());
+        bool modeWins = false;
+        for (const AttemptEffect &e : fx3)
+            modeWins = modeWins || (e.type == EffectType::StartPath && e.path.id.id == QLatin1String("a2") && !e.lead);
+        CHECK(modeWins); // the transport mode is stronger than any proof
     }
     // B3b: the race stops at its winner plus one spare proof
     {
@@ -1318,9 +1438,11 @@ static void scenarioRace()
         NetworkTracker tr;
         tr.observe(home);
         const QList<PathCandidate> list = { awg("a", "EE"), awg("b", "NL"), xray("c", "FI") };
-        // hedge at once: the first candidate is the leg raised now - never probed
+        // hedge at once (race_hedge_ms = 0): the first candidate is the leg raised now - never probed
         {
-            PathRace race;
+            RaceTimings atOnce;
+            atOnce.hedgeMs = 0;
+            PathRace race(atOnce);
             QStringList started;
             for (const RaceEffect &e : race.begin(0, list, tr.current(), hostCaps(), -1, PathRace::Costs{}))
                 if (e.type == RaceEffectType::StartProbe)

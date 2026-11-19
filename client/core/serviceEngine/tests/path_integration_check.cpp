@@ -490,11 +490,28 @@ int main(int argc, char **argv)
         // a stale result of that race changes nothing
         r.eng.onProbeResult(prober.stampOf("17"), path::PathOutcome::ProbeOk, 1000);
         CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
-        // B3a hedge: nothing proven by hedgeMs - the owner starts its first choice, the race runs on beside it
+        CHECK(journalHas(r.journal, "race_owner_start why=winner lead=16"));
+        CHECK(journalHas(r.journal, "node=16 kind=awg timeout_ms=4500 checked=1/") && journalHas(r.journal, "pick=proof"));
+        // No evidence and nothing proven within the race's wait (PathRace.h hedgeAfterMs, 2750 ms by default): the owner
+        // starts its first choice blind, the race runs on beside it.
         Rig h(pool);
         FakeProber hp;
         h.eng.setProber(&hp);
-        CHECK(h.eng.connect(err) && h.last() == QLatin1String("17") && h.eng.raceRunning()); // hedge 0: at once
+        CHECK(h.eng.connect(err) && h.tun.ups.isEmpty() && h.eng.raceRunning() && h.eng.attemptRunning());
+        h.pass(2500);
+        CHECK(h.tun.ups.isEmpty()); // still waiting for a first proof
+        h.pass(500);
+        CHECK(h.last() == QLatin1String("17") && h.eng.raceRunning());
+        CHECK(journalHas(h.journal, "wait_ms=2750") && journalHas(h.journal, "race_owner_start why=hedge lead=-")
+              && journalHas(h.journal, "pick=order"));
+        // race_hedge_ms = 0 (the server's switch back to the old hedge): the first choice starts at once, never probed
+        Rig h0(pool);
+        FakeProber h0p;
+        h0.eng.setProber(&h0p);
+        path::RaceTimings atOnce;
+        atOnce.hedgeMs = 0;
+        h0.eng.setRaceTimingsForTest(atOnce);
+        CHECK(h0.eng.connect(err) && h0.last() == QLatin1String("17") && h0.eng.raceRunning() && !h0p.stampOf("17").probe);
         // B1: a stop during the race prelude ends the attempt at once (nothing native runs)
         Rig b(pool);
         FakeProber bp;
@@ -508,6 +525,7 @@ int main(int argc, char **argv)
         Rig t(pool);
         FakeProber tp;
         t.eng.setProber(&tp);
+        t.eng.setRaceTimingsForTest(atOnce);
         CHECK(t.eng.connect(err) && t.last() == QLatin1String("17"));
         t.up(); // 17 is up, in its check
         t.eng.noteCheckStarved(false); // receiving: nothing happens even with a proof
@@ -519,28 +537,41 @@ int main(int argc, char **argv)
         t.confirmStop();
         CHECK(t.last() == QLatin1String("16") && t.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
         t.journal << t.eng.takeAttemptJournal();
-        CHECK(journalHas(t.journal, "leg_preempted_for_proof node=17"));
-        // Device round 19.11 (LTE): the hedged leg has shown nothing of its own (not up, not proven) when the race proves
-        // another path - it yields at once, nothing recorded, the proven path comes up; a leg already up keeps its check
+        CHECK(journalHas(t.journal, "leg_preempted_for_proof node=17 to=16") && journalHas(t.journal, "pick=proof"));
+        // A leg raised blind after the race's wait (its own probe proved nothing) yields to a later proof: nothing
+        // recorded, the proven path comes up; a leg already up keeps its check.
         Rig y(pool);
         FakeProber yp;
         y.eng.setProber(&yp);
-        CHECK(y.eng.connect(err) && y.last() == QLatin1String("17") && !yp.stampOf("17").probe); // the leg: never probed
-        y.pass(500);
+        CHECK(y.eng.connect(err) && y.tun.ups.isEmpty());
+        CHECK(yp.stampOf("17").probe != 0); // the first choice is probed while nothing runs
+        y.pass(3000);
+        CHECK(y.last() == QLatin1String("17") && yp.cancels >= 1); // raised blind: its probe in flight is cancelled
         y.eng.onProbeResult(yp.stampOf("16"), path::PathOutcome::ProbeOk, 1000);
         CHECK(y.tun.downs == 1);
         y.confirmStop();
         CHECK(y.last() == QLatin1String("16") && y.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
         y.journal << y.eng.takeAttemptJournal();
-        CHECK(journalHas(y.journal, "leg_preempted_for_proof node=17 phase=starting"));
+        CHECK(journalHas(y.journal, "leg_preempted_for_proof node=17 to=16"));
         Rig u(pool);
         FakeProber up;
         u.eng.setProber(&up);
+        u.eng.setRaceTimingsForTest(atOnce);
         CHECK(u.eng.connect(err) && u.last() == QLatin1String("17"));
         u.up(); // the leg shook hands before the proof
         u.pass(500);
         u.eng.onProbeResult(up.stampOf("16"), path::PathOutcome::ProbeOk, 1000);
         CHECK(u.tun.downs == 0 && u.eng.isVerifying());
+        // A leg that is the race's proof (the lead) is not ended by a later proof while it starts.
+        Rig l(pool);
+        FakeProber lp;
+        l.eng.setProber(&lp);
+        CHECK(l.eng.connect(err) && l.tun.ups.isEmpty());
+        l.pass(500);
+        l.eng.onProbeResult(lp.stampOf("16"), path::PathOutcome::ProbeOk, 1000);
+        CHECK(l.last() == QLatin1String("16"));
+        l.eng.onProbeResult(lp.stampOf("17"), path::PathOutcome::ProbeOk, 1000);
+        CHECK(l.tun.downs == 0 && l.tun.ups.size() == 1);
         // no host: stage 1
         Rig q(pool);
         FakeProber off;

@@ -8,7 +8,14 @@ struct Log {
   private static let IsLoggingEnabledKey = "IsLoggingEnabled"
   static var isLoggingEnabled: Bool {
     get {
-      sharedUserDefaults.bool(forKey: IsLoggingEnabledKey)
+#if AVPN_DEV_TOOLS
+      // AVPN (device round 19.11): development builds (-DAVPN_DEV_TOOLS=ON) always write the file logs (ne.log of the
+      // extension, app.log of the app's Swift parts) - without them nobody sees what the extension did (its start
+      // stages, its own seat release). Bounded by devLogCapBytes (LogRecord.swift). Release builds: the shared switch.
+      return true
+#else
+      return sharedUserDefaults.bool(forKey: IsLoggingEnabledKey)
+#endif
     }
     set {
       sharedUserDefaults.setValue(newValue, forKey: IsLoggingEnabledKey)
@@ -16,6 +23,12 @@ struct Log {
   }
 
   private static let appGroupID = "group.hk.wellwon.tribe"
+
+#if AVPN_DEV_TOOLS
+  // AVPN (device round 19.11): past this size a file log of a development build starts over (like the Qt log at
+  // MAX_LOG_FILE_SIZE in iosglue.mm) - it is always on there and must not grow without bound.
+  static let devLogCapBytes: UInt64 = 4 * 1024 * 1024
+#endif
 
   static let appLogURL = {
     let sharedContainerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)!

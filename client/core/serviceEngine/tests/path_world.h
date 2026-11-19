@@ -159,6 +159,15 @@ public:
     int providerProbes = 0;
     int lostSeatAnswers = 0;    // provider probe seats left to the server's TTL
     int yields = 0;             // legs that gave way to a proven path (ProofReady)
+    // The facade's starving data check (WhoamiVerdict.h kWhoamiFirstByteShareMs): no first byte this long after the
+    // check started -> ProofReady(starved) with the race's first proof as the lead. -1 = not modelled.
+    int starveShareMs = -1;
+    // The rule in front of the owner, for comparisons with the device rounds of 19.11 (test only; production = Proposed):
+    //  Old     (build 086b20e0a): the first choice starts blind at once, only a starving check yields, no lead;
+    //  Current (build 74da6399f): as Old, and a leg not up yet yields to any proof (the choice after the stop, no lead);
+    //  Proposed: race first with no evidence, the first proof leads, only a starving check yields.
+    enum class Rule { Proposed, Old, Current };
+    Rule rule = Rule::Proposed;
     bool raceFirst = false;
     qint64 ownerStartedMs = -1;
     QStringList raceLog;
@@ -182,6 +191,11 @@ public:
                 list << order.at(i).path;
             m_raceChoice = c;
             m_raceMode = mode;
+            if (rule != Rule::Proposed) {
+                RaceTimings t = race.timings();
+                t.hedgeMs = 0; // the blind leg at once (the hedge of both earlier builds)
+                race.setTimings(t);
+            }
             raceFirst = !known && !list.isEmpty();
             applyRace(race.begin(now, list, tracker.current(), caps, bytesLeft, PathRace::Costs{}));
             if (raceFirst && !race.running())
@@ -310,6 +324,19 @@ private:
                     ? m_legBehaviour.value(e.stamp.leg)
                     : m_world.at(tracker.current().local, e.path.id.id, now);
                 ++checksRun;
+                m_checkStarved = false;
+                const bool firstByteLate = b.kind != Behaviour::Kind::Works || b.ttfbMs > starveShareMs;
+                if (starveShareMs >= 0 && firstByteLate) {
+                    const PathStamp st = e.stamp;
+                    const int g = m_checkGen.value(e.stamp.leg) + 1; // the generation this check gets below
+                    at(now + starveShareMs, [this, st, g] {
+                        if (m_checkGen.value(st.leg) != g || owner.currentLeg() != st
+                            || owner.phase() != AttemptPhase::Checking)
+                            return;
+                        m_checkStarved = true;
+                        deliver(AttemptEvent::proofReady(now, true, rule == Rule::Proposed ? race.winner() : QString()));
+                    });
+                }
                 rechecks += e.recheck ? 1 : 0;
                 // a check run again voids the previous one on that leg (its answer is dropped, as the platform does)
                 const int gen = ++m_checkGen[e.stamp.leg];
@@ -362,15 +389,16 @@ private:
     QHash<quint64, int> m_checkGen;
     UserChoice m_raceChoice;
     TransportMode m_raceMode = TransportMode::Auto;
+    bool m_checkStarved = false; // the running check passed its first-byte share (the facade's m_checkStarved)
 
-    void startOwnerAfterRace(const char *why)
+    void startOwnerAfterRace(const char *why, const QString &lead = {})
     {
         if (!raceFirst)
             return;
         raceFirst = false;
         ownerStartedMs = now;
         raceLog << QStringLiteral("owner:%1").arg(QLatin1String(why));
-        deliver(AttemptEvent::userStart(now, m_raceChoice, m_raceMode, tracker.current()));
+        deliver(AttemptEvent::userStart(now, m_raceChoice, m_raceMode, tracker.current(), lead));
     }
 
     void applyRace(const QList<RaceEffect> &effects)
@@ -398,8 +426,18 @@ private:
                 reports.append(OutcomeReport{ e.network, e.networkGeneration, e.path.id, e.outcome, -1, -1 });
                 if (tracker.isCurrent(e.networkGeneration))
                     ledger.record(e.network, e.path.id, e.outcome, wall(), e.ms);
-                if (owner.running()) // a proof while a leg is in flight (the engine's rule)
-                    deliver(AttemptEvent::proofReady(now, false));
+                if (rule == Rule::Current && owner.phase() == AttemptPhase::Starting
+                    && ledger.view(tracker.current().local, owner.currentPath().id, wall()).state != PathState::Working
+                    && ledger.view(tracker.current().local, e.path.id, wall()).state == PathState::Working) {
+                    // the yield of build 74da6399f: a leg not up yet gave way to any proof, nothing recorded
+                    ++yields;
+                    raceLog << QStringLiteral("yield:%1").arg(owner.currentPath().id.id);
+                    deliver(AttemptEvent::pathFailed(now, owner.currentLeg(), PathOutcome::Inconclusive));
+                } else if (owner.running() && (rule != Rule::Old || m_checkStarved)) {
+                    // a proof while a leg is in flight (the engine's rule; build 086b20e0a: only to a starving check)
+                    deliver(AttemptEvent::proofReady(now, m_checkStarved,
+                                                     rule == Rule::Proposed ? e.path.id.id : QString()));
+                }
                 break;
             case RaceEffectType::Spent:
                 bytesSpent += e.bytes;
@@ -410,7 +448,7 @@ private:
                 if (ledger.view(tracker.current().local, e.path.id, wall()).state == PathState::Working) {
                     race.acceptWinner(e.path.id.id);
                     raceLog << QStringLiteral("winner:%1").arg(e.path.id.id);
-                    startOwnerAfterRace("winner");
+                    startOwnerAfterRace("winner", rule == Rule::Proposed ? e.path.id.id : QString());
                 }
                 break;
             case RaceEffectType::Hedge:
