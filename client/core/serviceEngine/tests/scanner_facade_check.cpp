@@ -167,6 +167,11 @@ struct FakeEngine : IScanEngine {
     QString liveBase;
     bool queueFull = false;
 
+    bool names = false; // providerRowName: the app's naming of provider rows (false = none, the server's label)
+    QString providerRowName(const ScanManifestUpstream &u) const override
+    {
+        return names ? QStringLiteral("Имя ") + u.profileId : QString();
+    }
     ScanCurrent current() const override { return cur; }
     ScanNetFacts network() const override { return net; }
     void fillManifestInput(ScanManifestInput &in) const override
@@ -3764,6 +3769,7 @@ static void caseServerScope()
         extra.insert("profile_id", "abcdefabcdefabcd");
         w.server.extraUpstream << extra;
         w.host.outcomes.insert(QStringLiteral("up:abcdefabcdefabcd"), Outcome{true, 90, 500});
+        w.engine.names = true;
         w.start();
         w.s->open();
         w.run(20000);
@@ -3794,6 +3800,28 @@ static void caseServerScope()
                 extraProbed = extraProbed || (c.toObject().value("id").toString() == QLatin1String("up:abcdefabcdefabcd")
                                               && !c.toObject().value("config").toString().isEmpty());
         CHECK(extraProbed);
+        // the batch's row is named by the app's naming function when it is born, not by the server's label, and
+        // keeps that name with no stub in the engine's pool (device round air7: «SE 1» after the 6th batch)
+        bool rowNamed = false;
+        for (const QVariant &rv : w.s->view().value(QStringLiteral("rows")).toList()) {
+            const QVariantMap r = rv.toMap();
+            if (r.value("id").toString() == QLatin1String("up:abcdefabcdefabcd"))
+                rowNamed = r.value("label").toString() == QStringLiteral("Имя abcdefabcdefabcd");
+        }
+        CHECK(rowNamed);
+        // a batch row is tapped after its stub may have left the engine's newest-48 offered pool: the facade offers it
+        // again right before the connect, so the engine knows the node it is asked to connect
+        {
+            const int offeredBefore = w.engine.offered.size();
+            const int callsBefore = w.engine.rowCalls.size();
+            w.s->tapRow(QStringLiteral("up:abcdefabcdefabcd"));
+            CHECK(w.engine.rowCalls.size() == callsBefore + 1);
+            bool again = false;
+            for (int i = offeredBefore; i < w.engine.offered.size(); ++i)
+                again = again || w.engine.offered.at(i).toObject().value("node_id").toString() == QLatin1String("up:abcdefabcdefabcd");
+            CHECK(again);
+        }
+
         const QString state = QJsonObject::fromVariantMap(w.s->view().value(QStringLiteral("more")).toMap()).value("state").toString();
         CHECK(state == "exhausted" || state == "available");
         w.s->close();

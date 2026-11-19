@@ -151,6 +151,17 @@ public:
         Q_UNUSED(rowId)
         return QString();
     }
+    // The one naming function of a provider row (UpstreamNode.h::upstreamDisplayName through the app's language:
+    // the admin's label, «<страна> <n>», «Белые списки <n>»), from the row's own fields - for the manifest's rows
+    // (fillManifestInput) and for every /v1/scan/candidates batch alike, so a row is named once when it is born and
+    // keeps that name for its life, also after its stub left the engine's offered pool (device round air7: rows of
+    // early batches turned into the server's raw labels «SE 1», «EE 4» after the 6th batch). "" = no name: the
+    // server's label stays.
+    virtual QString providerRowName(const ScanManifestUpstream &u) const
+    {
+        Q_UNUSED(u)
+        return QString();
+    }
     // The AWG mini-session input of an own AWG node (nodeId as in the manifest, e.g. "9"); false = the engine has
     // no config for that node (it is then «Не проверено»). The default (no AWG input: every AWG row «Не
     // проверено» awg_no_address) keeps an engine that does not implement it yet building; L6b overrides it.
@@ -584,6 +595,12 @@ private:
     ScanNetwork m_lastNet;
     qint64 m_poolAt = -1;            // when /v1/scan/pool last answered (or was asked); the server allows 60 per hour
     bool m_poolUnsupported = false;  // an older server: no pool endpoint
+    // The stub node of every /v1/scan/candidates provider row seen in this run (node id -> SubscriptionNode JSON, no
+    // config): the engine keeps only its newest offered stubs (ServiceEngine::kMaxScanOffered), so a row of an early
+    // batch is offered again right before its connect (ConnectRow) - a row on the screen can always be tapped.
+    QHash<QString, QJsonObject> m_batchStubs;
+    QStringList m_batchStubOrder;    // oldest first; bounded by kScanBatchStubsMax
+    static constexpr int kScanBatchStubsMax = 512; // the `seen` cap of one series
     bool m_fetchPoolOnOpen = true;
     bool m_hostGenFolded = false;
     ScanNetSource m_hostGen;

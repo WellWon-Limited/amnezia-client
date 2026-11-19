@@ -923,6 +923,9 @@ public:
             m_serverExhausted = c.exhausted || fresh == 0;
             m_manifest.manifest.nodes = c.nodes;
             m_manifest.manifest.upstream = c.upstream;
+            for (auto it = c.upstreamNames.constBegin(); it != c.upstreamNames.constEnd(); ++it)
+                if (!it.value().isEmpty())
+                    m_manifest.upstreamNames.insert(it.key(), it.value());
             startHost(now, s);
         }
         finishStep(s, now);

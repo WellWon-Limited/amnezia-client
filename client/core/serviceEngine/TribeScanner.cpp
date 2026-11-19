@@ -349,13 +349,26 @@ void TribeScanner::execute(const ScanAction &a)
         emitLog(QStringLiteral("action cancel_pending_connect"));
         m_engine->cancelPendingConnect();
         break;
-    case ScanActionKind::ConnectRow:
-        emitLog(QStringLiteral("action connect_row order=%1 user_origin=%2 force=%3")
+    case ScanActionKind::ConnectRow: {
+        // A batch row's stub may have left the engine's offered pool (newest 48 only): offer the tapped row and its
+        // chain again first, so the connect knows every node it may try.
+        QJsonArray again;
+        QStringList ids{a.nodeId};
+        ids << a.ids;
+        ids.removeDuplicates();
+        for (const QString &id : ids)
+            if (m_batchStubs.contains(id))
+                again << m_batchStubs.value(id);
+        if (!again.isEmpty())
+            m_engine->offerScanNodes(again);
+        emitLog(QStringLiteral("action connect_row order=%1 user_origin=%2 force=%3 reoffered=%4")
                     .arg(a.ids.size())
                     .arg(a.userOrigin)
-                    .arg(a.forceConnect));
+                    .arg(a.forceConnect)
+                    .arg(again.size()));
         m_engine->connectRow(a.nodeId, a.ids, a.hintTtlMs, a.userOrigin, a.forceConnect);
         break;
+    }
     }
 }
 
@@ -1845,7 +1858,20 @@ void TribeScanner::doCandidates(const ScanAction &a)
             self->m_active.body.insert(QStringLiteral("upstream"), ups);
             if (!r.view.providerNodes.isEmpty())
                 self->m_engine->offerScanNodes(r.view.providerNodes);
-            self->dispatch(self->m_m.candidatesReady(id, r.view, r.bytes, self->now()));
+            for (const QJsonValue &n : r.view.providerNodes) {
+                const QString nid = n.toObject().value(QLatin1String("node_id")).toString();
+                if (nid.isEmpty())
+                    continue;
+                if (!self->m_batchStubs.contains(nid))
+                    self->m_batchStubOrder << nid;
+                self->m_batchStubs.insert(nid, n.toObject());
+            }
+            while (self->m_batchStubOrder.size() > kScanBatchStubsMax)
+                self->m_batchStubs.remove(self->m_batchStubOrder.takeFirst());
+            ScanCandidatesView v = r.view;
+            for (const ScanManifestUpstream &u : v.upstream)
+                v.upstreamNames.insert(u.profileId, self->m_engine->providerRowName(u));
+            self->dispatch(self->m_m.candidatesReady(id, v, r.bytes, self->now()));
         } else {
             const QString reason = r.status == 404 ? QStringLiteral("unsupported") : r.reason; // the manifest answered: 404 = no endpoint
             self->dispatch(self->m_m.candidatesUnavailable(id, reason, r.bytes, self->now()));
