@@ -245,10 +245,29 @@ struct FakeApi : IRaceScanApi {
     QByteArray providerConfig;
     bool holdSeat = false;
     std::function<void(const Seat &)> heldSeat;
+    bool holdSession = false;                     // the session fetch waits in heldSession
+    std::function<void()> heldSession;
+    bool holdRelease = false;                     // a retired seat's release stays outstanding until finishRelease()
+    bool batchAnswered = true;                    // false while a held batch request is in flight
+    std::function<void()> idleCb;                 // the retired seat's idle callback, called when nothing can spend any more
+    void finishRelease()
+    {
+        auto f = std::move(idleCb);
+        idleCb = nullptr;
+        if (f)
+            f();
+    }
     struct FakeSeat : IRaceSeat {
         FakeApi *api = nullptr;
         QString lease;
         ~FakeSeat() override { api->released << lease; }
+        void retire(std::function<void()> idle) override
+        {
+            if (!api->batchAnswered || api->holdRelease)
+                api->idleCb = std::move(idle); // the request still runs, or a release is outstanding
+            else if (idle)
+                idle();
+        }
     };
 
     bool configured() const override { return isConfigured; }
@@ -265,6 +284,10 @@ struct FakeApi : IRaceScanApi {
         s.awgNodes.insert(QStringLiteral("16"), QStringLiteral("10.8.1.1"));
         s.numbers.insert(QStringLiteral("scan_awg_concurrency"), 2);
         s.bytes = 3000;
+        if (holdSession) {
+            heldSession = [done, s]() { done(s); };
+            return;
+        }
         QTimer::singleShot(0, [done, s]() { done(s); });
     }
     std::shared_ptr<IRaceSeat> probeSeat(const QString &profileId, qint64 costBytes, std::function<void(const Seat &)> done,
@@ -282,9 +305,15 @@ struct FakeApi : IRaceScanApi {
         auto seat = std::make_shared<FakeSeat>();
         seat->api = this;
         seat->lease = QStringLiteral("LEASE-%1").arg(profileId);
-        if (holdSeat)
-            heldSeat = [done, s](const Seat &) { done(s); };
-        else
+        if (holdSeat) {
+            batchAnswered = false;
+            heldSeat = [this, done, s](const Seat &) {
+                done(s); // the late answer's bytes are counted first
+                batchAnswered = true;
+                if (idleCb && !holdRelease)
+                    finishRelease();
+            };
+        } else
             QTimer::singleShot(0, [done, s]() { done(s); });
         return seat;
     }
@@ -991,6 +1020,74 @@ static void caseAccounting()
         for (const auto &g : got)
             seat = seat || (g.first == 7 && g.second == 2000);
         check(seat, "the seat batch's bytes are charged to the race of the probe");
+    }
+    { // eighth review (R1): a probe cancelled while its probe-batch request is in flight is NOT settled: the request runs on (dropping
+      // the seat owner does not cancel it), its answer spends this race's bytes, and a release follows. Reviewer's numbers: cap
+      // 120 000, the late answer is 40 000 B - the hold must last until it was counted
+        World w;
+        QList<quint64> settled;
+        QList<std::pair<quint64, qint64>> got;
+        w.api.holdSeat = true;
+        w.ready();
+        w.prober.onSettled = [&settled](const path::ProbeStamp &s) { settled << s.probe; };
+        w.prober.onSpent = [&got](quint64 race, qint64 b) { got << std::make_pair(race, b); };
+        const path::ProbeStamp p = w.start(1, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
+        spin(30);
+        w.prober.cancel(p); // the 5 s deadline of the probe: the batch answer has not come
+        spin(30);
+        check(settled.isEmpty(), "waiting for the probe-batch answer: the probe is not settled (before: settled at once)");
+        w.api.heldSeat(FakeApi::Seat()); // the late answer: 2000 B in the fake
+        spin(20);
+        bool counted = false;
+        for (const auto &g : got)
+            counted = counted || (g.first == 1 && g.second == 2000);
+        check(counted && settled == QList<quint64>{1}, "settled only after the late answer's bytes were counted for the race");
+    }
+    { // the release that follows a late grant is a spender too
+        World w;
+        QList<quint64> settled;
+        w.api.holdSeat = true;
+        w.api.holdRelease = true;
+        w.ready();
+        w.prober.onSettled = [&settled](const path::ProbeStamp &s) { settled << s.probe; };
+        const path::ProbeStamp p = w.start(1, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
+        spin(30);
+        w.prober.cancel(p);
+        w.api.heldSeat(FakeApi::Seat());
+        spin(20);
+        check(settled.isEmpty(), "the batch answered but its release is outstanding: not settled");
+        w.api.finishRelease();
+        check(settled == QList<quint64>{1}, "settled when the release is done");
+    }
+    { // waiting for the session: the fetch the probe asked for is a spender
+        World w;
+        QList<quint64> settled;
+        w.api.holdSession = true;
+        w.prober.onSettled = [&settled](const path::ProbeStamp &s) { settled << s.probe; };
+        w.prober.warmUp();
+        spin(10);
+        const path::ProbeStamp p = w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(20);
+        w.prober.cancel(p);
+        check(settled.isEmpty(), "waiting for the session: its fetch runs on - not settled");
+        if (w.api.heldSession)
+            w.api.heldSession();
+        spin(20);
+        check(settled == QList<quint64>{1}, "settled when the fetch it asked for ended");
+    }
+    { // batch granted, scan not opened yet: the seat is idle but the scan start is out - settled with the scan's end
+        World w;
+        QList<quint64> settled;
+        w.ready();
+        w.prober.onSettled = [&settled](const path::ProbeStamp &s) { settled << s.probe; };
+        const path::ProbeStamp p = w.start(1, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
+        spin(40); // the seat is granted, the candidate sent, the scan open
+        w.host.finalDelayPolls = 10;
+        w.prober.cancel(p);
+        spin(10);
+        check(settled.isEmpty(), "granted and sent: the scan still counts - not settled");
+        spin(200);
+        check(settled == QList<quint64>{1}, "settled when the scan reached its final");
     }
     { // a scan whose final never comes: polled for the bound (kScanFinalWaitMs), then forgotten - counted, not charged twice
         World w;

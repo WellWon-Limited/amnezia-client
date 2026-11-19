@@ -172,6 +172,10 @@ public:
     QString operationId() const;
     // These lease ids were released by their owner one by one: not released again.
     void forget(const QStringList &leaseIds);
+    // The owner gives the batch up for good (what the destructor does) and `idle` is called ONCE when nothing of the batch can
+    // spend any more: no request in flight and no release outstanding (at once if that is so already). The state outlives the
+    // owner, so the callback comes after the object is gone.
+    void retire(std::function<void()> idle);
 
     struct State;
 

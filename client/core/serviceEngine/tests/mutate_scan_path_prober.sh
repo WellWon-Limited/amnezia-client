@@ -146,5 +146,7 @@ mutate_engine hour_ledger_skips_other_race finding3 "        if (m_chargeProbeBy
 mutate settled_at_cancel_not_at_final I8 "    if (followed)
         m_unsettled[it->scanId] << stamp;" "    if (false)
         m_unsettled[it->scanId] << stamp;"
+mutate settle_at_cancel_while_api_request_in_flight R1 "    if (seat) { // the seat: the batch request still runs" "    if (false) { // the seat: the batch request still runs"
+mutate settle_at_cancel_while_session_fetch_runs R1 "    if (it->waitingSession && m_sessionFetching) {" "    if (false) {"
 echo "work dir: $WORK"
 exit $failed

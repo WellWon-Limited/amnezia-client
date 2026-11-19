@@ -123,6 +123,10 @@ void ScanPathProber::sessionArrived(const RaceScanSession &s)
 {
     m_sessionFetching = false;
     spend(m_fetchRace, s.bytes);
+    const QSet<quint64> watchers = m_sessionWatchers; // the fetch they asked for is over
+    m_sessionWatchers.clear();
+    for (quint64 k : watchers)
+        settleOne(k);
     if (s.ok) {
         m_session = s;
         m_sessionAtMs = now();
@@ -517,8 +521,18 @@ void ScanPathProber::dropBook(const QString &scanId)
     m_books.remove(scanId);
     const QList<path::ProbeStamp> settle = m_unsettled.take(scanId);
     for (const path::ProbeStamp &s : settle)
-        if (onSettled)
-            onSettled(s);
+        settleOne(s.probe);
+}
+
+void ScanPathProber::settleOne(quint64 key)
+{
+    const auto it = m_settling.find(key);
+    if (it == m_settling.end() || --it->open > 0)
+        return;
+    const path::ProbeStamp stamp = it->stamp;
+    m_settling.erase(it);
+    if (onSettled)
+        onSettled(stamp);
 }
 
 void ScanPathProber::onPollReply(const QString &scanId, const QByteArray &reply)
@@ -610,14 +624,31 @@ void ScanPathProber::cancel(const path::ProbeStamp &stamp)
     if (it == m_probes.end() || !(it->stamp == stamp))
         return;
     const bool atHost = !it->sent.isEmpty() && it->scanId == m_scan.id && !m_scan.closed;
-    // Its spend is final when the scan it ran in is (the host may still count its stopped parts): the race keeps its hold until
-    // then. A probe that never reached a scan still followed settles at once.
-    const bool followed = !it->sent.isEmpty() && m_books.contains(it->scanId);
-    if (followed)
+    // Its spend is final when nothing that can still spend for it is outstanding (see Settling): the race keeps its hold until
+    // then. The count starts at 1 (this function) so a spender that finishes at once cannot settle it half way.
+    const quint64 key = stamp.probe;
+    Settling &st = m_settling[key];
+    st.stamp = stamp;
+    st.open = 1;
+    if (!it->sent.isEmpty() && m_books.contains(it->scanId)) { // the host scan it ran in (its stopped parts are still counted)
         m_unsettled[it->scanId] << stamp;
-    m_probes.erase(it); // its seat goes with it (a seat still asked: released by its operation id once the ask ends)
-    if (!followed && onSettled)
-        onSettled(stamp);
+        ++st.open;
+    }
+    if (it->waitingSession && m_sessionFetching) { // the session fetch it asked for goes on and spends this race's bytes
+        m_sessionWatchers.insert(key);
+        ++st.open;
+    }
+    const std::shared_ptr<IRaceSeat> seat = it->seat;
+    m_probes.erase(it);
+    if (seat) { // the seat: the batch request still runs (dropping the owner does not cancel it), a release may follow
+        ++m_settling[key].open;
+        const std::weak_ptr<bool> alive = m_alive;
+        seat->retire([this, alive, key]() {
+            if (alive.lock())
+                settleOne(key);
+        });
+    }
+    settleOne(key); // the count's own 1
     if (!atHost)
         return; // nothing of it runs at the host: no scan is touched
     // The host stops per scan only: end the scan (the cancelled probe, an AmneziaWG session included, ends with it)

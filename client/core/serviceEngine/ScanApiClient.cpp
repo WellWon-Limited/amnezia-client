@@ -324,6 +324,16 @@ struct ScanSeatBatch::State {
     qint64 releaseCost = 0;
     std::function<void(const ScanApiClient::Batch &)> done;
     std::function<void(qint64)> releaseBytes;
+    int releasesOut = 0;            // release requests not answered yet
+    std::function<void()> idle;     // retire(): called once when nothing of the batch can spend any more
+    static void noteIdle(const std::shared_ptr<State> &st)
+    {
+        if (st->inFlight || st->releasesOut > 0 || !st->idle)
+            return;
+        const std::function<void()> f = std::move(st->idle);
+        st->idle = nullptr;
+        f();
+    }
 };
 
 ScanSeatBatch::~ScanSeatBatch()
@@ -332,6 +342,15 @@ ScanSeatBatch::~ScanSeatBatch()
     if (!m_s->inFlight && !m_s->held.isEmpty())
         ScanApiClient::releaseBatch(m_s);
     // in flight: no resend any more; the seats go when the request ends (finishBatch)
+}
+
+void ScanSeatBatch::retire(std::function<void()> idle)
+{
+    m_s->owned = false;
+    if (!m_s->inFlight && !m_s->held.isEmpty())
+        ScanApiClient::releaseBatch(m_s);
+    m_s->idle = std::move(idle);
+    State::noteIdle(m_s);
 }
 
 QString ScanSeatBatch::operationId() const { return m_s->op; }
@@ -349,9 +368,12 @@ void ScanApiClient::releaseBatch(const std::shared_ptr<ScanSeatBatch::State> &st
     if (!st->api)
         return; // the client went with the app: the seats are the server's TTL's
     const std::function<void(qint64)> sink = st->releaseBytes;
-    st->api->releaseLeases(ids, st->releaseCost, [sink](qint64 bytes) {
+    ++st->releasesOut;
+    st->api->releaseLeases(ids, st->releaseCost, [sink, st](qint64 bytes) {
+        --st->releasesOut;
         if (sink)
             sink(bytes);
+        ScanSeatBatch::State::noteIdle(st); // after its bytes were counted
     }, st->op);
 }
 
@@ -998,6 +1020,7 @@ void ScanApiClient::finishBatch(std::shared_ptr<ScanSeatBatch::State> st, const 
     }
     if (st->done)
         st->done(out);
+    ScanSeatBatch::State::noteIdle(st); // (a retired batch: the answer's bytes and any release are counted by now)
 }
 
 void ScanApiClient::releaseLeases(const QStringList &leaseIds, qint64 costBytes, std::function<void(qint64)> done,

@@ -79,6 +79,13 @@ namespace {
 // The race's seat owner over the Scanner's batch owner (the release lives there).
 struct ScanApiRaceSeat final : IRaceSeat {
     std::unique_ptr<ScanSeatBatch> batch;
+    void retire(std::function<void()> idle) override
+    {
+        if (batch)
+            batch->retire(std::move(idle));
+        else if (idle)
+            idle();
+    }
 };
 } // namespace
 
