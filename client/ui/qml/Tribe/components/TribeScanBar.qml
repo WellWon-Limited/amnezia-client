@@ -47,6 +47,8 @@ Item {
     // the whole pool is a choice even with one country («Все страны» + it); the scan locks it (menu_enabled false)
     readonly property bool showMenu: !fallback && (scopeMode ? bar.scope_countries.length >= 1 : bar.menu_visible === true)
     function countryName(cc) {
+        if (cc === "whitelist")
+            return ScanTexts.whitelists
         const lists = [bar.scope_countries || [], bar.countries || []]
         for (let k = 0; k < lists.length; ++k)
             for (let i = 0; i < lists[k].length; ++i)
@@ -131,6 +133,7 @@ Item {
                 Layout.preferredHeight: Theme.scan.barHeight
                 countries: root.menuCountries
                 total: root.menuTotal
+                whitelist: root.scopeMode ? Number(root.bar.scope_whitelist || 0) : 0
                 selected: root.chosen
                 // menu bottom = 4 px under the bar's top edge (artboard .mn bottom: calc(100% - 4px))
                 menuLift: barRow.y + Theme.space.sm - 4

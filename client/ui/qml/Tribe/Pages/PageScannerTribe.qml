@@ -104,6 +104,8 @@ PageType {
     // nothing of this scope on the screen yet (page open without results, or a scope not scanned): its summary
     readonly property bool scopeStart: !scanning && !blocked && !emptyResult && rowsModel.count === 0
     function scopeCount(cc) {
+        if (cc === "whitelist")
+            return Number(barView.scope_whitelist || 0)
         const list = Array.isArray(barView.scope_countries) ? barView.scope_countries : []
         let n = 0
         for (let i = 0; i < list.length; ++i)
