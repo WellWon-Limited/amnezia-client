@@ -1340,6 +1340,128 @@ static void scenarioBlindLegBesideSlowProbes()
     CHECK(s.lastTapWallMs() <= 7500);
 }
 
+// Lane C (device round 10, 19.11: LTE in the operator's white-list mode): our API is unreachable on every edge, our own
+// AmneziaWG and Xray servers are blocked, the two white-list provider profiles (with a standby-pack entry) work, the three
+// other provider profiles need the direct API to start and cannot. The device took 25-40 s for the first connect (3.0 s
+// session wait, then 6 s per leg through the dead ones), and from the second tap walked servers that cannot start.
+static void scenarioWhitelistNetworkNoControlPlane()
+{
+    const NetworkObservation lte = cell("", "lte");
+    const QString k = key(lte);
+    const auto build = [&](ApiReach reach, bool restrictedNet, const NetworkObservation &net) {
+        const QString nk = key(net);
+        World w;
+        w.set(nk, QStringLiteral("16"), restrictedNet ? Behaviour::noHandshake() : Behaviour::works(2100, 1300, 400));
+        w.set(nk, QStringLiteral("11:xray"), restrictedNet ? Behaviour::noData(1900) : Behaviour::works(2100, 1300, 400));
+        for (const char *id : { "up:n1", "up:n2", "up:n3" })
+            w.set(nk, QString::fromLatin1(id), Behaviour::noHandshake()); // needs the lease over the dead API
+        w.set(nk, QStringLiteral("up:w1"), Behaviour::works(800, 1200, 500));
+        w.set(nk, QStringLiteral("up:w2"), Behaviour::works(800, 1200, 500));
+        PathCandidate w1 = prov("up:w1", UpstreamKind::Whitelist, "", 5), w2 = prov("up:w2", UpstreamKind::Whitelist, "", 6);
+        w1.standbyEntry = w2.standbyEntry = true;
+        const QList<PathCandidate> pool = { awg("16", "RS"), xray("11:xray", "FI"),
+                                            prov("up:n1", UpstreamKind::Country, "NL", 0),
+                                            prov("up:n2", UpstreamKind::Country, "PL", 1),
+                                            prov("up:n3", UpstreamKind::Country, "DE", 2), w1, w2 };
+        auto s = std::make_unique<Sim>(pool, w, net);
+        s->caps = hostCaps();
+        s->caps.ready = false; // the race's session cannot come over the dead API
+        s->caps.preparing = true;
+        s->stopMs = 850;
+        s->starveShareMs = 1000;
+        s->rule = Sim::Rule::Proposed;
+        s->bytesLeft = RaceTimings().cellularMaxBytes;
+        s->controlPlane = reach;
+        return s;
+    };
+    {
+        // first tap, empty ledger: a white-list provider with a pack entry, no non-pack leg, no session wait
+        auto s = build(ApiReach::Unreachable, true, lte);
+        const AttemptResult r = s->raceTap(UserChoice::automatic());
+        const QStringList legs = legPaths(*s);
+        g_rows.append({ QStringLiteral("white-list LTE, API dead: first tap"),
+                        r.connected ? QStringLiteral("connected ") + r.path.id.id : QStringLiteral("failed"),
+                        s->lastTapWallMs(), r.paths, legs.join(QLatin1Char(' ')) });
+        CHECK(r.connected && r.path.id.id == QLatin1String("up:w1"));
+        CHECK(legs == QStringList({ "up:w1" }));
+        CHECK(s->lastTapWallMs() <= 4000);
+        CHECK(s->probesStarted == 0); // no race bytes on a session that cannot come
+        // Stop, the next tap: the proven server leads and starts at once
+        s->deliver(AttemptEvent::userStop(s->now));
+        s->idle(2000);
+        const int from = s->legs.size();
+        const AttemptResult r2 = s->raceTap(UserChoice::automatic());
+        g_rows.append({ QStringLiteral("white-list LTE, API dead: second tap"),
+                        r2.connected ? QStringLiteral("connected ") + r2.path.id.id : QStringLiteral("failed"),
+                        s->lastTapWallMs(), r2.paths, legPaths(*s, from).join(QLatin1Char(' ')) });
+        CHECK(r2.connected && r2.path.id.id == QLatin1String("up:w1"));
+        CHECK(legPaths(*s, from) == QStringList({ "up:w1" }));
+        CHECK(s->lastTapWallMs() <= 2500);
+    }
+    {
+        // a wrong first white-list server: the walk goes to the other one before anything else
+        auto s = build(ApiReach::Unreachable, true, lte);
+        s->world().set(k, QStringLiteral("up:w1"), Behaviour::noHandshake());
+        const AttemptResult r = s->raceTap(UserChoice::automatic());
+        CHECK(r.connected && r.path.id.id == QLatin1String("up:w2"));
+        CHECK(legPaths(*s) == QStringList({ "up:w1", "up:w2" }));
+    }
+    {
+        // the mirror: Wi-Fi with the control plane dead - the usual order (own servers first), nothing moved to the
+        // white-list seats; the providers that need the API are still not offered
+        const NetworkObservation home = wifi("192.168.1.1");
+        auto s = build(ApiReach::Unreachable, false, home);
+        const AttemptResult r = s->raceTap(UserChoice::automatic());
+        const QStringList legs = legPaths(*s);
+        g_rows.append({ QStringLiteral("Wi-Fi, API dead (mirror)"),
+                        r.connected ? QStringLiteral("connected ") + r.path.id.id : QStringLiteral("failed"),
+                        s->lastTapWallMs(), r.paths, legs.join(QLatin1Char(' ')) });
+        CHECK(r.connected && !legs.isEmpty() && legs.first() != QLatin1String("up:w1") && legs.first() != QLatin1String("up:w2"));
+        CHECK(!legs.contains(QStringLiteral("up:n1")) && !legs.contains(QStringLiteral("up:n2")) && !legs.contains(QStringLiteral("up:n3")));
+    }
+    {
+        // control plane back (Reachable): the non-pack providers are candidates again, the prior is off
+        auto s = build(ApiReach::Reachable, true, lte);
+        SelectInput in;
+        in.pool = s->pool();
+        in.controlPlane = ApiReach::Reachable;
+        QStringList ids;
+        for (const RankedPath &r : selectPaths(in))
+            ids << r.path.id.id;
+        CHECK(ids.contains(QStringLiteral("up:n1")) && ids.contains(QStringLiteral("up:n2")) && ids.contains(QStringLiteral("up:n3")));
+        SelectInput dead = in;
+        dead.controlPlane = ApiReach::Unreachable;
+        ids.clear();
+        for (const RankedPath &r : selectPaths(dead))
+            ids << r.path.id.id;
+        CHECK(!ids.contains(QStringLiteral("up:n1")) && ids.contains(QStringLiteral("up:w1")));
+        SelectInput unk = in;
+        unk.controlPlane = ApiReach::Unknown;
+        CHECK(selectPaths(unk).size() == in.pool.size()); // UNKNOWN: nothing skipped
+        // an exact choice of a non-pack provider is the person's: not skipped even with the API dead
+        dead.choice = UserChoice::exactPath(QStringLiteral("up:n1"));
+        CHECK(selectPaths(dead).size() == 1);
+    }
+    {
+        // C3: the prior needs cellular, an unreachable control plane and no proof; a proof cancels it
+        const QList<PathCandidate> pool = [] {
+            PathCandidate w = prov("up:w1", UpstreamKind::Whitelist, "", 5);
+            w.standbyEntry = true;
+            return QList<PathCandidate>{ awg("16", "RS"), prov("up:n1", UpstreamKind::Country, "NL", 0), w };
+        }();
+        const QHash<QString, PathView> none;
+        CHECK(restrictedNetworkPrior(pool, none, ApiReach::Unreachable, true).contains(QStringLiteral("up:w1")));
+        CHECK(restrictedNetworkPrior(pool, none, ApiReach::Unreachable, false).isEmpty());
+        CHECK(restrictedNetworkPrior(pool, none, ApiReach::Unknown, true).isEmpty());
+        CHECK(restrictedNetworkPrior(pool, none, ApiReach::Reachable, true).isEmpty());
+        QHash<QString, PathView> proof;
+        PathView v;
+        v.state = PathState::Working;
+        proof.insert(QStringLiteral("16"), v);
+        CHECK(restrictedNetworkPrior(pool, proof, ApiReach::Unreachable, true).isEmpty());
+    }
+}
+
 static void scenarioTrace1911()
 {
     struct Case {
@@ -1512,6 +1634,7 @@ static void scenarioRace()
     scenarioTrace1911();
     scenarioHostileCellular1911();
     scenarioBlindLegBesideSlowProbes();
+    scenarioWhitelistNetworkNoControlPlane();
     // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when real bytes spent + what the probes
     // in flight hold + its own bound fit; a candidate the cap cannot pay does not block the cheaper ones behind it.
     // (Rewritten for the real-byte cap: a result no longer carries a byte number, spent() does.)

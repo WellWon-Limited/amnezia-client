@@ -144,6 +144,11 @@ public:
     SelectionContext ctx() const
     {
         SelectionContext c{ m_pool, &ledger, wall(), crowd };
+        c.controlPlane = controlPlane; // lane C (the engine's rule, ServiceEngine::ownerContext)
+        const QHash<QString, double> prior = restrictedNetworkPrior(
+            m_pool, ledger.viewOf(tracker.current().local, m_pool, wall()), controlPlane, tracker.current().cellular());
+        for (auto it = prior.constBegin(); it != prior.constEnd(); ++it)
+            c.crowd.insert(it.key(), it.value());
         for (const QString &id : raceFailed) // the engine's rule (ServiceEngine::ownerContext)
             c.crowd.insert(id, 0.0);
         if (race.running())
@@ -151,8 +156,10 @@ public:
                 c.crowd.insert(id, 0.0);
         return c;
     }
+    ApiReach controlPlane = ApiReach::Unknown; // lane C: ConfigService::directApiReach of the current network
     QSet<QString> raceFailed; // paths whose probe failed in the race of this tap
     void setPool(const QList<PathCandidate> &pool) { m_pool = pool; }
+    const QList<PathCandidate> &pool() const { return m_pool; }
     World &world() { return m_world; }
     int checksRun = 0;   // RunDataCheck effects (rechecks included)
     int rechecks = 0;    // of them, runs again on the same tunnel
@@ -189,12 +196,17 @@ public:
         const quint64 before = owner.attempt();
         raceFirst = false;
         raceFailed.clear();
-        if (caps.available && c.kind != UserChoice::Kind::ExactPath) {
+        // Lane C (C2): the race's session comes over the direct API; unreachable and no session -> no race, the owner
+        // starts at once (ServiceEngine::beginRaceForTap)
+        const bool noSession = !caps.ready && controlPlane == ApiReach::Unreachable;
+        if (caps.available && !noSession && c.kind != UserChoice::Kind::ExactPath) {
             SelectInput in;
             in.pool = m_pool;
             in.evidence = ledger.viewOf(tracker.current().local, m_pool, wall());
             in.choice = c;
             in.mode = mode;
+            in.controlPlane = controlPlane;
+            in.crowd = ctx().crowd;
             const QList<RankedPath> order = selectPaths(in);
             const bool known = !order.isEmpty() && order.first().view.state == PathState::Working;
             QList<PathCandidate> list;

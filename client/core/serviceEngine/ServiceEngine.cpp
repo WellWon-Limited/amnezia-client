@@ -271,6 +271,9 @@ void ServiceEngine::noteStartRefused(const QString &nodeId, const QString &code)
 // R1 (device round 4): only the server's own answer about this profile is the path's outcome. A transport failure
 // or timeout of OUR control plane (the lease request), a retry-later answer (429, 503), a request our server
 // rejected as malformed and every local failure (envelope, bridge, invoke) say nothing about the path.
+// Lane C (C4, checked): a lease `transport` failure (no answer from the direct API) falls to the default below -
+// Inconclusive: no evidence about the path. With the control plane unreachable C1 no longer attempts those paths at
+// all; one that still fails this way (state Unknown) stays evidence-free (covered: path_integration_check).
 path::PathOutcome ServiceEngine::startFailureOutcome(const QString &codeIn)
 {
     const QString code = codeIn.section(QLatin1Char('/'), 0, 0);
@@ -313,7 +316,10 @@ QList<path::PathCandidate> ServiceEngine::pathPool() const
         // server); Auto keeps to the delivered stubs.
         if (n.upstream.has_value() && n.upstream->scanOffered && !m_choice.pathIds.contains(n.nodeId))
             continue;
-        out << path::pathCandidateFromNode(n);
+        path::PathCandidate c = path::pathCandidateFromNode(n);
+        if (c.kind == path::PathKind::Provider && !c.standbyEntry && m_hasStandbyEntry)
+            c.standbyEntry = m_hasStandbyEntry(n); // lane C: a usable pack entry lets the profile start without the API
+        out << c;
     }
     return out;
 }
@@ -324,6 +330,12 @@ path::SelectionContext ServiceEngine::ownerContext() const
     c.pool = pathPool();
     c.ledger = &m_ledger;
     c.wallNowMs = nowMs();
+    c.controlPlane = controlPlane();
+    // Lane C (C3): a cellular network with no proof whose direct control plane is unreachable - the servers built for
+    // restricted networks (white-list provider profiles that start from the standby pack) lead. Through the crowd
+    // prior; any evidence of this network outranks it (PathSelect.h::restrictedNetworkPrior).
+    c.crowd = path::restrictedNetworkPrior(c.pool, m_ledger.viewOf(m_net.current().local, c.pool, c.wallNowMs),
+                                           c.controlPlane, m_net.current().cellular());
     // Paths whose probe failed in the race of this tap: the worst prior for this attempt, so the walk tries the
     // servers the race has not seen fail first (device round 19.11, LTE: the race saw three first candidates fail,
     // proved nothing, and the walk then spent 6 s on each of the same three).
@@ -543,6 +555,20 @@ bool ServiceEngine::raceAllowed() const
         && m_choice.kind != path::UserChoice::Kind::ExactPath; // an exact node is the person's: nothing to race
 }
 
+// Lane C (C1): the paths the choice leaves out because they cannot start on this network - one journal line per
+// attempt with the count and the reason, never a path outcome. They return by themselves when the control plane answers.
+void ServiceEngine::journalControlPlaneSkips()
+{
+    if (controlPlane() != ApiReach::Unreachable || m_choice.kind == path::UserChoice::Kind::ExactPath)
+        return;
+    int skipped = 0;
+    for (const path::PathCandidate &c : pathPool())
+        if (path::needsControlPlane(c) && path::modeAllows(c.kind, transportMode()))
+            ++skipped;
+    if (skipped > 0)
+        attemptJournal(QStringLiteral("paths_skipped reason=no_control count=%1").arg(skipped));
+}
+
 void ServiceEngine::beginRaceForTap()
 {
     m_raceFailed.clear(); // per tap
@@ -556,6 +582,8 @@ void ServiceEngine::beginRaceForTap()
     in.evidence = m_ledger.viewOf(m_net.current().local, ctx.pool, ctx.wallNowMs);
     in.choice = m_choice;
     in.mode = transportMode();
+    in.controlPlane = ctx.controlPlane;
+    in.crowd = ctx.crowd;
     const QList<path::RankedPath> order = path::selectPaths(in);
     if (order.isEmpty())
         return; // the owner reports "no candidate" itself
@@ -1198,6 +1226,7 @@ bool ServiceEngine::connect(QString &error)
     // Stage 2: with a probe host, a known working path starts at once and the spares are raced beside it; with
     // none known, the race runs first and the owner starts with its first proven path as the lead (or blind when the
     // race's wait, PathRace.h hedgeAfterMs, is over or the race ends).
+    journalControlPlaneSkips();
     if (raceAllowed()) {
         m_raceStartedOwner = false;
         beginRaceForTap();

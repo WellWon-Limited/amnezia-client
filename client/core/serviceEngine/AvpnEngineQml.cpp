@@ -1251,6 +1251,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // ConfigService (the edge walk); the engine reads it per network generation and keeps no copy. "This provider
     // can start without the API" = the usable standby-pack entry the bring-up itself uses.
     m_configSvc->setNetworkGenerationSource([this]() { return m_engine.network().generation; });
+    m_engine.setControlPlaneSource([this]() { return m_configSvc ? m_configSvc->directApiReach() : avpn::ApiReach::Unknown; });
+    m_engine.setStandbyEntryProbe([this](const avpn::SubscriptionNode &n) {
+        const std::optional<avpn::StandbyPack> &pack = m_tunnel.standbyPack();
+        avpn::StandbyCandidate sc;
+        return pack && avpn::standbyCandidateFor(*pack, n, m_engine.upstreamRevision(),
+                                                 QDateTime::currentMSecsSinceEpoch(),
+                                                 avpn::upstreamStandbyMaxAgeSTuned(), sc);
+    });
     connect(m_configSvc, &avpn::ConfigService::directApiReachChanged, this, [this](avpn::ApiReach r) {
         reliabilityEvent(QStringLiteral("control_plane reach=%1 net_gen=%2")
                              .arg(QLatin1String(avpn::apiReachName(r))).arg(m_engine.network().generation));

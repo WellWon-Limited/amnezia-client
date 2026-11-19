@@ -46,6 +46,8 @@ struct FakeProber : path::IPathProber {
     bool on = true;
     bool ready = true;      // the session of the host is in hand
     bool preparing = false; // it is being fetched
+    int prepares = 0;       // prepare() calls (the manifest fetch of the real host starts there)
+    void prepare(const path::NetworkKey &) override { ++prepares; }
     QList<std::pair<path::ProbeStamp, QString>> started;
     int cancels = 0;
     std::function<void(quint64, qint64)> sink; // the engine's byte sink (setSpendSink): the test spends through it
@@ -616,6 +618,61 @@ int main(int argc, char **argv)
         q.eng.setProber(&off);
         CHECK(q.eng.connect(err) && q.last() == QLatin1String("17") && off.started.isEmpty());
         TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true}}, {}, {});
+    }
+
+    // Lane C (C1, C3) in the engine: with the direct control plane unreachable, a provider profile without a standby-pack
+    // entry is not walked (one journal line per attempt: count and reason; never a path outcome); on a cellular network
+    // without proof the white-list provider with a pack entry leads; on Wi-Fi the usual order stays.
+    {
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true},
+                              {QStringLiteral("upstream_nodes"), true}}, {}, {});
+        avpn::upstreamPlatformRuntimeReady().store(true);
+        const auto stub = [](const char *id, UpstreamKind kind, bool pack, int prio) {
+            SubscriptionNode n;
+            n.nodeId = QString::fromLatin1(id);
+            n.region = QStringLiteral("upstream");
+            n.proto = QStringLiteral("xray");
+            UpstreamStub u;
+            u.profileId = n.nodeId.mid(3);
+            u.kind = kind;
+            u.packSourced = pack;
+            u.priority = prio;
+            n.upstream = u;
+            return n;
+        };
+        const QList<SubscriptionNode> prov = { stub("up:n1", UpstreamKind::Auto, false, 0),
+                                               stub("up:w1", UpstreamKind::Whitelist, true, 5) };
+        QString err;
+        {   // Wi-Fi, control plane unreachable: the non-pack provider is skipped (counted), the usual order leads
+            Rig r(pool);
+            r.eng.setStandbyCandidates(prov);
+            r.eng.setControlPlaneSource([] { return avpn::ApiReach::Unreachable; });
+            CHECK(r.eng.connect(err));
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(journalHas(r.journal, "paths_skipped reason=no_control count=1"));
+            CHECK(r.last() == QLatin1String("17")); // own servers first on an ordinary network
+        }
+        {   // UNKNOWN: nothing skipped, no line
+            Rig r(pool);
+            r.eng.setStandbyCandidates(prov);
+            CHECK(r.eng.connect(err));
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(!journalHas(r.journal, "paths_skipped"));
+        }
+        {   // cellular, no proof, unreachable: the white-list pack provider leads
+            Rig r(pool);
+            r.eng.setStandbyCandidates(prov);
+            r.eng.setControlPlaneSource([] { return avpn::ApiReach::Unreachable; });
+            path::NetworkObservation lte;
+            lte.medium = path::NetMedium::Cellular;
+            lte.carrier = QStringLiteral("250-01");
+            lte.radio = QStringLiteral("lte");
+            r.eng.observeNetwork(lte);
+            CHECK(r.eng.connect(err));
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(r.last() == QLatin1String("up:w1"));
+        }
+        avpn::upstreamPlatformRuntimeReady().store(false);
     }
 
     // Device round 19.11 (LTE, first tap after launch): the prober's session was not in hand. The race must not

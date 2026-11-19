@@ -122,6 +122,9 @@ struct SelectInput {
     TransportMode mode = TransportMode::Auto;
     QHash<QString, double> crowd;      // path id -> share of reporters it worked for, [0..1]; missing = neutral
     QSet<QString> tried;               // tried in this attempt on this network
+    // Lane C (C1): the direct control plane of this network (ConfigService::directApiReach). Unreachable: a provider
+    // path without a standby-pack entry cannot start and is not offered (an exact choice is the person's: untouched).
+    ApiReach controlPlane = ApiReach::Unknown;
     // R2 (device round 4): a preferred path that failed here, but longer ago than this (the first quarantine step),
     // gets one real try in each attempt among the untried paths - the person asked for it, and an old failure may
     // be gone. 0 = off. nowMs = the ledger's wall clock.
@@ -145,6 +148,34 @@ inline bool isSameCountryAsChoice(const UserChoice &choice, const PathCandidate 
 {
     return choice.kind == UserChoice::Kind::PreferCountry && !choice.pathIds.isEmpty() && !choice.country.isEmpty()
         && c.country == choice.country && !choice.pathIds.contains(c.id.id);
+}
+
+// Lane C (C1): a provider path that needs the direct API to start (no standby-pack entry).
+inline bool needsControlPlane(const PathCandidate &c) { return c.kind == PathKind::Provider && !c.standbyEntry; }
+
+// Lane C (C3): the crowd value that puts a path in front of the interleave of the untried paths (above the real
+// crowd domain [0..1]; the existing carrier of a prior, not a new sort).
+constexpr double kPriorFirstCrowd = 2.0;
+
+// The prior for a network WITHOUT evidence whose direct control plane is unreachable, on a cellular network: the
+// servers built for restricted networks (provider kind whitelist) that can start without the API lead, in their
+// existing order among themselves. Any proof in the ledger for this network (a Working path) cancels it: evidence
+// outranks the prior. Not Wi-Fi or Ethernet: an outage of our own API on an ordinary network must not move everyone
+// onto the white-list seats. Returns the crowd entries to add (never overrides a lower, explicit value).
+inline QHash<QString, double> restrictedNetworkPrior(const QList<PathCandidate> &pool,
+                                                     const QHash<QString, PathView> &evidence, ApiReach controlPlane,
+                                                     bool cellular)
+{
+    QHash<QString, double> out;
+    if (!cellular || controlPlane != ApiReach::Unreachable)
+        return out;
+    for (const PathCandidate &c : pool)
+        if (evidence.value(c.id.id).state == PathState::Working)
+            return out;
+    for (const PathCandidate &c : pool)
+        if (c.kind == PathKind::Provider && c.providerKind == UpstreamKind::Whitelist && c.standbyEntry)
+            out.insert(c.id.id, kPriorFirstCrowd);
+    return out;
 }
 
 inline bool modeAllows(PathKind k, TransportMode mode)
@@ -258,6 +289,8 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
             }
             continue;
         }
+        if (in.controlPlane == ApiReach::Unreachable && needsControlPlane(c))
+            continue; // C1: cannot start on this network (no journal here: the engine counts and names the skip)
         r.preferred = isPreferred(in.choice, c);
         r.sameCountry = isSameCountryAsChoice(in.choice, c);
         const int p = r.preferred ? 0 : r.sameCountry ? 1 : 2;
@@ -349,7 +382,15 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
         std::sort(s[3].begin(), s[3].end(), byTime(&PathView::lastFailureMs));
         std::sort(s[4].begin(), s[4].end(), byTime(&PathView::quarantineUntilMs));
     }
-    const auto unknown = [&](int p, int g) { return detail::interleaved(sec[p][g], crowd, lanes, lanesTried); };
+    const auto unknown = [&](int p, int g) {
+        // C3: paths carrying the restricted-network prior lead, in their prior order; the rest is interleaved as usual
+        QList<RankedPath> front, rest;
+        for (const RankedPath &r : sec[p][g])
+            (crowd.value(r.path.id.id) >= kPriorFirstCrowd ? front : rest) << r;
+        std::sort(front.begin(), front.end(),
+                  [&crowd](const RankedPath &a, const RankedPath &b) { return detail::priorLess(a, b, crowd); });
+        return front + detail::interleaved(rest, crowd, lanes, lanesTried);
+    };
     QList<RankedPath> out;
     // the choice itself; then what carried data here - the chosen country's first; then the untried paths the
     // same way; then the working paths of the kinds failing now; the last wave; what failed here
