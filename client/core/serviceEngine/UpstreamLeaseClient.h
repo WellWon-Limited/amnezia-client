@@ -20,6 +20,7 @@
 #include <QHash>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 #include <QString>
 
 #include <functional>
@@ -33,6 +34,7 @@ class UpstreamLeaseClient : public QObject, public IUpstreamLeaseIo
 {
     Q_OBJECT
 public:
+    bool acquireOutFor(const QString &profileId) const;
     explicit UpstreamLeaseClient(QObject *parent = nullptr);
 
     // nam = the app's API client (its connection-cache resets on tunnel transitions cover these requests
@@ -55,6 +57,11 @@ public:
     // newerOut / stillOut = another acquire of the same profile is still alive.
     std::function<void(const QString &profileId, const QString &leaseId, const LeaseRoute &route, bool newerOut)> onLateGrant;
     std::function<void(const QString &profileId, const QString &grantedLeaseId, bool stillOut)> onAcquireEnded;
+    // Asked before every resend of a release and before a held one is sent: false = the owner took the release back
+    // (a start of its profile - UpstreamLeaseOwner.h, row S1): it is dropped silently, no onReleaseDone.
+    std::function<bool(quint64 requestId)> releaseWanted;
+    bool releaseInFlight(quint64 requestId) const override { return m_inFlight.contains(requestId); }
+    bool acquireAlive(const QString &profileId) const override { return acquireOutFor(profileId); }
     // The spacing budget of a release's resends (UpstreamLeaseWire.h::seatReleaseNext; tests shorten it).
     qint64 releaseRetryBudgetMs = kSeatReleaseRetryBudgetMs;
 
@@ -118,7 +125,6 @@ private:
     QString baseFor(const LeaseRoute &route) const;
     void sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route,
                      int attempt, qint64 spacedMs = 0, quint64 bgKey = 0);
-    bool acquireOutFor(const QString &profileId) const;
     void reportLateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route);
     void reportAcquireEnded(const QString &profileId, const QString &grantedLeaseId);
     QNetworkReply *post(const QString &url, const QByteArray &body, const QString &bearer, int timeoutMs);
@@ -137,6 +143,7 @@ private:
     };
     QList<HeldRelease> m_held;
     QHash<quint64, QString> m_acquiresOut; // acquire request id -> profile, until its HTTP request ends
+    QSet<quint64> m_inFlight; // release request ids with a DELETE on the wire
     bool m_tunnelDown = true; // the last tunnel event was a confirmed stop (or none yet)
     bool m_stopPending = false;
     qint64 m_heldSinceMs = 0;
