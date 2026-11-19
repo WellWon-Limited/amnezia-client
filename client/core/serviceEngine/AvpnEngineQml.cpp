@@ -706,6 +706,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamSessionAdopted, this,
             [this](const QString &nodeId) {
                 // macOS: the daemon's live Xray session is this upstream node (its record) - identify it.
+                syncIntent(); // I7: an adopted session is stamped with the value in force
                 m_engine.adoptTunnelConnected(nodeId, QStringLiteral("xray"), QString());
                 reliabilityEvent(QStringLiteral("upstream_adopt node=%1").arg(nodeId));
                 emit changed();
@@ -1545,6 +1546,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 const bool thinkConnected = (state() == QLatin1String("connected"));
                 if (st == AndroidController::ConnectionState::CONNECTED && !thinkConnected) {
                     m_wantConnected = true;
+                    syncIntent(); // I7
                     m_engine.adoptTunnelConnected();
                     onConnectionStateChanged(Vpn::Connected);
                 } else if (st == AndroidController::ConnectionState::DISCONNECTED && thinkConnected) {
@@ -1655,6 +1657,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_savedPinCountry = s.value(QStringLiteral("avpn/pinnedCountry")).toString(); // review E8: the preference survives a pool without the node
         m_savedPin = s.value(QStringLiteral("avpn/pinnedNode")).toString();
         restorePin();
+        syncIntent(); // I7: the saved choice and mode become the first intent value; the engine gets the epoch from launch
     }
 
     // AVPN (фикс «на сотовой ∞ навсегда»): единый member-таймер ретрая bootstrap (вместо
@@ -3230,7 +3233,7 @@ void AvpnEngineQml::cancelStartPreparation()
 
 // ---- Path engine, stage 1 (design 2026-11-17): the facade's side of the attempt owner -----------------------
 
-void AvpnEngineQml::syncChoice()
+void AvpnEngineQml::syncIntent()
 {
     // Review E8 of 18.11: the person's choice is independent of what the pool or the mode can serve right now -
     // a pin the engine could not apply (the server left the pool, the mode excludes it) is still the choice.
@@ -3251,10 +3254,19 @@ void AvpnEngineQml::syncChoice()
                 paths << o.nodeId;
         c = avpn::path::UserChoice::preferServer(n->countryCode, paths);
     }
-    // H3: another choice than the one the engine holds is a newer intent the running attempt cannot serve
-    m_intentEpoch.onChoice(!(c == m_engine.userChoice()));
+    // I1/I2/I7: THE one place the intent value is set: wanted + the choice as the owner reads it + the transport mode.
+    // The epoch moves here and only here, compared with the value held here (not with the engine's choice, which a pin
+    // or clearPin already replaced). The engine gets the choice and the epoch together - at launch and adoption too.
+    avpn::IntentValue v;
+    v.wanted = m_wantConnected;
+    v.choice = QStringLiteral("%1|%2|%3").arg(int(c.kind)).arg(c.country, c.pathIds.join(QLatin1Char(',')));
+    v.mode = avpn::transportModeToString(m_engine.transportMode());
+    const bool moved = m_intentEpoch.set(v);
     m_engine.setUserChoice(c);
     m_engine.setIntentEpoch(m_intentEpoch.epoch);
+    if (moved)
+        reliabilityEvent(QStringLiteral("intent_epoch moved=%1 wanted=%2 choice=%3 mode=%4")
+                             .arg(m_intentEpoch.epoch).arg(int(v.wanted)).arg(choiceJournal(), v.mode));
 }
 
 QString AvpnEngineQml::choiceJournal() const
@@ -3283,7 +3295,7 @@ bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err)
         reliabilityEvent(QStringLiteral("transport_mode_auto why=server_tap mode_was=%1 node=%2").arg(was, nodeId));
         emit notice(tr("Режим подключения переключён на «Авто», чтобы подключить выбранный сервер"));
     }
-    syncChoice();
+    syncIntent();
     return true;
 }
 
@@ -3353,7 +3365,7 @@ void AvpnEngineQml::endExactRowRequest(bool connected)
     m_exactRestoreReconnectNow = !connected && req.reconnect;
     if (!connected)
         restoreChoiceBeforeRow(req);
-    syncChoice();
+    syncIntent();
     reliabilityEvent(QStringLiteral("exact_row_request_end row=%1 connected=%2 choice=%3")
                          .arg(req.row).arg(int(connected)).arg(choiceJournal()));
 }
@@ -3366,7 +3378,7 @@ void AvpnEngineQml::restoreChoiceBeforeRow(const avpn::ExactRowRequest &req)
     const bool applied = !req.restorePin.isEmpty() && m_engine.setPinnedNode(req.restorePin, err);
     const avpn::ExactRowRequest::RestorePlan plan = req.restorePlan(applied);
     if (plan.clearEnginePin)
-        m_engine.clearPin(); // G4: a refused previous pin must not leave the engine on the row (syncChoice prefers it)
+        m_engine.clearPin(); // G4: a refused previous pin must not leave the engine on the row (syncIntent prefers it)
     m_savedPin = plan.savedPin;
     m_savedPinCountry = plan.savedCountry;
     QSettings().setValue(QStringLiteral("avpn/pinnedNode"), m_savedPin);
@@ -3413,6 +3425,8 @@ bool AvpnEngineQml::syncAttempt()
     syncControlPlaneEdge(m_lastTunnelState == Vpn::Connected); // R1a: a new leg's requests are direct at once
     const int legStartFailures = m_engine.takeLegStartFailures();
     const std::optional<avpn::path::AttemptResult> result = m_engine.takeAttemptResult();
+    if (result)
+        syncIntent(); // I1/I2: any door that changed the intent since the last look is seen before the result is judged
     // Review E1 of 18.11: the owner's terminal result settles the facade's operation - a start whose native
     // commands never published anything must not leave the orb latched (the start watchdog that rescued it is
     // gone). A stop the person asked for is settled by its own stop protocol.
@@ -3586,7 +3600,7 @@ void AvpnEngineQml::persistPin()
     const avpn::SubscriptionNode *pinned = m_engine.nodeById(m_savedPin);
     m_savedPinCountry = m_savedPin.isEmpty() ? QString() : pinned ? pinned->countryCode : m_savedPinCountry;
     QSettings().setValue(QStringLiteral("avpn/pinnedCountry"), m_savedPinCountry);
-    syncChoice();
+    syncIntent();
 #ifdef Q_OS_IOS
     if (m_savedPin != pinBefore)
         writeTunnelWatchPlan("pin"); // AVPN (iOS data watch, 141): the extension follows the pin at once
@@ -3608,7 +3622,7 @@ void AvpnEngineQml::restorePin(const QString &pinBefore)
     if (!droppedForTransport.isEmpty() && m_engine.pinnedNodeId().isEmpty()) {
         reliabilityEvent(QStringLiteral("pin_unavailable why=reseed kept=1 mode=%1 node=%2")
                              .arg(avpn::transportModeToString(m_engine.transportMode()), droppedForTransport));
-        syncChoice();
+        syncIntent();
         return;
     }
     switch (decidePinRestore(m_savedPin, pinBefore, m_engine.pinnedNodeId())) {
@@ -3625,7 +3639,7 @@ void AvpnEngineQml::restorePin(const QString &pinBefore)
         // this run stays exact across a refresh (review E8 of 18.11).
         if (m_engine.setPinnedNode(m_savedPin, error))
             persistPin();
-        syncChoice();
+        syncIntent();
         return;
     }
     }
@@ -4101,6 +4115,7 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
         m_stopRetryTimer.stop();
     }
     m_wantConnected = true;
+    syncIntent(); // I7: the adopted session is stamped with the value in force
     m_latch.needStatusBeforeStart = false;
     m_statusRequestAttempts = 0;
     m_statusRetryTimer.stop();
@@ -4129,6 +4144,7 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
     if (m_op != Op::None)
         return false;
     m_wantConnected = true;
+    syncIntent(); // I7
     const bool adopted = m_engine.adoptTunnelConnected();
     syncAttempt();
     return adopted;
@@ -6391,6 +6407,7 @@ void AvpnEngineQml::noteUserStart()
     m_graceStopInFlight = false;
     // Намерение: хотим быть онлайн (к авто/закреплённой ноде). Факт догонит reconcile() из терминала.
     m_wantConnected = true;
+    syncIntent(); // I1: the intent value is set (wanted on)
     m_startOrigin = StartOrigin::User; // plan v3 step 5: network memory may be read and written
     m_waitUplink = false;
     m_liveSessionPending = false;
@@ -6415,7 +6432,7 @@ void AvpnEngineQml::noteIntentChange()
     if (m_exactReq.active()) {
         reliabilityEvent(QStringLiteral("exact_row_request_dropped row=%1").arg(m_exactReq.row));
         m_exactReq.clear();
-        syncChoice(); // no longer exact: an ordinary preferred server (or Auto)
+        syncIntent(); // no longer exact: an ordinary preferred server (or Auto)
     }
     // Every action on the intent (stop, start, Auto, another pick, ...) ends a seat taken for a switch that has not
     // brought it up yet - before any operation guard (review F1 of 17.11: Stop during the switch's own teardown
@@ -6456,8 +6473,6 @@ void AvpnEngineQml::stop()
     // (restored below, after the owner is told to stop). Any other action on the intent just drops the request.
     const avpn::ExactRowRequest cancelledRow = m_exactReq;
     noteIntentChange(); // AVPN Scanner
-    m_intentEpoch.onStop(); // H3: the attempt that runs now cannot serve what the person wants after this stop
-    m_engine.setIntentEpoch(m_intentEpoch.epoch);
     Avpn_recordGuiIntent(false);
     m_userIntentKnown = true;
     cancelStartPreparation();
@@ -6466,7 +6481,7 @@ void AvpnEngineQml::stop()
     m_engine.requestStop();
     if (cancelledRow.active()) {
         restoreChoiceBeforeRow(cancelledRow);
-        syncChoice();
+        syncIntent();
         reliabilityEvent(QStringLiteral("exact_row_request_cancelled row=%1 choice=%2").arg(cancelledRow.row, choiceJournal()));
     }
     // AVPN (Task 7): явный stop() отменяет ожидающую авто-паузу (пользователь сам выключил VPN).
@@ -6475,6 +6490,7 @@ void AvpnEngineQml::stop()
     m_wasConnected = false;
     // Намерение: хотим быть офлайн. reconcile() опустит туннель, если он поднят.
     m_wantConnected = false;
+    syncIntent(); // I1: the value changed (wanted off): the attempt that runs now cannot serve what comes after this stop
     m_needsRestart = false;
     m_waitUplink = false;
     m_statusRequestAttempts = 0;
@@ -6724,7 +6740,7 @@ void AvpnEngineQml::guardedStart()
     m_attemptOrigin = m_startOrigin;
     m_pathCheck.clear();
     m_engine.observeNetwork(currentNetworkObservation());
-    syncChoice();
+    syncIntent();
     reliabilityEvent(QStringLiteral("attempt_start origin=%1 net=%2 net_gen=%3 choice=%4 mode=%5")
                          .arg(int(m_attemptOrigin))
                          .arg(m_engine.network().local.isEmpty() ? QStringLiteral("-") : m_engine.network().local)
@@ -6745,7 +6761,7 @@ void AvpnEngineQml::guardedStart()
     bool ok;
     {
         QScopedValueRollback<bool> syncGuard(m_inSyncNetCall, true);
-        m_engine.setIntentEpoch(m_intentEpoch.stampForNewAttempt()); // H3: the attempt begun by this connect serves this epoch
+        syncIntent(); // I1/I7: the value in force is read and pushed right before the attempt begins
         ok = (m_engine.hasSubscription() || !m_engine.candidateNodes().isEmpty()) && m_engine.connect(err);
     }
     if (!ok) {
@@ -7327,6 +7343,7 @@ void AvpnEngineQml::reprobe()
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
         m_restartOrigin = QStringLiteral("reprobe");
     }
+    syncIntent(); // I1: Auto (and wanted) is read after both are set
     emit changed();
     reconcile();
 }
@@ -7413,6 +7430,7 @@ void AvpnEngineQml::switchToNodeImpl(const QString &nodeId, bool persist)
     // Цель (pin) запомнена → следующий ручной Connect поднимет именно её.
     m_wantConnected = false;
     reliabilityEvent(QStringLiteral("intent_off why=select_node_offline")); // U10: кто снял намерение
+    syncIntent(); // I1
     m_needsRestart = false;
     reconcile();
     emit changed();
@@ -7475,6 +7493,7 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
         m_wantConnected = false; // офлайн: только цель, туннель не стартуем
         m_needsRestart = false;
     }
+    syncIntent(); // I1: the pick and the wanted flag are one value, read after both are set
     emit changed();
     reconcile();
 }
@@ -7497,6 +7516,7 @@ void AvpnEngineQml::selectAutoImpl(bool persist)
     if (persist) persistPin();
     m_wantConnected = false;
     reliabilityEvent(QStringLiteral("intent_off why=select_auto")); // U10: кто снял намерение
+    syncIntent(); // I1: Auto and wanted-off are one value change
     m_needsRestart = false;
     reconcile();        // онлайн → guardedStop (орб OFF); оффлайн → no-op
     emit changed();
@@ -7527,6 +7547,7 @@ void AvpnEngineQml::rotateNext()
     m_needsRestart = true;
     m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
     m_restartOrigin = QStringLiteral("rotate");
+    syncIntent(); // I1
     emit changed();
     reconcile();
 }
@@ -8230,13 +8251,18 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
     // the next pool refresh.
     if (m == avpn::TransportMode::Auto)
         restorePin();
-    if (d.restartTunnel) {
+    // I2: the mode is part of the intent value. A tunnel up on a transport the mode excludes restarts (above); so does an
+    // attempt still walking candidates with the old mode - the owner keeps its old order, the new mode must be tried.
+    const bool replaceWalk = !d.restartTunnel && m_wantConnected && m_engine.attemptRunning();
+    if (d.restartTunnel || replaceWalk) {
         m_wantConnected = true;
         m_needsRestart = true;
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
         m_restartOrigin = QStringLiteral("transport");
+        syncIntent();
         reconcile();
     }
+    syncIntent(); // I2: a mode change moves the epoch
     emit changed();
 }
 
@@ -12064,7 +12090,7 @@ void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, quint64 prepareId,
         // S1 (device round 5): the tapped row's request ends here - it never reached the owner, the live tunnel stays
         if (m_exactReq.active()) {
             m_exactReq.clear();
-            syncChoice();
+            syncIntent();
         }
         endScanRowRequest(nodeId, "seat_first_failed");
         emit changed();

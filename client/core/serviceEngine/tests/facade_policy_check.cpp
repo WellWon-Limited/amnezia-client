@@ -882,34 +882,65 @@ static void exactRowRequestObject()
                                                              .restorePlan(false);
         CHECK(autoBefore.clearEnginePin && autoBefore.savedPin.isEmpty() && autoBefore.savedCountry.isEmpty());
     }
-    // G3 + H3: which attempt serves which intent (IntentEpoch: moves on a Stop or another choice only)
+    // G3 + H3 + I1/I2/I7: which attempt serves which intent. The intent is one value (wanted, choice, mode); the epoch
+    // moves exactly when the value changes, compared with the value held, never with derived state.
     {
         using avpn::IntentEpoch;
-        // G3: a connect to A runs; the person taps the row B (another choice) -> A's result is superseded
+        using avpn::IntentValue;
+        auto val = [](bool wanted, const char *choice, const char *mode) {
+            IntentValue v;
+            v.wanted = wanted;
+            v.choice = QLatin1String(choice);
+            v.mode = QLatin1String(mode);
+            return v;
+        };
+        // I7: launch - the first value only seeds; the epoch the engine is given is the facade's from the start
         IntentEpoch e;
+        CHECK(!e.set(val(false, "auto", "auto")) && e.epoch == 1);
+        CHECK(!e.set(val(false, "auto", "auto")));                   // no change: no move
+        // G3: a connect to A runs (wanted, choice A); the person taps the row B -> the choice changes
+        CHECK(e.set(val(true, "A", "auto")));
         const quint64 attemptA = e.stampForNewAttempt();
-        e.onChoice(true);
-        CHECK(!e.resultBelongs(attemptA));
-        CHECK(e.resultBelongs(e.stampForNewAttempt())); // the attempt that serves B is current
-        // H3: a repeated start() during a running attempt moves nothing: its failure is current (error shown, rule applied)
+        CHECK(e.resultBelongs(attemptA));
+        CHECK(e.set(val(true, "B-exact", "auto")));                  // another server / country (I1)
+        CHECK(!e.resultBelongs(attemptA) && e.resultBelongs(e.stampForNewAttempt()));
+        // I1: from a pinned server to Auto moves it too, wanted unchanged
+        const quint64 attemptB = e.stampForNewAttempt();
+        CHECK(e.set(val(true, "auto", "auto")) && !e.resultBelongs(attemptB));
+        // I2: AmneziaWG -> Auto while connecting (and the mirror): only the mode changed
+        IntentEpoch m;
+        m.set(val(true, "auto", "awg"));
+        const quint64 awgAttempt = m.stampForNewAttempt();
+        CHECK(m.set(val(true, "auto", "auto")) && !m.resultBelongs(awgAttempt));
+        IntentEpoch x;
+        x.set(val(true, "auto", "xray"));
+        const quint64 xrayAttempt = x.stampForNewAttempt();
+        CHECK(x.set(val(true, "auto", "auto")) && !x.resultBelongs(xrayAttempt));
+        // H3: a repeated start() / a refused pick / a no-op leaves the value as it was: the result is current
         IntentEpoch r;
+        r.set(val(true, "auto", "auto"));
         const quint64 running = r.stampForNewAttempt();
-        r.onChoice(false); // noteIntentChange() alone does not move the epoch
-        CHECK(r.resultBelongs(running));
-        // H3: a pick refused after noteIntentChange(): the choice is as it was -> current
-        r.onChoice(false);
-        CHECK(r.resultBelongs(running));
-        // a Stop, then a new start: the old attempt's result is superseded, the new one's is current
+        CHECK(!r.set(val(true, "auto", "auto")) && r.resultBelongs(running));
+        // a Stop (wanted off), then a new start: the old attempt's result is superseded, the new one's is current
         IntentEpoch s2;
+        s2.set(val(true, "auto", "auto"));
         const quint64 old = s2.stampForNewAttempt();
-        s2.onStop();
+        CHECK(s2.set(val(false, "auto", "auto")));
+        CHECK(s2.set(val(true, "auto", "auto")));
         const quint64 fresh = s2.stampForNewAttempt();
         CHECK(!s2.resultBelongs(old) && s2.resultBelongs(fresh));
-        // the failover attempt after a live loss is begun by the engine under the epoch in force: current
+        // the failover attempt after a live loss / an adopted session is stamped with the epoch in force: current
         IntentEpoch f;
+        f.set(val(true, "auto", "auto"));
         const quint64 live = f.stampForNewAttempt();
-        const quint64 failover = f.stampForNewAttempt(); // no intent change between the session and its failover
+        const quint64 failover = f.stampForNewAttempt();
         CHECK(f.resultBelongs(live) && f.resultBelongs(failover));
+        // I7: adoption of a running session after a launch with a saved Auto: wanted flips on, then it is stamped
+        IntentEpoch ad;
+        ad.set(val(false, "auto", "auto"));
+        ad.set(val(true, "auto", "auto"));                           // the facade syncs the value BEFORE the engine adopts
+        const quint64 adopted = ad.stampForNewAttempt();
+        CHECK(ad.resultBelongs(adopted) && ad.epoch == 2);
     }
     // an ended request holds nothing: no exact choice, no restore, no reconnect (before: the row outlived the flag)
     ExactRowRequest e = c;

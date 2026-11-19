@@ -1103,7 +1103,7 @@ private:
     // Path engine: the user's choice for the attempt owner - Auto (no pin), a preferred server (a server of the list,
     // tapped now or saved earlier: its transports first, then fallback with a notice) or an exact node (a Scanner
     // row: that one path, an honest error if it fails).
-    void syncChoice();
+    void syncIntent();
     QString choiceJournal() const;
     // Pin a server the person tapped. A server the transport mode cannot serve switches the mode to Auto and is
     // selected (coordinator decision 9 of 18.11: the latest explicit action wins; the UI gets a notice).
