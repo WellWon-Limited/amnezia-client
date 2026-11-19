@@ -253,7 +253,10 @@ class TribeScanner : public QObject
     Q_PROPERTY(bool doctorLegacy READ doctorLegacy NOTIFY switchesChanged)
     Q_PROPERTY(bool connectOnOpen READ connectOnOpen NOTIFY switchesChanged)
     Q_PROPERTY(bool returnHome READ returnHome NOTIFY switchesChanged)
-    Q_PROPERTY(QVariantMap view READ view NOTIFY viewChanged)
+    // The view goes to QML as JSON (device round air7, 19.11): a QJsonArray reaches QML as a real JS array, while a
+    // QVariantList inside a QVariantMap reaches it as a sequence for which Array.isArray() is false (Qt 6.11) - the
+    // page then never saw bar.scope_countries and fell back to the filter of found rows.
+    Q_PROPERTY(QJsonObject view READ viewJson NOTIFY viewChanged)
     Q_PROPERTY(bool screenOpen READ screenOpen NOTIFY viewChanged)
     Q_PROPERTY(QVariantMap shade READ shade NOTIFY shadeChanged)
 public:
@@ -280,7 +283,8 @@ public:
     bool doctorLegacy() const { return m_doctorLegacy; }
     bool connectOnOpen() const { return m_connectOnOpen; }
     bool returnHome() const { return m_returnHome; }
-    QVariantMap view() const { return m_viewMap; }
+    QJsonObject viewJson() const { return m_viewQml; }
+    QVariantMap view() const { return m_viewQml.toVariantMap(); } // C++ callers (tests); QML reads viewJson
     bool screenOpen() const { return m_m.screenOpen(); }
     QVariantMap shade() const { return m_shadeMap; }
     // The server list's figures (owner 17.11, provider rows): engine node id -> ms of the latest Scanner result of
@@ -567,8 +571,8 @@ private:
     qint64 m_viewWake = -1;
     qint64 m_shadeWake = -1;
     qint64 m_nextPollAt = -1;
-    QJsonObject m_viewJson;
-    QVariantMap m_viewMap;
+    QJsonObject m_viewJson;  // the view without its clock (the change test)
+    QJsonObject m_viewQml;   // what QML reads: m_viewJson + now_ms
     QVariantMap m_shadeMap;
 
     bool m_enabled = false;

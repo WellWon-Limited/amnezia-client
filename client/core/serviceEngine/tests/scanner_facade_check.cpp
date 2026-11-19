@@ -10,6 +10,7 @@
 #include "../TribeScanner.h"
 
 #include <QCoreApplication>
+#include <QMetaProperty>
 #include <QElapsedTimer>
 #include <QTimeZone>
 #include <QCryptographicHash>
@@ -3730,6 +3731,30 @@ static void caseReleaseSurvivesTransition()
 static void caseServerScope()
 {
     g_case = QStringLiteral("server_scope");
+    {
+        // Device round air7 (19.11): opening the Scanner showed no «Все страны · N серверов» and no country menu
+        // although GET /v1/scan/pool answered - the page checks Array.isArray(bar.scope_countries), and a list
+        // inside a QVariantMap reaches QML as a sequence that is no Array (Qt 6.11). The QML property is JSON.
+        const QMetaObject &mo = TribeScanner::staticMetaObject;
+        const int pi = mo.indexOfProperty("view");
+        CHECK(pi >= 0 && mo.property(pi).metaType() == QMetaType::fromType<QJsonObject>());
+        World w;
+        w.server.scopeApi = true;
+        w.poolOnOpen = true;
+        w.start();
+        w.s->show(); // opening the screen: no scan, only the pool
+        w.run(5000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), 1);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 0);
+        const QJsonObject bar = w.s->viewJson().value(QStringLiteral("bar")).toObject();
+        CHECK(bar.value("scope_countries").isArray() && !bar.value("scope_countries").toArray().isEmpty());
+        CHECK(bar.value("scope").isString() && bar.value("scope").toString().isEmpty());
+        bool logged = false;
+        for (const QString &l : w.logs)
+            logged = logged || l.startsWith(QLatin1String("pool fetched countries="));
+        CHECK(logged);
+        w.s->close();
+    }
     {
         World w;
         w.server.scopeApi = true;

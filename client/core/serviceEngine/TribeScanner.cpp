@@ -462,9 +462,8 @@ void TribeScanner::refreshView()
     if (j == m_viewJson)
         return;
     m_viewJson = j;
-    QJsonObject withNow = j;
-    withNow.insert(QStringLiteral("now_ms"), double(t));
-    m_viewMap = withNow.toVariantMap();
+    m_viewQml = j;
+    m_viewQml.insert(QStringLiteral("now_ms"), double(t));
     emit viewChanged();
 }
 
@@ -1869,8 +1868,16 @@ void TribeScanner::fetchPoolIfStale()
         if (!self)
             return;
         self->chargeOutsideScan(p.bytes, cellular);
-        if (p.ok)
+        if (p.ok) {
+            int own = 0, provider = 0;
+            for (const ScanPoolView::Country &c : p.view.countries) {
+                own += c.own;
+                provider += c.provider;
+            }
+            self->emitLog(QStringLiteral("pool fetched countries=%1 total=%2 own=%3 provider=%4 whitelist=%5")
+                              .arg(p.view.countries.size()).arg(own + provider).arg(own).arg(provider).arg(p.view.whitelist));
             self->dispatch(self->m_m.poolReady(p.view, self->now()));
+        }
         else if (p.status == 404)
             self->m_poolUnsupported = true;
         else
