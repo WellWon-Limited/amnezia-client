@@ -288,6 +288,29 @@ if(AVPN_DEV_TOOLS)
     message(STATUS "AVPN overlay: AVPN_DEV_TOOLS=ON (development build tools)")
 endif()
 
+# Device round 19.11: the commit label ("Started AVPN version 5.1.110.140 <commit>", About screen) came from a
+# configure-time git call, so an incremental build of a newer commit kept the old label (the phone ran 74da6399f and
+# said 76015d714). The label is now written on every build into a generated header that only the three upstream files
+# printing it force-include (it overrides their -DGIT_COMMIT_HASH); the header changes only with the commit, so only
+# those three files recompile. No upstream file is touched.
+set(AVPN_GIT_COMMIT_HEADER "${CMAKE_CURRENT_BINARY_DIR}/avpn_git_commit.h")
+execute_process(COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${AVPN_GIT_COMMIT_HEADER}
+                        -P ${CMAKE_CURRENT_LIST_DIR}/avpn_git_commit.cmake)
+add_custom_target(avpn_git_commit ALL
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${AVPN_GIT_COMMIT_HEADER}
+            -P ${CMAKE_CURRENT_LIST_DIR}/avpn_git_commit.cmake
+    BYPRODUCTS ${AVPN_GIT_COMMIT_HEADER}
+    COMMENT "AVPN: commit label"
+    VERBATIM)
+add_dependencies(${PROJECT} avpn_git_commit)
+foreach(avpn_label_src main.cpp ui/controllers/settingsUiController.cpp core/controllers/settingsController.cpp)
+    # COMPILE_FLAGS, not COMPILE_OPTIONS: the Xcode generator passes a per-file "SHELL:" option to clang verbatim
+    set_property(SOURCE ${CMAKE_CURRENT_LIST_DIR}/../${avpn_label_src} APPEND_STRING PROPERTY
+                 COMPILE_FLAGS " -include ${AVPN_GIT_COMMIT_HEADER}")
+    set_property(SOURCE ${CMAKE_CURRENT_LIST_DIR}/../${avpn_label_src} APPEND PROPERTY
+                 OBJECT_DEPENDS ${AVPN_GIT_COMMIT_HEADER})
+endforeach()
+
 # AVPN (аудит N3, 2026-07-02): «нет return в non-void функции» = UB — в НАШИХ исходниках это
 # ошибка компиляции, не warning. Апстрим-TU не трогаем. MSVC не покрываем (наши платформы — clang).
 if(NOT MSVC)
