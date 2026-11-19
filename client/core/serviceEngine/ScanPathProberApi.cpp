@@ -75,10 +75,18 @@ void ScanApiRaceApi::session(const QString &networkKey, std::function<void(const
     });
 }
 
-void ScanApiRaceApi::probeSeat(const QString &profileId, std::function<void(const Seat &)> done)
+namespace {
+// The race's seat owner over the Scanner's batch owner (the release lives there).
+struct ScanApiRaceSeat final : IRaceSeat {
+    std::unique_ptr<ScanSeatBatch> batch;
+};
+} // namespace
+
+std::shared_ptr<IRaceSeat> ScanApiRaceApi::probeSeat(const QString &profileId, qint64 costBytes, std::function<void(const Seat &)> done,
+                                                     std::function<void(qint64)> releaseBytes)
 {
-    const ScanTunables t;
-    m_api->probeBatch({profileId}, true, t.costBatchBytes + t.costConfigBytes, [done](const ScanApiClient::Batch &b) {
+    auto seat = std::make_shared<ScanApiRaceSeat>();
+    seat->batch = m_api->probeBatch({profileId}, true, costBytes, [done](const ScanApiClient::Batch &b) {
         Seat s;
         s.bytes = b.bytes;
         if (!b.ok || b.items.isEmpty()) {
@@ -93,14 +101,8 @@ void ScanApiRaceApi::probeSeat(const QString &profileId, std::function<void(cons
         s.configSha256 = i.configSha256;
         s.code = i.code;
         done(s);
-    });
-}
-
-void ScanApiRaceApi::releaseSeats(const QStringList &leaseIds)
-{
-    if (leaseIds.isEmpty())
-        return;
-    m_api->releaseLeases(leaseIds, ScanTunables().costApiBytes, [](qint64) {});
+    }, std::move(releaseBytes));
+    return seat;
 }
 
 } // namespace avpn

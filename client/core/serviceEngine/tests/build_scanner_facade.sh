@@ -20,7 +20,7 @@ ARCH_FLAGS=()
 FLAGS=(-std=c++17 -fPIC ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} -Wall -Wextra -Wno-unused-parameter
   -I"$SE" -I"$CLIENT" -I"$QT/include" -I"$QT/lib/QtCore.framework/Headers" -I"$QT/lib/QtNetwork.framework/Headers"
   -I"$SSL/include" -F"$QT/lib")
-LINK=(-F"$QT/lib" -framework QtCore -framework QtNetwork -L"$SSL/lib" -lcrypto -Wl,-rpath,"$QT/lib")
+LINK=(-F"$QT/lib" -framework QtCore -framework QtNetwork -L"$SSL/lib" -lcrypto -lz -Wl,-rpath,"$QT/lib")
 
 # Objects that never change between mutations: built once.
 "$QT/libexec/moc" -f"TribeScanner.h" "$SE/TribeScanner.h" -o "$WORK/moc_TribeScanner.cpp"
@@ -73,8 +73,16 @@ if [ "${1:-}" = "--mutate" ]; then
     "if-none-match-not-sent@@ScanApiClient.cpp@@        rq.headers << qMakePair(QByteArrayLiteral(\"If-None-Match\"), run->stored.etag);@@        ;"
     "stored-token-after-304@@ScanApiClient.cpp@@        run->result.scanToken = token;\n        run->result.tokenExpiresAtMs@@        run->result.scanToken = run->stored.obj.value(QLatin1String(\"scan_token\")).toObject().value(QLatin1String(\"token\")).toString();\n        run->result.tokenExpiresAtMs"
     "manifest-signature-not-checked@@ScanApiClient.cpp@@    if (!verifyDetachedWithContext(key, QLatin1String(kScanManifestSigContext), body, sig))\n        return false;@@"
-    "batch-signature-not-checked@@ScanApiClient.cpp@@            if (!sigOk || o.value@@            if (o.value"
-    "batch-cut-missing@@ScanApiClient.cpp@@    rq.body = QJsonDocument(QJsonObject{{QStringLiteral(\"profile_ids\"), arr}, {QStringLiteral(\"include_config\"), includeConfig}})\n                  .toJson(QJsonDocument::Compact);\n    rq.maxBytes = costBytes;@@    rq.body = QJsonDocument(QJsonObject{{QStringLiteral(\"profile_ids\"), arr}, {QStringLiteral(\"include_config\"), includeConfig}})\n                  .toJson(QJsonDocument::Compact);"
+    "batch-signature-not-checked@@ScanApiClient.cpp@@        if (!sigOk || o.value@@        if (o.value"
+    "batch-cut-missing@@ScanApiClient.cpp@@    rq.maxBytes = st->cost < 0 ? -1 : qMax<qint64>(0, st->cost - st->spent);@@    rq.maxBytes = -1;"
+    "batch-not-resent@@ScanApiClient.cpp@@        const bool again = st->owned && scanRetryCanceledRequest(@@        const bool again = false && scanRetryCanceledRequest("
+    "batch-without-operation-id@@ScanApiClient.cpp@@,\n                                        {QStringLiteral(\"operation_id\"), st->op}})@@})"
+    "foreign-operation-accepted@@ScanApiClient.cpp@@        } else if (o.value(QLatin1String(\"operation_id\")).toString() != st->op) {@@        } else if (false) {"
+    "unseen-seats-kept@@ScanApiClient.cpp@@    if (unseen || (!st->owned && !st->held.isEmpty())) {@@    if (!st->owned && !st->held.isEmpty()) {"
+    "owner-gone-seats-kept@@ScanApiClient.cpp@@    if (unseen || (!st->owned && !st->held.isEmpty())) {@@    if (unseen) {"
+    "owner-dtor-keeps-seats@@ScanApiClient.cpp@@    if (!m_s->inFlight && !m_s->held.isEmpty())\n        ScanApiClient::releaseBatch(m_s);@@"
+    "qnam-implicit-gzip@@ScanApiClient.cpp@@        rq.headers << qMakePair(QByteArrayLiteral(\"Accept-Encoding\"), QByteArrayLiteral(\"gzip\"));@@        ;"
+    "gzip-not-inflated@@ScanApiClient.cpp@@            if (scanGunzip(r.body, kScanInflateMaxBytes, &plain)) {\n                r.body = plain;@@            if (scanGunzip(r.body, kScanInflateMaxBytes, &plain)) {"
     "revision-refetch-skipped@@ScanApiClient.cpp@@        if (rev > run->stored.revision && !run->refetched) {@@        if (false) {"
     "release-bytes-not-reported@@TribeScanner.cpp@@[self, reqId](qint64 bytes) {\n        if (self)\n            self->dispatch(self->m_m.appRequestDone(reqId, bytes, self->now()));@@[self, reqId](qint64 bytes) {\n        if (self)\n            ;"
     "outcomes-bytes-not-reported@@TribeScanner.cpp@@[self, reqId](int, qint64 bytes) {\n        if (self)\n            self->dispatch(self->m_m.appRequestDone(reqId, bytes, self->now()));@@[self, reqId](int, qint64 bytes) {\n        if (self)\n            ;"
@@ -120,7 +128,6 @@ if [ "${1:-}" = "--mutate" ]; then
     "server-off-never-cleared@@TribeScanner.cpp@@    m_serverOff = false; // the switches changed@@    ; // the switches changed"
     "stale-live-probe-delivered@@TribeScanner.cpp@@                         if (self->bindingCurrent(asked))\n                             self->dispatch(self->m_m.liveProbeResult@@                         if (true)\n                             self->dispatch(self->m_m.liveProbeResult"
     "stale-batch-applied@@TribeScanner.cpp@@        if (!self->bindingCurrent(asked)) {\n            // A reply of an older scan@@        if (false) {\n            // A reply of an older scan"
-    "stale-seats-kept@@TribeScanner.cpp@@            self->releaseStaleLeases(stale);@@            ;"
     "light-ask-id-ignored@@TribeScanner.cpp@@    if (askId != m_lightAskId) {@@    if (false) {"
     "wire-cap-ignored@@UpstreamLeaseClient.cpp@@    const qint64 wireCap = pr.maxWireBytes;@@    const qint64 wireCap = -1;"
     "headers-not-counted@@UpstreamLeaseClient.cpp@@        facts->wireBytes += h;@@        ;"

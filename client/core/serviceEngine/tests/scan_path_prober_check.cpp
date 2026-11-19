@@ -169,11 +169,18 @@ struct FakeApi : IRaceScanApi {
     bool sessionOk = true;
     int sessions = 0;
     QStringList seatsAsked;
-    QStringList released;
+    QList<qint64> seatCosts;
+    QStringList released; // a seat whose owner went (production: released by its operation id, also unseen seats)
     bool seatOk = true;
+    QString seatCode = QStringLiteral("no_seat"); // the refusal when !seatOk
     QByteArray providerConfig;
     bool holdSeat = false;
     std::function<void(const Seat &)> heldSeat;
+    struct FakeSeat : IRaceSeat {
+        FakeApi *api = nullptr;
+        QString lease;
+        ~FakeSeat() override { api->released << lease; }
+    };
 
     bool configured() const override { return isConfigured; }
     void session(const QString &key, std::function<void(const RaceScanSession &)> done) override
@@ -191,23 +198,27 @@ struct FakeApi : IRaceScanApi {
         s.bytes = 3000;
         QTimer::singleShot(0, [done, s]() { done(s); });
     }
-    void probeSeat(const QString &profileId, std::function<void(const Seat &)> done) override
+    std::shared_ptr<IRaceSeat> probeSeat(const QString &profileId, qint64 costBytes, std::function<void(const Seat &)> done,
+                                         std::function<void(qint64)>) override
     {
         seatsAsked << profileId;
+        seatCosts << costBytes;
         Seat s;
         s.ok = seatOk;
-        s.leaseId = QStringLiteral("LEASE-%1").arg(profileId);
+        s.leaseId = seatOk ? QStringLiteral("LEASE-%1").arg(profileId) : QString();
         s.config = QString::fromUtf8(providerConfig);
         s.configSha256 = QString::fromLatin1(QCryptographicHash::hash(providerConfig, QCryptographicHash::Sha256).toHex());
-        s.code = seatOk ? QString() : QStringLiteral("no_seat");
+        s.code = seatOk ? QString() : seatCode;
         s.bytes = 2000;
-        if (holdSeat) {
+        auto seat = std::make_shared<FakeSeat>();
+        seat->api = this;
+        seat->lease = QStringLiteral("LEASE-%1").arg(profileId);
+        if (holdSeat)
             heldSeat = [done, s](const Seat &) { done(s); };
-            return;
-        }
-        QTimer::singleShot(0, [done, s]() { done(s); });
+        else
+            QTimer::singleShot(0, [done, s]() { done(s); });
+        return seat;
     }
-    void releaseSeats(const QStringList &ids) override { released << ids; }
 };
 
 struct FakeEngine : IScanEngine {
@@ -377,6 +388,10 @@ static void caseProvider()
     w.start(1, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
     spin(30);
     check(w.api.seatsAsked == QStringList{QStringLiteral("abcdef0123456789")}, "one probe seat for the profile");
+    const ScanTunables dt;
+    check(w.api.seatCosts == QList<qint64>{qint64(dt.costBatchBytes) + dt.costConfigBytes},
+          "the seat's request is cut at the price the race paid for it (the batch with its config)");
+    check(w.api.released.isEmpty(), "the seat is held while the probe runs");
     const QJsonObject c = w.host.candidateOf(1);
     check(c.value("kind").toString() == "xray_full" && c.value("profile_id").toString() == "abcdef0123456789"
               && c.value("config").toString().contains("192.0.2.31"),
@@ -393,6 +408,19 @@ static void caseProvider()
     spin(30);
     check(x.resultOf(1) && x.resultOf(1)->outcome == path::PathOutcome::Inconclusive && x.host.of("scan_start").isEmpty(),
           "no seat: not proven, nothing sent");
+
+    // Contract 1.15.0: a resent operation whose seat already ended answers lease_gone - the candidate has no seat:
+    // skipped (not proven, never probed), not an error of the batch.
+    World g;
+    g.api.seatOk = false;
+    g.api.seatCode = QStringLiteral("lease_gone");
+    g.ready();
+    g.start(1, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
+    g.start(1, 2, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+    spin(30);
+    check(g.resultOf(1) && g.resultOf(1)->outcome == path::PathOutcome::Inconclusive && g.host.candidateOf(1).isEmpty(),
+          "lease_gone: the provider candidate is skipped, nothing probed");
+    check(!g.host.candidateOf(2).isEmpty() && !g.resultOf(2), "the race's other probes go on");
 
     World y;
     y.api.providerConfig = R"({"api":{"tag":"api"},"outbounds":[]})";
@@ -427,7 +455,25 @@ static void caseCancel()
     x.api.heldSeat(IRaceScanApi::Seat());
     spin(20);
     check(x.api.released == QStringList{QStringLiteral("LEASE-abcdef0123456789")} && x.results.isEmpty() && x.host.of("scan_start").isEmpty(),
-          "a seat granted after the cancel is released at once, nothing probed");
+          "a seat still asked when the probe is cancelled is released by its owner at once (its operation id), nothing probed");
+
+    FakeApi api; // the prober goes while its provider probe holds a seat: the seat goes with it
+    {
+        FakeHost host;
+        FakeEngine engine;
+        api.providerConfig = providerProfile();
+        ScanPathProber p(&host, &engine, &api);
+        p.pollIntervalMs = 5;
+        p.warmUp();
+        spin(30);
+        path::PathCandidate c;
+        c.id.id = QStringLiteral("up:abcdef0123456789");
+        c.kind = path::PathKind::Provider;
+        p.start(path::ProbeStamp{1, 1, 1}, c, 4000);
+        spin(30);
+        check(!host.candidateOf(1).isEmpty() && api.released.isEmpty(), "the probe runs with its seat");
+    }
+    check(api.released == QStringList{QStringLiteral("LEASE-abcdef0123456789")}, "the prober's end releases the seat");
 }
 
 static void caseScanReplaced()
@@ -563,6 +609,19 @@ static void caseCosts()
           "provider: the data connection and the seat batch with its config");
     w.prober.xrayBurst = 1;
     check(w.prober.costs().xray < c.xray, "one connection costs less than the burst");
+
+    // Device round 19.11 + prod after gzip (PR #639): a one-profile batch answer with its config is 7.3-12.6 KB on the
+    // wire (the HTTP layer counts wire bytes). At 32 KiB per config a provider probe is 107 520 B: one own Xray probe
+    // (116 736 B) and one provider probe fit one cellular race (262 144 B) together; at the old 256 KiB price
+    // (336 896 B) a provider never took part on cellular.
+    const path::PathRace::Costs d = ScanPathProber::raceCosts(ScanTunables(), kScanXrayBurstParts);
+    check(d.provider == 107520 && d.xray == 116736, "the compiled prices: provider 107 520 B, own Xray 116 736 B");
+    check(d.xray + d.provider <= path::RaceTimings().cellularMaxBytes, "one own Xray and one provider probe fit one cellular race");
+    const ScanTunables old = ScanTunables::fromNumbers({{QStringLiteral("scan_cost_config_bytes"), 262144}});
+    check(old.costConfigBytes == 262144 && ScanPathProber::raceCosts(old, kScanXrayBurstParts).provider == 336896,
+          "a server that still publishes 256 KiB is taken as published (inside the client's range)");
+    check(ScanTunables::fromNumbers({{QStringLiteral("scan_cost_config_bytes"), 8192}}).costConfigBytes == 16384,
+          "the floor: 16 KiB");
 }
 
 int main(int argc, char **argv)

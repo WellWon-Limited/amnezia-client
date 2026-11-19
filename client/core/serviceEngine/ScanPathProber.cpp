@@ -19,13 +19,7 @@ ScanPathProber::ScanPathProber(IScanHost *host, IScanEngine *engine, IRaceScanAp
 
 ScanPathProber::~ScanPathProber()
 {
-    *m_alive = false;
-    QStringList seats;
-    for (const Probe &p : m_probes)
-        if (!p.leaseId.isEmpty())
-            seats << p.leaseId;
-    if (m_api && !seats.isEmpty())
-        m_api->releaseSeats(seats);
+    *m_alive = false; // the probes' seats go with m_probes (their owners)
 }
 
 qint64 ScanPathProber::now() const { return wallNow ? wallNow() : QDateTime::currentMSecsSinceEpoch(); }
@@ -152,7 +146,7 @@ void ScanPathProber::start(const path::ProbeStamp &stamp, const path::PathCandid
 void ScanPathProber::launch(quint64 key)
 {
     auto it = m_probes.find(key);
-    if (it == m_probes.end() || it->cancelled)
+    if (it == m_probes.end())
         return;
     const path::PathCandidate &pc = it->path;
     const ScanTunables t = tunables();
@@ -222,23 +216,24 @@ void ScanPathProber::launch(quint64 key)
         it->waitingSeat = true;
         const std::weak_ptr<bool> alive = m_alive;
         const QString nodeId = pc.id.id;
-        m_api->probeSeat(profileId, [this, alive, key, profileId, nodeId](const IRaceScanApi::Seat &seat) {
+        const auto charge = [this, alive](qint64 bytes) {
+            if (alive.lock() && chargeApiBytes && bytes > 0)
+                chargeApiBytes(bytes);
+        };
+        // The cut is the price the race paid for this probe (raceCosts: the batch with its config).
+        const std::shared_ptr<IRaceSeat> owner = m_api->probeSeat(profileId, qint64(t.costBatchBytes) + t.costConfigBytes,
+                                                                  [this, alive, key, profileId, nodeId, charge](const IRaceScanApi::Seat &seat) {
             if (!alive.lock())
                 return;
-            if (chargeApiBytes && seat.bytes > 0)
-                chargeApiBytes(seat.bytes);
+            charge(seat.bytes);
             auto p = m_probes.find(key);
-            if (p == m_probes.end() || p->cancelled) {
-                if (seat.ok && !seat.leaseId.isEmpty())
-                    m_api->releaseSeats({seat.leaseId}); // the probe went away while the seat was asked
-                return;
-            }
+            if (p == m_probes.end())
+                return; // the probe went away while the seat was asked: its owner released the seat
             p->waitingSeat = false;
             if (!seat.ok || seat.leaseId.isEmpty() || seat.config.isEmpty()) {
-                finish(key, path::PathOutcome::Inconclusive, 0, "no_seat");
+                finish(key, path::PathOutcome::Inconclusive, 0, seat.code == QLatin1String("lease_gone") ? "seat_gone" : "no_seat");
                 return;
             }
-            p->leaseId = seat.leaseId;
             const SanitizedProfile chk = upstreamProfileCheck(seat.config.toUtf8(), seat.configSha256,
                                                               m_engine->upstreamProtocolTags(nodeId));
             if (!chk.ok()) {
@@ -254,7 +249,10 @@ void ScanPathProber::launch(quint64 key)
             hc.reachAtMs = -1;
             hc.costBytes = scanProbeCostBytes(ScanProbeKind::XrayFull, false, tunables());
             sendCandidate(key, hc);
-        });
+        }, charge);
+        const auto p = m_probes.find(key);
+        if (p != m_probes.end())
+            p->seat = owner;
         return;
     }
     }
@@ -363,8 +361,7 @@ void ScanPathProber::onAddReply(const QString &scanId, const QList<ScanHostCandi
     QList<ScanHostCandidate> again;
     for (const ScanHostCandidate &c : cands) {
         const quint64 key = keyOfHostId(c.id);
-        auto it = m_probes.find(key);
-        if (it == m_probes.end() || it->cancelled)
+        if (!m_probes.contains(key))
             continue;
         again << c;
     }
@@ -458,11 +455,7 @@ void ScanPathProber::cancel(const path::ProbeStamp &stamp)
     auto it = m_probes.find(stamp.probe);
     if (it == m_probes.end() || !(it->stamp == stamp))
         return;
-    it->cancelled = true;
-    if (!it->leaseId.isEmpty())
-        m_api->releaseSeats({it->leaseId});
-    if (!it->waitingSeat) // a seat still asked is released when its answer comes
-        m_probes.erase(it);
+    m_probes.erase(it); // its seat goes with it (a seat still asked: released by its operation id once the ask ends)
     cancelScanIfIdle();
 }
 
@@ -471,7 +464,7 @@ void ScanPathProber::cancelScanIfIdle()
     if (m_scan.closed)
         return;
     for (const Probe &p : m_probes)
-        if (!p.cancelled && p.scanId == m_scan.id)
+        if (p.scanId == m_scan.id)
             return;
     // nothing of the scan is wanted any more: end it (its AmneziaWG sessions too) before the owner raises a tunnel
     const QString scanId = m_scan.id;
@@ -497,14 +490,12 @@ void ScanPathProber::finish(quint64 key, path::PathOutcome outcome, qint64 bytes
     auto it = m_probes.find(key);
     if (it == m_probes.end())
         return;
-    const Probe p = it.value();
+    const Probe p = it.value(); // its seat is released as the last copy goes, after the result below
     m_probes.erase(it);
-    if (!p.leaseId.isEmpty() && !p.cancelled)
-        m_api->releaseSeats({p.leaseId});
     say(QStringLiteral("race_prober result race=%1 probe=%2 node=%3 outcome=%4 bytes=%5 why=%6")
             .arg(p.stamp.race).arg(p.stamp.probe).arg(p.path.id.id, QLatin1String(path::pathOutcomeName(outcome)))
             .arg(bytes).arg(QLatin1String(why)));
-    if (!p.cancelled && onResult)
+    if (onResult)
         onResult(p.stamp, outcome, bytes);
     // A finished probe leaves the scan open: the race may add its next probe at once (the engine closes a scan whose
     // candidates are all final by itself; only cancel() ends it early).

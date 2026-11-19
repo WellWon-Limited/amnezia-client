@@ -17,10 +17,13 @@
 //    anything else, the scan's end without an item, an unknown scan -> Inconclusive (never recorded by the race).
 //    Bytes = the item's spent bytes (the host's own count). Every result goes to onResult once, on the GUI thread,
 //    never from inside start().
-//  - cancel(): the probe's result is dropped; its seat is released; when nothing of the scan is live any more the
+//  - cancel(): the probe's result is dropped and the probe is gone; when nothing of the scan is live any more the
 //    host scan is cancelled (its AmneziaWG sessions end before the owner raises a tunnel).
-//  - Provider seats: one batch call per provider probe (the race starts at most providerPerRace of them), released
-//    when the result comes or the probe is cancelled; never a session seat.
+//  - Provider seats: one batch call per provider probe (the race starts at most providerPerRace of them); never a
+//    session seat. The probe owns its seat (IRaceSeat, production: ScanSeatBatch with its operation id): the seat
+//    goes with the probe - its result, its cancel, the prober's end - also a seat whose answer a tunnel transition
+//    cut (released by the operation id). A refusal `lease_gone` (a resent operation whose seat already ended) is
+//    "no seat": the candidate is skipped, not proven.
 //
 // Session cache (the cost rule): the session (token, probe base, its IPs, the manifest's awg_probe nodes and
 // numbers) is kept in memory per network reporting key until 60 s before the token expires (server scan_token_ttl_s,
@@ -71,6 +74,13 @@ struct RaceScanSession {
     qint64 bytes = 0;            // what the fetch transferred
 };
 
+// The owner of one provider probe seat: destroying it releases the seat, also one whose answer never came.
+class IRaceSeat
+{
+public:
+    virtual ~IRaceSeat() = default;
+};
+
 // The server calls of the race (production: ScanApiClient, ScanPathProberApi.cpp; tests: a fake).
 class IRaceScanApi
 {
@@ -83,11 +93,13 @@ public:
         QString leaseId;      // SECRET
         QString config;       // SECRET
         QString configSha256;
-        QString code;         // refused: no_seat | rate_limited | ...
+        QString code;         // refused: no_seat | rate_limited | lease_gone | ...
         qint64 bytes = 0;
     };
-    virtual void probeSeat(const QString &profileId, std::function<void(const Seat &)> done) = 0;
-    virtual void releaseSeats(const QStringList &leaseIds) = 0;
+    // One seat with its config; costBytes cuts the request (resends included). `done` once, never from inside the
+    // call; the returned owner releases the seat when it goes (releaseBytes: what that release transferred).
+    virtual std::shared_ptr<IRaceSeat> probeSeat(const QString &profileId, qint64 costBytes, std::function<void(const Seat &)> done,
+                                                 std::function<void(qint64)> releaseBytes) = 0;
 };
 
 // Pure: the race caps of a host's scan_caps (inFlight = the total the race may keep in flight).
@@ -176,8 +188,7 @@ private:
         path::PathCandidate path;
         QString hostId;        // the candidate id in the host scan ("" = not sent yet)
         QString scanId;        // the host scan it joined
-        QString leaseId;       // provider: its probe seat
-        bool cancelled = false;
+        std::shared_ptr<IRaceSeat> seat; // provider: its probe seat (released with the probe)
         bool waitingSession = false;
         bool waitingSeat = false;
         int parts = 1;          // host candidates of this probe (own Xray: the burst, see xrayBurst)

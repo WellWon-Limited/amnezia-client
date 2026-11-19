@@ -2,6 +2,7 @@
 
 #include "NetAwait.h" // armTimeout: the per-request bound of the app's API client (no timer of our own)
 #include "ScanBudget.h"
+#include "ScanTunables.h"
 #include "SignedContext.h"
 
 #include <QCryptographicHash>
@@ -23,6 +24,9 @@
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QUuid>
+
+#include <zlib.h>
 
 namespace avpn {
 
@@ -77,10 +81,52 @@ qint64 scanHttpRequestBytes(const IScanHttp::Request &r)
     return n;
 }
 
+bool scanGunzip(const QByteArray &in, qint64 maxOut, QByteArray *out)
+{
+    out->clear();
+    z_stream zs{};
+    if (in.isEmpty() || inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK) // 16: the gzip wrapper only
+        return false;
+    zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(in.constData()));
+    zs.avail_in = uInt(in.size());
+    char buf[16384];
+    int rc = Z_OK;
+    while (rc == Z_OK) {
+        zs.next_out = reinterpret_cast<Bytef *>(buf);
+        zs.avail_out = sizeof(buf);
+        rc = inflate(&zs, Z_NO_FLUSH);
+        if (rc != Z_OK && rc != Z_STREAM_END)
+            break;
+        out->append(buf, qsizetype(sizeof(buf) - zs.avail_out));
+        if (out->size() > maxOut) {
+            rc = Z_MEM_ERROR;
+            break;
+        }
+        if (rc == Z_OK && zs.avail_in == 0 && zs.avail_out != 0) {
+            rc = Z_DATA_ERROR; // the stream ended before its end mark
+            break;
+        }
+    }
+    inflateEnd(&zs);
+    if (rc != Z_STREAM_END) {
+        out->clear();
+        return false;
+    }
+    return true;
+}
+
 ScanQnamHttp::ScanQnamHttp(QNetworkAccessManager *nam, QObject *parent) : QObject(parent), m_nam(nam) {}
 
-void ScanQnamHttp::send(const Request &rq, DoneFn done)
+void ScanQnamHttp::send(const Request &asked, DoneFn done)
 {
+    // Our own Accept-Encoding: QNAM then hands the body over as it came (counted and cut as wire bytes) and the
+    // answer is inflated below; with QNAM's implicit "gzip, deflate" its counts would be the inflated body.
+    Request rq = asked;
+    bool hasEncoding = false;
+    for (const auto &h : rq.headers)
+        hasEncoding = hasEncoding || h.first.compare("Accept-Encoding", Qt::CaseInsensitive) == 0;
+    if (!hasEncoding)
+        rq.headers << qMakePair(QByteArrayLiteral("Accept-Encoding"), QByteArrayLiteral("gzip"));
     const qint64 sentBytes = scanHttpRequestBytes(rq);
     if (!m_nam || rq.url.isEmpty() || (rq.maxBytes >= 0 && sentBytes > rq.maxBytes)) {
         QTimer::singleShot(0, this, [done, rq, sentBytes]() {
@@ -147,6 +193,15 @@ void ScanQnamHttp::send(const Request &rq, DoneFn done)
         r.bytes = sentBytes + qMax<qint64>(0, live->headerBytes) + live->body.size();
         if (cap >= 0)
             r.bytes = qMin(r.bytes, cap);
+        if (!r.cut && r.header("content-encoding").trimmed().toLower() == "gzip") {
+            QByteArray plain;
+            if (scanGunzip(r.body, kScanInflateMaxBytes, &plain)) {
+                r.body = plain;
+            } else {
+                r.status = 0; // an answer that does not inflate is no answer
+                r.body.clear();
+            }
+        }
         if (done)
             done(r);
     });
@@ -243,6 +298,60 @@ QByteArray scanProbeNonce()
     for (int i = 0; i < 24; ++i)
         n += alphabet[QRandomGenerator::global()->bounded(int(sizeof(alphabet) - 1))];
     return n;
+}
+
+QString scanOperationId() { return QUuid::createUuid().toString(QUuid::Id128); }
+
+bool scanOperationIdValid(const QString &id)
+{
+    static const QRegularExpression re(QStringLiteral("^[A-Za-z0-9_-]{16,64}$"));
+    return re.match(id).hasMatch();
+}
+
+// --- the owner of a probe-seat batch ---------------------------------------------------------------------------
+
+struct ScanSeatBatch::State {
+    QPointer<ScanApiClient> api;
+    QString op;
+    QStringList profileIds; // as asked: the answer's order
+    qint64 cost = -1;       // every send together
+    qint64 spent = 0;
+    int resends = 0;
+    bool inFlight = true;
+    bool owned = true;
+    QStringList held;       // granted lease ids nobody released one by one yet
+    qint64 releaseCost = 0;
+    std::function<void(const ScanApiClient::Batch &)> done;
+    std::function<void(qint64)> releaseBytes;
+};
+
+ScanSeatBatch::~ScanSeatBatch()
+{
+    m_s->owned = false;
+    if (!m_s->inFlight && !m_s->held.isEmpty())
+        ScanApiClient::releaseBatch(m_s);
+    // in flight: no resend any more; the seats go when the request ends (finishBatch)
+}
+
+QString ScanSeatBatch::operationId() const { return m_s->op; }
+
+void ScanSeatBatch::forget(const QStringList &leaseIds)
+{
+    for (const QString &l : leaseIds)
+        m_s->held.removeAll(l);
+}
+
+void ScanApiClient::releaseBatch(const std::shared_ptr<ScanSeatBatch::State> &st)
+{
+    const QStringList ids = st->held;
+    st->held.clear();
+    if (!st->api)
+        return; // the client went with the app: the seats are the server's TTL's
+    const std::function<void(qint64)> sink = st->releaseBytes;
+    st->api->releaseLeases(ids, st->releaseCost, [sink](qint64 bytes) {
+        if (sink)
+            sink(bytes);
+    }, st->op);
 }
 
 // --- the client ------------------------------------------------------------------------------------------------
@@ -717,9 +826,24 @@ void ScanApiClient::fetchCandidates(const QString &networkKey, const QString &sc
 
 // --- probe-batch -----------------------------------------------------------------------------------------------
 
-void ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig, qint64 costBytes,
-                               std::function<void(const Batch &)> done)
+// Device round of 19.11: the race asked its probe seats as a tunnel came up; that transition cut the request and
+// the seats the server had granted stayed until their TTL, unknown to the app. Contract 1.15.0: the batch carries an
+// operation id made here, before the first send; a send our own transition cut (scanRetryCanceledRequest) goes again
+// with the SAME body - the server answers the same seats - and only an answer echoing the id is used. The seats
+// belong to the returned owner (ScanSeatBatch), released by the id whenever they may be held and unseen.
+std::unique_ptr<ScanSeatBatch> ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig, qint64 costBytes,
+                                                         std::function<void(const Batch &)> done,
+                                                         std::function<void(qint64)> releaseBytes)
 {
+    auto st = std::make_shared<ScanSeatBatch::State>();
+    st->api = this;
+    st->op = scanOperationId();
+    st->profileIds = profileIds;
+    st->cost = costBytes;
+    st->done = std::move(done);
+    st->releaseBytes = std::move(releaseBytes);
+    st->releaseCost = ScanTunables().costApiBytes;
+    std::unique_ptr<ScanSeatBatch> owner(new ScanSeatBatch(st));
     QStringList ids;
     for (const QString &p : profileIds)
         if (profileIdValid(p) && !ids.contains(p))
@@ -727,15 +851,16 @@ void ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig
     const QString b = base();
     const QString token = m_deviceToken ? m_deviceToken() : QString();
     if (ids.isEmpty() || !configured() || b.isEmpty() || token.isEmpty()) {
-        QTimer::singleShot(0, this, [done, profileIds]() {
+        QTimer::singleShot(0, this, [st]() {
+            st->inFlight = false; // nothing was sent: no seat can exist
             Batch r;
             r.failCode = QStringLiteral("transport");
-            for (const QString &p : profileIds)
+            for (const QString &p : st->profileIds)
                 r.items << BatchItem{p, false, QString(), QString(), QStringLiteral("transport"), QString()};
-            if (done)
-                done(r);
+            if (st->done)
+                st->done(r);
         });
-        return;
+        return owner;
     }
     QJsonArray arr;
     for (const QString &p : ids)
@@ -745,90 +870,146 @@ void ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig
     rq.url = b + QStringLiteral("/v1/upstream/lease/probe-batch");
     rq.headers << qMakePair(QByteArrayLiteral("Authorization"), bearer(token))
                << qMakePair(QByteArrayLiteral("Content-Type"), QByteArrayLiteral("application/json"));
-    rq.body = QJsonDocument(QJsonObject{{QStringLiteral("profile_ids"), arr}, {QStringLiteral("include_config"), includeConfig}})
+    rq.body = QJsonDocument(QJsonObject{{QStringLiteral("profile_ids"), arr}, {QStringLiteral("include_config"), includeConfig},
+                                        {QStringLiteral("operation_id"), st->op}})
                   .toJson(QJsonDocument::Compact);
-    rq.maxBytes = costBytes;
+    sendBatch(st, rq, 0);
+    return owner;
+}
+
+void ScanApiClient::sendBatch(std::shared_ptr<ScanSeatBatch::State> st, IScanHttp::Request rq, int attempt)
+{
+    rq.maxBytes = st->cost < 0 ? -1 : qMax<qint64>(0, st->cost - st->spent); // the batch's cut covers every send
     QPointer<ScanApiClient> self(this);
-    m_http->send(rq, [self, profileIds, done](const IScanHttp::Response &r) {
-        Batch out;
-        out.bytes = r.bytes;
-        out.status = r.status;
-        const auto failAll = [&out, &profileIds](const QString &code) {
-            out.ok = false;
-            out.failCode = code;
-            out.items.clear();
-            for (const QString &p : profileIds)
-                out.items << BatchItem{p, false, QString(), QString(), code, QString()};
-        };
-        if (!self) {
-            failAll(QStringLiteral("transport"));
-        } else if (r.status == 200) {
-            const QString key = self->m_pubKeyHex ? self->m_pubKeyHex() : QString();
-            const bool sigOk = !key.isEmpty()
-                               && verifyDetachedWithContext(key, QLatin1String(kUpstreamLeaseSigContext), r.body, r.header("x-tribe-sig"));
-            const QJsonObject o = QJsonDocument::fromJson(r.body).object();
-            if (!sigOk || o.value(QLatin1String("type")).toString() != QLatin1String("upstream_probe_batch")) {
-                failAll(QStringLiteral("transport")); // an unverified answer grants nothing
-            } else {
-                QHash<QString, BatchItem> got;
-                for (const QJsonValue &v : o.value(QLatin1String("items")).toArray()) {
-                    const QJsonObject it = v.toObject();
-                    BatchItem bi;
-                    bi.profileId = it.value(QLatin1String("profile_id")).toString();
-                    bi.granted = it.value(QLatin1String("granted")).toBool(false);
-                    bi.leaseId = it.value(QLatin1String("lease_id")).toString();
-                    bi.config = it.value(QLatin1String("config")).toString();
-                    bi.configSha256 = it.value(QLatin1String("config_sha256")).toString();
-                    bi.code = it.value(QLatin1String("code")).toString();
-                    if (bi.granted && !leaseIdValid(bi.leaseId)) {
-                        bi.granted = false;
-                        bi.code = QStringLiteral("lease_failed");
-                    }
-                    if (!bi.granted && bi.code.isEmpty())
-                        bi.code = QStringLiteral("lease_failed");
-                    if (!got.contains(bi.profileId))
-                        got.insert(bi.profileId, bi);
-                }
-                out.ok = true;
-                for (const QString &p : profileIds)
-                    out.items << got.value(p, BatchItem{p, false, QString(), QString(), QStringLiteral("lease_failed"), QString()});
-            }
-        } else if (r.status == 403) {
-            failAll(QStringLiteral("not_entitled"));
-        } else if (r.status == 410) {
-            failAll(QStringLiteral("over_quota"));
-        } else if (r.status == 404) {
-            failAll(QStringLiteral("disabled"));
-        } else if (r.status == 429) {
-            failAll(QStringLiteral("rate_limited"));
-        } else {
-            failAll(QStringLiteral("transport"));
+    m_http->send(rq, [self, st, rq, attempt](const IScanHttp::Response &r) {
+        st->spent += r.bytes;
+        const bool again = st->owned && scanRetryCanceledRequest(r.status, r.canceled, attempt)
+                           && (st->cost < 0 || st->cost - st->spent > 0);
+        if (self && again) {
+            ++st->resends;
+            self->emitLog(QStringLiteral("probe_batch status=0 canceled=1 resend=%1 op=%2 bytes=%3")
+                              .arg(attempt + 1).arg(st->op.left(6)).arg(r.bytes));
+            QTimer::singleShot(kScanCanceledRetryDelayMs, self.data(), [self, st, rq, attempt]() {
+                if (self)
+                    self->sendBatch(st, rq, attempt + 1);
+            });
+            return;
         }
         if (self) {
-            int granted = 0;
-            for (const BatchItem &bi : out.items)
-                granted += bi.granted ? 1 : 0;
-            self->emitLog(QStringLiteral("probe_batch status=%1 asked=%2 granted=%3 bytes=%4%5")
-                              .arg(r.status)
-                              .arg(profileIds.size())
-                              .arg(granted)
-                              .arg(r.bytes)
-                              .arg(out.ok ? QString() : QStringLiteral(" fail=") + out.failCode));
+            self->finishBatch(st, r);
+            return;
         }
-        if (done)
-            done(out);
+        st->inFlight = false; // the client went with the app: nothing can be released
+        Batch out;
+        out.failCode = QStringLiteral("transport");
+        out.bytes = st->spent;
+        for (const QString &p : st->profileIds)
+            out.items << BatchItem{p, false, QString(), QString(), QStringLiteral("transport"), QString()};
+        if (st->done)
+            st->done(out);
     });
 }
 
-void ScanApiClient::releaseLeases(const QStringList &leaseIds, qint64 costBytes, std::function<void(qint64)> done)
+void ScanApiClient::finishBatch(std::shared_ptr<ScanSeatBatch::State> st, const IScanHttp::Response &r)
+{
+    Batch out;
+    out.bytes = st->spent;
+    out.status = r.status;
+    out.resends = st->resends;
+    const QStringList &profileIds = st->profileIds;
+    const auto failAll = [&out, &profileIds](const QString &code) {
+        out.ok = false;
+        out.failCode = code;
+        out.items.clear();
+        for (const QString &p : profileIds)
+            out.items << BatchItem{p, false, QString(), QString(), code, QString()};
+    };
+    bool unseen = r.status == 0; // no HTTP answer: the server may have granted seats nobody saw
+    QString why;
+    if (r.status == 200) {
+        const QString key = m_pubKeyHex ? m_pubKeyHex() : QString();
+        const bool sigOk = !key.isEmpty()
+                           && verifyDetachedWithContext(key, QLatin1String(kUpstreamLeaseSigContext), r.body, r.header("x-tribe-sig"));
+        const QJsonObject o = QJsonDocument::fromJson(r.body).object();
+        if (!sigOk || o.value(QLatin1String("type")).toString() != QLatin1String("upstream_probe_batch")) {
+            failAll(QStringLiteral("transport")); // an unverified answer grants nothing
+            unseen = true;
+            why = QStringLiteral(" unverified=1");
+        } else if (o.value(QLatin1String("operation_id")).toString() != st->op) {
+            failAll(QStringLiteral("transport")); // another operation's answer (a late one, a mix-up): not ours to use
+            unseen = true;
+            why = QStringLiteral(" foreign_op=1");
+        } else {
+            QHash<QString, BatchItem> got;
+            for (const QJsonValue &v : o.value(QLatin1String("items")).toArray()) {
+                const QJsonObject it = v.toObject();
+                BatchItem bi;
+                bi.profileId = it.value(QLatin1String("profile_id")).toString();
+                bi.granted = it.value(QLatin1String("granted")).toBool(false);
+                bi.leaseId = it.value(QLatin1String("lease_id")).toString();
+                bi.config = it.value(QLatin1String("config")).toString();
+                bi.configSha256 = it.value(QLatin1String("config_sha256")).toString();
+                bi.code = it.value(QLatin1String("code")).toString();
+                if (bi.granted && !leaseIdValid(bi.leaseId)) {
+                    bi.granted = false;
+                    bi.code = QStringLiteral("lease_failed");
+                }
+                if (!bi.granted && bi.code.isEmpty())
+                    bi.code = QStringLiteral("lease_failed");
+                if (!got.contains(bi.profileId))
+                    got.insert(bi.profileId, bi);
+            }
+            out.ok = true;
+            for (const QString &p : profileIds) {
+                out.items << got.value(p, BatchItem{p, false, QString(), QString(), QStringLiteral("lease_failed"), QString()});
+                if (out.items.last().granted)
+                    st->held << out.items.last().leaseId;
+            }
+        }
+    } else if (r.status == 403) {
+        failAll(QStringLiteral("not_entitled"));
+    } else if (r.status == 410) {
+        failAll(QStringLiteral("over_quota"));
+    } else if (r.status == 404) {
+        failAll(QStringLiteral("disabled"));
+    } else if (r.status == 429) {
+        failAll(QStringLiteral("rate_limited"));
+    } else {
+        failAll(QStringLiteral("transport"));
+    }
+    st->inFlight = false;
+    int granted = 0;
+    for (const BatchItem &bi : out.items)
+        granted += bi.granted ? 1 : 0;
+    emitLog(QStringLiteral("probe_batch status=%1 asked=%2 granted=%3 bytes=%4 op=%5%6%7%8")
+                .arg(r.status)
+                .arg(profileIds.size())
+                .arg(granted)
+                .arg(out.bytes)
+                .arg(st->op.left(6))
+                .arg(st->resends > 0 ? QStringLiteral(" resends=%1").arg(st->resends) : QString())
+                .arg(out.ok ? QString() : QStringLiteral(" fail=") + out.failCode)
+                .arg(why));
+    // Seats that may be held and that nobody will release one by one: released by the operation id now.
+    if (unseen || (!st->owned && !st->held.isEmpty())) {
+        emitLog(QStringLiteral("probe_batch release op=%1 reason=%2").arg(st->op.left(6), unseen ? QStringLiteral("unseen") : QStringLiteral("owner_gone")));
+        releaseBatch(st);
+    }
+    if (st->done)
+        st->done(out);
+}
+
+void ScanApiClient::releaseLeases(const QStringList &leaseIds, qint64 costBytes, std::function<void(qint64)> done,
+                                  const QString &operationId)
 {
     QJsonArray arr;
     for (const QString &l : leaseIds)
         if (leaseIdValid(l))
             arr << l;
+    const bool byOp = scanOperationIdValid(operationId);
     const QString b = base();
     const QString token = m_deviceToken ? m_deviceToken() : QString();
-    if (arr.isEmpty() || !configured() || b.isEmpty() || token.isEmpty()) {
+    if ((arr.isEmpty() && !byOp) || !configured() || b.isEmpty() || token.isEmpty()) {
         QTimer::singleShot(0, this, [done]() {
             if (done)
                 done(0);
@@ -840,7 +1021,12 @@ void ScanApiClient::releaseLeases(const QStringList &leaseIds, qint64 costBytes,
     rq.url = b + QStringLiteral("/v1/upstream/lease/probe-batch/release");
     rq.headers << qMakePair(QByteArrayLiteral("Authorization"), bearer(token))
                << qMakePair(QByteArrayLiteral("Content-Type"), QByteArrayLiteral("application/json"));
-    rq.body = QJsonDocument(QJsonObject{{QStringLiteral("lease_ids"), arr}}).toJson(QJsonDocument::Compact);
+    QJsonObject body;
+    if (!arr.isEmpty())
+        body.insert(QStringLiteral("lease_ids"), arr);
+    if (byOp)
+        body.insert(QStringLiteral("operation_id"), operationId);
+    rq.body = QJsonDocument(body).toJson(QJsonDocument::Compact);
     rq.maxBytes = costBytes;
     rq.timeoutMs = 5000;
     sendRelease(rq, arr.size(), 0, 0, std::move(done));
@@ -863,8 +1049,8 @@ void ScanApiClient::sendRelease(const IScanHttp::Request &rq, int leases, int at
                 done(total);
             return;
         }
-        self->emitLog(QStringLiteral("probe_release status=%1 leases=%2 bytes=%3%4")
-                          .arg(r.status).arg(leases).arg(r.bytes)
+        self->emitLog(QStringLiteral("probe_release status=%1 leases=%2 by_op=%3 bytes=%4%5")
+                          .arg(r.status).arg(leases).arg(rq.body.contains("\"operation_id\"") ? 1 : 0).arg(r.bytes)
                           .arg(again ? QStringLiteral(" canceled=1 resend=%1").arg(attempt + 1) : QString()));
         if (!again) {
             if (done)

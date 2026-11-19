@@ -55,6 +55,6 @@ wait
 for o in "${OBJS[@]}"; do [ -f "$o" ] || { echo "build_scan_lab_e2e.sh: compile failed ($o)"; exit 1; }; done
 mkdir -p "$(dirname "$OUT")"
 clang++ "${OBJS[@]}" "$PKG/lib/libamnezia_xray.a" -framework CoreFoundation -framework Security -lresolv \
-  -F"$QT/lib" -framework QtCore -framework QtNetwork -framework QtRemoteObjects -L"$SSL/lib" -lcrypto \
+  -F"$QT/lib" -framework QtCore -framework QtNetwork -framework QtRemoteObjects -L"$SSL/lib" -lcrypto -lz \
   -Wl,-rpath,"$QT/lib" -o "$OUT"
 echo ">>> build ok: $OUT"
