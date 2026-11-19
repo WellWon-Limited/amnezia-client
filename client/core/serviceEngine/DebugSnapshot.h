@@ -520,6 +520,18 @@ inline bool stopFindsNothingNative(ObservedTunnel observed, bool ownerHoldsNativ
     return !ownerHoldsNativeLeg && observed == ObservedTunnel::Disconnected;
 }
 
+// R1 (review of 141): whether the facade's stop() must run guardedStop(). Native work to stop (`stoppable`) - always,
+// unless a stop is already in flight. No native work: a start the facade opened (opInFlight) that never reached a leg
+// - the race prelude - has no native event coming, so the facade settles it itself at the stop; otherwise the
+// operation stayed Starting and every later tap read as Stop.
+inline bool stopNeedsGuardedStop(bool stoppable, bool stopInFlight, bool opInFlight, ObservedTunnel observed,
+                                 bool ownerHoldsNativeLeg)
+{
+    if (stopInFlight)
+        return false;
+    return stoppable || (opInFlight && stopFindsNothingNative(observed, ownerHoldsNativeLeg));
+}
+
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
 {
     return legStartFailures > 0 || attemptEndedNothingProven;

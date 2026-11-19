@@ -6376,7 +6376,10 @@ void AvpnEngineQml::stop()
 #else
     const bool stoppable = m_lastTunnelState != Vpn::Disconnected && m_lastTunnelState != Vpn::Unknown;
 #endif
-    if (stoppable && m_op != Op::Stopping) {
+    // R1: also a start that never reached a native leg (the race prelude: tunnel Disconnected, no leg held) -
+    // no native event will settle it, guardedStop settles it at once (stop_nothing_native).
+    if (avpn::stopNeedsGuardedStop(stoppable, m_op == Op::Stopping, m_opInFlight, observedTunnelOf(m_lastTunnelState),
+                                   m_engine.ownerHoldsNativeLeg())) {
         m_stopRetries = 0;
         guardedStop("user");
         return;
