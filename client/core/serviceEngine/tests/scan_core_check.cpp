@@ -3852,6 +3852,39 @@ static void serverBatches()
     CHECK(actionOf(wl.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 80050), ScanActionKind::RequestCandidates).requestId.isEmpty());
 }
 
+static void countrylessRows()
+{
+    // Device round air7 (19.11): a white-list row (no country) became a second «Все страны» entry of the menu.
+    World w = baseWorld("wl_menu", hostMac(), ScanNetKind::Wifi);
+    ScanMachine m(w.caps);
+    ScanOpen o = openOf(w, QString(), false);
+    ScanCachedResult c;
+    c.networkKey = o.network.key;
+    c.fingerprint = o.network.fingerprint;
+    c.savedAtMs = kT0;
+    ScanCachedRow nl;
+    nl.id = QStringLiteral("up:aaaaaaaaaaaaaa01");
+    nl.origin = ScanOrigin::Upstream;
+    nl.profileId = QStringLiteral("aaaaaaaaaaaaaa01");
+    nl.countryCode = QStringLiteral("NL");
+    nl.label = QStringLiteral("Нидерланды 1");
+    nl.ms = 40;
+    ScanCachedRow wl = nl;
+    wl.id = QStringLiteral("up:aaaaaaaaaaaaaa02");
+    wl.profileId = QStringLiteral("aaaaaaaaaaaaaa02");
+    wl.countryCode.clear();
+    wl.label = QStringLiteral("Белые списки 1");
+    c.rows << nl << wl;
+    o.cached = c;
+    m.shown(o, kT0 + 1000);
+    const ScanView v = m.view(kT0 + 1000);
+    CHECK(v.rows.size() == 2);
+    bool blank = false;
+    for (const ScanCountryView &x : v.bar.countries)
+        blank = blank || x.countryCode.isEmpty();
+    CHECK(!blank && v.bar.countries.size() == 1 && v.bar.total == 2);
+}
+
 static void rowsAfter17Nov()
 {
     // the manifest's `kind`: absent = Unspecified, unknown = auto
@@ -4191,6 +4224,7 @@ int main(int argc, char **argv)
     labSeams();
     cooldownRule();
     rowsAfter17Nov();
+    countrylessRows();
     xrayBurst();
     findMore();
     findMoreAppends();

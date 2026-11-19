@@ -1636,8 +1636,11 @@ public:
             v.checkedAgoMin = int(qMax<qint64>(0, now - m_finishedAt) / 60000);
         else if ((m_phase == ScanPhase::NoScan || m_phase == ScanPhase::Idle) && cachedAt > 0)
             v.checkedAgoMin = int(qMax<qint64>(0, now - cachedAt) / 60000);
-        // Bottom bar.
+        // Bottom bar. A row without a country (the provider's white-list rows) is no country of the menu: it was
+        // drawn as a second «Все страны» entry (device round air7, 19.11); it counts in the total only.
         for (const ScanRowView &r : all) {
+            if (r.countryCode.isEmpty())
+                continue;
             bool hit = false;
             for (ScanCountryView &c : v.bar.countries)
                 if (c.countryCode == r.countryCode) {
