@@ -29,6 +29,8 @@
 //   Works        - data flows through one of our exits. A body cut by OUR OWN timeout after >= 16 KiB
 //                  counts as Works too (slow link); the hash is checked only on a complete body.
 
+#include "DataCheckRetry.h"
+
 #include <QByteArray>
 #include <QString>
 #include <QtGlobal>
@@ -60,12 +62,13 @@ inline bool whoamiProgressCut(qint64 nowMs, qint64 startMs, qint64 lastByteAtMs,
 }
 // A body above this is not our whoami (contract max is 256 KiB): stop downloading on metered links.
 constexpr qint64 kWhoamiMaxBodyBytes = 1024 * 1024;
-// At most this many whoami requests per verification (one retry), under the server's 6/min limit.
+// At most this many ANSWERED whoami requests per verification (one retry after an answer), under the server's
+// 6/min limit. A try that got no HTTP answer at all is not counted here: the server did not answer it, and the
+// whoami budget bounds such tries (whoamiNext).
 constexpr int kWhoamiMaxAttempts = 2;
-// A whoami request needs at least this much of the whoami budget left to be worth starting.
-constexpr int kWhoamiMinAttemptMs = 1000;
-// Pause before the one retry (no answer, or the first answer said "past the VPN").
-constexpr int kWhoamiRetryDelayMs = 1000;
+// A whoami request needs at least this much of the whoami budget left to be worth starting (the same floor as a
+// retry of any data check, DataCheckRetry.h).
+constexpr int kWhoamiMinAttemptMs = int(kDataCheckRetryMinLeftMs);
 
 struct WhoamiObservation {
     int httpStatus = 0;          // 0 = no HTTP answer (transport error / timeout before headers)
@@ -103,19 +106,47 @@ inline WhoamiVerdict whoamiVerdict(const WhoamiObservation &o)
     return WhoamiVerdict::Works;
 }
 
-// What to do after one whoami answer: one retry for "past the VPN" (routes of a fresh tunnel may not
-// have settled) and for "no HTTP answer at all", within the attempt cap and the whoami budget; any
-// other inconclusive answer goes straight to the generate_204 tiebreak.
-inline WhoamiStep whoamiNextStep(WhoamiVerdict v, int httpStatus, int attemptsDone, qint64 whoamiBudgetLeftMs)
+// "Not yet" (floor 19.11, DataCheckRetry.h): the try got no HTTP answer and no byte - no route yet, DNS not
+// answered, connection refused or reset before any byte, or our clock found no first byte. This is what the old
+// 800 ms wait before the first try stood for; the check now starts as soon as the tunnel is up and retries this.
+inline bool whoamiNotYet(const WhoamiObservation &o)
 {
-    // The retry starts after kWhoamiRetryDelayMs and then needs a whole attempt's worth of budget.
-    const bool canRetry = attemptsDone < kWhoamiMaxAttempts
-                          && whoamiBudgetLeftMs >= kWhoamiRetryDelayMs + kWhoamiMinAttemptMs;
-    if (v == WhoamiVerdict::BypassVpn)
-        return canRetry ? WhoamiStep::Retry : WhoamiStep::Finish;
+    return o.httpStatus == 0 && o.bytesReceived <= 0;
+}
+
+struct WhoamiNext {
+    WhoamiStep step = WhoamiStep::Finish;
+    qint64 delayMs = 0; // Retry: wait this long, then the next request
+};
+
+// What to do after one whoami try. answeredSoFar = tries of this check that got an HTTP answer (the server counted
+// them), this one included; retriesSoFar = retries already made in this check (any kind); whoamiBudgetLeftMs = the
+// whoami share of the check budget left now. The spacing and the budget floor are the shared data-check rule
+// (DataCheckRetry.h: 300, 600, 1200 ms ..., at least kWhoamiMinAttemptMs left after the spacing).
+//  - not yet (no answer, no byte): retry on the spacing while the budget allows, then the generate_204 tiebreak;
+//  - "past the VPN" (the answer came by the physical path - routes of a fresh tunnel not applied yet): one retry on
+//    the same spacing within the answered-request cap, then bypass is final;
+//  - any other inconclusive answer: the tiebreak; every other verdict is final.
+inline WhoamiNext whoamiNext(WhoamiVerdict v, const WhoamiObservation &o, int answeredSoFar, int retriesSoFar,
+                             qint64 whoamiBudgetLeftMs)
+{
+    WhoamiNext n;
+    const DataCheckRetry spacing = decideDataCheckRetry(true, retriesSoFar, whoamiBudgetLeftMs);
+    if (whoamiNotYet(o)) {
+        n.step = spacing.retry ? WhoamiStep::Retry : WhoamiStep::Tiebreak;
+        n.delayMs = spacing.retry ? spacing.delayMs : 0;
+        return n;
+    }
+    if (v == WhoamiVerdict::BypassVpn) {
+        if (spacing.retry && answeredSoFar < kWhoamiMaxAttempts) {
+            n.step = WhoamiStep::Retry;
+            n.delayMs = spacing.delayMs;
+        }
+        return n;
+    }
     if (v == WhoamiVerdict::Inconclusive)
-        return (httpStatus == 0 && canRetry) ? WhoamiStep::Retry : WhoamiStep::Tiebreak;
-    return WhoamiStep::Finish;
+        n.step = WhoamiStep::Tiebreak;
+    return n;
 }
 
 // The tiebreak is the existing generate_204 verification with the rest of the verify budget.

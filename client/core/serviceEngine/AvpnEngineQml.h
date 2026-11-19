@@ -1727,6 +1727,7 @@ private:
     int                          m_verifyEpoch = 0;
     QElapsedTimer                m_verifyClock;
     int                          m_verifyAttempts = 0;
+    int                          m_whoamiAnswered = 0;             // whoami tries with an HTTP answer (whoamiNext cap)
     qint64                       m_lastVerifyMs = -1;
     int                          m_lastVerifyOk = -1;              // -1 не было, 0 провал, 1 успех
     // AVPN (независимое ревью волны, MAJOR-3): было ли у последней успешной верификации

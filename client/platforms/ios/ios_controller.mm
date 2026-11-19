@@ -1334,9 +1334,12 @@ void IosController::checkStatus()
                          (rxBytes >= handshakeRxThreshold));
 
                 if (hasFreshHandshake) {
+                    // AVPN (floor 19.11): the stage NE Connected -> handshake seen, for the journal (before invalidate)
+                    const qint64 awaitedMs = m_handshakeTimer.isValid() ? m_handshakeTimer.elapsed() : -1;
                     m_handshakeConfirmed = true;
                     m_handshakeAwaiting = false;
                     m_handshakeTimer.invalidate();
+                    emit handshakeConfirmed(awaitedMs);
                     m_handshakeTimeouts = 0;
                     qDebug() << "IosController::checkStatus : handshake confirmed";
                     emitConnectionStateIfChanged(Vpn::ConnectionState::Connected);
@@ -2106,7 +2109,20 @@ bool IosController::setupXray()
         splitTunnelSites[index] = splitTunnelSites[index].toString().remove(" ");
     }
 
-    finalConfig.insert(configKey::splitTunnelSites, splitTunnelSites);
+    // AVPN (floor 19.11, §28 on the Xray path): with features.ios_userspace_split the RU list goes to the extension
+    // as the App Group file and becomes a routing rule of the core (XrayDirectSplit.swift) - no system routes, no
+    // list in the VPN profile. ~10,800 excluded routes cost own Xray ~1.2 s of every start against a provider profile.
+    // The file not written - the routes path, as upstream.
+    const bool userspaceSplit = avpn_ios::useUserspaceSplit(
+        m_rawConfig.value(QStringLiteral("directSplit")).toString() == QLatin1String("1"),
+        m_rawConfig[configKey::splitTunnelType].toInt(), splitTunnelSites.count());
+    if (userspaceSplit && writeDirectSplitList(splitTunnelSites)) {
+        finalConfig.insert(configKey::splitTunnelType, 0);
+        finalConfig.insert(configKey::splitTunnelSites, QJsonArray());
+        finalConfig.insert(QStringLiteral("directSplitFile"), QString::fromLatin1(avpn_ios::kDirectSplitFileName));
+    } else {
+        finalConfig.insert(configKey::splitTunnelSites, splitTunnelSites);
+    }
     finalConfig.insert(configKey::config, xrayConfigStr);
     // AVPN backend-first (Task 6): tun2socks connect/read-write timeouts + network-change reconnect
     // debounce, server-tunable via TuningStore (numbers.xray_connect_timeout_ms/xray_rw_timeout_ms/

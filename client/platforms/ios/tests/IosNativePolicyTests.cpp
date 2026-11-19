@@ -283,6 +283,33 @@ static void testEstablishedSession()
     assert(!showEstablishedAsConnected(false, false, -1));             // время подключения неизвестно
 }
 
+// Floor 19.11: the status poll runs fast only while a start is in flight (Connecting), so the AmneziaWG handshake
+// is seen within one fast tick of happening; every other state keeps the server-tunable normal cadence.
+static void testStartStatusPoll()
+{
+    using namespace avpn_ios;
+    assert(statusPollIntervalMs(true, 1000) == kStartStatusPollMs);   // a start in flight: fast
+    assert(statusPollIntervalMs(false, 1000) == 1000);                // Connected / Reconnecting: normal
+    assert(statusPollIntervalMs(true, 100) == 100);                   // never slower than the configured cadence
+    assert(statusPollIntervalMs(false, 5000) == 5000);
+    assert(kStartStatusPollMs >= 100 && kStartStatusPollMs <= 150);   // bounded IPC rate: <= 10 status messages/s
+    // Worst lateness of "handshake seen" after the handshake itself = one poll interval (any phase of the poll).
+    const auto worstLateness = [](int intervalMs) {
+        int worst = 0;
+        for (int phase = 0; phase < intervalMs; phase += 5)
+            for (int handshakeAt = 0; handshakeAt < 3000; handshakeAt += 7) {
+                int poll = phase;
+                while (poll < handshakeAt)
+                    poll += intervalMs;
+                if (poll - handshakeAt > worst)
+                    worst = poll - handshakeAt;
+            }
+        return worst;
+    };
+    assert(worstLateness(statusPollIntervalMs(false, 1000)) > 900);  // before: up to ~1 s late
+    assert(worstLateness(statusPollIntervalMs(true, 1000)) < kStartStatusPollMs); // now: under one fast tick
+}
+
 // Owner test 06.11 (device 36): an adopted session that never completed a handshake (NE answered:
 // last_handshake_time_sec == 0, rx below the threshold) is stopped after the budget; a false timeout
 // (no stats from the NE) or a session that once had a handshake stays Reconnecting (wave-3).
@@ -574,6 +601,7 @@ int main()
     testStatusAccept();
     testTryLock();
     testEstablishedSession();
+    testStartStatusPoll();
     testNeverConnectedAdoptedSession();
     testDeadAdoptedSessionJournal();
     testUpstreamEnvelope();

@@ -27,6 +27,9 @@ struct XrayConfig: Decodable {
     // AVPN (upstream nodes, contract section 3): Go memory limit + hev sizes; nil / absent keys =
     // the behaviour before (XrayTunables.swift).
     let tunables: XrayTunables?
+    // AVPN (floor 19.11, §28 on the Xray path): the RU split list as an App Group file name - routed inside the core
+    // (XrayDirectSplit.swift) instead of system routes. nil = the routes path, as before.
+    let directSplitFile: String?
 
     private enum CodingKeys: String, CodingKey {
         case dns1
@@ -40,5 +43,6 @@ struct XrayConfig: Decodable {
         case restartOnPathLoss = "xray_restart_on_path_loss"
         case ipv6Capture = "xray_ipv6_capture"
         case tunables = "xray_tunables" // AVPN (upstream nodes)
+        case directSplitFile // AVPN (floor 19.11)
     }
 }

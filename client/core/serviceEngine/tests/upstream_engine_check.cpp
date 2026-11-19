@@ -885,8 +885,9 @@ static void envelopeAndParsing()
 
 
 // Lab 14.11 D3: the first seconds of a provider profile may refuse every connection. The data check's loop
-// as the facade runs it (AvpnEngineQml::upstreamVerifyAttempt), on a fake clock: first attempt at 800 ms,
-// each attempt then decideUpstreamEarlyRetry(upstreamProbeNotYet(facts), retries so far, budget left).
+// as the facade runs it (AvpnEngineQml::upstreamVerifyAttempt), on a fake clock: first attempt as soon as the tunnel
+// is up (floor 19.11: no 800 ms clock wait), each attempt then decideUpstreamEarlyRetry(upstreamProbeNotYet(facts),
+// retries so far, budget left).
 struct EarlyRun {
     UpstreamVerdictResult verdict;
     int attempts = 0;
@@ -897,7 +898,7 @@ static EarlyRun runEarlyCheck(const std::function<UpstreamProbeFacts(qint64)> &a
                               const UpstreamProbeGrant &access)
 {
     EarlyRun r;
-    qint64 t = 800;
+    qint64 t = 0;
     for (int guard = 0; guard < 100; ++guard) {
         ++r.attempts;
         const UpstreamProbeFacts f = attemptAt(t);
@@ -964,7 +965,8 @@ static void earlyRefusals()
     // Refused for the first 1.2 s after the core start, then the profile carries data: Works.
     EarlyRun w = runEarlyCheck([&](qint64 t) { return t < 1200 ? refused() : complete("net-b", good); }, 12000, access);
     CHECK(w.verdict.verdict == UpstreamVerdict::Works && w.verdict.passes);
-    CHECK(w.attempts == 3 && w.spacing == QList<qint64>({300, 600})); // 800 refused, 1103 refused, 1706 data
+    CHECK(w.attempts == 4 && w.spacing == QList<qint64>({300, 600, 1200})); // 0, 303, 906 refused; 2109 data
+    CHECK(w.endedAtMs == 2109 + 700);
     // A longer mobile warm-up (refused for 4 s): still Works inside the 12 s budget.
     w = runEarlyCheck([&](qint64 t) { return t < 4000 ? refused() : complete("net-b", good); }, 12000, access);
     CHECK(w.verdict.verdict == UpstreamVerdict::Works && w.spacing == QList<qint64>({300, 600, 1200, 2000}));
@@ -980,7 +982,14 @@ static void earlyRefusals()
     CHECK(w.verdict.reason == QLatin1String("digest_mismatch") && w.attempts == 1);
     // Refused first, then a complete bad answer: that last answer decides.
     w = runEarlyCheck([&](qint64 t) { return t < 1000 ? refused() : complete("net-a", good); }, 12000, access);
-    CHECK(w.verdict.verdict == UpstreamVerdict::NotThroughProvider && w.attempts == 2);
+    CHECK(w.verdict.verdict == UpstreamVerdict::NotThroughProvider && w.attempts == 4);
+    // A profile that answers at once is proven by its first probe, with no wait before it (floor 19.11): the check
+    // ends one transfer after the tunnel is up (it used to start 800 ms later).
+    w = runEarlyCheck([&](qint64) { return complete("net-b", good); }, 12000, access);
+    CHECK(w.verdict.verdict == UpstreamVerdict::Works && w.attempts == 1 && w.endedAtMs == 700);
+    // The shared rule: the provider check and the own-server whoami space their retries alike (DataCheckRetry.h).
+    CHECK(decideUpstreamEarlyRetry(true, 2, 5000).delayMs == decideDataCheckRetry(true, 2, 5000).delayMs
+          && kUpstreamEarlyRetryMinLeftMs == kDataCheckRetryMinLeftMs);
     // A tiny budget (the server's minimum 3 s): one early retry at most fits.
     w = runEarlyCheck([&](qint64) { return refused(); }, 3000, access);
     CHECK(w.verdict.verdict == UpstreamVerdict::NoData && w.endedAtMs <= 3000);

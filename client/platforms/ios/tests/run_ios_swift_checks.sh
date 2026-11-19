@@ -35,6 +35,14 @@ xcrun --sdk macosx swiftc -Onone -parse-as-library \
     "$SCRIPT_DIR/XraySocketCallbackLifecycleTests.swift"
 "$WORK_DIR/xray_lifecycle_tests"
 
+# AVPN (floor 19.11): the RU split of an own Xray session as one routing rule of the core (XrayDirectSplit.swift).
+echo "== 1a хостовый Swift-тест разделения РФ внутри ядра Xray =="
+xcrun --sdk macosx swiftc -Onone -parse-as-library \
+    -o "$WORK_DIR/xray_direct_split_tests" \
+    "$IOS_DIR/XrayDirectSplit.swift" \
+    "$SCRIPT_DIR/XrayDirectSplitTests.swift"
+"$WORK_DIR/xray_direct_split_tests"
+
 # AVPN (upstream nodes, lane L3): lease machine twin + renewer + tunables, replaying the shared C++
 # vectors (client/core/serviceEngine/tests/vectors).
 echo "== 1b хостовый Swift-тест аренды upstream (векторы C++) =="
@@ -136,7 +144,7 @@ for rr in d.values():
         "$IOS_DIR/PacketTunnelProvider.swift" "$IOS_DIR/PacketTunnelProvider+WireGuard.swift" \
         "$IOS_DIR/PacketTunnelProvider+OpenVPN.swift" "$IOS_DIR/PacketTunnelProvider+Xray.swift" \
         "$IOS_DIR/IPv4RouteSpec.swift" "$IOS_DIR/IPv6RouteSpec.swift" "$IOS_DIR/WGConfig.swift" \
-        "$IOS_DIR/XrayConfig.swift" "$IOS_DIR/TunnelRuntimeStatus.swift" \
+        "$IOS_DIR/XrayConfig.swift" "$IOS_DIR/XrayDirectSplit.swift" "$IOS_DIR/TunnelRuntimeStatus.swift" \
         "$IOS_DIR/XraySocketCallbackLifecycle.swift" "$IOS_DIR/UpstreamLeaseMachine.swift" \
         "$IOS_DIR/UpstreamLeaseWire.swift" "$IOS_DIR/UpstreamLeaseRenewer.swift" \
         "$IOS_DIR/UpstreamProxyMeter.swift" \

@@ -78,6 +78,7 @@
 // Upstream Amnezia has no counterpart (no seats, no backend leases).
 #pragma once
 
+#include "DataCheckRetry.h"
 #include "UpstreamLeaseWire.h"
 #include "UpstreamNode.h"
 
@@ -92,14 +93,14 @@ inline constexpr int kUpstreamRenewRejectedLimit = 3;
 
 // Lab 14.11 D3: the first seconds of a provider profile may refuse every connection. Spacing before the
 // n-th early retry (n >= 1): 300, 600, 1200, 2000, 2000, ... ms - used by the provisional seat confirmation
-// below and by the data check (UpstreamEngine.h::decideUpstreamEarlyRetry).
-inline constexpr qint64 kUpstreamEarlyRetryBaseMs = 300;
-inline constexpr qint64 kUpstreamEarlyRetryCapMs = 2000;
+// below and by the data check (UpstreamEngine.h::decideUpstreamEarlyRetry). The spacing is the one rule of every
+// data check through a fresh tunnel (DataCheckRetry.h), the own-server whoami included.
+inline constexpr qint64 kUpstreamEarlyRetryBaseMs = kDataCheckRetryBaseMs;
+inline constexpr qint64 kUpstreamEarlyRetryCapMs = kDataCheckRetryCapMs;
 
 inline qint64 upstreamEarlyRetryDelayMs(int retryNumber)
 {
-    const int n = qBound(1, retryNumber, 16);
-    return qMin<qint64>(kUpstreamEarlyRetryBaseMs << (n - 1), kUpstreamEarlyRetryCapMs);
+    return dataCheckRetryDelayMs(retryNumber);
 }
 
 struct UpstreamLeaseTiming {

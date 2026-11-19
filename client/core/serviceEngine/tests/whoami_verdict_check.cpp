@@ -279,43 +279,120 @@ int main()
               "xray 429 then 204 failed -> next path");
     }
 
-    // --- next step: retry / tiebreak / finish (review items 3 and 7) ---
+    // --- next step: retry / tiebreak / finish (review items 3 and 7; floor 19.11 - the shared spacing) ---
     {
         const qint64 plenty = 5000;
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::BypassVpn, 0, 1, plenty) == WhoamiStep::Retry,
-              "first bypass answer -> one retry (routes may not have settled)");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::BypassVpn, 200, 2, plenty) == WhoamiStep::Finish,
-              "second bypass answer -> bypass is final");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::BypassVpn, 200, 1, avpn::kWhoamiMinAttemptMs - 1)
+        WhoamiObservation none;            // no HTTP answer, no byte (no route / DNS yet / refused / reset)
+        WhoamiObservation bypass = good(); // answered by the physical path
+        bypass.node = 0;
+        WhoamiObservation answered502;
+        answered502.httpStatus = 502;
+        WhoamiObservation limited;
+        limited.httpStatus = 429;
+        WhoamiObservation stalled = good();
+        stalled.bytesReceived = 5 * 1024;
+        stalled.complete = false;
+        CHECK(avpn::whoamiNotYet(none) && !avpn::whoamiNotYet(bypass) && !avpn::whoamiNotYet(answered502),
+              "not yet = no HTTP answer and no byte");
+        avpn::WhoamiNext n = avpn::whoamiNext(WhoamiVerdict::Inconclusive, none, 0, 0, plenty);
+        CHECK(n.step == WhoamiStep::Retry && n.delayMs == 300, "first try got nothing -> retry after 300 ms (not 1 s)");
+        n = avpn::whoamiNext(WhoamiVerdict::Inconclusive, none, 0, 1, plenty);
+        CHECK(n.step == WhoamiStep::Retry && n.delayMs == 600, "second empty try -> retry after 600 ms");
+        n = avpn::whoamiNext(WhoamiVerdict::Inconclusive, none, 0, 2, plenty);
+        CHECK(n.step == WhoamiStep::Retry && n.delayMs == 1200,
+              "empty tries do not hit the answered-request cap - the budget bounds them");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::Inconclusive, none, 0, 0, 300 + avpn::kWhoamiMinAttemptMs - 1).step
+                  == WhoamiStep::Tiebreak,
+              "no answer, no room for the spacing + one attempt -> generate_204 tiebreak");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::Inconclusive, none, 0, 0, 300 + avpn::kWhoamiMinAttemptMs).step
+                  == WhoamiStep::Retry,
+              "no answer, exactly spacing + one attempt left -> retry");
+        n = avpn::whoamiNext(WhoamiVerdict::BypassVpn, bypass, 1, 0, plenty);
+        CHECK(n.step == WhoamiStep::Retry && n.delayMs == 300,
+              "first bypass answer -> one retry on the short spacing (routes may not be applied yet)");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::BypassVpn, bypass, 2, 1, plenty).step == WhoamiStep::Finish,
+              "second bypass answer -> bypass is final (answered cap)");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::BypassVpn, bypass, 1, 2, plenty).step == WhoamiStep::Retry,
+              "bypass after empty tries: only answered tries count toward the cap");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::BypassVpn, bypass, 1, 0, avpn::kWhoamiMinAttemptMs).step
                   == WhoamiStep::Finish,
-              "bypass with no whoami budget left -> final");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::BypassVpn, 200, 1, avpn::kWhoamiMinAttemptMs) == WhoamiStep::Finish,
-              "bypass: budget for an attempt but not for the delay + attempt -> final (no doomed retry)");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::BypassVpn, 200, 1,
-                                   avpn::kWhoamiRetryDelayMs + avpn::kWhoamiMinAttemptMs) == WhoamiStep::Retry,
-              "bypass: exactly delay + attempt left -> retry");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::Inconclusive, 0, 1, plenty) == WhoamiStep::Retry,
-              "no answer, budget and cap left -> retry");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::Inconclusive, 0, avpn::kWhoamiMaxAttempts, plenty)
-                  == WhoamiStep::Tiebreak,
-              "no answer, cap reached -> generate_204 tiebreak");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::Inconclusive, 0, 1, avpn::kWhoamiMinAttemptMs - 1)
-                  == WhoamiStep::Tiebreak,
-              "no answer, whoami budget spent -> generate_204 tiebreak");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::Inconclusive, 502, 1, plenty) == WhoamiStep::Tiebreak,
+              "bypass: budget for an attempt but not for the spacing + attempt -> final (no doomed retry)");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::Inconclusive, answered502, 1, 0, plenty).step == WhoamiStep::Tiebreak,
               "an HTTP answer that decides nothing (502) -> tiebreak, no retry");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::CheckLimited, 429, 1, plenty) == WhoamiStep::Finish,
+        CHECK(avpn::whoamiNext(WhoamiVerdict::CheckLimited, limited, 1, 0, plenty).step == WhoamiStep::Finish,
               "429 is never retried (rate limit)");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::NoData, 200, 1, plenty) == WhoamiStep::Finish,
+        CHECK(avpn::whoamiNext(WhoamiVerdict::NoData, stalled, 1, 0, plenty).step == WhoamiStep::Finish,
               "a stalled 200 is a verdict, not a retry");
-        CHECK(avpn::whoamiNextStep(WhoamiVerdict::Works, 200, 1, plenty) == WhoamiStep::Finish, "works is final");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::Works, good(), 1, 0, plenty).step == WhoamiStep::Finish, "works is final");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::Inconclusive, none, 0, 0, plenty).delayMs
+                  == avpn::decideDataCheckRetry(true, 0, plenty).delayMs,
+              "one spacing for every data check (DataCheckRetry.h, the provider check uses it too)");
+    }
+
+    // --- floor 19.11: the whoami loop as the facade runs it, on a fake clock (AvpnEngineQml::whoamiAttempt) ---
+    // The first request goes at 0 ms after the tunnel is up (it went at 800 ms); a fresh tunnel that does not route
+    // yet costs only the short spacing, and a tunnel that routes at once costs nothing.
+    {
+        struct Run {
+            WhoamiVerdict verdict = WhoamiVerdict::Inconclusive;
+            WhoamiStep last = WhoamiStep::Finish;
+            int requests = 0;
+            qint64 decidedAtMs = 0;
+        };
+        // routesAtMs: from then on a request reaches our exit; before it, an instant connection error.
+        const auto run = [](qint64 routesAtMs, qint64 transferMs, int checkBudgetMs) {
+            Run r;
+            const qint64 whoamiBudget = avpn::whoamiBudgetMs(checkBudgetMs);
+            qint64 t = 0;
+            int answered = 0;
+            for (int guard = 0; guard < 20; ++guard) {
+                if (avpn::whoamiAttemptGate(r.requests, whoamiBudget - t, checkBudgetMs - t) != avpn::WhoamiGate::Send) {
+                    r.last = WhoamiStep::Tiebreak;
+                    break;
+                }
+                ++r.requests;
+                WhoamiObservation o;
+                if (t >= routesAtMs) {
+                    o = good();
+                    t += transferMs;
+                } else {
+                    t += 5; // HostNotFound / unreachable: no answer, no byte
+                }
+                const WhoamiVerdict v = avpn::whoamiVerdict(o);
+                if (!avpn::whoamiNotYet(o))
+                    ++answered;
+                const avpn::WhoamiNext next = avpn::whoamiNext(v, o, answered, r.requests - 1, whoamiBudget - t);
+                r.verdict = v;
+                r.last = next.step;
+                if (next.step != WhoamiStep::Retry)
+                    break;
+                t += next.delayMs;
+            }
+            r.decidedAtMs = t;
+            return r;
+        };
+        Run r = run(0, 900, 4000);
+        CHECK(r.verdict == WhoamiVerdict::Works && r.requests == 1 && r.decidedAtMs == 900,
+              "routes ready at Connected: works one transfer after Connected (was 800 + transfer)");
+        r = run(200, 900, 4000);
+        CHECK(r.verdict == WhoamiVerdict::Works && r.requests == 2 && r.decidedAtMs == 5 + 300 + 900,
+              "routes 200 ms late: one empty try, works at ~1.2 s - still earlier than the old 800 ms wait + transfer");
+        r = run(700, 900, 4000);
+        CHECK(r.verdict == WhoamiVerdict::Works && r.requests == 3 && r.decidedAtMs == 5 + 300 + 5 + 600 + 900,
+              "routes 700 ms late (the old wait's worst case): works within the default 4 s check");
+        r = run(100000, 900, 4000);
+        CHECK(r.verdict == WhoamiVerdict::Inconclusive && r.last == WhoamiStep::Tiebreak && r.decidedAtMs < 2400,
+              "never routes: empty tries end in the generate_204 tiebreak inside the whoami share");
+        r = run(100000, 900, 1500);
+        CHECK(r.last == WhoamiStep::Tiebreak && r.requests == 0,
+              "the 1.5 s floor budget: the whoami share (900 ms) is below one attempt -> tiebreak (as before)");
     }
     // whoami gets at most ~60 % of the verify budget, the rest is the tiebreak's (review item 3)
     CHECK(avpn::whoamiBudgetMs(12000) == 7200, "whoami budget = 60 % of 12 s");
     CHECK(avpn::whoamiBudgetMs(3000) == 1800, "whoami budget = 60 % of the 3 s floor");
     CHECK(12000 - avpn::whoamiBudgetMs(12000) >= 4000, "at least 4 s left for generate_204 at the default budget");
-    CHECK(avpn::whoamiBudgetMs(3000) - 800 >= avpn::kWhoamiMinAttemptMs,
-          "even at the 3 s floor one whoami fits after the 800 ms settle delay");
+    CHECK(avpn::whoamiBudgetMs(3000) >= avpn::kWhoamiMinAttemptMs + 300 + 5,
+          "at a 3 s budget one empty try and one retry fit (no 800 ms settle delay any more)");
 
     // --- helpers ---
     CHECK(avpn::whoamiFailsPath(WhoamiVerdict::NoData) && avpn::whoamiFailsPath(WhoamiVerdict::BypassVpn),
