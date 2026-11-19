@@ -32,7 +32,7 @@
 //    the desktop service's text), and open / retry / connect-and-scan request nothing until refreshSwitches()
 //    sees the switches change.
 //  - Every asynchronous reply fed into the machine is bound to the scan that asked (scan id + scan token +
-//    network generation at request time): a stale live-probe result or light fact is dropped (its bytes still
+//    network generation at request time): a stale live-probe result is dropped (its bytes still
 //    accounted); a stale probe-batch reply never touches the current scan - its grants are released at once.
 //  - A transient "not now" of the host (tunnel_changed, stale_epoch; internal/stop_pending = internal/stopping =
 //    teardown_pending) to scan_start or
@@ -53,7 +53,7 @@
 //       answered, at the latest scan_stop_ms after it settled.
 //  - Bytes (plan §2.2b): every app-side action is executed with its costBytes as the hard cut, and its real
 //    bytes go back with appRequestDone for EVERY request id - an abandoned manifest (superseded by a network
-//    change) included; light checks report their worst case when their facts are in.
+//    change) included.
 //  - Access evidence: only the host's attempts of the CURRENT host scan, started with THIS scan's token, reach
 //    the machine; ScanManifestInput.access stays empty; progress of an older host scan is delivered for its
 //    byte settlement with access / access_close stripped.
@@ -127,7 +127,7 @@ public:
     virtual ScanNetFacts network() const = 0;
     // Everything of ScanManifestInput except manifest, access, apiBytes, awgMiniEnabled, strictUnverifiable
     // (the coordinator's): ownNodes, freshFailures, lastKnownGood, upstreamNames, restrictCountry,
-    // awgProbeIpKnown, ruSplitOn.
+    // awgProbeIpKnown.
     virtual void fillManifestInput(ScanManifestInput &in) const = 0;
     // SECRET: the exact probe config of an OWN candidate per kind ("" = none).
     virtual QString ownProbeConfig(const ScanCandidate &c) const = 0;
@@ -189,15 +189,6 @@ public:
     virtual void cancelPendingConnect() = 0;
     virtual void connectRow(const QString &nodeId, const QStringList &attemptOrder, qint64 hintTtlMs, bool userOrigin,
                             bool forceConnect) = 0;
-    virtual void startLightChecks(const QString &nodeId) = 0;
-    // The same with an ask id the engine hands back with each fact (TribeScanner::lightFactFor): binds a fact to
-    // exactly the check that asked (review F1). The default forwards to startLightChecks (facts then come
-    // through lightFact and are bound by scan, network and live node only).
-    virtual void startLightChecksFor(const QString &nodeId, quint64 askId)
-    {
-        Q_UNUSED(askId);
-        startLightChecks(nodeId);
-    }
     virtual void startReportCheck(const QString &reportId, const QJsonObject &report, bool withConnection) = 0;
 };
 
@@ -312,7 +303,6 @@ public:
     // (ScanMachine::moreTapped).
     Q_INVOKABLE void findMore(const QString &country = QString());
     Q_INVOKABLE void tapRow(const QString &id);
-    Q_INVOKABLE void tapCheck();
     // Support's «Проверить подключение и отправить отчёт» (variant B, 18.11): the same check without the Scanner
     // screen (ScanMachine::supportCheckTapped); its progress is view.support_check {running, progress}.
     Q_INVOKABLE void checkFromSupport();
@@ -324,18 +314,11 @@ public:
     // --- the engine lane calls these (GUI thread) ----------------------------------------------------------
     void engineStateChanged();
     void networkChanged();
-    void lightFact(const ScanLightFact &f);
-    // A light fact of the check startLightChecksFor(node, askId) asked for: dropped unless it is the latest ask
-    // and its scan, network and live node are still current.
-    void lightFactFor(quint64 askId, const ScanLightFact &f);
-    // A card fact of the button's FULL check (StartReportCheck): delivered only while that report is the
-    // machine's current check AND no new scan started (nor the network changed) since it began.
-    void lightFactForReport(const QString &reportId, const ScanLightFact &f);
     void reportCheckStarted();
     void reportCheckProgress(int step, int total);
     void reportCheckDone(bool sent, const QString &reportId);
     // The engine could not start or submit the full check (queue full in a race, another diagnostic running):
-    // reason "queue_full" | "busy" | ... - a notice, no «sent» text, the card restored.
+    // reason "queue_full" | "busy" | ... - a notice, no «sent» text.
     void reportCheckRefused(const QString &reportId, const QString &reason);
     // The Doctor's speed stage: one sized GET /v1/probe of `bytes` (scan_check_speed_bytes) through the LIVE
     // tunnel with this scan's token (POST /v1/scan/token first when there is none), cut at its cost, charged
@@ -401,11 +384,6 @@ private:
     ScanBinding bindingNow() const;
     bool bindingCurrent(const ScanBinding &b) const;
     void releaseStaleLeases(const QStringList &leaseIds);
-    ScanBinding m_lightAsked;
-    QString m_lightNode;
-    quint64 m_lightAskId = 0;
-    QString m_checkReportId;    // the full check the machine started last (StartReportCheck)
-    ScanBinding m_checkAsked;   // the scan / network it started in
 
     struct HostScan {         // the machine's live tracking of a host scan it owns (polled for the machine)
         QString token;        // SECRET: the token its scan_start carried
@@ -560,7 +538,6 @@ private:
     void doLiveProbe(const ScanAction &a);
     void doCandidates(const ScanAction &a);
     void fetchPoolIfStale();
-    void doLight(const ScanAction &a);
     void doShade(const ShadeRequest &r);
     void applyShadeStep(const ShadeStep &s);
     void pollHost();
@@ -633,7 +610,6 @@ private:
     std::function<QString()> m_radio;
     QHash<QString, HostScan> m_hostScans;    // host scan id -> its state
     QHash<QString, Lease> m_leases;          // candidate id -> its probe lease
-    QString m_lightReqId;
 };
 
 } // namespace avpn

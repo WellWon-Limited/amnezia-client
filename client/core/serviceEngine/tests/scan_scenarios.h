@@ -234,7 +234,7 @@ inline void checkStepInvariants(const Recorded &r, const QString &prevPhase, con
             f.check(a.maxBytes >= 0 && a.maxBytes <= r.allowance, where + QStringLiteral(": host grant above the allowance"));
         const bool app = a.kind == ScanActionKind::RequestManifest || a.kind == ScanActionKind::RequestProbeBatch
                          || a.kind == ScanActionKind::ReleaseProbeLeases || a.kind == ScanActionKind::ProbeLiveTunnel
-                         || a.kind == ScanActionKind::StartLightChecks || a.kind == ScanActionKind::SendOutcomes;
+                         || a.kind == ScanActionKind::SendOutcomes;
         if (app)
             f.check(!a.requestId.isEmpty() && a.costBytes >= 0, where + QStringLiteral(": an app request without its reservation"));
         if (a.kind == ScanActionKind::RequestProbeBatch)
@@ -519,10 +519,10 @@ inline QList<Scenario> scenarios()
 {
     QList<Scenario> l;
 
-    // 1. Wi-Fi, everything works, parallel legs (macOS host): 10 rows quickly, then «Ваше подключение».
+    // 1. Wi-Fi, everything works, parallel legs (macOS host): 10 rows quickly, done (no step checks the connection).
     l << Scenario{QStringLiteral("wifi_all_works_legs"),
                   {QStringLiteral("stop at scan_stop_works"), QStringLiteral("list cap 10"), QStringLiteral("shade scan_found"),
-                   QStringLiteral("card filled after S4"), QStringLiteral("no tunnel action")},
+                   QStringLiteral("no tunnel action")},
                   [] {
                       World w = baseWorld("wifi_all_works_legs", hostMac(), ScanNetKind::Wifi);
                       w.current = QStringLiteral("1");
@@ -536,8 +536,7 @@ inline QList<Scenario> scenarios()
                       f.check(v.value(QLatin1String("verified")).toInt() == 10, QStringLiteral("10 verified rows"));
                       f.check(countActions(d, ScanActionKind::StopHostScan) == 1, QStringLiteral("host stopped once"));
                       f.check(shadeCount(d, "scan_found") == 1, QStringLiteral("one found shade"));
-                      f.check(v.value(QLatin1String("card")).toObject().value(QLatin1String("mode")).toString() == QLatin1String("filled"),
-                              QStringLiteral("card filled"));
+                      f.check(!v.contains(QLatin1String("card")), QStringLiteral("no connection card in the Scanner"));
                       f.check(rowOf(v, QStringLiteral("1")).value(QLatin1String("state")).toString() == QLatin1String("connected"),
                               QStringLiteral("current row connected"));
                       int tunnel = 0;
@@ -668,8 +667,6 @@ inline QList<Scenario> scenarios()
                       f.check(phaseOf(v) == QLatin1String("empty"), QStringLiteral("empty"));
                       f.check(v.value(QLatin1String("empty")).toObject().value(QLatin1String("variant")).toString() == QLatin1String("cellular"),
                               QStringLiteral("cellular variant"));
-                      f.check(v.value(QLatin1String("card")).toObject().value(QLatin1String("mode")).toString() == QLatin1String("hidden"),
-                              QStringLiteral("no card in the empty state"));
                       f.check(!hasShade(d, "wifi_intent") && d.closes.size() == 1, QStringLiteral("closed once, no intent"));
                       f.check(countActions(d, ScanActionKind::RequestManifest) == 1, QStringLiteral("no second scan on Wi-Fi"));
                   }};
@@ -733,8 +730,6 @@ inline QList<Scenario> scenarios()
                       f.check(v0.value(QLatin1String("checked_ago_min")).toInt() == 12, QStringLiteral("cached 12 min"));
                       f.check(rowIds(v0).size() == 4, QStringLiteral("cached rows at once"));
                       f.check(!rowIds(lastView(d)).contains(QStringLiteral("77:xray")), QStringLiteral("unverified cached row dropped"));
-                      f.check(v0.value(QLatin1String("card")).toObject().value(QLatin1String("mode")).toString() == QLatin1String("off"),
-                              QStringLiteral("card off"));
                       f.check(countActions(d, ScanActionKind::UserConnectForScan) == 1, QStringLiteral("one connect"));
                       f.check(countActions(d, ScanActionKind::CancelPendingConnect) == 0, QStringLiteral("never disconnected"));
                       f.check(phaseOf(lastView(d)) == QLatin1String("done"), QStringLiteral("done"));
@@ -777,7 +772,7 @@ inline QList<Scenario> scenarios()
     // 10. First connect from a row fails: shade + the next of the visible order; the screen stays.
     l << Scenario{QStringLiteral("first_connect_fails"),
                   {QStringLiteral("tap = ConnectRow with the visible order"), QStringLiteral("failed row dimmed"),
-                   QStringLiteral("shade connect_failed_next"), QStringLiteral("card refills for the new node"), QStringLiteral("screen stays")},
+                   QStringLiteral("shade connect_failed_next"), QStringLiteral("screen stays")},
                   [] {
                       World w = baseWorld("first_connect_fails", hostMac(), ScanNetKind::Wifi);
                       w.current = QStringLiteral("1");
@@ -797,13 +792,7 @@ inline QList<Scenario> scenarios()
                       f.check(rowOf(v, QStringLiteral("4:xray")).value(QLatin1String("state")).toString() == QLatin1String("failed"), QStringLiteral("failed row"));
                       const QString next = taps.isEmpty() ? QString() : taps.value(0).ids.value(0);
                       f.check(rowOf(v, next).value(QLatin1String("state")).toString() == QLatin1String("connected"), QStringLiteral("next connected"));
-                      bool refill = false;
-                      for (const ScanAction &a : actionsOf(d, ScanActionKind::StartLightChecks))
-                          refill = refill || a.nodeId == next;
-                      f.check(refill, QStringLiteral("card refilled"));
                       f.check(d.closes.isEmpty(), QStringLiteral("screen stays"));
-                      f.check(v.value(QLatin1String("card")).toObject().value(QLatin1String("mode")).toString() == QLatin1String("filled"),
-                              QStringLiteral("card filled again"));
                   }};
 
     // 11. Filter by country: the list and the attempt order follow the filter.
@@ -884,28 +873,19 @@ inline QList<Scenario> scenarios()
                                   QStringLiteral("no cached row after the scan"));
                   }};
 
-    // 14. «Проверить и отправить отчёт»: checking, then sent; then again with no connectivity (queued).
+    // 14. Support's «Проверить подключение и отправить отчёт» with a live connection: the check runs, then sent.
     l << Scenario{QStringLiteral("check_and_report"),
-                  {QStringLiteral("card Checking/Checked"), QStringLiteral("report always sent"), QStringLiteral("queued -> info shade")},
+                  {QStringLiteral("support check with the connection"), QStringLiteral("report always sent")},
                   [] {
                       World w = baseWorld("check_and_report", hostMac(), ScanNetKind::Wifi);
                       w.current = QStringLiteral("1");
                       w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
-                      w.script << qMakePair(qint64(9000), at("check_tapped"));
+                      w.script << qMakePair(qint64(9000), at("support_check_tapped"));
                       w.runMs = 12000;
                       return w;
                   },
                   [](const Driver &d, Fail &f) {
-                      const QJsonObject v = viewAt(d, 9100);
-                      f.check(v.value(QLatin1String("card")).toObject().value(QLatin1String("mode")).toString() == QLatin1String("checking"),
-                              QStringLiteral("checking"));
-                      f.check(v.value(QLatin1String("card")).toObject().value(QLatin1String("button")).toString() == QLatin1String("busy"),
-                              QStringLiteral("button busy"));
-                      const QJsonObject e = lastView(d);
-                      f.check(e.value(QLatin1String("card")).toObject().value(QLatin1String("mode")).toString() == QLatin1String("checked"),
-                              QStringLiteral("checked"));
-                      f.check(e.value(QLatin1String("card")).toObject().value(QLatin1String("speed")).toObject().value(QLatin1String("bars")).toInt() == 5,
-                              QStringLiteral("speed bars"));
+                      f.check(countActions(d, ScanActionKind::StartReportCheck) == 1 && !d.m.reportCheckRunning(), QStringLiteral("one check, ended"));
                       f.check(hasShade(d, "report_sent"), QStringLiteral("success shade"));
                       f.check(actionsOf(d, ScanActionKind::StartReportCheck).value(0).withConnection, QStringLiteral("with the connection"));
                   }};
@@ -1235,7 +1215,7 @@ inline QList<Scenario> scenarios()
                   }};
 
     // 27. The host's share cannot carry one probe (plan §2.2b step 3, S11): a full 200 manifest on a small
-    // allowance; the scan runs app side only - the live-tunnel check and the light checks.
+    // allowance; the scan runs app side only - the live-tunnel check.
     l << Scenario{QStringLiteral("app_side_only"),
                   {QStringLiteral("grant below one probe: no host"), QStringLiteral("budget notice"), QStringLiteral("live check still runs")},
                   [] {
@@ -1251,7 +1231,7 @@ inline QList<Scenario> scenarios()
                       f.check(countActions(d, ScanActionKind::StartHostScan) == 0 && countActions(d, ScanActionKind::RequestProbeBatch) == 0,
                               QStringLiteral("no host, no seats"));
                       f.check(hasShade(d, "scan_budget"), QStringLiteral("budget shade"));
-                      f.check(countActions(d, ScanActionKind::ProbeLiveTunnel) == 1 && countActions(d, ScanActionKind::StartLightChecks) == 1,
+                      f.check(countActions(d, ScanActionKind::ProbeLiveTunnel) == 1,
                               QStringLiteral("app side runs"));
                       const QJsonObject v = lastView(d);
                       f.check(phaseOf(v) == QLatin1String("done") && rowOf(v, QStringLiteral("1")).value(QLatin1String("state")).toString() == QLatin1String("connected"),
@@ -1457,21 +1437,20 @@ inline QList<Scenario> scenarios()
                   }};
     // The engine refuses the full check (the queue filled in a race): a notice, never «sent» / «will be sent».
     l << Scenario{QStringLiteral("report_check_refused"),
-                  {QStringLiteral("refused check -> report_queue_full, card back to filled")},
+                  {QStringLiteral("refused check -> report_queue_full")},
                   [] {
                       World w = baseWorld("report_check_refused", hostMac(), ScanNetKind::Wifi);
                       w.current = QStringLiteral("1");
                       w.reportRefuse = QStringLiteral("queue_full");
                       w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
-                      w.script << qMakePair(qint64(9000), at("check_tapped"));
+                      w.script << qMakePair(qint64(9000), at("support_check_tapped"));
                       w.runMs = 11000;
                       return w;
                   },
                   [](const Driver &d, Fail &f) {
                       f.check(shadeCount(d, "report_queue_full") == 1 && !hasShade(d, "report_sent") && !hasShade(d, "report_queued"),
                               QStringLiteral("notice only"));
-                      f.check(lastView(d).value(QLatin1String("card")).toObject().value(QLatin1String("mode")).toString() == QLatin1String("filled"),
-                              QStringLiteral("card filled again"));
+                      f.check(!d.m.reportCheckRunning(), QStringLiteral("the check ended"));
                   }};
     // «Понял» on «no scan: budget» (the cellular hour used up): close; nothing scans later by itself.
     l << Scenario{QStringLiteral("got_it_budget_no_scan"),

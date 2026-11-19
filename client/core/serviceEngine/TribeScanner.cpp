@@ -314,13 +314,8 @@ void TribeScanner::execute(const ScanAction &a)
     case ScanActionKind::ReleaseProbeLeases:
         doRelease(a);
         break;
-    case ScanActionKind::StartLightChecks:
-        doLight(a);
-        break;
     case ScanActionKind::StartReportCheck:
         emitLog(QStringLiteral("action start_report_check with_connection=%1").arg(a.withConnection));
-        m_checkReportId = a.reportId;
-        m_checkAsked = bindingNow();
         m_engine->startReportCheck(a.reportId, a.report, a.withConnection);
         break;
     case ScanActionKind::ShowShade:
@@ -410,7 +405,7 @@ void TribeScanner::timerFired()
         finishResolve(QStringList()); // the name did not resolve in time: the host resolves it itself
     if (m_machineWake >= 0 && t >= m_machineWake) {
         m_machineWake = -1;
-        dispatch(m_m.tick(t)); // a wake-up of the machine: it stops probes / fills the card, never the tunnel
+        dispatch(m_m.tick(t)); // a wake-up of the machine: it stops probes, never the tunnel
         return;
     }
     afterStep();
@@ -422,7 +417,7 @@ void TribeScanner::refreshView()
     const ScanView v = m_m.view(t);
     QJsonObject j = scanViewToJson(v);
     // Screen fields the core's JSON leaves out (scanner-api-note.md (b)): the row's protocol version (the
-    // engine's node data, «Amnezia v3.1»), the card's server name and country, the country menu's names.
+    // engine's node data, «Amnezia v3.1»), the country menu's names.
     QJsonArray rows = j.value(QLatin1String("rows")).toArray();
     for (int i = 0; i < rows.size() && i < v.rows.size(); ++i) {
         QJsonObject r = rows.at(i).toObject();
@@ -436,12 +431,6 @@ void TribeScanner::refreshView()
         rows[i] = r;
     }
     j.insert(QStringLiteral("rows"), rows);
-    QJsonObject card = j.value(QLatin1String("card")).toObject();
-    if (v.card.mode != ScanCardMode::Hidden && v.card.mode != ScanCardMode::Off) {
-        card.insert(QStringLiteral("server_label"), v.card.serverLabel);
-        card.insert(QStringLiteral("server_cc"), v.card.serverCountry);
-    }
-    j.insert(QStringLiteral("card"), card);
     QJsonObject bar = j.value(QLatin1String("bar")).toObject();
     QJsonArray countries = bar.value(QLatin1String("countries")).toArray();
     const QString lang = m_engine->uiLanguage();
@@ -547,7 +536,7 @@ void TribeScanner::notifyNetwork()
     // «Сеть сменилась — проверяем заново» (artboard): only for the person's running scan the change restarted on
     // the new network. A finished result is never rescanned by itself (owner 19.11): no shade then. A scan still
     // preparing just retargets: silent.
-    const bool restarted = (before == ScanPhase::Reach || before == ScanPhase::Data || before == ScanPhase::Self)
+    const bool restarted = (before == ScanPhase::Reach || before == ScanPhase::Data)
                            && scanPhaseScanning(m_m.phase());
     if (m_m.screenOpen() && restarted) {
         ShadeRequest r;
@@ -1901,19 +1890,6 @@ void TribeScanner::doLiveProbe(const ScanAction &a)
                      });
 }
 
-void TribeScanner::doLight(const ScanAction &a)
-{
-    emitLog(QStringLiteral("action start_light_checks"));
-    m_lightAsked = bindingNow();
-    m_lightNode = a.nodeId;
-    ++m_lightAskId;
-    m_engine->startLightChecksFor(a.nodeId, m_lightAskId);
-    // The checks run in the engine and report no byte count: their worst case is their charge, reported at
-    // once so the request id never waits for the allowance to close.
-    if (!a.requestId.isEmpty())
-        dispatch(m_m.appRequestDone(a.requestId, -1, now()));
-}
-
 void TribeScanner::doShade(const ShadeRequest &r)
 {
     emitLog(QStringLiteral("action show_shade %1 %2").arg(QLatin1String(shadeToneName(r.tone)), r.textKey));
@@ -2025,7 +2001,6 @@ void TribeScanner::findMore(const QString &country)
     dispatch(m_m.moreTapped(country, now()));
 }
 void TribeScanner::tapRow(const QString &id) { dispatch(m_m.rowTapped(id, now())); }
-void TribeScanner::tapCheck() { dispatch(m_m.checkTapped(now())); }
 void TribeScanner::checkFromSupport()
 {
     emitLog(QStringLiteral("support_check tapped screen_open=%1").arg(m_m.screenOpen()));
@@ -2056,38 +2031,6 @@ void TribeScanner::engineStateChanged()
     fireNotNow(true); // a start refused with tunnel_changed goes once more now that the tunnel reported its state
 }
 void TribeScanner::networkChanged() { notifyNetwork(); }
-void TribeScanner::lightFact(const ScanLightFact &f)
-{
-    // The facts of the light checks the machine asked for (StartLightChecks) belong to that scan, network and
-    // live node: a late fact after any of them changed is dropped (the new check's facts follow). Facts of the
-    // button's full check (the card is Checking) are bound by its report id instead and always delivered.
-    const bool checking = m_m.view(now()).card.mode == ScanCardMode::Checking;
-    if (!checking && !m_lightAsked.scanId.isEmpty()
-        && (!bindingCurrent(m_lightAsked) || m_engine->current().nodeId != m_lightNode)) {
-        emitLog(QStringLiteral("stale light fact dropped"));
-        return;
-    }
-    dispatch(m_m.lightFact(f, now()));
-}
-
-void TribeScanner::lightFactForReport(const QString &reportId, const ScanLightFact &f)
-{
-    if (reportId.isEmpty() || reportId != m_checkReportId || !bindingCurrent(m_checkAsked)) {
-        emitLog(QStringLiteral("card fact of another check dropped"));
-        return;
-    }
-    dispatch(m_m.lightFact(f, now()));
-}
-
-void TribeScanner::lightFactFor(quint64 askId, const ScanLightFact &f)
-{
-    if (askId != m_lightAskId) {
-        emitLog(QStringLiteral("light fact of an older check dropped"));
-        return;
-    }
-    lightFact(f);
-}
-
 // The binding of an asynchronous reply to the scan that asked (review F1/F5).
 TribeScanner::ScanBinding TribeScanner::bindingNow() const
 {

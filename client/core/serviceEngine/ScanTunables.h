@@ -10,8 +10,9 @@
 //  1. published since contract 1.5.0 (src/tribe_backend/config.py SCAN_CLIENT_NUMBERS, incl. the plan's G5
 //     numbers): defaults and ranges copied from the server's own clamps;
 //  2. the AWG probe's numbers (awg-probe-plan.md §6.1), published since contract 1.6.0;
-//  3. the plan's gap-1 numbers (slow limits, entry-IP spacing, light-check bound, hint life, follow-up
-//     time), published since contract 1.7.0;
+//  3. the plan's gap-1 numbers (slow limits, entry-IP spacing, hint life, follow-up time), published since
+//     contract 1.7.0 (the server also publishes scan_light_timeout_ms and scan_cost_light_bytes: the client
+//     ignores them since the Scanner's connection step left it, 19.11);
 //  4. the worst-case costs of the one allowance (clamps x0.5..x4 of the default) and the freeze / drain
 //     waits (plan v2.2 §2.2b), published since contract 1.7.0.
 // Every default and clamp equals the server's (checked against config.py of 1.7.0; scan_stage2_stall_after_bytes
@@ -71,7 +72,6 @@ struct ScanTunables {
     int slowTtfbMs = 1500;
     int slowT64Ms = 3000;
     int entryIpSpacingMs = 300;
-    int lightTimeoutMs = 7000;
     int attemptHintTtlS = 120;
     int followUpMinLeftMs = 3000;
     // 4. published since 1.7.0 (plan v2.2 §2.2b): the worst-case costs reserved inside the scan's ONE
@@ -81,7 +81,6 @@ struct ScanTunables {
     int costBatchBytes = 12288;
     int costConfigBytes = 262144;
     int costTunnelProbeBytes = 82944;
-    int costLightBytes = 40960;
     int costOutcomesBytes = 16384;
     int costNetinfoBytes = 10240;
     int freezeAckMs = 1000;
@@ -147,7 +146,6 @@ inline const QList<ScanTunableSpec> &scanTunableTable()
         {"scan_slow_ttfb_ms", &ScanTunables::slowTtfbMs, 1500, 300, 10000, "ms", 3, "a working probe whose first request is slower is «Медленно»"},
         {"scan_slow_t64_ms", &ScanTunables::slowT64Ms, 3000, 500, 20000, "ms", 3, "a working probe whose body takes longer is «Медленно»"},
         {"scan_entry_ip_spacing_ms", &ScanTunables::entryIpSpacingMs, 300, 0, 2000, "ms", 3, "two connection opens to one entry IP at least this far apart (R8)"},
-        {"scan_light_timeout_ms", &ScanTunables::lightTimeoutMs, 7000, 2000, 20000, "ms", 3, "bound of the card's light checks (stage «Проверяем ваше подключение»)"},
         {"scan_attempt_hint_ttl_s", &ScanTunables::attemptHintTtlS, 120, 10, 600, "s", 3, "life of a tap's attempt order hint in the engine"},
         {"scan_followup_min_left_ms", &ScanTunables::followUpMinLeftMs, 3000, 1000, 30000, "ms", 3, "a full follow-up of a provider leg starts only with this much scan time left"},
         {"scan_cost_api_bytes", &ScanTunables::costApiBytes, 10240, 5120, 40960, "bytes", 4, "worst case of one small API request (scan token, batch release, a 304 manifest revalidation): 8 KiB TLS + 2 KiB"},
@@ -155,7 +153,6 @@ inline const QList<ScanTunableSpec> &scanTunableTable()
         {"scan_cost_batch_bytes", &ScanTunables::costBatchBytes, 12288, 6144, 49152, "bytes", 4, "worst case of the probe-batch answer without configs (<= 12 items + signature + TLS)"},
         {"scan_cost_config_bytes", &ScanTunables::costConfigBytes, 262144, 131072, 1048576, "bytes", 4, "worst case of one included config (Wi-Fi only; profile cap 256 KiB)"},
         {"scan_cost_tunnel_probe_bytes", &ScanTunables::costTunnelProbeBytes, 82944, 41472, 331776, "bytes", 4, "worst case of the sized check through the live tunnel (warm + body + 2 x 8 KiB TLS); never below that sum"},
-        {"scan_cost_light_bytes", &ScanTunables::costLightBytes, 40960, 20480, 163840, "bytes", 4, "worst case of the card's light checks (4 RU sites x 10 KiB; 0 with the RU split off)"},
         {"scan_cost_outcomes_bytes", &ScanTunables::costOutcomesBytes, 16384, 8192, 65536, "bytes", 4, "worst case of one outcomes POST (<= 32 items + TLS)"},
         {"scan_cost_netinfo_bytes", &ScanTunables::costNetinfoBytes, 10240, 5120, 40960, "bytes", 4, "worst case of one direct access attempt of the probe host (reserved by the host inside its grant)"},
         {"scan_freeze_ack_ms", &ScanTunables::freezeAckMs, 1000, 200, 5000, "ms", 4, "wait for the host's freeze ack; none -> the whole host grant is charged"},

@@ -2009,12 +2009,12 @@ Puedes adjuntar una foto o un video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+67"/>
+        <location line="+66"/>
         <source>Сканер</source>
         <translation>Escáner</translation>
     </message>
     <message>
-        <location line="-66"/>
+        <location line="-65"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2040,11 +2040,6 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+2"/>
-        <source>Проверяем ваше подключение</source>
-        <translation>Comprobando su conexión</translation>
-    </message>
-    <message>
-        <location line="+1"/>
         <source>Рабочие ноды появятся здесь</source>
         <translation>Los nodos que funcionan aparecerán aquí</translation>
     </message>
@@ -2405,7 +2400,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Iniciar el servicio</translation>
     </message>
     <message>
-        <location line="-94"/>
+        <location line="-93"/>
         <source>только что</source>
         <translation>ahora mismo</translation>
     </message>
@@ -2465,7 +2460,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Comprobando la transferencia de datos · %1 de&#xa0;%2 disponibles</translation>
     </message>
     <message>
-        <location line="+9"/>
+        <location line="+8"/>
         <source>Доступно</source>
         <translation>Disponible</translation>
     </message>
@@ -3131,7 +3126,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4275"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4272"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3504,7 +3499,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
     <message>
-        <location line="+809"/>
+        <location line="+672"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>

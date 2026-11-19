@@ -31,7 +31,6 @@ QtObject {
     readonly property string stageReach: qsTr("Проверяем доступность · %1 из %2")
     readonly property string stageReachShort: qsTr("Проверяем доступность")
     readonly property string stageData: qsTr("Проверяем передачу данных · доступно %1 из %2")
-    readonly property string stageSelf: qsTr("Проверяем ваше подключение")
     readonly property string waitRows: qsTr("Рабочие ноды появятся здесь")
     readonly property string waitMore: qsTr("Ищем ещё… до %1 с")
     readonly property string legend: qsTr("работает у других в вашей сети — по обезличенным отчётам устройств того же оператора")

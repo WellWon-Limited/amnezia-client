@@ -1320,27 +1320,6 @@ inline QString cellularGenerationForKind(const QString &kind, const QString &cel
 // keys know it - "queue_full" (report_queue_full: the queue's 20 reports / 32 MiB wait for the network), "busy"
 // (report_check_busy: another diagnostic runs), "unavailable" (report_check_unavailable: no queue, the switch off,
 // the queue refused the report for another reason - support_diag off, too large twice, unsupported log type).
-// Review F1: every light fact goes back WITH the ask it answers - TribeScanner::lightFactFor(askId, fact), which
-// drops a fact of any ask but the latest - so a late fact of a previous scan never fills the next scan's card.
-// The engine also drops it itself once a newer ask started (its epoch moved). bound = asked through
-// startLightChecksFor; an old-style ask (startLightChecks) answers through lightFact.
-struct ScanLightAsk {
-    quint64 askId = 0;
-    bool bound = false;
-    quint64 epoch = 0; // the engine's light epoch when the ask came
-};
-template <typename Scanner, typename Fact>
-inline bool scanDeliverLightFact(Scanner &scanner, const ScanLightAsk &ask, quint64 epochNow, const Fact &f)
-{
-    if (ask.epoch != epochNow)
-        return false;
-    if (ask.bound)
-        scanner.lightFactFor(ask.askId, f);
-    else
-        scanner.lightFact(f);
-    return true;
-}
-
 // The server's kill switch, immediate: a 404 of the scan endpoints (TribeScanner::serverSwitchedOff) asks for a
 // fresh /v1/config at once through the existing refresh (ConfigService::refreshIfStale, the foreground path; no
 // new timer), at most once per kScannerOffRefreshMs - ten 404s in a minute are one request. The refreshed

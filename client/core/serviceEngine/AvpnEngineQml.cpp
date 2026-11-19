@@ -48,7 +48,7 @@
 #include "ReportDelivery.h"
 #include "TribeDiagReport.h" // AVPN (diag-report, Task 4 bff-3): единый диагностический отчёт для чата поддержки
 #include "logger.h" // AVPN (diag-report): Logger::userLogsFilePath() — хвост лога приложения в отчёт
-#include "TribeScanner.h"     // AVPN Scanner (lane L6b): the coordinator, IScanEngine, ScanLightFact
+#include "TribeScanner.h"     // AVPN Scanner (lane L6b): the coordinator, IScanEngine
 #include "../utils/constants/protocolConstants.h" // AVPN Scanner: protocols::awg::defaultMtu (awg_mini as the live tunnel)
 #include "TribeSupportChat.h" // AVPN Scanner: the support report queue (reserve / submit / status)
 #include "XrayConfigBuilder.h" // AVPN Scanner: an own path's probe config (the exact tunnel config)
@@ -302,8 +302,6 @@ public:
     {
         m_e->connectToNode(nodeId, attemptOrder, hintTtlMs, userOrigin, forceConnect);
     }
-    void startLightChecks(const QString &nodeId) override { m_e->scanStartLightChecks(nodeId, 0, false); }
-    void startLightChecksFor(const QString &nodeId, quint64 askId) override { m_e->scanStartLightChecks(nodeId, askId, true); }
     void startReportCheck(const QString &reportId, const QJsonObject &report, bool withConnection) override
     {
         m_e->scanStartReportCheck(reportId, report, withConnection);
@@ -541,7 +539,6 @@ void ScanEngineAdapter::fillManifestInput(ScanManifestInput &in) const
     // coordinator (knownHostIps / its own resolution).
     in.awgAddressKnown = !m_e->m_engine.subscription().address.isEmpty() && !m_e->m_engine.clientKeys().privateKey.isEmpty();
     in.awgProbeIpKnown = !knownIpsForHost(m_e->m_apiHostIpsByHost, QUrl(m_e->m_baseUrl).host()).isEmpty();
-    in.ruSplitOn = QSettings().value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
 }
 
 // SECRET: the probe config of an own path. xray_full = the exact core config the tunnel would get;
@@ -7812,113 +7809,6 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
     scanRowAttemptBegin(m_scanRow, nodeId, m_intentSerial);
 }
 
-// StartLightChecks: the light facts of «Ваше подключение» on every scan (plan §3, F9) from the existing
-// checks - the server (known at once), the home chips of THIS connection (read, no new probe), the RU sites
-// (the Doctor's corpus, only with «Доступ к сайтам РФ»). Answered deferred (never inside the coordinator's
-// own action), each bounded by scan_light_timeout_ms of the manifest.
-void AvpnEngineQml::scanStartLightChecks(const QString &nodeId, quint64 askId, bool bound)
-{
-    ScanLightAsk ask;
-    ask.askId = askId;
-    ask.bound = bound;
-    ask.epoch = ++m_scanLightEpoch;
-    // Every fact through scanDeliverLightFact: with its own ask id (review F1), dropped once a newer ask started.
-    auto deliver = [this, ask](const ScanLightFact &f) {
-        if (m_scanner)
-            scanDeliverLightFact(*m_scanner, ask, m_scanLightEpoch, f);
-    };
-    QTimer::singleShot(0, this, [this, ask, nodeId, deliver]() {
-        if (!m_scanner || ask.epoch != m_scanLightEpoch)
-            return;
-        const bool same = !nodeId.isEmpty() && nodeId == m_engine.currentNodeId() && state() == QLatin1String("connected");
-        reliabilityEvent(QStringLiteral("scan_light_checks node=%1 live=%2 ask=%3").arg(nodeId).arg(int(same)).arg(ask.askId));
-        ScanLightFact server;
-        server.kind = ScanFactKind::Server;
-        server.state = same ? ScanFactState::Done : ScanFactState::Unknown;
-        deliver(server);
-        ScanLightFact svc;
-        svc.kind = ScanFactKind::Services;
-        bool fresh = false;
-        svc.chips = doctor::scanChipStates(m_serviceStatus, &fresh);
-        if (!same || !fresh) {
-            svc.state = ScanFactState::Unknown;
-            svc.needsButton = true; // «?» + «проверим по кнопке»: the chips did not run on this connection
-            if (!same)
-                svc.chips = QList<int>(4, -1);
-        } else {
-            svc.state = ScanFactState::Done;
-        }
-        deliver(svc);
-        ScanLightFact sites;
-        sites.kind = ScanFactKind::Sites;
-        if (!QSettings().value(QStringLiteral("AvpnBypass/masterOn"), false).toBool()) {
-            sites.state = ScanFactState::Off; // «Сайты РФ: выключено»
-            deliver(sites);
-            return;
-        }
-        if (!same) {
-            sites.state = ScanFactState::Unknown;
-            deliver(sites);
-            return;
-        }
-        const int boundMs = m_scanner->machine().tunables().lightTimeoutMs;
-        probeRuSites(qBound(1000, boundMs - 500, 6000), [deliver](const QStringList &names, const QList<bool> &oks) {
-            const doctor::StageResult r = doctor::ruSplitStage(names, oks);
-            ScanLightFact f;
-            f.kind = ScanFactKind::Sites;
-            f.state = r.status == doctor::Skip ? ScanFactState::Unknown : ScanFactState::Done;
-            f.ok = r.status == doctor::Ok;
-            deliver(f); // a late answer of an older ask is dropped here and by the coordinator
-        });
-    });
-}
-
-void AvpnEngineQml::probeRuSites(int transferTimeoutMs, std::function<void(const QStringList &, const QList<bool> &)> done)
-{
-    const QStringList raw = TuningStore::listOr(QStringLiteral("rusplit_watch"), rusentinel::defaultWatch());
-    auto names = std::make_shared<QStringList>();
-    auto oks = std::make_shared<QList<bool>>();
-    QStringList urls;
-    for (const QString &entry : raw) {
-        QString name, url;
-        if (!rusentinel::parseWatchEntry(entry, name, url))
-            continue;
-        names->append(name);
-        oks->append(false);
-        urls.append(url);
-    }
-    if (urls.isEmpty() || !m_nam) {
-        done(*names, *oks);
-        return;
-    }
-    auto pending = std::make_shared<int>(int(urls.size()));
-    for (int i = 0; i < urls.size(); ++i) {
-        QNetworkRequest req{QUrl(urls.at(i))};
-        req.setTransferTimeout(transferTimeoutMs);
-        req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
-        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
-        QNetworkReply *rep = m_nam->get(req);
-        auto code = std::make_shared<int>(0);
-        connect(rep, &QNetworkReply::metaDataChanged, this, [rep, code] {
-            if (*code > 0)
-                return;
-            *code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-            if (*code > 0)
-                rep->abort(); // the headers decide; the body is not fetched
-        });
-        connect(rep, &QNetworkReply::finished, this, [rep, code, i, names, oks, pending, done] {
-            rep->deleteLater();
-            int c = *code;
-            if (c <= 0)
-                c = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-            if (i < oks->size())
-                (*oks)[i] = (c > 0 && c < 500);
-            if (--*pending == 0)
-                done(*names, *oks);
-        });
-    }
-}
-
 // StartReportCheck: «Проверить и отправить отчёт» (withConnection) or the empty state's «Отправить отчёт в
 // поддержку». A queue slot first (backpressure: none free = no check), then the Doctor pipeline in scan mode.
 void AvpnEngineQml::scanStartReportCheck(const QString &reportId, const QJsonObject &report, bool withConnection)
@@ -7972,41 +7862,11 @@ void AvpnEngineQml::scanRefuseReportCheck(const QString &reportId, const char *w
     });
 }
 
-void AvpnEngineQml::scanCheckStageDone(const doctor::StageResult &r)
+void AvpnEngineQml::scanCheckStageDone(const doctor::StageResult &)
 {
     if (!m_scanner)
         return;
     m_scanner->reportCheckProgress(int(m_docStages.size()), kScanCheckStageCount);
-    if (!m_scanCheck.withConnection)
-        return; // the empty state's report: no card to fill
-    ScanLightFact f;
-    if (r.id == QLatin1String("servers")) {
-        f.kind = ScanFactKind::Server;
-        f.state = ScanFactState::Done;
-    } else if (r.id == QLatin1String("services")) {
-        f.kind = ScanFactKind::Services;
-        bool fresh = false;
-        f.chips = doctor::scanChipStates(m_serviceStatus, &fresh);
-        f.state = (r.status == doctor::Skip || !fresh) ? ScanFactState::Unknown : ScanFactState::Done;
-    } else if (r.id == QLatin1String("rusplit")) {
-        f.kind = ScanFactKind::Sites;
-        if (r.data.value(QStringLiteral("enabled")).toBool(true) == false)
-            f.state = ScanFactState::Off;
-        else {
-            f.state = r.status == doctor::Skip ? ScanFactState::Unknown : ScanFactState::Done;
-            f.ok = r.status == doctor::Ok;
-        }
-    } else if (r.id == QLatin1String("speed")) {
-        f.kind = ScanFactKind::Speed;
-        const doctor::SpeedCardFact sp = doctor::speedCardFact(r.data.value(QStringLiteral("down_mbit")).toDouble(-1), r.status);
-        f.state = sp.known ? ScanFactState::Done : ScanFactState::Unknown;
-        f.bars = sp.bars;
-        f.word = sp.word;
-    } else {
-        return;
-    }
-    // AVPN Scanner: bound to THIS check's report (a fact of an older check never fills a newer card).
-    m_scanner->lightFactForReport(m_scanCheck.machineReportId, f);
 }
 
 // docFinish of the check: the schema-5 report (the machine's summary as `scan`), validated by the server's
@@ -10911,7 +10771,7 @@ void AvpnEngineQml::docStageDone(const doctor::StageResult &r)
                                 {QStringLiteral("data"), r.data}});
     emit doctorChanged();
     if (m_scanCheck.active)
-        scanCheckStageDone(r); // AVPN Scanner: the card's facts and the check's progress
+        scanCheckStageDone(r); // AVPN Scanner: the check's progress
     const DoctorPhase donePh = m_docPhase;
     QTimer::singleShot(0, this, [this, e = m_docEpoch, donePh] {
         if (e != m_docEpoch)

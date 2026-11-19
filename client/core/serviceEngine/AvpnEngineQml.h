@@ -1826,9 +1826,8 @@ private:
     void scanApplySwitches(const char *why);
     void scanSyncState();        // live status -> coordinator, the row tap's chain, the own connect latch
     void scanNotifyNetwork();
-    void scanStartLightChecks(const QString &nodeId, quint64 askId, bool bound);
     void scanStartReportCheck(const QString &reportId, const QJsonObject &report, bool withConnection);
-    void scanCheckStageDone(const doctor::StageResult &r);   // facts + progress of the report check
+    void scanCheckStageDone(const doctor::StageResult &r);   // progress of the report check
     void scanCheckSubmit();                                   // the schema-5 report into the support queue
     void scanCheckDelivery(bool guardFired);                  // the shade follows the support thread result
     void scanCheckFinish(bool sent, bool notify = true);
@@ -1836,7 +1835,6 @@ private:
     void scanJournal(const QString &line, const QJsonObject &fields); // reliability ring + testing journal
     // The RU corpus (lists.rusplit_watch) through the current path, the Doctor's request semantics (GET cut
     // after the headers, any HTTP answer < 500 = reachable), each request bounded by transferTimeoutMs.
-    void probeRuSites(int transferTimeoutMs, std::function<void(const QStringList &, const QList<bool> &)> done);
     void docBeginRun(bool full, bool nodeScan); // the run state of startDoctor, shared with the Scanner's check
     bool                         m_scanNetHooked = false;     // iOS: the app path monitor's change hook is set
     bool                         m_scanSvcBusy = false;       // the Scanner's service step runs (item 6)
@@ -1855,7 +1853,6 @@ private:
     avpn::ScanRowAttempt         m_scanRow;
     avpn::UpstreamSeatFirst      m_seatFirst;                 // a provider pick waiting for its seat (live tunnel kept)
     QString                      m_scanLastCurrent;           // the last ScanCurrent sent (dedupe, never secret)
-    quint64                      m_scanLightEpoch = 0;
     // The full check of «Проверить и отправить отчёт» = the Doctor pipeline in scan mode (no start(), no
     // alternatives, the report into the support queue).
     struct ScanCheck {

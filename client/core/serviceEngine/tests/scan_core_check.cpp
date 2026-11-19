@@ -75,11 +75,11 @@ static void tunables()
         group3 += s.group == 3 ? 1 : 0;
     }
     CHECK(keys.size() == scanTunableTable().size());
-    CHECK(group3 == 6 && !keys.contains(QStringLiteral("scan_auto_race_total_ms"))); // plan v2 C6 / C7
+    CHECK(group3 == 5 && !keys.contains(QStringLiteral("scan_auto_race_total_ms"))); // plan v2 C6 / C7; no light bound (19.11)
     // plan v2.2 §2.2b / §6 gap 7: exactly these names and defaults; cost clamps x0.5..x4
     const QMap<QString, int> gap7{{QStringLiteral("scan_cost_api_bytes"), 10240}, {QStringLiteral("scan_cost_manifest_bytes"), 270336},
                                   {QStringLiteral("scan_cost_batch_bytes"), 12288}, {QStringLiteral("scan_cost_config_bytes"), 262144},
-                                  {QStringLiteral("scan_cost_tunnel_probe_bytes"), 82944}, {QStringLiteral("scan_cost_light_bytes"), 40960},
+                                  {QStringLiteral("scan_cost_tunnel_probe_bytes"), 82944},
                                   {QStringLiteral("scan_cost_outcomes_bytes"), 16384}, {QStringLiteral("scan_cost_netinfo_bytes"), 10240},
                                   {QStringLiteral("scan_drain_ms"), 2000}, {QStringLiteral("scan_freeze_ack_ms"), 1000}};
     int group4 = 0;
@@ -1131,19 +1131,19 @@ static ScanOpen openOf(const World &w, const QString &current, bool working)
 static void machineRules()
 {
     World w = baseWorld("rules", hostMac(), ScanNetKind::Wifi);
-    // manifest unavailable: NoScan with the card
+    // manifest unavailable: NoScan; the live row stays, no check of the connection runs (owner 18.11, variant B)
     {
         ScanMachine m(w.caps);
         m.opened(openOf(w, QStringLiteral("1"), true), kT0);
         ScanStep s = m.manifestUnavailable(QStringLiteral("service_off"), kT0 + 100);
-        CHECK(m.phase() == ScanPhase::NoScan && s.has(ScanActionKind::StartLightChecks));
+        CHECK(m.phase() == ScanPhase::NoScan && s.actions.size() >= 0 && !scanViewToJson(m.view(kT0 + 100)).contains(QStringLiteral("card")));
         const ScanView v = m.view(kT0 + 100);
-        CHECK(v.card.mode == ScanCardMode::Filling && v.empty.variant == ScanEmptyVariant::None); // the live row is shown
+        CHECK(v.empty.variant == ScanEmptyVariant::None); // the live row is shown
         ScanMachine off(w.caps);
         off.opened(openOf(w, QString(), false), kT0);
         off.manifestUnavailable(QString(), kT0 + 100);
         const ScanView v2 = off.view(kT0 + 100);
-        CHECK(v2.empty.variant == ScanEmptyVariant::NoScan && v2.empty.reason == QLatin1String("service_off") && v2.card.mode == ScanCardMode::Off);
+        CHECK(v2.empty.variant == ScanEmptyVariant::NoScan && v2.empty.reason == QLatin1String("service_off"));
     }
     // the host refuses the start before any result: NoScan host_memory; a late progress of another scan is ignored
     {
@@ -1235,36 +1235,27 @@ static void machineRules()
         CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 2100).actions.isEmpty()); // failed row
         CHECK(m.attemptEnded(kT0 + 2200).actions.isEmpty());                      // chain already over
     }
-    // the light checks are bounded: S4 ends at scan_light_timeout_ms
+    // no step checks the live connection (owner 18.11, variant B): the stop ends the scan at once, also for a
+    // connection that came up late
     {
         ScanMachine m(w.caps);
         m.opened(openOf(w, QStringLiteral("1"), true), kT0);
         m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
-        // the light checks start with the scan: their bound (7 s) passes before the stop (8 s)
-        CHECK(m.tick(kT0 + 50 + 6999).actions.isEmpty() && m.view(kT0 + 50 + 6999).phase == ScanPhase::Reach);
-        m.tick(kT0 + 50 + 7000);
-        CHECK(m.phase() == ScanPhase::Reach);
+        CHECK(m.tick(kT0 + 50 + 7999).actions.isEmpty() && m.view(kT0 + 50 + 7999).phase == ScanPhase::Reach);
         const ScanStep s = m.tick(kT0 + 50 + 8000);
-        CHECK(s.has(ScanActionKind::FreezeHostScan) && m.phase() == ScanPhase::Done); // facts final: no S4 wait
-        const ScanView v = m.view(kT0 + 50 + 8000);
-        CHECK(v.card.services.state == ScanFactState::Unknown && v.card.sites.state == ScanFactState::Unknown && v.card.mode == ScanCardMode::Filled);
-        // a connection that came up late: S4 waits for its facts, bounded
+        CHECK(s.has(ScanActionKind::FreezeHostScan) && m.phase() == ScanPhase::Done);
         ScanMachine late(w.caps);
         late.opened(openOf(w, QString(), false), kT0);
         late.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
         late.vpnState(liveOf(w, QStringLiteral("2:xray"), true), kT0 + 6000);
-        late.tick(kT0 + 50 + 8000);
-        CHECK(late.phase() == ScanPhase::Self && late.view(kT0 + 8050).stage == ScanStageKey::Self);
-        CHECK(!late.tick(kT0 + 6000 + 6999).has(ScanActionKind::PersistResults) && late.phase() == ScanPhase::Self);
-        late.tick(kT0 + 6000 + 7000);
-        CHECK(late.phase() == ScanPhase::Done);
+        const ScanStep ls = late.tick(kT0 + 50 + 8000);
+        CHECK(late.phase() == ScanPhase::Done && ls.has(ScanActionKind::PersistResults));
     }
     // stop when nothing runs does nothing; the report link only in the empty / no-scan states
     {
         ScanMachine m(w.caps);
         CHECK(m.stopTapped(kT0).actions.isEmpty());
         CHECK(m.reportLinkTapped(kT0).actions.isEmpty());
-        CHECK(m.checkTapped(kT0).actions.isEmpty());
         CHECK(m.retryTapped(kT0).has(ScanActionKind::RequestManifest)); // never scanned: retry scans
     }
     // the hint of a tap carries its TTL from the numbers
@@ -1735,7 +1726,7 @@ static void reviewFixes()
         m.closed(kT0 + 2100);
         CHECK(m.opened(openOf(w, QStringLiteral("1"), true), kT0 + 30000).has(ScanActionKind::RequestManifest));
     }
-    // F9: the light checks run again on a second scan of the same connection
+    // F9: the live check runs again on a second scan of the same connection
     {
         World w = baseWorld("f9", hostMac(), ScanNetKind::Wifi);
         w.current = QStringLiteral("1");
@@ -1744,8 +1735,7 @@ static void reviewFixes()
         w.runMs = 45000;
         Driver d(w);
         d.run();
-        CHECK(countActions(d, ScanActionKind::StartLightChecks) == 2 && countActions(d, ScanActionKind::RequestManifest) == 2);
-        CHECK(countActions(d, ScanActionKind::ProbeLiveTunnel) == 2); // and the live check too
+        CHECK(countActions(d, ScanActionKind::RequestManifest) == 2 && countActions(d, ScanActionKind::ProbeLiveTunnel) == 2);
     }
     // F10 (plan §2.11a): another local network with the same operator key - the app's monitor counted a
     // change and the gateway differs: the old results are not current evidence there
@@ -1872,15 +1862,13 @@ static void reviewFixes()
         w.current = QStringLiteral("1");
         w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
         w.script << qMakePair(qint64(8500), at("report_queue_state", {{QStringLiteral("full"), true}}));
-        w.script << qMakePair(qint64(9000), at("check_tapped"));
+        w.script << qMakePair(qint64(9000), at("support_check_tapped"));
         w.script << qMakePair(qint64(9500), at("report_queue_state", {{QStringLiteral("full"), false}}));
-        w.script << qMakePair(qint64(10000), at("check_tapped"));
+        w.script << qMakePair(qint64(10000), at("support_check_tapped"));
         w.runMs = 14000;
         Driver d(w);
         d.run();
         CHECK(shadeCount(d, "report_queue_full") == 1 && countActions(d, ScanActionKind::StartReportCheck) == 1);
-        CHECK(viewAt(d, 9200).value(QStringLiteral("card")).toObject().value(QStringLiteral("report_queue_full")).toBool());
-        CHECK(!viewAt(d, 9600).value(QStringLiteral("card")).toObject().contains(QStringLiteral("report_queue_full")));
         const ScanAction a = actionsOf(d, ScanActionKind::StartReportCheck).value(0);
         CHECK(a.report.value(QStringLiteral("scan_stats")).isObject()); // seats asked etc. ride with the report, not the summary
     }
@@ -1889,7 +1877,7 @@ static void reviewFixes()
         World w = baseWorld("f12", hostMac(), ScanNetKind::Wifi);
         w.current = QStringLiteral("1");
         w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
-        w.script << qMakePair(qint64(9000), at("check_tapped"));
+        w.script << qMakePair(qint64(9000), at("support_check_tapped"));
         w.script << qMakePair(qint64(9100), at("report_check_done", {{QStringLiteral("delivery"), QStringLiteral("sent")}, {QStringLiteral("report_id"), QStringLiteral("report-other")}}));
         w.runMs = 13000;
         Driver d(w);
@@ -1897,7 +1885,7 @@ static void reviewFixes()
         const ScanAction a = actionsOf(d, ScanActionKind::StartReportCheck).value(0);
         CHECK(a.reportId.startsWith(QLatin1String("report-")) && a.report.value(QStringLiteral("id")).toString() == a.reportId);
         CHECK(a.report.value(QStringLiteral("network_key")).toString() == QLatin1String("wifi:asn:64500") && a.report.value(QStringLiteral("scan")).isObject());
-        CHECK(phaseOf(viewAt(d, 9150)) == QLatin1String("done") && viewAt(d, 9150).value(QStringLiteral("card")).toObject().value(QStringLiteral("mode")).toString() == QLatin1String("checking"));
+        CHECK(phaseOf(viewAt(d, 9150)) == QLatin1String("done") && d.m.lastSummary().size() > 0);
         CHECK(shadeCount(d, "report_sent") == 1);
     }
     // mutation 32 (second round): provider probes never pass the cap when the host spent more than projected
@@ -1959,30 +1947,22 @@ static void planV22()
         CHECK(mr && mr->costBytes == 270336 + 10240 && !mr->requestId.isEmpty()); // reserved before it is sent
         const ScanStep s = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
         const ScanAction *a = s.find(ScanActionKind::StartHostScan);
-        CHECK(a && a->maxBytes == 1389568 && m.hostGrant() == 1389568 && m.allowanceBytes() == 1572864);
+        CHECK(a && a->maxBytes == 1430528 && m.hostGrant() == 1430528 && m.allowanceBytes() == 1572864); // no light-check share
         CHECK(a && a->limits.netinfoCostBytes == 10240);
         const ScanAction *b = s.find(ScanActionKind::RequestProbeBatch);
         CHECK(b && !b->includeConfig && b->costBytes == 12288); // cellular: never include_config
         const ScanAction *lp = s.find(ScanActionKind::ProbeLiveTunnel);
-        const ScanAction *lc = s.find(ScanActionKind::StartLightChecks);
-        CHECK(lp && lp->costBytes == 82944 && lc && lc->costBytes == 40960);
+        CHECK(lp && lp->costBytes == 82944);
         // composite providers need their config: on cellular they stay «Не проверено» (config_cellular)
         bool configCellular = false;
         for (const ScanRowView &r : m.view(kT0 + 50).rows)
             configCellular = configCellular || r.notVerifiedReason == QLatin1String("config_cellular");
         CHECK(configCellular);
-        // the RU split off: the light checks cost nothing
-        ScanMachine nosplit(w.caps);
-        nosplit.opened(openOf(w, QStringLiteral("1"), true), kT0);
-        QJsonObject args = manifestArgs(w);
-        args.insert(QStringLiteral("ru_split_on"), false);
-        const ScanStep s2 = nosplit.manifestReady(manifestInputFrom(args), kT0 + 50);
-        CHECK(s2.find(ScanActionKind::StartHostScan) && s2.find(ScanActionKind::StartHostScan)->maxBytes == 1389568 + 40960);
         // an app request reports its real bytes: they replace the reservation, also when they are more
         const qint64 used = m.allowanceUsed();
         m.appRequestDone(lp->requestId, 70000, kT0 + 700);
         CHECK(m.allowanceUsed() == used - 82944 + 70000);
-        m.appRequestDone(lc->requestId, 40960 + 17000, kT0 + 800); // one chunk past its reservation: recorded
+        m.appRequestDone(b->requestId, 12288 + 17000, kT0 + 800); // one chunk past its reservation: recorded
         CHECK(m.allowanceUsed() == used - 82944 + 70000 + 17000);
         m.appRequestDone(QStringLiteral("scan-nope/batch"), 5, kT0 + 900); // unknown: nothing
         CHECK(m.allowanceUsed() == used - 82944 + 70000 + 17000);
@@ -2649,22 +2629,18 @@ static void contractV23()
         CHECK(nv); // «Не проверено», reason bind_failed
         CHECK(scanHostFailureReason(ScanHostError::BindFailed) == QLatin1String("host_bind_failed"));
     }
-    // 5a. reportCheckRefused: a notice, no «sent» / «will be sent», the card as before, the queue state kept
+    // 5a. reportCheckRefused: a notice, no «sent» / «will be sent», the check over, the queue state kept
     {
         World w = baseWorld("refused", hostMac(), ScanNetKind::Wifi);
         w.current = QStringLiteral("1");
         w.reportRefuse = QStringLiteral("queue_full");
         w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
-        w.script << qMakePair(qint64(9000), at("check_tapped"));
+        w.script << qMakePair(qint64(9000), at("support_check_tapped"));
         w.runMs = 12000;
         Driver d(w);
         d.run();
         CHECK(countActions(d, ScanActionKind::StartReportCheck) == 1 && shadeCount(d, "report_queue_full") == 1
-              && !hasShade(d, "report_sent") && !hasShade(d, "report_queued"));
-        const QJsonObject card = lastView(d).value(QStringLiteral("card")).toObject();
-        CHECK(card.value(QStringLiteral("mode")).toString() == QLatin1String("filled") && card.value(QStringLiteral("button")).toString() == QLatin1String("ready")
-              && !card.contains(QStringLiteral("report_queue_full")));
-        CHECK(viewAt(d, 9100).value(QStringLiteral("card")).toObject().value(QStringLiteral("mode")).toString() == QLatin1String("checking"));
+              && !hasShade(d, "report_sent") && !hasShade(d, "report_queued") && !d.m.reportCheckRunning());
         // another diagnostic runs: its own notice; a refusal for another report changes nothing
         ScanMachine m(w.caps);
         m.opened(openOf(w, QStringLiteral("1"), true), kT0);
@@ -2673,16 +2649,13 @@ static void contractV23()
         const ScanStep st = m.reportLinkTapped(kT0 + 70); // not in the empty state: nothing
         CHECK(st.actions.isEmpty());
         m.tick(kT0 + 50 + 8000);
-        m.lightFact(ScanLightFact{ScanFactKind::Services, ScanFactState::Done, {2, 2, 2, 2}}, kT0 + 8100);
-        m.lightFact(ScanLightFact{ScanFactKind::Sites, ScanFactState::Done, {}, true}, kT0 + 8100);
-        const ScanStep ck = m.checkTapped(kT0 + 8200);
+        const ScanStep ck = m.supportCheckTapped(kT0 + 8200);
         const ScanAction *rc = ck.find(ScanActionKind::StartReportCheck);
         CHECK(rc && m.reportCheckRefused(QStringLiteral("report-other"), QStringLiteral("busy"), kT0 + 8300).actions.isEmpty());
         const ScanStep busy = m.reportCheckRefused(rc->reportId, QStringLiteral("busy"), kT0 + 8400);
         CHECK(busy.find(ScanActionKind::ShowShade) && busy.find(ScanActionKind::ShowShade)->shade.textKey == QLatin1String("report_check_busy"));
-        CHECK(m.view(kT0 + 8400).card.mode == ScanCardMode::Filled && !m.view(kT0 + 8400).card.reportQueueFull);
-        CHECK(m.view(kT0 + 8400).card.sites.state == ScanFactState::Done && m.view(kT0 + 8400).card.sites.ok); // restored
-        CHECK(m.checkTapped(kT0 + 8500).has(ScanActionKind::StartReportCheck)); // a new try is possible
+        CHECK(!m.reportCheckRunning());
+        CHECK(m.supportCheckTapped(kT0 + 8500).has(ScanActionKind::StartReportCheck)); // a new try is possible
     }
     // 5b. «Понял» in the no-scan budget state: close + the Wi-Fi intent, as for the empty result
     {
@@ -2823,13 +2796,11 @@ static void labSeams()
             }
         CHECK(items == xray.size() - 1);
 
-        // S7: Done with rows and no live connection (the card says «VPN не подключён», no button): the report
-        // link is offered and sends the summary through the same report flow as the card's button
-        CHECK(v.card.mode == ScanCardMode::Off && v.card.button == ScanCardButton::Hidden && v.empty.reportLink
-              && scanViewToJson(v).value(QStringLiteral("empty")).toObject().value(QStringLiteral("report_link")).toBool());
+        // S7: Done with rows and no live connection: the report link is offered and sends the summary through the
+        // report flow
+        CHECK(v.empty.reportLink && scanViewToJson(v).value(QStringLiteral("empty")).toObject().value(QStringLiteral("report_link")).toBool());
         ScanMachine &m = d.m;
         const qint64 t = d.now + 100;
-        CHECK(m.checkTapped(t).actions.isEmpty()); // no card button without a connection
         const ScanStep s = m.reportLinkTapped(t);
         const ScanAction *a = s.find(ScanActionKind::StartReportCheck);
         CHECK(a && !a->withConnection && !a->reportId.isEmpty() && a->report.value(QStringLiteral("scan")).toObject() == sum
@@ -2847,7 +2818,7 @@ static void labSeams()
         CHECK(!full.has(ScanActionKind::StartReportCheck) && full.has(ScanActionKind::ShowShade)
               && full.find(ScanActionKind::ShowShade)->shade.textKey == QLatin1String("report_queue_full"));
         m.reportQueueState(false, t + 1900);
-        // a live connection appears (a row's connect): the card's button is the way and the link goes
+        // a live connection appears (a row's connect): Support's check is the way and the link goes
         ScanCurrent live = liveOf(w, QStringLiteral("2:xray"), true);
         m.vpnState(live, t + 2000);
         CHECK(!m.view(t + 2000).empty.reportLink && m.reportLinkTapped(t + 2000).actions.isEmpty());
@@ -2856,7 +2827,7 @@ static void labSeams()
         m.retryTapped(t + 60000);
         CHECK(scanPhaseScanning(m.phase()) && !m.view(t + 60000).empty.reportLink && m.reportLinkTapped(t + 60000).actions.isEmpty());
     }
-    // S7: Done WITH a live connection (desktop, VPN on): the card's button, never the link
+    // S7: Done WITH a live connection (desktop, VPN on): never the link (Support's check is the way)
     {
         World x = w;
         x.out[QStringLiteral("5:xray")].durMs = 500;
@@ -2866,7 +2837,7 @@ static void labSeams()
         Driver d(x);
         d.run();
         const ScanView v = d.m.view(d.now);
-        CHECK(d.m.phase() == ScanPhase::Done && v.card.button == ScanCardButton::Ready && !v.empty.reportLink
+        CHECK(d.m.phase() == ScanPhase::Done && !v.empty.reportLink
               && d.m.reportLinkTapped(d.now).actions.isEmpty());
         // S4 with the live row: it is one of the summary's rows (+1 candidate), judged by the live tunnel
         const QJsonObject sum = d.m.lastSummary();
@@ -3022,25 +2993,22 @@ static void overruns()
         m.opened(openOf(w, QStringLiteral("1"), true), kT0);
         const ScanStep s = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
         const ScanAction *lp = s.find(ScanActionKind::ProbeLiveTunnel);
-        const ScanAction *lc = s.find(ScanActionKind::StartLightChecks);
-        CHECK(lp && lp->costBytes == 82944 && lc);
+        CHECK(lp && lp->costBytes == 82944);
         const qint64 grant = m.hostGrant();
         Driver dd(w);
         ScanProbeFacts f = dd.liveFacts(QStringLiteral("1"));
         f.spentBytes = 82944 + late;
         m.liveProbeResult(QStringLiteral("1"), f, kT0 + 700);
         CHECK(m.allowanceOvershoot() == late && m.hostGrant() == grant); // recorded; the host keeps its grant
-        m.appRequestDone(lc->requestId, 20000, kT0 + 900);
-        CHECK(m.allowanceOvershoot() == late - (40960 - 20000) || m.allowanceOvershoot() == 0);
         // a further app request (a release in the middle of the scan) is admitted only against what is left
         m.stopTapped(kT0 + 1000);
         m.hostFreezeAck(m.scanId(), 50000, 0, kT0 + 1030);
         ScanHostProgress fin = progressOf(m, {}, 50000, 0, true);
         fin.finalTotals = true;
         m.hostProgress(fin, kT0 + 1100);
-        // ledger = manifest 20480 + live 82944 + late + light 20000 + the live row's outcome batch sent at the
-        // end and never reported (its worst case 16384) + host 50000
-        CHECK(!m.draining() && m.ledger().spentInHour(kT0 + 1100, true) == 20480 + 82944 + late + 20000 + 16384 + 50000);
+        // ledger = manifest 20480 + live 82944 + late + the live row's outcome batch sent at the end and never
+        // reported (its worst case 16384) + host 50000
+        CHECK(!m.draining() && m.ledger().spentInHour(kT0 + 1100, true) == 20480 + 82944 + late + 16384 + 50000);
     }
     // the manifest: a full answer one chunk past its reservation - the grant is cut from what is left
     {
@@ -3128,7 +3096,7 @@ static void overruns()
     {
         World wr = baseWorld("overrun_run", hostMac(), ScanNetKind::Cellular);
         wr.current = QStringLiteral("1");
-        wr.cutApp = QStringLiteral("light");
+        wr.cutApp = QStringLiteral("batch");
         wr.appOverrunBytes = int(late);
         wr.liveOverrunBytes = int(late);
         wr.script << qMakePair(qint64(0), at("opened", openArgs(wr, wr.current, true)));

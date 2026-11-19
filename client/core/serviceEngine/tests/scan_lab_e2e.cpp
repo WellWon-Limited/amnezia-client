@@ -385,7 +385,7 @@ struct LabEngine : IScanEngine {
     QNetworkAccessManager *nam = nullptr;
     QString token;
     TribeScanner *scanner = nullptr;
-    int userConnects = 0, cancels = 0, rowCalls = 0, lights = 0;
+    int userConnects = 0, cancels = 0, rowCalls = 0;
     QStringList reportIds;
     QJsonObject lastBenchBody;
     int lastBenchStatus = 0;
@@ -417,7 +417,6 @@ struct LabEngine : IScanEngine {
         }
         in.awgAddressKnown = !sub.address.isEmpty();
         in.awgProbeIpKnown = true;
-        in.ruSplitOn = false; // the lab has no RU sites: the light checks cost 0
     }
     QString ownProbeConfig(const ScanCandidate &c) const override
     {
@@ -439,7 +438,6 @@ struct LabEngine : IScanEngine {
         return {};
     }
     QString liveProbeBase(const ScanCurrent &) const override { return {}; }
-    bool appInFront() const override { return true; }
     bool reportQueueFull() const override { return false; }
     QString uiLanguage() const override { return QStringLiteral("ru"); }
     QStringList knownHostIps(const QString &host) const override
@@ -456,11 +454,6 @@ struct LabEngine : IScanEngine {
     {
         ++rowCalls;
         out(QStringLiteral("[engine] connectRow %1").arg(nodeId));
-    }
-    void startLightChecks(const QString &nodeId) override
-    {
-        ++lights;
-        out(QStringLiteral("[engine] startLightChecks %1").arg(nodeId));
     }
     // FAKE of the engine's full check: the schema-5 report is built with the app's real builder and validator
     // (DoctorReport.h buildCheckReport / fitCheckReport / checkReportValid) around the machine's own summary, and
@@ -617,21 +610,21 @@ int probeSocketsLeft(QString *detail)
 bool reportPath(TribeScanner &scanner, LabEngine &engine, const QString &when)
 {
     const int before = engine.reportIds.size();
-    scanner.tapCheck();
+    scanner.checkFromSupport();
     const bool viaCheck = waitFor([&]() { return engine.reportIds.size() > before; }, 2000);
     if (!viaCheck)
         scanner.tapReportLink();
     const bool started = viaCheck || waitFor([&]() { return engine.reportIds.size() > before; }, 2000);
     const QString phase = scanner.view().value(QStringLiteral("phase")).toString();
     if (!started) {
-        out(QStringLiteral("REPORT: no report path %1 (phase %2; the card needs a live connection, the link exists in empty / no_scan / done without one)").arg(when, phase));
+        out(QStringLiteral("REPORT: no report path %1 (phase %2; Support's check needs a live connection, the link exists in empty / no_scan / done without one)").arg(when, phase));
         evt(QStringLiteral("report_path"), {{QStringLiteral("when"), when}, {QStringLiteral("phase"), phase}, {QStringLiteral("started"), false}});
         return false;
     }
     engine.lastBenchStatus = 0;
     waitFor([&]() { return engine.lastBenchStatus != 0; }, 10000);
     check(engine.lastBenchStatus == 201, QStringLiteral("report %1 via %2 in phase %3: POST /v1/bench/report (doctor schema 5) -> %4")
-                                             .arg(when, viaCheck ? QStringLiteral("tapCheck") : QStringLiteral("tapReportLink"), phase)
+                                             .arg(when, viaCheck ? QStringLiteral("checkFromSupport") : QStringLiteral("tapReportLink"), phase)
                                              .arg(engine.lastBenchStatus));
     evt(QStringLiteral("report_path"), {{QStringLiteral("when"), when}, {QStringLiteral("phase"), phase}, {QStringLiteral("started"), true},
                                         {QStringLiteral("status"), engine.lastBenchStatus}});

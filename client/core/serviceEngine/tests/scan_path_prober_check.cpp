@@ -225,7 +225,6 @@ struct FakeEngine : IScanEngine {
         return c.id == QLatin1String("11:xray") ? QStringLiteral(R"({"outbound":{"protocol":"vless","tag":"proxy"},"dns":[]})") : QString();
     }
     QString liveProbeBase(const ScanCurrent &) const override { return QString(); }
-    bool appInFront() const override { return true; }
     bool reportQueueFull() const override { return false; }
     QString uiLanguage() const override { return QStringLiteral("ru"); }
     bool awgProbeInput(const QString &nodeId, ScanAwgNodeInput &out) const override
@@ -241,7 +240,6 @@ struct FakeEngine : IScanEngine {
     void userConnectForScan() override {}
     void cancelPendingConnect() override {}
     void connectRow(const QString &, const QStringList &, qint64, bool, bool) override {}
-    void startLightChecks(const QString &) override {}
     void startReportCheck(const QString &, const QJsonObject &, bool) override {}
 };
 

@@ -25,7 +25,7 @@
 //                          never for a tunnel this machine did not start (a fresh machine after an app
 //                          relaunch never cancels anything), never on completion. The machine has no other
 //                          way to turn the VPN off.
-// The scan's own deadline and the light-check bound are wake-ups of this machine (wakeAtMs); they stop
+// The scan's own deadline and the allowance's settle bounds are wake-ups of this machine (wakeAtMs); they stop
 // probes and fill the screen, they never act on the tunnel. An AmneziaWG mini-session (the device's own key)
 // is never planned for, and leaves the scan the moment it becomes, the live tunnel's node or the target of a
 // connect attempt in progress (awg-probe-plan.md §5: the same key there would move the live endpoint).
@@ -61,11 +61,11 @@
 //    the outcome and the Doctor row carry evidence "exclusion", contract 1.7.0).
 //  - The live connection (F2) is a row «Подключено» at once, but «works» (counted, cached, in the summary)
 //    only after ProbeLiveTunnel - the sized, digest-checked /v1/probe through the live tunnel - says so, once
-//    per scan; the light checks (S8) also run again with every scan (F9).
+//    per scan.
 //  - Bytes (plan §2.2b, F6/F7): ONE allowance per scan A = min(scan_budget_scan_bytes, the rolling cellular
 //    hour) on cellular, the server device budget where named, else unlimited. The app side is reserved FIRST
 //    at its worst cases (scan_cost_*: manifest + token before the host; then probe-batch (+ configs on Wi-Fi),
-//    one batch release, the live-tunnel probe, the light checks, the outcome batch); every app request is
+//    one batch release, the live-tunnel probe, the outcome batch); every app request is
 //    admitted against that slice with the atomic rule and its reservation is replaced by the real bytes
 //    (appRequestDone). The host gets the rest as max_bytes; below the cheapest probe the host is not started
 //    (app side only, shade "scan_budget"). Stop: FreezeHostScan, then StopHostScan after the freeze ack; the
@@ -75,8 +75,8 @@
 //  - Cellular budget (ScanBudget.h): a scan starts only when the rolling hour covers its projection; the
 //    button becomes «Повторить через N мин» (hint «Лимит сканов в мобильной сети на этот час»).
 //  - Flow: Preparing (manifest requested) -> [Connecting (S1, VPN-required host, VPN off)] -> Reach (S2) ->
-//    Data (S3: from the first data item or the host's phase) -> Self (S4: the light checks of «Ваше
-//    подключение», only with a live connection, bounded by scan_light_timeout_ms) -> Done (S5) | Empty (S7).
+//    Data (S3: from the first data item or the host's phase) -> Done (S5) | Empty (S7). No separate step checks
+//    the live connection (owner 18.11, variant B: that check with its report lives in Support).
 //    NoScan = a scan could not run (scanner switched off / manifest unavailable, budget, host error,
 //    network changed while showing results): cached rows within scan_cache_works_ttl_s are the result.
 //  - Stop at scan_stop_works working rows (works + slow, the live connection included) or scan_stop_ms
@@ -105,12 +105,12 @@
 //  - Country filter after the scan (the menu is disabled while scanning, hidden with one country), reset
 //    by a new scan; the attempt order hint follows the filtered order.
 //  - Tap (S8): during a scan the scan stops at once and keeps its fresh rows. Connecting -> «Подключение…»;
-//    the engine's live data (vpnState dataFlowing) -> «Подключено», the screen STAYS (owner 15.11), the card
-//    refills for the new node; connectFailed -> «Не удалось» + warning shade «… подключаем следующую» while
+//    the engine's live data (vpnState dataFlowing) -> «Подключено», the screen STAYS (owner 15.11);
+//    connectFailed -> «Не удалось» + warning shade «… подключаем следующую» while
 //    the hint has a candidate left, else «… проверьте снова через минуту».
-//  - Card «Ваше подключение»: Off without a live data path; Filling / Filled from the light facts; Checking
-//    while the button's check runs («Проверяем…»); Checked after the report: shade success (sent) or info
-//    (queued offline, «Отчёт уйдёт, когда появится связь»). The report is always sent (the coordinator).
+//  - Support's check (supportCheckTapped): the full check with its report, running + progress; after the
+//    report: shade success (sent) or info (queued offline, «Отчёт уйдёт, когда появится связь»). The report is
+//    always sent (the coordinator). The Scanner's view has no card of it.
 //  - Empty (S7): «Понял, подключусь к Wi‑Fi» closes the screen; nothing scans later by itself.
 //  - No scan starts unless the person presses «Сканировать» (owner 19.11): shown() opens the screen without one.
 //  - Network change during a scan: the scan is cancelled (its finished results still reported under the old
@@ -159,7 +159,7 @@ namespace avpn {
 
 // --- phases --------------------------------------------------------------------------------------------------
 
-enum class ScanPhase { Idle, Preparing, Connecting, Reach, Data, Self, Done, Empty, NoScan };
+enum class ScanPhase { Idle, Preparing, Connecting, Reach, Data, Done, Empty, NoScan };
 
 inline const char *scanPhaseName(ScanPhase p)
 {
@@ -169,7 +169,6 @@ inline const char *scanPhaseName(ScanPhase p)
     case ScanPhase::Connecting: return "connecting";
     case ScanPhase::Reach: return "reach";
     case ScanPhase::Data: return "data";
-    case ScanPhase::Self: return "self";
     case ScanPhase::Done: return "done";
     case ScanPhase::Empty: return "empty";
     case ScanPhase::NoScan: break;
@@ -179,8 +178,7 @@ inline const char *scanPhaseName(ScanPhase p)
 
 inline bool scanPhaseScanning(ScanPhase p)
 {
-    return p == ScanPhase::Preparing || p == ScanPhase::Connecting || p == ScanPhase::Reach || p == ScanPhase::Data
-           || p == ScanPhase::Self;
+    return p == ScanPhase::Preparing || p == ScanPhase::Connecting || p == ScanPhase::Reach || p == ScanPhase::Data;
 }
 
 // --- actions -------------------------------------------------------------------------------------------------
@@ -193,7 +191,6 @@ enum class ScanActionKind {
     StopHostScan,       // scanId: scan_cancel (after the freeze ack, or when it did not come)
     RequestProbeBatch,  // ids + candidates (profile ids), includeConfig: POST /v1/upstream/lease/probe-batch (once per scan)
     ReleaseProbeLeases, // ids (<= 12): POST /v1/upstream/lease/probe-batch/release with their lease ids
-    StartLightChecks,   // nodeId: server + chips state + RU sites, answer with lightFact events
     StartReportCheck,   // withConnection: the full check + report (sent ALWAYS)
     ShowShade,          // shade: enqueue in the app's ShadeQueue
     SendOutcomes,       // networkKey, outcomes: POST /v1/telemetry/path-outcomes (ScanOutcomeCollector batches)
@@ -220,7 +217,6 @@ inline const char *scanActionName(ScanActionKind k)
     case ScanActionKind::StopHostScan: return "stop_host_scan";
     case ScanActionKind::RequestProbeBatch: return "request_probe_batch";
     case ScanActionKind::ReleaseProbeLeases: return "release_probe_leases";
-    case ScanActionKind::StartLightChecks: return "start_light_checks";
     case ScanActionKind::StartReportCheck: return "start_report_check";
     case ScanActionKind::ShowShade: return "show_shade";
     case ScanActionKind::SendOutcomes: return "send_outcomes";
@@ -336,48 +332,15 @@ struct ScanManifestInput {
     QStringList probeBaseIps;             // IP literals of the probe base's host (scan_start probe.base_ips)
     bool strictUnverifiable = false;      // features.upstream_unverifiable_strict: true = no proof by exclusion
     qint64 apiBytes = -1;                 // what the manifest / token requests really transferred (-1 unknown)
-    bool ruSplitOn = true;                // the RU split is on: the light checks open RU sites (else they cost 0)
-};
-
-enum class ScanFactKind { Server, Services, Sites, Speed };
-enum class ScanFactState { Pending, Running, Done, Unknown, Off };
-
-inline const char *scanFactStateName(ScanFactState s)
-{
-    switch (s) {
-    case ScanFactState::Pending: return "pending";
-    case ScanFactState::Running: return "running";
-    case ScanFactState::Done: return "done";
-    case ScanFactState::Unknown: return "unknown";
-    case ScanFactState::Off: break;
-    }
-    return "off";
-}
-
-inline bool scanFactFinal(ScanFactState s)
-{
-    return s == ScanFactState::Done || s == ScanFactState::Unknown || s == ScanFactState::Off;
-}
-
-struct ScanLightFact {
-    ScanFactKind kind = ScanFactKind::Sites;
-    ScanFactState state = ScanFactState::Done;
-    QList<int> chips;        // Services: TribeServiceChips states (Telegram, YouTube, Instagram, WhatsApp), -1 unknown
-    bool ok = false;         // Sites: «работают» / «не открываются»
-    int bars = 0;            // Speed: LoadBars level
-    QString word;            // Speed: "comfortable" | "slow"
-    bool needsButton = false; // Services: chips did not run in this connection («?», «проверим по кнопке»)
 };
 
 enum class ScanReportDelivery { Sent, Queued };
 
 // --- view --------------------------------------------------------------------------------------------------------
 
-enum class ScanStageKey { None, Preparing, Connecting, Reach, Data, Self };
+enum class ScanStageKey { None, Preparing, Connecting, Reach, Data };
 enum class ScanWaitKey { None, RowsAppearHere, SearchingMore };
 enum class ScanRowState { Works, Slow, NotVerified, Connecting, Connected, Failed };
-enum class ScanCardMode { Hidden, Off, Filling, Filled, Checking, Checked };
-enum class ScanCardButton { Hidden, Ready, Disabled, Busy };
 enum class ScanBarButton { Stop, Retry, RetryInSeconds, RetryInMinutes, ConnectAndScan };
 enum class ScanHint { None, CellularBudgetHour };
 enum class ScanEmptyVariant { None, Cellular, Wifi, NoScan };
@@ -389,7 +352,6 @@ inline const char *scanStageKeyName(ScanStageKey k)
     case ScanStageKey::Connecting: return "connecting";
     case ScanStageKey::Reach: return "reach";
     case ScanStageKey::Data: return "data";
-    case ScanStageKey::Self: return "self";
     case ScanStageKey::None: break;
     }
     return "none";
@@ -406,30 +368,6 @@ inline const char *scanRowStateName(ScanRowState s)
     case ScanRowState::Failed: break;
     }
     return "failed";
-}
-
-inline const char *scanCardModeName(ScanCardMode m)
-{
-    switch (m) {
-    case ScanCardMode::Hidden: return "hidden";
-    case ScanCardMode::Off: return "off";
-    case ScanCardMode::Filling: return "filling";
-    case ScanCardMode::Filled: return "filled";
-    case ScanCardMode::Checking: return "checking";
-    case ScanCardMode::Checked: break;
-    }
-    return "checked";
-}
-
-inline const char *scanCardButtonName(ScanCardButton b)
-{
-    switch (b) {
-    case ScanCardButton::Hidden: return "hidden";
-    case ScanCardButton::Ready: return "ready";
-    case ScanCardButton::Disabled: return "disabled";
-    case ScanCardButton::Busy: break;
-    }
-    return "busy";
 }
 
 inline const char *scanBarButtonName(ScanBarButton b)
@@ -486,27 +424,6 @@ struct ScanRowView {
     QString notVerifiedReason;
 };
 
-struct ScanFactView {
-    ScanFactState state = ScanFactState::Pending;
-    QList<int> chips;
-    bool ok = false;
-    int bars = 0;
-    QString word;
-    bool needsButton = false;
-};
-
-struct ScanCardView {
-    ScanCardMode mode = ScanCardMode::Hidden;
-    ScanCardButton button = ScanCardButton::Hidden;
-    double progress = -1;            // Checking: 0..1
-    QString serverLabel;
-    QString serverCountry;
-    int serverMs = -1;
-    ScanFactView server, services, sites, speed;
-    bool speedVisible = false;       // the fourth row appears with the button's check only
-    bool reportQueueFull = false;    // the support queue is full: the button shows the backpressure notice (F12)
-};
-
 struct ScanCountryView {
     QString countryCode;
     int count = 0;
@@ -554,7 +471,6 @@ struct ScanView {
     QList<ScanRowView> rows;         // display order, filter applied
     int verifiedCount = 0;           // fresh verified rows, before the filter (cached rows never count)
     int unverifiedCount = 0;
-    ScanCardView card;
     ScanBarView bar;
     ScanEmptyView empty;
     ScanNetKind net = ScanNetKind::Unknown;
@@ -1260,7 +1176,7 @@ public:
     }
 
     // The support report queue says whether it can take another report (F12): when full no new full check
-    // starts; a backpressure notice shows instead; light checks and the scan go on.
+    // starts; a backpressure notice shows instead; the scan goes on.
     ScanStep reportQueueState(bool full, qint64 now)
     {
         now = clock(now);
@@ -1315,7 +1231,7 @@ public:
             s.actions << d.actions;
             m_liveReqId.clear();
         }
-        if (m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data || m_phase == ScanPhase::Self) {
+        if (m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data) {
             m_outcomes.add(o);
             checkStop(now, s);
         } else {
@@ -1385,43 +1301,10 @@ public:
         return s;
     }
 
-    // --- «Ваше подключение» -----------------------------------------------------------------------------------
-    ScanStep lightFact(const ScanLightFact &f, qint64 now)
-    {
-        now = clock(now);
-        ScanStep s;
-        if (m_lightActive || m_checking) {
-            Fact &x = m_facts[int(f.kind)];
-            x.state = f.state;
-            x.chips = f.chips;
-            x.ok = f.ok;
-            x.bars = f.bars;
-            x.word = f.word;
-            x.needsButton = f.needsButton;
-            if (lightFinal())
-                m_lightDeadline = -1;
-            if (m_phase == ScanPhase::Self && lightFinal())
-                finish(now, s);
-        }
-        finishStep(s, now);
-        return s;
-    }
-
-    ScanStep checkTapped(qint64 now)
-    {
-        now = clock(now);
-        ScanStep s;
-        const ScanCardMode mode = cardMode();
-        if ((mode == ScanCardMode::Filled || mode == ScanCardMode::Checked) && m_connectingId.isEmpty())
-            startReportCheck(s);
-        finishStep(s, now);
-        return s;
-    }
-
+    // --- the support check --------------------------------------------------------------------------------------
     // Support's «Проверить подключение и отправить отчёт» (owner 18.11, variant B: the card and its button left the
-    // Scanner): the card's full check and report, started from the Support screen - no scan and no Scanner screen
-    // needed. With a live connection the stages check it (the view's card turns Checking, its progress is the
-    // coordinator's support_check); without one the report goes with the last scan's summary, like the empty
+    // Scanner): the full check and report, started from the Support screen - no scan and no Scanner screen
+    // needed. With a live connection the stages check it (its progress is the coordinator's support_check); without one the report goes with the last scan's summary, like the empty
     // state's link. A check or a report already running answers «Проверка уже идёт»; a row's connect in flight -
     // nothing (the attempt decides first). The queue's backpressure is startReportCheck's (report_queue_full).
     ScanStep supportCheckTapped(qint64 now)
@@ -1491,19 +1374,14 @@ public:
 
     // The engine could not start or submit the full check (the queue filled up in a race, another diagnostic
     // runs): no report exists, so no «sent» / «will be sent» text - a notice instead (reason "queue_full" or
-    // empty: report_queue_full; otherwise report_check_<reason>, e.g. report_check_busy); the card goes back
-    // to what it showed before the check; the queue state (reportQueueState) is not touched.
+    // empty: report_queue_full; otherwise report_check_<reason>, e.g. report_check_busy); the queue state
+    // (reportQueueState) is not touched.
     ScanStep reportCheckRefused(const QString &reportId, const QString &reason, qint64 now)
     {
         now = clock(now);
         ScanStep s;
         if ((m_checking || m_reportSending) && (reportId.isEmpty() || reportId == m_reportId)) {
-            if (m_checking) {
-                m_checking = false;
-                for (int k = 0; k < 4; ++k)
-                    m_facts[k] = m_factsBeforeCheck[k];
-                m_checked = m_checkedBeforeCheck;
-            }
+            m_checking = false;
             m_reportSending = false;
             const bool full = reason.isEmpty() || reason == QLatin1String("queue_full");
             s.actions << shade(ShadeTone::Warning, full ? QStringLiteral("report_queue_full")
@@ -1520,13 +1398,7 @@ public:
         now = clock(now);
         ScanStep s;
         if ((m_checking || m_reportSending) && (reportId.isEmpty() || reportId == m_reportId)) {
-            if (m_checking) {
-                m_checking = false;
-                m_checked = true;
-                for (Fact &f : m_facts)
-                    if (f.state == ScanFactState::Running || f.state == ScanFactState::Pending)
-                        f.state = ScanFactState::Unknown;
-            }
+            m_checking = false;
             m_reportSending = false;
             if (d == ScanReportDelivery::Sent)
                 s.actions << shade(ShadeTone::Success, QStringLiteral("report_sent"));
@@ -1561,8 +1433,6 @@ public:
                 m_hostDone = true;
                 releaseLeases(s);
             }
-            m_lightActive = false;
-            m_lightDeadline = -1;
             finishKeeping(now, id, s);
         }
         // The attempt order: the visible rows after the filter, after the tapped one, wrapping.
@@ -1659,14 +1529,6 @@ public:
         for (Settle *st : {&m_cur, &m_prev})
             if (st->open && st->deadline >= 0 && now >= st->deadline)
                 settleOnTimeout(*st, now, s);
-        if (m_lightDeadline >= 0 && now >= m_lightDeadline) {
-            for (int k = 0; k < 3; ++k)
-                if (!scanFactFinal(m_facts[k].state))
-                    m_facts[k].state = ScanFactState::Unknown;
-            m_lightDeadline = -1;
-            if (m_phase == ScanPhase::Self)
-                finish(now, s);
-        }
         finishStep(s, now);
         return s;
     }
@@ -1734,21 +1596,12 @@ public:
             v.progress = qMin(0.92, qMax(byWorks, byTime));
             break;
         }
-        case ScanPhase::Self: {
-            v.stage = ScanStageKey::Self;
-            int done = 0;
-            for (int k = 0; k < 3; ++k)
-                done += scanFactFinal(m_facts[k].state) ? 1 : 0;
-            v.progress = 0.92 + 0.02 * done;
-            break;
-        }
         default:
             v.progress = 0;
             break;
         }
-        v.card = cardView(now);
         if (v.scanning) {
-            if (all.isEmpty() && v.card.mode == ScanCardMode::Hidden)
+            if (all.isEmpty())
                 v.wait = ScanWaitKey::RowsAppearHere;
             else if (m_phase == ScanPhase::Data && m_deadline >= 0) {
                 const int left = int((m_deadline - now + 999) / 1000);
@@ -1842,7 +1695,7 @@ public:
     qint64 deadline() const { return m_deadline; }
     bool startedVpn() const { return m_startedVpn; }
     bool screenOpen() const { return m_screenOpen; }
-    // The full check / report in flight (Support's action and the card's button share it): running, and the
+    // The full check / report in flight (Support's action): running, and the
     // share of the check's stages done (0..1; -1 = a report without a connection, no stages to count).
     bool reportCheckRunning() const { return m_checking || m_reportSending; }
     double reportCheckProgress() const { return m_checking ? double(m_checkStep) / qMax(1, m_checkTotal) : -1.0; }
@@ -1997,15 +1850,6 @@ private:
         QString reason;
     };
 
-    struct Fact {
-        ScanFactState state = ScanFactState::Pending;
-        QList<int> chips;
-        bool ok = false;
-        int bars = 0;
-        QString word;
-        bool needsButton = false;
-    };
-
     // --- helpers ----------------------------------------------------------------------------------------------
     qint64 clock(qint64 now)
     {
@@ -2066,7 +1910,6 @@ private:
         };
         if (m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data)
             take(m_deadline);
-        take(m_lightDeadline);
         if (m_cur.open)
             take(m_cur.deadline);
         if (m_prev.open)
@@ -2085,14 +1928,12 @@ private:
     }
 
     // The app side of one scan at its worst cases (plan §2.2b table): manifest + token, probe-batch (without
-    // configs) + one release, the live-tunnel probe, the light checks, the outcome batch.
+    // configs) + one release, the live-tunnel probe, the outcome batch.
     qint64 appWorstCase() const
     {
         return qint64(m_t.costManifestBytes) + m_t.costApiBytes + m_t.costBatchBytes + m_t.costApiBytes
-               + m_t.costTunnelProbeBytes + lightCost() + m_t.costOutcomesBytes;
+               + m_t.costTunnelProbeBytes + m_t.costOutcomesBytes;
     }
-
-    qint64 lightCost() const { return m_manifest.ruSplitOn ? m_t.costLightBytes : 0; }
 
     // The stamp of CURRENT evidence: the strict generation tuple's hash and this scan's token (the scan id).
     QString currentStamp() const { return m_net.generation() + QLatin1Char('|') + m_scanId; }
@@ -2191,7 +2032,7 @@ private:
         }
     }
 
-    // The live connection: its row (materialized from the live tunnel), the connect chain, S1, the card.
+    // The live connection: its row (materialized from the live tunnel), the connect chain, S1.
     void setCurrent(const ScanCurrent &c, qint64 now, ScanStep &s)
     {
         const ScanCurrent prev = m_current;
@@ -2293,20 +2134,6 @@ private:
             // rule (the freeze goes unanswered: the whole grant after scan_freeze_ack_ms).
             stopStage2(now, QStringLiteral("tunnel_stopped"), s);
         }
-        // The card follows the live connection.
-        if (!c.working()) {
-            if (prev.working()) {
-                m_lightActive = false;
-                m_lightDeadline = -1;
-                m_lightNode.clear();
-                if (m_phase == ScanPhase::Self)
-                    finish(now, s);
-            }
-        } else if (c.nodeId != m_lightNode && !m_checking
-                   && (m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data || m_phase == ScanPhase::Self
-                       || m_phase == ScanPhase::Done || m_phase == ScanPhase::Empty || m_phase == ScanPhase::NoScan)) {
-            startLight(now, s);
-        }
         if (c.working() && m_phase != ScanPhase::Idle && m_phase != ScanPhase::Preparing && m_phase != ScanPhase::Connecting)
             maybeProbeLive(s);
     }
@@ -2359,53 +2186,11 @@ private:
                                {QStringLiteral("scan_stats"), m_stats.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(m_stats)}};
     }
 
-    void startLight(qint64 now, ScanStep &s)
-    {
-        if (!m_current.working())
-            return;
-        m_lightNode = m_current.nodeId;
-        m_lightActive = true;
-        m_checked = false;
-        for (Fact &f : m_facts)
-            f = Fact();
-        m_facts[int(ScanFactKind::Server)].state = ScanFactState::Done; // name + live ms: known at once
-        m_facts[int(ScanFactKind::Services)].state = ScanFactState::Running;
-        m_facts[int(ScanFactKind::Sites)].state = ScanFactState::Running;
-        m_lightDeadline = now + m_t.lightTimeoutMs;
-        ScanAction a = act(ScanActionKind::StartLightChecks);
-        a.nodeId = m_current.nodeId;
-        if (!sendApp(QStringLiteral("light"), lightCost(), now, s, a)) {
-            // No room in the allowance: the light facts are unknown («проверим по кнопке»).
-            m_facts[int(ScanFactKind::Services)].state = ScanFactState::Unknown;
-            m_facts[int(ScanFactKind::Services)].needsButton = true;
-            m_facts[int(ScanFactKind::Sites)].state = ScanFactState::Unknown;
-            m_lightDeadline = -1;
-            return;
-        }
-        s.actions << a;
-    }
-
-    bool lightFinal() const
-    {
-        for (int k = 0; k < 3; ++k)
-            if (!scanFactFinal(m_facts[k].state))
-                return false;
-        return true;
-    }
-
     void beginChecking()
     {
-        for (int k = 0; k < 4; ++k)
-            m_factsBeforeCheck[k] = m_facts[k];
-        m_checkedBeforeCheck = m_checked;
         m_checking = true;
-        m_checked = false;
         m_checkStep = 0;
         m_checkTotal = 4;
-        for (int k = 0; k < 4; ++k) {
-            m_facts[k].state = ScanFactState::Running;
-            m_facts[k].needsButton = false;
-        }
     }
 
     void startReportCheck(ScanStep &s)
@@ -2482,15 +2267,6 @@ private:
         m_appSideOnly = false;
         m_liveProbeNode.clear();
         m_liveProbeDone = false;
-        // Light checks run again with every scan, also on the same connection (S8, F9).
-        m_lightActive = false;
-        m_lightNode.clear();
-        m_lightDeadline = -1;
-        if (!m_checking) {
-            m_checked = false;
-            for (Fact &f : m_facts)
-                f = Fact();
-        }
         m_scanNet = m_net;
         m_completed = false;
         // «Найти ещё» (moreTapped): a continuation keeps this network's rows fresh and its judged set; any other
@@ -2687,13 +2463,11 @@ private:
         for (const ScanCandidate &c : plan.orderOnly)
             addUnverified(c, c.notVerifiedReason);
         // F6 (plan §2.2b step 2b): the app side of this scan is reserved at its worst case BEFORE the host's
-        // grant is cut - the live-tunnel probe, the light checks, the outcome batch, then the probe-batch
+        // grant is cut - the live-tunnel probe, the outcome batch, then the probe-batch
         // (configs only on Wi-Fi) and one release (no room: the providers stay «Не проверено»). The host gets
         // the rest.
-        if (m_current.working()) {
+        if (m_current.working())
             reserveApp(QStringLiteral("live"), m_t.costTunnelProbeBytes);
-            reserveApp(QStringLiteral("light"), lightCost());
-        }
         reserveApp(QStringLiteral("outcomes"), m_t.costOutcomesBytes);
         const BatchPick pick = pickBatch();
         bool batchReserved = false;
@@ -2741,8 +2515,6 @@ private:
         m_s2Start = now;
         m_deadline = now + m_t.stopMs;
         m_phase = ScanPhase::Reach;
-        if (m_current.working() && m_lightNode != m_current.nodeId)
-            startLight(now, s);
         maybeProbeLive(s);
         bool anyHost = false;
         for (const Cand &c : m_cands)
@@ -3271,14 +3043,6 @@ private:
         releaseLeases(s);
         settleUnjudged(); // what the stop cut in flight is «Не проверено» (cancelled), never a failure
         m_stopReason = reason;
-        if (m_current.working() && (!m_lightActive || m_lightNode != m_current.nodeId))
-            startLight(now, s);
-        if (m_current.working() && !lightFinal()) {
-            m_phase = ScanPhase::Self;
-            if (m_lightDeadline < 0)
-                m_lightDeadline = now + m_t.lightTimeoutMs;
-            return;
-        }
         finish(now, s);
     }
 
@@ -3474,7 +3238,6 @@ private:
     {
         if (!scanPhaseScanning(m_phase))
             return;
-        m_lightDeadline = lightFinal() ? -1 : m_lightDeadline;
         const bool connectStep = m_phase == ScanPhase::Connecting || m_phase == ScanPhase::Preparing;
         dropCachedRowsExcept(keep);
         if (connectStep && keep.isEmpty() && m_emptyReason.isEmpty() && !m_current.working())
@@ -3686,7 +3449,7 @@ private:
         const bool sameNet = m_scanNet.generation() == m_net.generation();
         ScanOutcomeCollector late;
         late.begin(m_scanNet.key);
-        const bool scanning = m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data || m_phase == ScanPhase::Self;
+        const bool scanning = m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data;
         for (Cand &c : m_cands) {
             if (!c.exclusionPending)
                 continue;
@@ -3822,11 +3585,6 @@ private:
         m_completed = false;
         m_phase = ScanPhase::Idle;
         m_deadline = -1;
-        if (!lightFinal()) {
-            m_lightActive = false;
-            m_lightDeadline = -1;
-            m_lightNode.clear();
-        }
         m_checkAfterScan = false;
     }
 
@@ -3840,14 +3598,6 @@ private:
         m_completed = false;
         m_cands.clear();
         m_deadline = -1;
-        ensureLight(now, s);
-    }
-
-    // The card always has its light facts for the live connection once the scan is over.
-    void ensureLight(qint64 now, ScanStep &s)
-    {
-        if (m_current.working() && !m_checking && (!m_lightActive || m_lightNode != m_current.nodeId))
-            startLight(now, s);
     }
 
 
@@ -4066,57 +3816,6 @@ private:
                || (m_phase == ScanPhase::Done && !m_current.working());
     }
 
-    ScanCardMode cardMode() const
-    {
-        if (!m_current.working())
-            return (m_phase == ScanPhase::Idle || m_phase == ScanPhase::Empty) ? ScanCardMode::Hidden : ScanCardMode::Off;
-        if (m_checking)
-            return ScanCardMode::Checking;
-        if (m_phase == ScanPhase::Preparing || m_phase == ScanPhase::Connecting || m_phase == ScanPhase::Reach
-            || m_phase == ScanPhase::Data || m_phase == ScanPhase::Idle)
-            return ScanCardMode::Hidden;
-        if (!m_lightActive || !lightFinal())
-            return ScanCardMode::Filling;
-        return m_checked ? ScanCardMode::Checked : ScanCardMode::Filled;
-    }
-
-    ScanCardView cardView(qint64 now) const
-    {
-        Q_UNUSED(now);
-        ScanCardView c;
-        c.mode = cardMode();
-        c.reportQueueFull = m_reportQueueFull;
-        if (c.mode == ScanCardMode::Hidden || c.mode == ScanCardMode::Off)
-            return c;
-        c.serverLabel = m_current.label;
-        c.serverCountry = m_current.countryCode;
-        c.serverMs = m_current.liveRttMs;
-        const auto fv = [this](ScanFactKind k) {
-            const Fact &f = m_facts[int(k)];
-            ScanFactView v;
-            v.state = f.state;
-            v.chips = f.chips;
-            v.ok = f.ok;
-            v.bars = f.bars;
-            v.word = f.word;
-            v.needsButton = f.needsButton;
-            return v;
-        };
-        c.server = fv(ScanFactKind::Server);
-        c.services = fv(ScanFactKind::Services);
-        c.sites = fv(ScanFactKind::Sites);
-        c.speed = fv(ScanFactKind::Speed);
-        c.speedVisible = c.mode == ScanCardMode::Checking || c.mode == ScanCardMode::Checked;
-        if (c.mode == ScanCardMode::Checking) {
-            c.button = ScanCardButton::Busy;
-            c.progress = double(m_checkStep) / qMax(1, m_checkTotal);
-        } else if (c.mode == ScanCardMode::Filling) {
-            c.button = ScanCardButton::Hidden;
-        } else {
-            c.button = m_connectingId.isEmpty() ? ScanCardButton::Ready : ScanCardButton::Disabled;
-        }
-        return c;
-    }
 
     qint64 nextChange(qint64 now, const ScanView &v) const
     {
@@ -4274,15 +3973,8 @@ private:
     QString m_connectingId;
     QStringList m_chainOrder;
     bool m_chainLaterShown = false;
-    // card
-    Fact m_facts[4];
-    Fact m_factsBeforeCheck[4];       // restored when the engine refuses the check
-    bool m_checkedBeforeCheck = false;
-    bool m_lightActive = false;
-    QString m_lightNode;
-    qint64 m_lightDeadline = -1;
+    // the support check (supportCheckTapped / reportCheck*)
     bool m_checking = false;
-    bool m_checked = false;
     int m_checkStep = 0;
     int m_checkTotal = 4;
     bool m_reportSending = false;
@@ -4378,9 +4070,6 @@ inline QJsonObject scanActionToJson(const ScanAction &a)
         o.insert(QStringLiteral("ids"), ids);
         break;
     }
-    case ScanActionKind::StartLightChecks:
-        o.insert(QStringLiteral("node_id"), a.nodeId);
-        break;
     case ScanActionKind::StartReportCheck:
         o.insert(QStringLiteral("with_connection"), a.withConnection);
         o.insert(QStringLiteral("report_id"), a.reportId);
@@ -4430,27 +4119,6 @@ inline QJsonObject scanActionToJson(const ScanAction &a)
     case ScanActionKind::CancelPendingConnect:
         break;
     }
-    return o;
-}
-
-inline QJsonObject scanFactViewToJson(const ScanFactView &f)
-{
-    QJsonObject o;
-    o.insert(QStringLiteral("state"), QLatin1String(scanFactStateName(f.state)));
-    if (!f.chips.isEmpty()) {
-        QJsonArray c;
-        for (int x : f.chips)
-            c << x;
-        o.insert(QStringLiteral("chips"), c);
-    }
-    if (f.ok)
-        o.insert(QStringLiteral("ok"), true);
-    if (f.bars)
-        o.insert(QStringLiteral("bars"), f.bars);
-    if (!f.word.isEmpty())
-        o.insert(QStringLiteral("word"), f.word);
-    if (f.needsButton)
-        o.insert(QStringLiteral("needs_button"), true);
     return o;
 }
 
@@ -4510,22 +4178,6 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     }
     if (!v.netRadio.isEmpty())
         o.insert(QStringLiteral("net_radio"), v.netRadio);
-    QJsonObject card;
-    card.insert(QStringLiteral("mode"), QLatin1String(scanCardModeName(v.card.mode)));
-    card.insert(QStringLiteral("button"), QLatin1String(scanCardButtonName(v.card.button)));
-    if (v.card.reportQueueFull)
-        card.insert(QStringLiteral("report_queue_full"), true);
-    if (v.card.mode != ScanCardMode::Hidden && v.card.mode != ScanCardMode::Off) {
-        card.insert(QStringLiteral("server"), scanFactViewToJson(v.card.server));
-        card.insert(QStringLiteral("server_ms"), v.card.serverMs);
-        card.insert(QStringLiteral("services"), scanFactViewToJson(v.card.services));
-        card.insert(QStringLiteral("sites"), scanFactViewToJson(v.card.sites));
-        if (v.card.speedVisible)
-            card.insert(QStringLiteral("speed"), scanFactViewToJson(v.card.speed));
-        if (v.card.progress >= 0)
-            card.insert(QStringLiteral("progress"), qRound(v.card.progress * 100) / 100.0);
-    }
-    o.insert(QStringLiteral("card"), card);
     QJsonObject bar;
     bar.insert(QStringLiteral("menu_visible"), v.bar.menuVisible);
     bar.insert(QStringLiteral("menu_enabled"), v.bar.menuEnabled);

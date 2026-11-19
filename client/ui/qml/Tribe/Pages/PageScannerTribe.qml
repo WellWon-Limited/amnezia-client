@@ -30,9 +30,8 @@ PageType {
     readonly property var view: (hasScanner && TribeScanner.view) ? TribeScanner.view : ({ phase: "idle" })
     readonly property string phase: view.phase || "idle"
     readonly property bool scanning: phase === "preparing" || phase === "connecting" || phase === "reach"
-                                     || phase === "data" || phase === "self"
+                                     || phase === "data"
     readonly property bool hero: view.hero === true
-    readonly property var card: view.card || ({ mode: "hidden" })
     readonly property var barView: view.bar || ({})
     readonly property var emptyView: view.empty || ({})
     readonly property string reason: emptyView.reason || ""
@@ -386,7 +385,6 @@ PageType {
                 case "connecting": return ScanTexts.stageConnecting
                 case "reach": return ScanTexts.stageReach.arg(v.stage_count || 0).arg(v.stage_total || 0)
                 case "data": return ScanTexts.stageData.arg(v.stage_count || 0).arg(v.stage_total || 0)
-                case "self": return ScanTexts.stageSelf
                 }
                 return ScanTexts.stageReachShort
             }
@@ -515,9 +513,9 @@ PageType {
                     liveProto: (typeof TribeEngine !== "undefined") ? String(TribeEngine.activeProto || "") : ""
                     liveProtoVersion: (typeof TribeEngine !== "undefined" && TribeEngine.currentNode)
                                       ? String(TribeEngine.currentNode.protoVersion || "") : ""
-                    serverLabel: root.card.server_label || root.liveLabel
+                    serverLabel: root.liveLabel
                                  || ((typeof TribeEngine !== "undefined" && TribeEngine.currentNode) ? (TribeEngine.currentNode.name || "") : "")
-                    serverCc: root.card.server_cc || root.liveCc
+                    serverCc: root.liveCc
                               || ((typeof TribeEngine !== "undefined" && TribeEngine.currentNode) ? (TribeEngine.currentNode.countryCode || "") : "")
                 }
 
@@ -655,7 +653,7 @@ PageType {
                     visible: w !== "none" && !root.blocked
                     width: parent.width
                     // alone in the list it sits in the middle (artboard .list.empty: centred with its 32 margin)
-                    topPadding: (rowsModel.count === 0 && (root.card.mode || "hidden") === "hidden")
+                    topPadding: rowsModel.count === 0
                                 ? Math.max(Theme.space.xxl, (list.height - list.padTop - list.padBottom - 20 + Theme.space.xxl) / 2)
                                 : Theme.space.xxl - content.spacing
                     horizontalAlignment: Text.AlignHCenter
