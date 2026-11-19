@@ -2129,12 +2129,7 @@ You can attach a photo or video.</translation>
         <translation>Nothing works on the cellular network right now</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Подключитесь к Wi‑Fi — через него VPN обычно работает. Когда телефон подключится, откройте приложение — проверим ещё раз сами.</source>
-        <translation>Connect to Wi‑Fi — the VPN usually works through it. When the phone is connected, open the app — we will check again by ourselves.</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Понял, подключусь к Wi‑Fi</source>
         <translation>Got it, I will connect to Wi‑Fi</translation>
     </message>
@@ -2475,7 +2470,12 @@ You can attach a photo or video.</translation>
         <translation>Available</translation>
     </message>
     <message>
-        <location line="+28"/>
+        <location line="+19"/>
+        <source>Подключитесь к Wi‑Fi — через него VPN обычно работает. Потом откройте Сканер и нажмите «Сканировать».</source>
+        <translation>Connect to Wi‑Fi — VPN usually works through it. Then open the Scanner and tap “Scan”.</translation>
+    </message>
+    <message>
+        <location line="+9"/>
         <source>Найдена 1 доступная нода</source>
         <translation>1 available server found</translation>
     </message>
@@ -3131,7 +3131,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4276"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4275"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3620,7 +3620,7 @@ You can attach a photo or video.</translation>
         <translation>Auto</translation>
     </message>
     <message>
-        <location line="+584"/>
+        <location line="+582"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Sign in or connect first</translation>
     </message>

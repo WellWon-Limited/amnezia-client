@@ -62,7 +62,6 @@ struct ScanTunables {
     int unverifiedRowsMax = 2;
     int checkSpeedBytes = 1048576;
     int pollMs = 300;
-    int wifiRescanWindowS = 1800;
     int shadeMs = 1500;
     // 2. being added with the AWG probe (contract 1.6.0, awg-probe-plan.md §6.1)
     int awgConcurrency = 0;
@@ -141,7 +140,6 @@ inline const QList<ScanTunableSpec> &scanTunableTable()
         {"scan_unverified_rows_max", &ScanTunables::unverifiedRowsMax, 2, 0, 10, "rows", 1, "«Не проверено» rows shown at most"},
         {"scan_check_speed_bytes", &ScanTunables::checkSpeedBytes, 1048576, 65536, 4 * 1024 * 1024, "bytes", 1, "speed sample of the connection check"},
         {"scan_poll_ms", &ScanTunables::pollMs, 300, 100, 5000, "ms", 1, "probe host poll period while the screen is open"},
-        {"scan_wifi_rescan_window_s", &ScanTunables::wifiRescanWindowS, 1800, 60, 86400, "s", 1, "life of the «проверим ещё раз на Wi-Fi» intent"},
         {"scan_shade_ms", &ScanTunables::shadeMs, 1500, 500, 10000, "ms", 1, "hold time of a notification shade"},
         {"scan_awg_concurrency", &ScanTunables::awgConcurrency, 0, 0, 8, "count", 2, "awg_mini sessions at once; 0 = no AWG probe"},
         {"scan_awg_handshake_ms", &ScanTunables::awgHandshakeMs, 1500, 300, 5000, "ms", 2, "handshake wait of one awg_mini session"},

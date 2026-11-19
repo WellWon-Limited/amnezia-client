@@ -645,9 +645,10 @@ inline QList<Scenario> scenarios()
                       f.check(v.value(QLatin1String("verified")).toInt() <= 2, QStringLiteral("at most two working rows"));
                   }};
 
-    // 5. Nothing works on cellular, VPN off (macOS host): empty state, «Понял, подключусь к Wi‑Fi», the Wi-Fi intent.
+    // 5. Nothing works on cellular, VPN off (macOS host): empty state, «Понял, подключусь к Wi‑Fi» closes; Wi-Fi later
+    //    starts nothing by itself (owner 19.11: no scan unless the person presses «Сканировать»).
     l << Scenario{QStringLiteral("nothing_works_cellular"),
-                  {QStringLiteral("empty state by network kind"), QStringLiteral("Wi-Fi intent fires once while in front")},
+                  {QStringLiteral("empty state by network kind"), QStringLiteral("Wi-Fi later scans nothing by itself")},
                   [] {
                       World w = baseWorld("nothing_works_cellular", hostMacMinimal(), ScanNetKind::Cellular);
                       w.nodes = ownOnly(w.nodes); // providers: only first-wave seats, the rest «Не проверено»
@@ -658,8 +659,7 @@ inline QList<Scenario> scenarios()
                       World w2 = w;
                       w2.net = scanNet(ScanNetKind::Wifi, QStringLiteral("wifi:asn:64501"));
                       w.script << qMakePair(qint64(60000), at("network_changed", {{QStringLiteral("network"), netJson(w2.net)},
-                                                                                {QStringLiteral("cached"), QJsonObject()},
-                                                                                {QStringLiteral("app_in_front"), true}}));
+                                                                                {QStringLiteral("cached"), QJsonObject()}}));
                       w.runMs = 62000;
                       return w;
                   },
@@ -670,10 +670,8 @@ inline QList<Scenario> scenarios()
                               QStringLiteral("cellular variant"));
                       f.check(v.value(QLatin1String("card")).toObject().value(QLatin1String("mode")).toString() == QLatin1String("hidden"),
                               QStringLiteral("no card in the empty state"));
-                      f.check(hasShade(d, "wifi_intent"), QStringLiteral("intent shade"));
-                      f.check(d.closes.size() == 1 && d.opens.size() == 1, QStringLiteral("closed once, reopened by the intent"));
-                      f.check(countActions(d, ScanActionKind::RequestManifest) == 2, QStringLiteral("second scan on Wi-Fi"));
-                      f.check(d.m.wifiIntentUntil() == 0, QStringLiteral("intent consumed"));
+                      f.check(!hasShade(d, "wifi_intent") && d.closes.size() == 1, QStringLiteral("closed once, no intent"));
+                      f.check(countActions(d, ScanActionKind::RequestManifest) == 1, QStringLiteral("no second scan on Wi-Fi"));
                   }};
 
     // 6. Nothing works on Wi-Fi: «Понял» only closes.
@@ -693,7 +691,7 @@ inline QList<Scenario> scenarios()
                       const QJsonObject v = viewAt(d, 10500);
                       f.check(v.value(QLatin1String("empty")).toObject().value(QLatin1String("variant")).toString() == QLatin1String("wifi"),
                               QStringLiteral("wifi variant"));
-                      f.check(!hasShade(d, "wifi_intent") && d.m.wifiIntentUntil() == 0, QStringLiteral("no intent"));
+                      f.check(!hasShade(d, "wifi_intent"), QStringLiteral("no intent"));
                       f.check(d.closes.size() == 1, QStringLiteral("closed"));
                   }};
 
@@ -1475,9 +1473,9 @@ inline QList<Scenario> scenarios()
                       f.check(lastView(d).value(QLatin1String("card")).toObject().value(QLatin1String("mode")).toString() == QLatin1String("filled"),
                               QStringLiteral("card filled again"));
                   }};
-    // «Понял» on «no scan: budget» (the cellular hour used up): close and arm the Wi-Fi intent.
+    // «Понял» on «no scan: budget» (the cellular hour used up): close; nothing scans later by itself.
     l << Scenario{QStringLiteral("got_it_budget_no_scan"),
-                  {QStringLiteral("budget no-scan: got it closes and arms the Wi-Fi intent")},
+                  {QStringLiteral("budget no-scan: got it closes")},
                   [] {
                       World w = baseWorld("got_it_budget_no_scan", hostMac(), ScanNetKind::Cellular);
                       QJsonArray ledger;
@@ -1492,7 +1490,7 @@ inline QList<Scenario> scenarios()
                   [](const Driver &d, Fail &f) {
                       f.check(phaseOf(viewAt(d, 1000)) == QLatin1String("no_scan") && countActions(d, ScanActionKind::RequestManifest) == 0,
                               QStringLiteral("budget no-scan"));
-                      f.check(d.closes.size() == 1 && hasShade(d, "wifi_intent") && d.m.wifiIntentUntil() > 0, QStringLiteral("closed, intent armed"));
+                      f.check(d.closes.size() == 1 && !hasShade(d, "wifi_intent"), QStringLiteral("closed, no intent"));
                   }};
     // awg_mini with the device's own tunnel address unknown: «Не проверено» awg_no_address, never probed.
     l << Scenario{QStringLiteral("awg_no_address"),

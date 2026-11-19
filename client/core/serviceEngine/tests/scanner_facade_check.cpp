@@ -185,7 +185,6 @@ struct FakeEngine : IScanEngine {
         return true;
     }
     QStringList knownHostIps(const QString &host) const override { return knownIps.value(host); }
-    bool appInFront() const override { return true; }
     bool reportQueueFull() const override { return queueFull; }
     QString uiLanguage() const override { return QStringLiteral("ru"); }
     void userConnectForScan() override { ++userConnects; }
@@ -2041,10 +2040,10 @@ static void caseCapsGen()
     w.host.avail = ScanHostAvailability::Available;
     w.host.onAvailabilityChanged();
     w.run(50);
-    // a network change after a finished result: the screen rescans by itself (artboard, 17.11)
-    CHECK_EQ(w.phase(), QStringLiteral("preparing"));
+    // a network change after a finished result: seen (the host's new gen), no scan by itself (owner 19.11)
+    CHECK_EQ(w.phase(), QStringLiteral("idle"));
     w.run(20000);
-    CHECK_EQ(w.host.count("scan_start"), 2);
+    CHECK_EQ(w.host.count("scan_start"), 1);
 }
 
 // The machine is built from the host's own scan_caps answer, not the compiled guess.
@@ -2136,20 +2135,20 @@ static void caseScreenFields()
         g_case = QStringLiteral("screen_fields");
     }
 
-    // a change while results are shown: the shade «Сеть сменилась — проверяем заново» and a new scan by itself
-    // (artboard, «Сеть сменилась после скана»)
-    g_case = QStringLiteral("network_changed_shade_results");
+    // a change while results are shown (owner 19.11: no scan unless the person presses «Сканировать»): no scan by
+    // itself, no «проверяем заново» shade - the open page of the new network
+    g_case = QStringLiteral("network_changed_results_no_rescan");
     w.run(5000);
     const int startsBefore = w.host.count("scan_start");
     w.engine.net.appSources[0].counter = 5;
     w.s->networkChanged();
-    CHECK_EQ(w.phase(), QStringLiteral("preparing"));
-    CHECK_EQ(w.s->shade().value("text_key").toString(), QStringLiteral("network_changed"));
+    CHECK_EQ(w.phase(), QStringLiteral("idle"));
+    CHECK(!w.s->shade().value("visible").toBool());
     w.run(20000);
-    CHECK_EQ(w.host.count("scan_start"), startsBefore + 1);
+    CHECK_EQ(w.host.count("scan_start"), startsBefore);
     CHECK_EQ(w.engine.userConnects, 0);
 
-    // a change mid-scan: the machine rescans by itself, the same shade says so
+    // a change mid-scan: the person's scan restarts on the new network, the shade says so
     g_case = QStringLiteral("network_changed_shade_scan");
     World m;
     m.liveOn(QStringLiteral("4:xray"));

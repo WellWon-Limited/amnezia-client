@@ -58,7 +58,7 @@ QtObject {
 
     // ── empty result ──
     readonly property string emptyCellTitle: qsTr("В мобильной сети сейчас ничего не работает")
-    readonly property string emptyCellText: qsTr("Подключитесь к Wi‑Fi — через него VPN обычно работает. Когда телефон подключится, откройте приложение — проверим ещё раз сами.")
+    readonly property string emptyCellText: qsTr("Подключитесь к Wi‑Fi — через него VPN обычно работает. Потом откройте Сканер и нажмите «Сканировать».")
     readonly property string emptyCellOk: qsTr("Понял, подключусь к Wi‑Fi")
     readonly property string emptyWifiTitle: qsTr("В этой сети Wi‑Fi сейчас ничего не работает")
     readonly property string emptyWifiText: qsTr("Попробуйте мобильный интернет или другую сеть Wi‑Fi.")
@@ -157,8 +157,7 @@ QtObject {
     //  - stage «preparing» (manifest requested): stageReachShort without the counts + an indeterminate bar
     //  - NoScan not_entitled / over_quota / manifest_invalid / manifest_unavailable / host_* (generic): state 23
     //    texts (engineTitle + engineText + «Повторить»)
-    //  - NoScan network_changed: the last result + the bar's «Повторить» + the shade networkChanged
-    //  - shade scan_budget: hourLimit; shade wifi_intent: none (dismissed at once)
+    //  - shade scan_budget: hourLimit
     //  - network chip for ethernet / unknown: no chip
     // NEWTEXTS-END
 
@@ -198,7 +197,6 @@ QtObject {
                                         // closes itself when the engine's scannerEnabled turns false
             return { layout: "blocked", icon: "alert-circle", title: t.scannerOffTitle, text: t.scannerOffText, action: "none", primary: true }
         case "vpn_off":                 // state 20: last result + «Подключиться и проверить» (the bar)
-        case "network_changed":         // NO FRAME: last result + «Повторить» (cooldown cleared)
             return { layout: "list" }
         case "cooldown":                // state 21
             return { layout: "blocked", icon: "clock", title: t.pauseTitle, text: t.pauseText, action: "retry", primary: false }
@@ -289,7 +287,6 @@ QtObject {
         case "report_check_unavailable": return t.checkUnavailable
         case "report_check_not_saved": return t.checkNotSaved
         case "report_check_rejected": return t.checkRejected
-        // wifi_intent: no text (NO FRAME) - the host lets it go at once
         }
         return ""
     }

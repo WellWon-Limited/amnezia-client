@@ -286,9 +286,7 @@ inline ScanStep applyScanEvent(ScanMachine &m, const QJsonObject &ev, bool *know
     if (e == QLatin1String("filter")) return m.filterChosen(a.value(QLatin1String("cc")).toString(), now);
     if (e == QLatin1String("network_changed"))
         return m.networkChanged(netFrom(a.value(QLatin1String("network")).toObject()),
-                                scanCachedResultFromJson(a.value(QLatin1String("cached")).toObject()),
-                                a.value(QLatin1String("app_in_front")).toBool(), now);
-    if (e == QLatin1String("app_foreground")) return m.appForeground(now);
+                                scanCachedResultFromJson(a.value(QLatin1String("cached")).toObject()), now);
     if (e == QLatin1String("vpn_state")) return m.vpnState(currentFrom(a.value(QLatin1String("current")).toObject()), now);
     if (e == QLatin1String("manifest_ready")) return m.manifestReady(manifestInputFrom(a), now);
     if (e == QLatin1String("manifest_unavailable")) return m.manifestUnavailable(a.value(QLatin1String("reason")).toString(), now);
@@ -574,7 +572,7 @@ public:
     ScanMachine m;
     QList<Recorded> steps;
     qint64 now = kT0;
-    QStringList closes, opens;
+    QStringList closes;
     int releases = 0;
     int batches = 0;
     int maxReleaseIds = 0;
@@ -821,9 +819,6 @@ public:
                 break;
             case ScanActionKind::CloseScreen:
                 closes << QString::number(now - kT0);
-                break;
-            case ScanActionKind::OpenScreen:
-                opens << QString::number(now - kT0);
                 break;
             default:
                 break;

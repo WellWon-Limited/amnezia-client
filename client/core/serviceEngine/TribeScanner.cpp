@@ -339,10 +339,6 @@ void TribeScanner::execute(const ScanAction &a)
         emitLog(QStringLiteral("action close_screen"));
         emit closeScreenRequested();
         break;
-    case ScanActionKind::OpenScreen:
-        emitLog(QStringLiteral("action open_screen"));
-        emit openScreenRequested();
-        break;
     case ScanActionKind::ProbeLiveTunnel:
         doLiveProbe(a);
         break;
@@ -469,9 +465,6 @@ void TribeScanner::refreshView()
     j.insert(QStringLiteral("cooldown_ends_at_ms"), double(t < m_m.cooldownUntil() ? m_m.cooldownUntil() : 0));
     j.insert(QStringLiteral("next_change_at_ms"), double(v.nextChangeAtMs));
     j.insert(QStringLiteral("screen_open"), m_m.screenOpen());
-    // show() put the last result of this network on the screen without a scan: its age for the clock chip
-    if (v.phase == ScanPhase::Idle && !v.rows.isEmpty() && m_shownCacheAt > 0 && j.value(QLatin1String("checked_ago_min")).toInt(-1) < 0)
-        j.insert(QStringLiteral("checked_ago_min"), int(qMax<qint64>(0, t - m_shownCacheAt) / 60000));
     // Support's check (variant B): whether a full check / report runs and how far (-1 = no stages to count)
     j.insert(QStringLiteral("support_check"),
              QJsonObject{{QStringLiteral("running"), m_m.reportCheckRunning()},
@@ -550,15 +543,13 @@ void TribeScanner::notifyNetwork()
     m_lastNet = n;
     emitLog(QStringLiteral("network kind=%1 sources=%2").arg(QLatin1String(scanNetKindName(n.kind))).arg(n.sources.size()));
     const ScanPhase before = m_m.phase();
-    dispatch(m_m.networkChanged(n, cachedFor(n), m_engine->appInFront(), now()));
-    // «Сеть сменилась — проверяем заново» (artboard): a scan the change restarted or a finished result it rescans
-    // (the machine does both by itself, ScanMachine.h::scanRescanOnNetworkChange), or results that the change
-    // turned into the new network's cache (NoScan network_changed). A scan still preparing just retargets: silent.
-    const bool restarted = (before == ScanPhase::Reach || before == ScanPhase::Data || before == ScanPhase::Self
-                            || before == ScanPhase::Done || before == ScanPhase::Empty || before == ScanPhase::NoScan)
+    dispatch(m_m.networkChanged(n, cachedFor(n), now()));
+    // «Сеть сменилась — проверяем заново» (artboard): only for the person's running scan the change restarted on
+    // the new network. A finished result is never rescanned by itself (owner 19.11): no shade then. A scan still
+    // preparing just retargets: silent.
+    const bool restarted = (before == ScanPhase::Reach || before == ScanPhase::Data || before == ScanPhase::Self)
                            && scanPhaseScanning(m_m.phase());
-    const bool resultsVoided = m_m.phase() == ScanPhase::NoScan && m_m.view(now()).empty.reason == QLatin1String("network_changed");
-    if (m_m.screenOpen() && (restarted || resultsVoided)) {
+    if (m_m.screenOpen() && restarted) {
         ShadeRequest r;
         r.tone = ShadeTone::Info;
         r.textKey = QStringLiteral("network_changed");
@@ -2003,7 +1994,6 @@ void TribeScanner::show()
     o.cached = cachedFor(o.network);
     o.connectOnOpen = m_connectOnOpen;
     m_lastNet = o.network;
-    m_shownCacheAt = o.cached.present() ? o.cached.savedAtMs : -1;
     emitLog(QStringLiteral("show (no scan) cached=%1").arg(o.cached.present()));
     fetchPoolIfStale(); // the scope menu lists the whole pool before any scan
     dispatch(m_m.reportQueueState(m_engine->reportQueueFull(), now()));
@@ -2066,7 +2056,6 @@ void TribeScanner::engineStateChanged()
     fireNotNow(true); // a start refused with tunnel_changed goes once more now that the tunnel reported its state
 }
 void TribeScanner::networkChanged() { notifyNetwork(); }
-void TribeScanner::appForeground() { dispatch(m_m.appForeground(now())); }
 void TribeScanner::lightFact(const ScanLightFact &f)
 {
     // The facts of the light checks the machine asked for (StartLightChecks) belong to that scan, network and

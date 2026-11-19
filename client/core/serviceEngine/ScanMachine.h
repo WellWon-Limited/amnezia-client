@@ -111,13 +111,12 @@
 //  - Card «Ваше подключение»: Off without a live data path; Filling / Filled from the light facts; Checking
 //    while the button's check runs («Проверяем…»); Checked after the report: shade success (sent) or info
 //    (queued offline, «Отчёт уйдёт, когда появится связь»). The report is always sent (the coordinator).
-//  - Empty (S7): «Понял, подключусь к Wi‑Fi» (cellular) arms the Wi-Fi intent for scan_wifi_rescan_window_s:
-//    a Wi-Fi network delivered while the app is in front (networkChanged with appInFront, or appForeground)
-//    opens the Scanner and scans once (A5).
+//  - Empty (S7): «Понял, подключусь к Wi‑Fi» closes the screen; nothing scans later by itself.
+//  - No scan starts unless the person presses «Сканировать» (owner 19.11): shown() opens the screen without one.
 //  - Network change during a scan: the scan is cancelled (its finished results still reported under the old
-//    key) and restarted on the new network; while the open screen shows a finished result: a new scan by itself
-//    (artboard; scanRescanOnNetworkChange - cooldown cleared, the cellular hour still applies, never starting the
-//    VPN), otherwise the new network's cached rows (NoScan network_changed).
+//    key) and restarted on the new network; after a finished result: the new network's cached result with its
+//    age and scope, else the open page without a result (phase Idle) - never a scan by itself.
+//  - A persisted result keeps the scope it covered (ScanCachedResult.scope): shown again under that scope.
 //  - Outcomes (ScanOutcomes.h): one batch per scan (also for a cancelled one: what was measured is true),
 //    one per tap's connect chain. Budget actuals go to the ledger at every scan end (PersistBudget).
 //  - Doctor summary (lab seam S4, 16.11): every planned candidate ends in exactly one bucket - works, slow, a
@@ -184,26 +183,6 @@ inline bool scanPhaseScanning(ScanPhase p)
            || p == ScanPhase::Self;
 }
 
-// A network change while the open screen shows a finished result (artboard, «Сеть сменилась после скана»: the
-// shade «Сеть сменилась — проверяем заново» and a new scan by itself, instead of the old result and «Повторить»).
-// Only from a result the person is looking at - Done, Empty, or NoScan for the pause, the cellular hour or an
-// earlier network change (the new network clears the pause, §32 п. 9; the hour is checked again by beginScan,
-// which shows frame 22 when it is still used up). Never by starting the VPN: a host that needs the VPN (iPhone,
-// Android) with no tunnel working, up or coming keeps «Повторить» - only opening the Scanner or its button starts
-// the user's connect (§32 п. 2б). Every other NoScan (service, host, server switch, vpn_off, manifest) keeps
-// «Повторить» as before. No new timer and no new limit: the scan runs under the existing budget and cooldown. Pure.
-inline bool scanRescanOnNetworkChange(bool screenOpen, ScanPhase phase, const QString &noScanReason, bool hostNeedsVpn,
-                                      bool tunnelUpOrComing)
-{
-    if (!screenOpen || (hostNeedsVpn && !tunnelUpOrComing))
-        return false;
-    if (phase == ScanPhase::Done || phase == ScanPhase::Empty)
-        return true;
-    return phase == ScanPhase::NoScan
-           && (noScanReason == QLatin1String("cooldown") || noScanReason == QLatin1String("budget")
-               || noScanReason == QLatin1String("network_changed"));
-}
-
 // --- actions -------------------------------------------------------------------------------------------------
 
 enum class ScanActionKind {
@@ -221,7 +200,6 @@ enum class ScanActionKind {
     PersistResults,     // cached: store per network key
     PersistBudget,      // ledger: QSettings avpn/scanBudget
     CloseScreen,        // leave the Scanner page
-    OpenScreen,         // open the Scanner page (the Wi-Fi intent fired)
     ProbeLiveTunnel,    // nodeId, warmBytes, bytes: the sized /v1/probe through the LIVE tunnel (review F2), answer
                         // with liveProbeResult - the connected row is «works» only after it
     RequestCandidates,  // networkKey, scopeCountry ("" | cc | "whitelist"), ids = seen, batch = limit: POST
@@ -249,7 +227,6 @@ inline const char *scanActionName(ScanActionKind k)
     case ScanActionKind::PersistResults: return "persist_results";
     case ScanActionKind::PersistBudget: return "persist_budget";
     case ScanActionKind::CloseScreen: return "close_screen";
-    case ScanActionKind::OpenScreen: return "open_screen";
     case ScanActionKind::ProbeLiveTunnel: return "probe_live_tunnel";
     case ScanActionKind::RequestCandidates: return "request_candidates";
     case ScanActionKind::UserConnectForScan: return "user_connect_for_scan";
@@ -340,7 +317,9 @@ struct ScanOpen {
 
 inline constexpr char kScannerConnectOnOpenFlag[] = "scanner_connect_on_open";
 
-// REQ S3 (b) kill switch: the scan-initiated user connect on open; compiled default ON.
+// REQ S3 (b) kill switch, compiled default ON. The server key keeps its name (contract), its meaning since 19.11
+// (no scan on page open): «Сканировать» connects the VPN first when it is off (a host that probes through the
+// tunnel); off = the button reads «Подключиться и проверить» and that tap is the person's explicit connect.
 inline bool scanConnectOnOpenFlag() { return TuningStore::flag(QLatin1String(kScannerConnectOnOpenFlag), true); }
 
 struct ScanManifestInput {
@@ -584,7 +563,7 @@ struct ScanView {
     // false after a batch that found nothing left = «nothing more». batch = 1 for the first scan of a series.
     bool moreAvailable = false;
     int batch = 0;
-    QString moreCountry;             // the country of the running / last continuation ("" = whole pool)
+    QString moreCountry;             // the scope the running / last series covers ("" = whole pool)
     QString moreState;               // view.more.state: available | running | exhausted ("" = none yet)
     QString moreBlocked;             // view.more.blocked: why «Найти ещё» cannot run now ("" = it can; "budget" =
                                      // the cellular hour, moreRetryMin = view.more.retry_min)
@@ -772,6 +751,7 @@ public:
         setCurrent(o.current, now, s);
         if (!scanPhaseScanning(m_phase) && m_rows.isEmpty())
             loadCached(o.cached, now);
+        adoptCachedScope(now);
         finishStep(s, now);
         return s;
     }
@@ -827,13 +807,9 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        // The empty result, and «no scan: budget» (the cellular hour is used up) behave the same: close, and
-        // on cellular arm the Wi-Fi intent.
+        // The empty result, and «no scan: budget» (the cellular hour is used up) behave the same: close. Nothing
+        // scans later by itself (owner 19.11: no scan starts unless the person presses «Сканировать»).
         if (m_phase == ScanPhase::Empty || (m_phase == ScanPhase::NoScan && m_noScanReason == QLatin1String("budget"))) {
-            if (m_net.kind == ScanNetKind::Cellular) {
-                m_wifiIntentUntil = now + qint64(m_t.wifiRescanWindowS) * 1000;
-                s.actions << shade(ShadeTone::Info, QStringLiteral("wifi_intent"));
-            }
             m_screenOpen = false;
             s.actions << act(ScanActionKind::CloseScreen);
         }
@@ -861,7 +837,7 @@ public:
         const bool sameNet = m_completed && m_scanNet.key == m_net.key && m_scanNet.generation() == m_net.generation();
         m_continuation = true;
         m_moreKeepRows = sameNet;
-        m_moreCountry = country.trimmed().isEmpty() ? m_scope : scanScopeOf(country);
+        m_moreCountry = country.trimmed().isEmpty() ? m_scannedScope : scanScopeOf(country); // the scope it continues
         m_worksBase = sameNet ? freshWorkingCount() : 0;
         if (!sameNet)
             m_shownNet.clear();
@@ -894,24 +870,13 @@ public:
     }
 
     // --- environment ------------------------------------------------------------------------------------------
-    ScanStep networkChanged(const ScanNetwork &n, const ScanCachedResult &cached, bool appInFront, qint64 now)
+    ScanStep networkChanged(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now)
     {
         now = clock(now);
         ScanStep s;
         if (n != m_net)
             applyNetworkChange(n, cached, now, s);
         m_net.radio = n.radio;
-        if (appInFront)
-            maybeFireWifiIntent(now, s);
-        finishStep(s, now);
-        return s;
-    }
-
-    ScanStep appForeground(qint64 now)
-    {
-        now = clock(now);
-        ScanStep s;
-        maybeFireWifiIntent(now, s);
         finishStep(s, now);
         return s;
     }
@@ -927,7 +892,10 @@ public:
 
 private:
     // Another strict tuple, kind or key: before anything was measured the scan just targets it; a running
-    // scan is cancelled and restarted there; shown results become cache rows of their fingerprint.
+    // scan (the person's own «Сканировать») is cancelled and restarted there; shown results become cache rows of
+    // their fingerprint. A finished result never rescans by itself (owner 19.11: no scan starts unless the person
+    // presses «Сканировать»): the screen shows this network's cached result with its age (and its scope), or the
+    // open page without a result - never another network's result as current.
     void applyNetworkChange(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now, ScanStep &s)
     {
         if (m_phase == ScanPhase::Connecting || m_phase == ScanPhase::Preparing) {
@@ -956,14 +924,12 @@ private:
             if (m_screenOpen)
                 beginScan(now, s);
         } else {
-            const bool rescan = scanRescanOnNetworkChange(m_screenOpen, m_phase, m_noScanReason, m_caps.needsVpn,
-                                                          m_current.working() || m_current.live || m_current.connecting);
             adoptNetwork(n, cached, now);
             materializeCurrent();
-            if (rescan)
-                beginScan(now, s); // its own budget / VPN rules decide (NoScan "budget" = the artboard's frame 22)
-            else if (m_screenOpen && m_phase != ScanPhase::Idle)
-                toNoScan(QStringLiteral("network_changed"), now, s);
+            m_phase = ScanPhase::Idle;
+            m_noScanReason.clear();
+            m_emptyReason.clear();
+            adoptCachedScope(now);
         }
     }
 
@@ -1716,7 +1682,7 @@ public:
         v.net = m_net.kind;
         v.moreAvailable = !v.scanning && m_completed && m_moreAvailable;
         v.batch = m_batch;
-        v.moreCountry = m_moreCountry;
+        v.moreCountry = m_scannedScope; // the scope the series covers: «Германия: проверены все серверы» when exhausted
         v.moreState = v.scanning ? (m_continuation && m_batch > 1 ? QStringLiteral("running") : QString())
                       : !m_completed  ? QString()
                       : m_moreAvailable ? QStringLiteral("available")
@@ -1729,7 +1695,7 @@ public:
         v.netRadio = m_net.kind == ScanNetKind::Cellular ? m_net.radio : QString();
         v.bar.scopeCountries = scopeList();
         v.bar.scopeWhitelist = m_poolWhitelist;
-        v.bar.scannedScope = m_completed || scanPhaseScanning(m_phase) ? m_scannedScope : QString();
+        v.bar.scannedScope = m_completed || scanPhaseScanning(m_phase) ? m_scannedScope : cachedShown(now) ? m_cachedScope : QString();
         v.bar.scope = m_scope;
         if (m_phase == ScanPhase::Empty)
             v.empty.scopeCc = m_scannedScope;
@@ -1801,7 +1767,7 @@ public:
             v.checkedAgoMin = cachedAt > 0 ? int(qMax<qint64>(0, now - cachedAt) / 60000) : -1;
         else if (m_phase == ScanPhase::Done || m_phase == ScanPhase::Empty)
             v.checkedAgoMin = int(qMax<qint64>(0, now - m_finishedAt) / 60000);
-        else if (m_phase == ScanPhase::NoScan && cachedAt > 0)
+        else if ((m_phase == ScanPhase::NoScan || m_phase == ScanPhase::Idle) && cachedAt > 0)
             v.checkedAgoMin = int(qMax<qint64>(0, now - cachedAt) / 60000);
         // Bottom bar.
         for (const ScanRowView &r : all) {
@@ -1880,7 +1846,6 @@ public:
     // share of the check's stages done (0..1; -1 = a report without a connection, no stages to count).
     bool reportCheckRunning() const { return m_checking || m_reportSending; }
     double reportCheckProgress() const { return m_checking ? double(m_checkStep) / qMax(1, m_checkTotal) : -1.0; }
-    qint64 wifiIntentUntil() const { return m_wifiIntentUntil; }
     QString connectingId() const { return m_connectingId; }
     const ScanBudgetLedger &ledger() const { return m_ledger; }
     int outstandingLeases() const
@@ -2177,12 +2142,31 @@ private:
         loadCached(cached, now);
     }
 
+    // A cached result on the screen (no scan of this network finished in this run): rows of this network's weak
+    // fingerprint within their show window.
+    bool cachedShown(qint64 now) const
+    {
+        for (const Row &r : m_rows)
+            if (r.cached && rowShown(r, now))
+                return true;
+        return false;
+    }
+
+    // The menu comes back to the scope the shown cached result covered (a Germany scan reopened later is shown
+    // under Germany, not under «Все страны»).
+    void adoptCachedScope(qint64 now)
+    {
+        if (!scanPhaseScanning(m_phase) && !m_completed && cachedShown(now))
+            m_scope = m_cachedScope;
+    }
+
     void loadCached(const ScanCachedResult &cached, qint64 now)
     {
         Q_UNUSED(now);
         if (!cached.present() || cached.networkKey != m_net.key)
             return;
         m_cachedFailures = cached;
+        m_cachedScope = scanScopeOf(cached.scope);
         for (const ScanCachedRow &cr : cached.rows) {
             if (rowIndex(cr.id) >= 0)
                 continue;
@@ -3520,6 +3504,7 @@ private:
         cache.networkKey = m_scanNet.key;
         cache.fingerprint = m_scanNet.fingerprint;
         cache.savedAtMs = now;
+        cache.scope = m_scannedScope;
         for (const ScanRowView &r : rows)
             if (r.verified) {
                 ++working;
@@ -3791,6 +3776,7 @@ private:
         cache.networkKey = m_scanNet.key;
         cache.fingerprint = m_scanNet.fingerprint;
         cache.savedAtMs = now;
+        cache.scope = m_scannedScope;
         for (const ScanRowView &r : rows) {
             if (!r.verified)
                 continue;
@@ -3864,18 +3850,6 @@ private:
             startLight(now, s);
     }
 
-    void maybeFireWifiIntent(qint64 now, ScanStep &s)
-    {
-        if (m_wifiIntentUntil <= 0 || m_net.kind != ScanNetKind::Wifi)
-            return;
-        const bool valid = now < m_wifiIntentUntil;
-        m_wifiIntentUntil = 0;
-        if (!valid || scanPhaseScanning(m_phase))
-            return;
-        m_screenOpen = true;
-        s.actions << act(ScanActionKind::OpenScreen);
-        beginScan(now, s);
-    }
 
     void addChainOutcome(const QString &nodeId, ScanClass cls)
     {
@@ -4253,6 +4227,7 @@ private:
     int m_planRemaining = 0;         // probed candidates the batch cap left for the next one
     QString m_scope;                 // the chosen country: the scope of the next scan ("" = all)
     QString m_scannedScope;          // the scope of the running / last scan
+    QString m_cachedScope;           // the scope of the cached result of this network (loadCached)
     QList<ScanCountryView> m_scopeCountries; // the pool's countries of the last manifest
     QList<ScanCountryView> m_poolCountries;  // the server's pool (/v1/scan/pool), preferred when known
     int m_poolWhitelist = -1;
@@ -4294,7 +4269,6 @@ private:
     QString m_stopReason;
     QString m_emptyReason;
     QString m_noScanReason;
-    qint64 m_wifiIntentUntil = 0;
     ScanOutcomeCollector m_outcomes;
     ScanOutcomeCollector m_chain;
     QString m_connectingId;
@@ -4452,7 +4426,6 @@ inline QJsonObject scanActionToJson(const ScanAction &a)
         o.insert(QStringLiteral("bytes"), a.bytes);
         break;
     case ScanActionKind::CloseScreen:
-    case ScanActionKind::OpenScreen:
     case ScanActionKind::UserConnectForScan:
     case ScanActionKind::CancelPendingConnect:
         break;

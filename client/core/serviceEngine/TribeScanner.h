@@ -133,7 +133,6 @@ public:
     virtual QString ownProbeConfig(const ScanCandidate &c) const = 0;
     // Where the live-tunnel probe goes for this connection ("" = the manifest's tunnel_api_base).
     virtual QString liveProbeBase(const ScanCurrent &c) const = 0;
-    virtual bool appInFront() const = 0;
     virtual bool reportQueueFull() const = 0;
     // The app's UI language ("ru", "en", "es", ...: AvpnEngineQml::appLang()) for the country menu's names.
     virtual QString uiLanguage() const = 0;
@@ -325,7 +324,6 @@ public:
     // --- the engine lane calls these (GUI thread) ----------------------------------------------------------
     void engineStateChanged();
     void networkChanged();
-    void appForeground();
     void lightFact(const ScanLightFact &f);
     // A light fact of the check startLightChecksFor(node, askId) asked for: dropped unless it is the latest ask
     // and its scan, network and live node are still current.
@@ -389,7 +387,6 @@ public:
 signals:
     void viewChanged();
     void shadeChanged();
-    void openScreenRequested();
     void closeScreenRequested();
     void switchesChanged();
     void serverSwitchedOff(); // a scan endpoint answered 404 (scanner_off): the engine refreshes /v1/config at once
@@ -603,7 +600,6 @@ private:
     bool m_serverOff = false;   // a scan endpoint answered 404 (the server's switch): nothing requested until the switches change
 
     ScanNetwork m_lastNet;
-    qint64 m_shownCacheAt = -1;      // show(): when the cached result it put on the screen was saved (its age chip)
     qint64 m_poolAt = -1;            // when /v1/scan/pool last answered (or was asked); the server allows 60 per hour
     bool m_poolUnsupported = false;  // an older server: no pool endpoint
     bool m_fetchPoolOnOpen = true;

@@ -817,6 +817,7 @@ struct ScanCachedResult {
     QString networkKey;
     QString fingerprint;      // the weak local fingerprint of that scan's network (stored on the device only)
     qint64 savedAtMs = 0;     // wall clock of the end of that scan
+    QString scope;            // the scope that scan covered ("" = all countries, a country code, "whitelist")
     QList<ScanCachedRow> rows;
     QList<ScanCachedFailure> failures;
     bool present() const { return savedAtMs > 0 && !networkKey.isEmpty(); }
@@ -872,6 +873,8 @@ inline QJsonObject scanCachedResultToJson(const ScanCachedResult &c)
     o.insert(QStringLiteral("network_key"), c.networkKey);
     o.insert(QStringLiteral("fingerprint"), c.fingerprint);
     o.insert(QStringLiteral("saved_at_ms"), double(c.savedAtMs));
+    if (!c.scope.isEmpty())
+        o.insert(QStringLiteral("scope"), c.scope);
     QJsonArray rows, fails;
     for (const ScanCachedRow &r : c.rows)
         rows << scanCachedRowToJson(r);
@@ -893,6 +896,7 @@ inline ScanCachedResult scanCachedResultFromJson(const QJsonObject &o)
     c.networkKey = o.value(QLatin1String("network_key")).toString();
     c.fingerprint = o.value(QLatin1String("fingerprint")).toString();
     c.savedAtMs = qint64(o.value(QLatin1String("saved_at_ms")).toDouble(0));
+    c.scope = o.value(QLatin1String("scope")).toString();
     for (const QJsonValue &v : o.value(QLatin1String("rows")).toArray()) {
         ScanCachedRow r;
         if (scanCachedRowFromJson(v.toObject(), r))

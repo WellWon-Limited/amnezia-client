@@ -283,7 +283,6 @@ public:
     void fillManifestInput(ScanManifestInput &in) const override;
     QString ownProbeConfig(const ScanCandidate &c) const override;
     QString liveProbeBase(const ScanCurrent &c) const override;
-    bool appInFront() const override { return AvpnEngineQml::uiForeground(); }
     bool reportQueueFull() const override { return m_e->m_support && m_e->m_support->reportsFull(); }
     QString uiLanguage() const override { return m_e->appLang(); }
     bool awgProbeInput(const QString &nodeId, ScanAwgNodeInput &out) const override;
@@ -9624,8 +9623,6 @@ void AvpnEngineQml::onForegroundDebounced()
     const ForegroundPlan plan = planForeground(m_lastFgRefreshMs > 0 ? now - m_lastFgRefreshMs : -1, -1);
     reliabilityEvent(QStringLiteral("foreground_return sub=%1").arg(plan.refreshSubscription));
     kickBootstrap();
-    if (m_scanner && m_scanSwitches.scanner)
-        m_scanner->appForeground(); // AVPN Scanner: a pending Wi-Fi intent may open the Scanner now
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     // Connect audit 2026-11-04 (VPN-SELF-OFF-ANALYSIS-2026-09-27 plan item 6, partial: status refresh
     // only; re-arming the watchdog while an operation is in flight is not done): while the app was

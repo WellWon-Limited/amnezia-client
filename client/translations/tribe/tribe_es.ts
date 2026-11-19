@@ -2129,12 +2129,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Ahora mismo nada funciona en la red móvil</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Подключитесь к Wi‑Fi — через него VPN обычно работает. Когда телефон подключится, откройте приложение — проверим ещё раз сами.</source>
-        <translation>Conéctese a Wi‑Fi: a través de él la VPN suele funcionar. Cuando el teléfono se conecte, abra la aplicación y volveremos a comprobar.</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Понял, подключусь к Wi‑Fi</source>
         <translation>Entendido, me conectaré a Wi‑Fi</translation>
     </message>
@@ -2475,7 +2470,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Disponible</translation>
     </message>
     <message>
-        <location line="+28"/>
+        <location line="+19"/>
+        <source>Подключитесь к Wi‑Fi — через него VPN обычно работает. Потом откройте Сканер и нажмите «Сканировать».</source>
+        <translation>Conéctese a Wi‑Fi: la VPN suele funcionar a través de ella. Luego abra el Escáner y pulse «Escanear».</translation>
+    </message>
+    <message>
+        <location line="+9"/>
         <source>Найдена 1 доступная нода</source>
         <translation>Encontrado 1 servidor disponible</translation>
     </message>
@@ -3131,7 +3131,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4276"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4275"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3620,7 +3620,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Auto</translation>
     </message>
     <message>
-        <location line="+584"/>
+        <location line="+582"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Primero inicia sesión o conéctate</translation>
     </message>
