@@ -76,6 +76,7 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     m_leaseClient->onLateGrant = [this](const QString &profile, const QString &lease, const LeaseRoute &route, bool newerOut) {
         applyUpstreamEvents(m_upOwner.lateGrant(profile, lease, route, newerOut));
     };
+    m_leaseClient->hasStandbyFor = [this](const QString &profile) { return m_upOwner.hasStandbyFor(profile); };
     m_leaseClient->releaseWanted = [this](quint64 id) {
         QVector<UpstreamOwnerEvent> ev;
         const bool wanted = m_upOwner.releaseWanted(id, upstreamClockMs(), ev);

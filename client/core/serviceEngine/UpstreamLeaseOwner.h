@@ -798,6 +798,11 @@ public:
         return m_active && !leaseId.isEmpty() && m_machine.phase() == LeasePhase::Active && m_machine.leaseId() == leaseId;
     }
     bool startQueued() const { return m_active && m_startQueued; }
+    // The live session of this profile can start from a standby-pack entry (so it does not wait the full lease share).
+    bool hasStandbyFor(const QString &profileId) const
+    {
+        return m_active && !m_prepareOnly && m_standby.has_value() && m_profileId == profileId;
+    }
     bool requestSent() const { return m_requestSent; }
     int unsentCount() const { return int(m_unsent.size()); }
     int withdrawnCount() const { return int(m_withdrawn.size()); }

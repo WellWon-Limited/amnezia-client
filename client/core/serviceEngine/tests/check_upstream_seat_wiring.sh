@@ -183,6 +183,10 @@ has "$(grep 'upstreamRequestSent' "$ADH")" 'm_upOwner.requestSent()' || bad "S3:
 has "$ctor" 'm_upOwner.onReleaseDone(id, upstreamClockMs(), confirmed)' || bad "S2: the adapter must pass the release's outcome to the owner (onReleaseDone confirmed)"
 has "$(body_of "$CLI" 'void UpstreamLeaseClient::releaseVia(')" 'sendRelease(requestId, leaseId, UpstreamMeter{}, route' || bad "S2: releaseVia must send over the route it is given (no direct-path strip)"
 
+# S4: a profile with a standby-pack entry waits only the hedge for the direct lease; the adapter tells the client which.
+has "$ctor" 'm_upOwner.hasStandbyFor(profile)' || bad "S4: the adapter must tell the client which profile has a standby entry (hasStandbyFor)"
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'upstreamAcquireHedgeMsTuned()' || bad "S4: acquire() must use the hedge for a profile with a standby entry"
+
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"
     exit 1

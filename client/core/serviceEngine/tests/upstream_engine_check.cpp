@@ -2180,6 +2180,7 @@ static void lateGrantOwnership()
                 apply(owner.lateGrant(p, l, r, newer));
             };
             client.onAcquireEnded = [this](const QString &p, const QString &l, bool out) { apply(owner.acquireEnded(p, l, out)); };
+            client.hasStandbyFor = [this](const QString &p) { return owner.hasStandbyFor(p); };
             client.releaseWanted = [this](quint64 id) {
                 QVector<UpstreamOwnerEvent> ev;
                 const bool wanted = owner.releaseWanted(id, now(), ev);
@@ -2432,6 +2433,47 @@ static void lateGrantOwnership()
         while (r.edge2.deletes.isEmpty() && t.elapsed() < 3000)
             pump(10);
         CHECK(r.edge2.deletes == QStringList{ QLatin1String(kLease) } && r.owner.unsentCount() == 0);
+    }
+    // Row S4 (device round 10): a profile WITH a standby-pack entry waits only the hedge for the direct lease, not the
+    // lease share (here 5 s); the tunnel starts from the pack, the direct request lives on, and its grant that lands after
+    // the provisional start is the ledger's (released first, the confirmation through the tunnel waits for that DELETE).
+    // A profile WITHOUT a pack entry keeps the full wait.
+    {
+        Rig r;
+        TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 5000}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {});
+        r.owner.setOptions({});
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"inbounds\":[]}");
+        sc.configSha256 = LeaseEdge::cfgSha();
+        sc.tunnelApiBase = r.edge.base();
+        sc.packRevision = 5;
+        r.begin(sc);
+        QElapsedTimer t;
+        t.start();
+        while (!r.owner.provisionalPending() && t.elapsed() < 4000)
+            pump(10);
+        CHECK(r.owner.provisionalPending() && t.elapsed() < 2500); // the hedge (1.2 s), not 5 s
+        r.edge.holdDeletes = true;
+        r.edge.grant(0); // the direct grant lands after the provisional start
+        pump(300);
+        CHECK(r.edge.deletes.size() == 1);
+        r.client.tunnelStarted();
+        r.apply(r.owner.tunnelUp(r.now()));
+        pump(300);
+        CHECK(r.edge.posts.size() == 1); // the confirmation waits for that DELETE
+        r.edge.releaseDeletes();
+        t.start();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 2000)
+            pump(10);
+        CHECK(r.edge.posts.size() == 2 && r.edge.log.indexOf(QStringLiteral("DELETE")) < r.edge.log.lastIndexOf(QStringLiteral("POST")));
+    }
+    {
+        Rig r;
+        TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 5000}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {});
+        r.owner.setOptions({});
+        r.begin(); // no pack entry: nothing to start from, so the full wait
+        pump(2500);
+        CHECK(r.owner.active() && !r.owner.provisionalPending());
     }
     // Row G1: the direct acquire exceeds its wait, the tunnel starts from the STANDBY pack (provisional); the original
     // request then returns L late and is released; Connected -> tunnelUp() confirms the seat with an acquire of the

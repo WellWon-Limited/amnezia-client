@@ -295,6 +295,7 @@ inline path::AttemptTimings attemptTimingsTuned()
     t.xrayStartMs = num("attempt_xray_start_ms", d.xrayStartMs, 2000, 20000);
     t.providerStartMs = num("attempt_provider_start_ms", d.providerStartMs, 2000, 20000);
     t.providerLeaseMs = num("attempt_provider_lease_ms", d.providerLeaseMs, 1500, 10000);
+    t.providerLeaseHedgeMs = num("attempt_provider_lease_hedge_ms", d.providerLeaseHedgeMs, 300, 6000);
     t.dataCheckMs = num("attempt_data_check_ms", d.dataCheckMs, 1500, 15000);
     t.budgetMs = num("attempt_budget_ms", d.budgetMs, 10000, 120000);
     t.maxPaths = num("attempt_max_paths", d.maxPaths, 1, 32);
@@ -331,6 +332,14 @@ inline path::RaceTimings raceTimingsTuned()
 inline int upstreamAcquireTimeoutMsTuned()
 {
     return attemptTimingsTuned().providerLeaseMs;
+}
+
+// How long the attempt waits for the direct lease of a profile that has a standby-pack entry (S4): the hedge, never
+// longer than the full wait.
+inline int upstreamAcquireHedgeMsTuned()
+{
+    const path::AttemptTimings t = attemptTimingsTuned();
+    return qMin(t.providerLeaseHedgeMs, t.providerLeaseMs);
 }
 
 // The release on a user disconnect goes through the tunnel BEFORE the core stops (contract §6) and the

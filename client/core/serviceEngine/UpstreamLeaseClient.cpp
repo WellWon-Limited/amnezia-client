@@ -99,7 +99,7 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
     // taken and the path was blamed. The attempt stops WAITING at the lease share of its leg (a transport failure
     // for the owner, never recorded against the path), but the request lives on for kUpstreamLateGrantGraceMs: a
     // grant that arrives after that point was a real seat and is released at once over the direct route.
-    const int waitMs = upstreamAcquireTimeoutMsTuned();
+    const int waitMs = (hasStandbyFor && hasStandbyFor(profileId)) ? upstreamAcquireHedgeMsTuned() : upstreamAcquireTimeoutMsTuned();
     QNetworkReply *r = base.isEmpty() ? nullptr
                                       : post(base + QStringLiteral("/v1/upstream/lease"),
                                              upstreamAcquireBody(profileId, kind, standbyConfigSha256), token,
@@ -114,11 +114,11 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
     }
     auto answered = std::make_shared<bool>(false);
     m_acquiresOut.insert(requestId, profileId); // until its HTTP request ends (it outlives the attempt's wait)
-    QTimer::singleShot(waitMs, r, [this, requestId, answered]() {
+    QTimer::singleShot(waitMs, r, [this, requestId, answered, waitMs]() {
         if (*answered)
             return;
         *answered = true; // the attempt stops waiting; the request goes on (a late grant is released below)
-        qWarning() << "avpn upstream: lease answer later than" << upstreamAcquireTimeoutMsTuned()
+        qWarning() << "avpn upstream: lease answer later than" << waitMs
                    << "ms - the attempt moves on, a late grant will be released";
         if (onAcquire)
             onAcquire(requestId, classifyAcquireReply(0, {}, {}, m_pubKeyHex));
