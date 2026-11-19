@@ -25,6 +25,12 @@ struct AttemptTimings {
     // acquisition is bounded by this, ConnectTunables.h::upstreamAcquireTimeoutMsTuned reads the same number;
     // 0.2-0.6 s observed) and then the native start (providerStartMs). With the direct API blocked the cached
     // profile starts only after the lease timed out - the leg's deadline still covers its whole native start.
+    // A provider profile that has a standby-pack entry does not wait providerLeaseMs for the DIRECT lease before its
+    // provisional start (device round 10: 5.7 s of a 7.8 s provider leg were that wait on a network where the direct
+    // API is dead): the direct request keeps its chance for this hedge - the time a healthy API needs - and goes on
+    // living after it (a grant that lands later is the lease ledger's: UpstreamLeaseOwner::lateGrant). A profile
+    // WITHOUT a pack entry keeps the full providerLeaseMs.
+    int providerLeaseHedgeMs = 1200;
     int providerLeaseMs = 6000; // device round 4: the server granted in 3.8-4.2 s - sized against that, tunable
     // The one in-tunnel data check: from "tunnel up" to "data proven".
     int dataCheckMs = 4000; // to be calibrated on device

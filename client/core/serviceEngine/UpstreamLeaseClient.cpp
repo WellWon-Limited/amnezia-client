@@ -99,7 +99,7 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
     // taken and the path was blamed. The attempt stops WAITING at the lease share of its leg (a transport failure
     // for the owner, never recorded against the path), but the request lives on for kUpstreamLateGrantGraceMs: a
     // grant that arrives after that point was a real seat and is released at once over the direct route.
-    const int waitMs = upstreamAcquireTimeoutMsTuned();
+    const int waitMs = (hasStandbyFor && hasStandbyFor(profileId)) ? upstreamAcquireHedgeMsTuned() : upstreamAcquireTimeoutMsTuned();
     QNetworkReply *r = base.isEmpty() ? nullptr
                                       : post(base + QStringLiteral("/v1/upstream/lease"),
                                              upstreamAcquireBody(profileId, kind, standbyConfigSha256), token,
@@ -114,11 +114,11 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
     }
     auto answered = std::make_shared<bool>(false);
     m_acquiresOut.insert(requestId, profileId); // until its HTTP request ends (it outlives the attempt's wait)
-    QTimer::singleShot(waitMs, r, [this, requestId, answered]() {
+    QTimer::singleShot(waitMs, r, [this, requestId, answered, waitMs]() {
         if (*answered)
             return;
         *answered = true; // the attempt stops waiting; the request goes on (a late grant is released below)
-        qWarning() << "avpn upstream: lease answer later than" << upstreamAcquireTimeoutMsTuned()
+        qWarning() << "avpn upstream: lease answer later than" << waitMs
                    << "ms - the attempt moves on, a late grant will be released";
         if (onAcquire)
             onAcquire(requestId, classifyAcquireReply(0, {}, {}, m_pubKeyHex));
@@ -209,6 +209,12 @@ void UpstreamLeaseClient::release(quint64 requestId, const QString &leaseId, con
     sendRelease(requestId, leaseId, meter, direct, /*attempt=*/0);
 }
 
+void UpstreamLeaseClient::releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route)
+{
+    m_lastReleaseId = requestId;
+    sendRelease(requestId, leaseId, UpstreamMeter{}, route, /*attempt=*/0); // a route that works: no hold, no strip
+}
+
 void UpstreamLeaseClient::holdReleasesForStop()
 {
     m_tunnelDown = false; // the app is stopping a tunnel it believes running
@@ -246,8 +252,11 @@ void UpstreamLeaseClient::flushHeld(bool tunnelDown)
         return;
     m_stopPending = false;
     const QList<HeldRelease> held = std::exchange(m_held, {});
-    for (const HeldRelease &h : held)
+    for (const HeldRelease &h : held) {
+        if (releaseWanted && !releaseWanted(h.requestId))
+            continue; // taken back while it waited for the stop
         sendRelease(h.requestId, h.leaseId, h.meter, h.route, /*attempt=*/0);
+    }
 }
 
 void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
@@ -268,6 +277,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         // Contract §6: bounded to 1.5 s; on failure the server frees the seat at TTL.
         r = m_nam->sendCustomRequest(req, QByteArrayLiteral("DELETE"), body);
         armTimeout(r, kUpstreamReleaseTimeoutMs);
+        m_inFlight.insert(requestId);
     }
     if (!r) {
         QTimer::singleShot(0, this, [this, requestId]() {
@@ -278,6 +288,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
     }
     connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt, spacedMs, bgKey]() {
         r->deleteLater();
+        m_inFlight.remove(requestId); // the DELETE is off the wire: a start of the profile may go
         // The release goes out just before the tunnel transition it belongs to, and that transition aborts every
         // API request in flight (owner's iPhone 16.11: "net_error 5" within 40-80 ms); an API restart answers 502
         // (device round 19.11). seatReleaseNext - the one rule of every seat release: no answer or 5xx is sent again
@@ -287,6 +298,12 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs);
         switch (next.kind) {
         case UpstreamReleaseTry::Resend:
+            if (releaseWanted && !releaseWanted(requestId)) { // taken back by a newer start of the profile
+                qInfo() << "avpn upstream: seat release withdrawn by a newer start - not resent";
+                if (bgKey)
+                    avpn::bgtask::end(avpn::bgtask::Reason::Release, bgKey, avpn::bgtask::EndWhy::Settled);
+                return;
+            }
             qInfo().noquote() << QStringLiteral("avpn upstream: seat release status=%1 net_error=%2 resend=%3 in %4 ms")
                                      .arg(status).arg(int(r->error())).arg(attempt + 1).arg(next.delayMs);
             // Build 142: a release waiting to be resent holds background time (iOS), so the resend is not
@@ -295,6 +312,10 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
                 const quint64 key = bgKey ? bgKey : avpn::bgtask::newKey();
                 avpn::bgtask::begin(avpn::bgtask::Reason::Release, key);
                 QTimer::singleShot(next.delayMs, this, [this, requestId, leaseId, meter, route, attempt, spacedMs, next, key]() {
+                    if (releaseWanted && !releaseWanted(requestId)) {
+                        avpn::bgtask::end(avpn::bgtask::Reason::Release, key, avpn::bgtask::EndWhy::Settled);
+                        return;
+                    }
                     sendRelease(requestId, leaseId, meter, route, attempt + 1, spacedMs + next.delayMs, key);
                 });
             }

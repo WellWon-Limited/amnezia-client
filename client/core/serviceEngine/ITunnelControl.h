@@ -84,6 +84,12 @@ public:
     // that never comes. Default: nothing held.
     virtual void startRefused() {}
 
+    // Did the start of the provider leg that is running actually put anything on the network - a lease request or the
+    // native start? A leg that ends without it (held by our own bookkeeping, refused locally, cancelled before the
+    // start) says nothing about the path and is never recorded against it (review S3 of device round 10).
+    // Default: yes (an own path's start is the up() call itself).
+    virtual bool upstreamRequestSent() const { return true; }
+
     // Path engine (review E2 of 18.11): the native layer reports without a stamp, so the leg travels through the
     // native stream itself. beginNativeOp(leg) is called right before that leg's native start; the adapter puts a
     // marker into the native event stream ahead of the start, and nativeLegSeen() is the leg of the last marker
