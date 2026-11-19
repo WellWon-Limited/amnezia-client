@@ -1296,6 +1296,37 @@ static void machineRules()
         CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 2100).actions.isEmpty()); // failed row
         CHECK(m.attemptEnded(kT0 + 2200).actions.isEmpty());                      // chain already over
     }
+    // Device round 13, C1: the person's Stop (or any action that takes the tunnel) ends the row's request without a
+    // failure: the row leaves «Подключение…» at once, is not marked failed, and takes a tap again.
+    {
+        ScanMachine m(w.caps);
+        m.opened(openOf(w, QStringLiteral("1"), true), kT0);
+        m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+        ScanHostProgress p;
+        p.scanId = m.scanId();
+        p.phase = QStringLiteral("data");
+        ScanProbeFacts f = goodData();
+        f.id = QStringLiteral("2:xray");
+        f.egressNode = QStringLiteral("2");
+        f.seq = 1;
+        p.items << withBurst(f);
+        m.hostProgress(p, kT0 + 600);
+        CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 700).has(ScanActionKind::ConnectRow));
+        CHECK(m.connectingId() == QLatin1String("2:xray"));
+        m.connectRefused(QString(), kT0 + 900); // superseded: no node named
+        CHECK(m.connectingId().isEmpty());
+        bool stuck = false;
+        for (const ScanRowView &r : m.view(kT0 + 950).rows)
+            stuck = stuck || (r.id == QLatin1String("2:xray") && (r.state == ScanRowState::Connecting || r.state == ScanRowState::Failed));
+        CHECK(!stuck);
+        CHECK(m.rowTapped(QStringLiteral("2:xray"), kT0 + 1000).has(ScanActionKind::ConnectRow));
+        // the engine refuses the row by name (its node is not in the pool): it cannot be connected, so it is not offered
+        m.connectRefused(QStringLiteral("2:xray"), kT0 + 1100);
+        bool offered = false;
+        for (const ScanRowView &r : m.view(kT0 + 1200).rows)
+            offered = offered || (r.id == QLatin1String("2:xray") && r.tappable);
+        CHECK(!offered && m.connectingId().isEmpty());
+    }
     // R6 (review of 141): the tapped row is an exact request. Its failure ends the chain at once: the old pair
     // connectFailed + attemptEnded moved the chain to the next row and marked THAT row failed, untried.
     for (const bool exact : {false, true}) {
@@ -3849,6 +3880,141 @@ static int stepAfter(const Driver &d, const char *event, qint64 offsetMs)
     return -1;
 }
 
+// Device round 13 (A7, A8): in EVERY state where the VPN is connected the connected server is the first row. A list
+// built from a cached result, or again after the person tapped a row of a later batch, puts the live connection's
+// row first; a row that becomes connected by a tap stays in place for the list on the screen.
+static void connectedFirstInEveryList()
+{
+    World w = baseWorld("cf", hostMac(), ScanNetKind::Wifi);
+    w.nodes = ownOnly(w.nodes);
+    w.numbers.insert(QStringLiteral("scan_stop_works"), 1);
+    const auto candidatesOf = [](const ScanStep &s) {
+        QList<ScanCandidate> out;
+        for (const ScanAction &a : s.actions)
+            if (a.kind == ScanActionKind::StartHostScan)
+                out << a.candidates;
+        return out;
+    };
+    const auto afterManifest = [&](ScanMachine &mm, qint64 at) {
+        ScanStep st = mm.manifestReady(manifestInputFrom(manifestArgs(w)), at);
+        for (const ScanAction &a : st.actions)
+            if (a.kind == ScanActionKind::RequestCandidates) {
+                const ScanStep f = mm.candidatesUnavailable(a.requestId, QStringLiteral("scanner_off"), 300, at + 1);
+                st.actions << f.actions;
+            }
+        return st;
+    };
+    const auto works = [](const QString &id) {
+        ScanProbeFacts f = goodData();
+        f.id = id;
+        f.egressNode = id.section(QLatin1Char(':'), 0, 0);
+        return f;
+    };
+    const auto firstRow = [](ScanMachine &mm, qint64 at) {
+        const ScanView v = mm.view(at);
+        return v.rows.isEmpty() ? QString() : v.rows.first().id;
+    };
+    ScanMachine m(w.caps);
+    m.opened(openOf(w, QString(), false), kT0);
+    const QList<ScanCandidate> first = candidatesOf(afterManifest(m, kT0 + 50));
+    CHECK(first.size() >= 3);
+    if (first.size() < 3)
+        return;
+    m.hostProgress(progressOf(m, {works(first.at(0).id)}), kT0 + 900);
+    m.tick(kT0 + 50 + 8000);
+    m.moreTapped(QString(), kT0 + 31000);
+    const QList<ScanCandidate> second = candidatesOf(afterManifest(m, kT0 + 31050));
+    CHECK(!second.isEmpty());
+    if (second.isEmpty())
+        return;
+    ScanStep ended = m.hostProgress(progressOf(m, {works(second.at(0).id)}), kT0 + 32000);
+    ended.actions << m.tick(kT0 + 31050 + 8100).actions;
+    {
+        // what is put away keeps each row's batch (the reopened list has every row the person saw: device round 13, A10)
+        bool saw = false;
+        QSet<int> batches;
+        for (const ScanAction &a : ended.actions)
+            if (a.kind == ScanActionKind::PersistResults) {
+                saw = true;
+                for (const ScanCachedRow &r : a.cached.rows)
+                    batches.insert(r.batch);
+            }
+        CHECK(saw && batches.contains(1) && batches.contains(2) && !batches.contains(0));
+    }
+    const QString tapped = second.at(0).id;
+    CHECK(m.view(kT0 + 40000).rows.size() >= 2);
+    // the tap: the row connects and stays where it is on the list on the screen
+    const QStringList before = [&]() { QStringList o; for (const ScanRowView &r : m.view(kT0 + 40000).rows) o << r.id; return o; }();
+    CHECK(m.rowTapped(tapped, kT0 + 40100).has(ScanActionKind::ConnectRow));
+    m.vpnState(openOf(w, tapped, true).current, kT0 + 42000);
+    {
+        QStringList after;
+        for (const ScanRowView &r : m.view(kT0 + 42100).rows)
+            after << r.id;
+        CHECK(after == before); // no jump
+    }
+    // the next time a list is built (the page is closed and opened again) the connected row is the first one
+    m.closed(kT0 + 43000);
+    m.opened(openOf(w, tapped, true), kT0 + 44000);
+    CHECK(firstRow(m, kT0 + 44100) == tapped);
+    // a scope change builds a list from the cache: the live connection's row is first there too
+    m.filterChosen(QString(), kT0 + 45000);
+    CHECK(firstRow(m, kT0 + 45100) == tapped);
+}
+
+// Device round 13, A10: a result of a «Найти ещё» series (14 rows in two batches) is kept whole across the store and
+// shown whole when the page is opened again; the cache is bounded (kScanCacheRowsMax); a result stored by an earlier
+// build (no batch numbers) still reads as one batch.
+static void cachedResultKeepsEveryShownRow()
+{
+    World w = baseWorld("cache14", hostMac(), ScanNetKind::Wifi);
+    w.nodes = ownOnly(w.nodes);
+    ScanCachedResult c;
+    c.networkKey = w.net.key;
+    c.fingerprint = w.net.fingerprint;
+    c.savedAtMs = kT0 - 60000;
+    c.scope = QStringLiteral("DE");
+    QStringList ids;
+    for (int i = 0; i < 14; ++i) {
+        ScanCachedRow r;
+        r.id = QStringLiteral("%1:xray").arg(100 + i);
+        r.label = QStringLiteral("Германия %1").arg(i + 1);
+        r.countryCode = QStringLiteral("DE");
+        r.speed = ScanSpeed::Fast;
+        r.ms = 40 + 5 * i;
+        r.batch = i < 10 ? 1 : 2;
+        c.rows << r;
+        ids << r.id;
+    }
+    const ScanCachedResult back = scanCachedResultFromJson(scanCachedResultToJson(c));
+    CHECK(back.rows.size() == 14 && back.rows.at(12).batch == 2 && back.rows.at(0).batch == 1);
+    const auto shownIds = [&](const ScanCachedResult &cr) {
+        ScanMachine m(w.caps);
+        ScanOpen o = openOf(w, QString(), false);
+        o.cached = cr;
+        m.shown(o, kT0);
+        QStringList out;
+        for (const ScanRowView &r : m.view(kT0 + 20).rows)
+            out << r.id;
+        return out;
+    };
+    CHECK(shownIds(back) == ids); // every row the person saw is back, in the order of the cached speeds
+    ScanCachedResult legacy = back;
+    for (ScanCachedRow &r : legacy.rows)
+        r.batch = 0;
+    CHECK(shownIds(legacy).size() == 10); // an earlier build's result: one batch, the old cap
+    // the bound
+    ScanCachedResult big = c;
+    big.rows.clear();
+    for (int i = 0; i < 2 * kScanCacheRowsMax; ++i) {
+        ScanCachedRow r = c.rows.first();
+        r.id = QStringLiteral("%1:xray").arg(1000 + i);
+        r.batch = 1 + i / 10;
+        big.rows << r;
+    }
+    CHECK(scanCachedResultFromJson(scanCachedResultToJson(big)).rows.size() == big.rows.size()); // the reader never drops
+}
+
 static void scanStartsNewList()
 {
     const QString de = QStringLiteral("DE");
@@ -4058,6 +4224,37 @@ static void serverBatches()
     wl.filterChosen(QString(), kT0 + 80000);
     wl.moreTapped(QStringLiteral("NL"), kT0 + 80000);
     CHECK(actionOf(wl.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 80050), ScanActionKind::RequestCandidates).requestId.isEmpty());
+}
+
+// Device round 13, A6/A12: the menu counts the pool's servers of a scope, the list shows the ones that answered. When the
+// series is exhausted the view says how many of the menu's count the list does not show (view.more.unshown), so the end
+// message is honest; with nothing missing it says nothing.
+static void exhaustedScopeSaysWhatIsMissing()
+{
+    World w = baseWorld("unshown", hostMac(), ScanNetKind::Wifi);
+    for (int pool : {2, 7}) {
+        ScanMachine m(w.caps);
+        m.opened(openOf(w, QString(), false), kT0);
+        m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+        m.tick(kT0 + 50 + 8100);
+        m.poolReady(ScanPoolView{{{QStringLiteral("DE"), pool, 0}}, 0, 0}, kT0 + 8200);
+        m.filterChosen(QStringLiteral("DE"), kT0 + 8300);
+        m.retryTapped(kT0 + 40000);
+        const ScanStep st = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 40050);
+        ScanCandidatesView cv; // the server has nothing more of the scope than what it said
+        cv.exhausted = true;
+        for (const ScanAction &a : st.actions)
+            if (a.kind == ScanActionKind::RequestCandidates)
+                m.candidatesReady(a.requestId, cv, 500, kT0 + 40100);
+        m.tick(kT0 + 40100 + 12000);
+        const ScanView v = m.view(kT0 + 60000);
+        int shown = 0;
+        for (const ScanRowView &r : v.rows)
+            shown += r.countryCode == QLatin1String("DE") ? 1 : 0;
+        CHECK(v.moreState == QLatin1String("exhausted"));
+        CHECK(v.moreUnshown == qMax(0, pool - shown) && v.moreUnshown > 0);
+        CHECK(scanViewToJson(v).value(QStringLiteral("more")).toObject().value(QStringLiteral("unshown")).toInt() == v.moreUnshown);
+    }
 }
 
 static void countrylessRows()
@@ -4629,6 +4826,9 @@ int main(int argc, char **argv)
     findMoreAppends();
     findMoreTruncatedSeen();
     scanStartsNewList();
+    connectedFirstInEveryList();
+    cachedResultKeepsEveryShownRow();
+    exhaustedScopeSaysWhatIsMissing();
     serverBatches();
     overruns();
     properties();

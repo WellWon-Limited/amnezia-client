@@ -78,8 +78,9 @@ struct ShadeTiming {
     int maxPending = 3;
 };
 
-// The hold time from the last scan manifest's numbers (scan_shade_ms, 1500, 500..10000); without a manifest
-// - the shade also shows before any scan - the compiled 1500 ms.
+// The hold time from the last scan manifest's numbers (scan_shade_ms, 500..10000; the server publishes it, so its value
+// overrides the client's: device round 13, A11 saw 1.4-2.1 s while the server said 1500); without a manifest - the shade
+// also shows before any scan - the compiled 2500 ms (ShadeTiming::holdMs).
 inline ShadeTiming shadeTimingFrom(const QMap<QString, double> &numbers)
 {
     ShadeTiming t;

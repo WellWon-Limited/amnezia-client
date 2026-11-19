@@ -515,6 +515,16 @@ ScanCachedResult TribeScanner::cachedFor(const ScanNetwork &n) const
     return c;
 }
 
+// The cached result a screen shows for this network, and the stubs that make its rows tappable: the two are read
+// together, wherever the result is handed to the machine (open, show, a network change). The stubs came back only on a
+// network change before, so a page that opened on the cache with the network already known showed rows the engine did
+// not know (device round 13, A10: scan_connect_ignored why=pin).
+ScanCachedResult TribeScanner::cachedWithStubs(const ScanNetwork &n)
+{
+    loadCachedStubs(scanCacheStoreKey(n.key, n.fingerprint));
+    return cachedFor(n);
+}
+
 QHash<QString, int> TribeScanner::listFigures() const
 {
     const ScanNetwork n = buildNetwork();
@@ -590,9 +600,8 @@ void TribeScanner::notifyNetwork()
                 .arg(QLatin1String(scanNetKindName(n.kind)), n.key, n.generation())
                 .arg(n.sources.size())
                 .arg(cachedFor(n).present()));
-    loadCachedStubs(scanCacheStoreKey(n.key, n.fingerprint));
     const ScanPhase before = m_m.phase();
-    dispatch(m_m.networkChanged(n, cachedFor(n), now()));
+    dispatch(m_m.networkChanged(n, cachedWithStubs(n), now()));
     // «Сеть сменилась — проверяем заново» (artboard): only for the person's running scan the change restarted on
     // the new network. A finished result is never rescanned by itself (owner 19.11): no shade then. A scan still
     // preparing just retargets: silent.
@@ -2051,7 +2060,7 @@ void TribeScanner::open(bool withCheck)
     ScanOpen o;
     o.network = buildNetwork();
     o.current = m_engine->current();
-    o.cached = cachedFor(o.network);
+    o.cached = cachedWithStubs(o.network);
     o.withCheck = withCheck;
     o.connectOnOpen = m_connectOnOpen;
     m_lastNet = o.network;
@@ -2080,7 +2089,7 @@ void TribeScanner::show()
     ScanOpen o;
     o.network = buildNetwork();
     o.current = m_engine->current();
-    o.cached = cachedFor(o.network);
+    o.cached = cachedWithStubs(o.network);
     o.connectOnOpen = m_connectOnOpen;
     m_lastNet = o.network;
     emitLog(QStringLiteral("show (no scan) cached=%1").arg(o.cached.present()));

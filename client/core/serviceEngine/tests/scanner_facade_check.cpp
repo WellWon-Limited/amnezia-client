@@ -4152,7 +4152,7 @@ static void caseServerScope()
         w.engine.rowCalls.clear();
         w.clock.t += 60000;
         w.start();
-        w.s->open();
+        w.s->show(); // the page opens on a cached result with no scan (device round 13, A10: open() hid this case)
         w.run(3000);
         bool shown = false;
         for (const QVariant &rv : w.s->view().value(QStringLiteral("rows")).toList())

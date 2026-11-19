@@ -7868,6 +7868,14 @@ void AvpnEngineQml::scanSyncState()
         const bool gaveUp = !m_wantConnected
                             || (m_engine.state() == avpn::EngineState::Error && !m_engine.attemptRunning());
         const ScanRowStep st = scanRowAttemptObserve(m_scanRow, m_intentSerial, engineNode, m_dataFlowing, gaveUp);
+        if (st.superseded) {
+            // The person's Stop or another action took the tunnel: the row's request is over (not a failure).
+            // Every «in progress» state of the row ends with its request, whichever way it ends.
+            scanJournal(QStringLiteral("scan_row_superseded reason=scan_row node=%1").arg(st.supersededNode),
+                        {{QStringLiteral("event"), QStringLiteral("row_superseded")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
+                         {QStringLiteral("node"), st.supersededNode}});
+            m_scanner->connectRefused(QString());
+        }
         for (const QString &n : st.failed) {
             scanJournal(QStringLiteral("scan_row_failed reason=scan_row node=%1").arg(n),
                         {{QStringLiteral("event"), QStringLiteral("row_failed")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},

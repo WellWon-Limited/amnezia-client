@@ -211,6 +211,7 @@ PageType {
         if (build !== listBuild || src.length < rowsModel.count) {
             rowsModel.clear()
             listBuild = build
+            if (!hero) bandHeld = false
         }
         let cacheAll = true, crowd = false
         for (let i = 0; i < src.length; ++i) {
@@ -229,7 +230,13 @@ PageType {
     // ── rings collapse (360 ms) into the header mark, and grow back the same way on «Повторить» ──
     // heroFrac 1 = rings + status line shown, 0 = gone; the block and the list under it follow it every frame
     property real heroFrac: 0
+    // Nothing moves the rows when a scan ends (device round 13, A5: all rows jumped up by the block's height): the rings
+    // and the status line fade out, the block keeps its height under the chips while the list is the one the scan built,
+    // and gives it back when the list is built again (view.list_build: page open, a scope, a new scan, a new network).
+    property bool bandHeld: false
+    onHeroFracChanged: if (heroFrac >= 1) bandHeld = false     // the rings are back: the block is its own again
     onHeroChanged: {
+        if (!hero) bandHeld = rowsModel.count > 0
         heroAnim.to = hero ? 1 : 0
         heroAnim.restart()
     }
@@ -322,7 +329,7 @@ PageType {
         anchors.left: parent.left
         anchors.right: parent.right
         readonly property real full: Theme.scan.hero + status.implicitHeight
-        height: full * root.heroFrac
+        height: full * (root.bandHeld ? 1 : root.heroFrac)   // held at full while the finished list is on the screen
         clip: true
         visible: height > 0
         SignalRing {
@@ -610,6 +617,7 @@ PageType {
                 Item {
                     id: moreBox
                     readonly property string st: (root.view.more && root.view.more.state) ? String(root.view.more.state) : ""
+                    readonly property int unshown: (root.view.more && root.view.more.unshown) ? Number(root.view.more.unshown) : 0
                     readonly property bool canAsk: root.hasScanner && typeof TribeScanner.findMore === "function"
                     // the engine's one gate (view.more.blocked): a limit is said on the button, never a dead tap
                     readonly property string limit: (root.view.more && root.view.more.blocked) ? String(root.view.more.blocked) : ""
@@ -637,8 +645,12 @@ PageType {
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.WordWrap
                         // a country scope: every server of that country was checked («Найти ещё» has nothing left)
+                        // (the menu counted more servers than the list shows: it says how many did not answer here)
                         text: root.scope !== "" && root.scope === String(root.barView.scanned_scope || "")
-                              ? ScanTexts.moreExhaustedScope.arg(bar.countryName(root.scope)) : ScanTexts.moreExhausted
+                              ? (Number(moreBox.unshown) > 0
+                                 ? ScanTexts.moreExhaustedUnshown.arg(bar.countryName(root.scope)).arg(moreBox.unshown)
+                                 : ScanTexts.moreExhaustedScope.arg(bar.countryName(root.scope)))
+                              : ScanTexts.moreExhausted
                         textFormat: Text.PlainText
                         color: Theme.color.text3
                         font.family: Theme.font.body

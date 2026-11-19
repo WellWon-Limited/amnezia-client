@@ -495,6 +495,9 @@ struct ScanView {
     QString moreBlocked;             // view.more.blocked: why «Найти ещё» cannot run now ("" = it can; "budget" =
                                      // the cellular hour, moreRetryMin = view.more.retry_min)
     int moreRetryMin = 0;
+    int moreUnshown = 0;             // view.more.unshown (state exhausted, a country / white-list scope): servers of the scope the
+                                     // menu counts that the list does not show - their probes failed, or they could not be
+                                     // checked here (device round 13, A6/A12: «Великобритания 32» listed 30)
     QString netRadio;                // view.net_radio: the cellular radio generation ("" = unknown / not cellular)
 };
 
@@ -1563,14 +1566,18 @@ public:
     }
 
     // The engine refused the tapped row before it touched the tunnel (device test of 142: the pin failed - the node
-    // left the subscription). Nothing was attempted, so nothing is marked failed and no outcome is sent: the row
-    // goes back to what it showed and the list takes taps again (before: m_connectingId stayed set, the row read
-    // «Подключение…» after reopening and rowTapped ignored every later tap).
+    // left the subscription). Nothing was attempted, so no outcome is sent and the list takes taps again (before:
+    // m_connectingId stayed set, the row read «Подключение…» after reopening and rowTapped ignored every later tap).
+    // A refusal that NAMES the row means this row cannot be connected now: it reads «Не удалось» until the list is
+    // rebuilt (a row that cannot be connected is not shown as available - device round 13, A10). An empty node =
+    // the request was superseded (the person's Stop, another action): the row goes back to what it showed.
     ScanStep connectRefused(const QString &nodeId, qint64 now)
     {
         now = clock(now);
         ScanStep s;
         if (!m_connectingId.isEmpty() && (nodeId.isEmpty() || nodeId == m_connectingId)) {
+            if (!nodeId.isEmpty())
+                m_tapFailed.insert(nodeId);
             m_connectingId.clear();
             m_chainOrder.clear();
             m_chainLaterShown = false;
@@ -1625,6 +1632,8 @@ public:
                       : !m_completed  ? QString()
                       : m_moreAvailable ? QStringLiteral("available")
                                         : QStringLiteral("exhausted");
+        if (v.moreState == QLatin1String("exhausted") && !m_scannedScope.isEmpty())
+            v.moreUnshown = unshownInScope(m_scannedScope);
         if (v.moreState == QLatin1String("available")) {
             v.moreBlocked = moreBlockedBy(now);
             if (!v.moreBlocked.isEmpty())
@@ -1944,7 +1953,8 @@ private:
     // The batch a row is shown in (displayRows): a series' batches follow each other - the rows of the batches
     // before keep their places and their order, a new batch's rows join after them. A cached row, and a fresh
     // row that no batch of this series made (the live connection before the first scan), go with the newest.
-    int rowBatch(const Row &r) const { return r.cached || r.batch < 1 ? qMax(1, m_batch) : r.batch; }
+    // A cached row keeps the batch it was shown in (a reopened list has the same rows, each batch under its own cap).
+    int rowBatch(const Row &r) const { return r.batch < 1 ? qMax(1, m_batch) : r.batch; }
 
     struct Unverified {
         ScanCandidate c;
@@ -2169,6 +2179,7 @@ private:
             r.speed = cr.speed;
             r.sortMs = cr.ms;
             r.cached = true;
+            r.batch = cr.batch;
             r.cachedAt = cached.savedAtMs;
             r.crowdWorks = cr.crowdWorks;
             r.fingerprint = cached.fingerprint;
@@ -3515,36 +3526,9 @@ private:
         const QList<ScanRowView> rows = resultRows(now);
         m_phase = rows.isEmpty() ? ScanPhase::Empty : ScanPhase::Done;
         int working = 0;
-        ScanCachedResult cache;
-        cache.networkKey = m_scanNet.key;
-        cache.fingerprint = m_scanNet.fingerprint;
-        cache.savedAtMs = now;
-        cache.scope = m_scannedScope;
         for (const ScanRowView &r : rows)
-            if (r.verified) {
-                ++working;
-                const int ri = rowIndex(r.id);
-                if (ri < 0 || m_rows.at(ri).cached)
-                    continue;
-                const Row &x = m_rows.at(ri);
-                ScanCachedRow cr;
-                cr.id = x.id;
-                cr.origin = x.origin;
-                cr.profileId = x.profileId;
-                cr.label = x.label;
-                cr.countryCode = x.countryCode;
-                cr.transport = x.transport;
-                cr.transportVersion = x.transportVersion;
-                cr.tier = x.tier;
-                cr.rank = x.rank;
-                cr.cls = x.base;
-                cr.speed = x.speed;
-                cr.ms = x.sortMs;
-                cr.crowdWorks = x.crowdWorks;
-                cache.rows << cr;
-            }
-        cache.failures = m_failuresThisScan;
-        addSlot(cache, now);
+            working += r.verified ? 1 : 0;
+        ScanCachedResult cache = buildCache(rows, now);
         if (!connectStep)
             recordSummary(rows, now);
         if (!connectStep) {
@@ -3814,7 +3798,9 @@ private:
             cr.speed = x.speed;
             cr.ms = x.sortMs;
             cr.crowdWorks = x.crowdWorks;
-            cache.rows << cr;
+            cr.batch = rowBatch(x);
+            if (cache.rows.size() < kScanCacheRowsMax)
+                cache.rows << cr;
         }
         cache.failures = m_failuresThisScan;
         addSlot(cache, now);
@@ -3996,6 +3982,7 @@ private:
             bool forced;
             bool cached;
             int batch;
+            bool current = false;
         };
         QList<Item> verified;
         for (const Row &r : m_rows) {
@@ -4009,9 +3996,15 @@ private:
             it.forced = isCurrentId(r.id) || r.id == m_connectingId || m_tapFailed.contains(r.id);
             it.cached = r.cached;
             it.batch = rowBatch(r);
+            it.current = isCurrentId(r.id);
             verified << it;
         }
+        // The live connection's row is the first one of every list that is built (owner 19.11: wherever there is an
+        // active connection it is the first row) - whatever batch it joined in (a row of a later batch, tapped and
+        // connected, was the 10th of the cached list built after it).
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
+            if (a.current != b.current)
+                return a.current;
             if (a.batch != b.batch)
                 return a.batch < b.batch;
             if (a.forced != b.forced)
@@ -4033,8 +4026,10 @@ private:
             ++n;
             ++i;
         }
-        // The batches in their order, each by speed.
+        // The batches in their order, each by speed; the live connection's row before them all.
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
+            if (a.current != b.current)
+                return a.current;
             if (a.batch != b.batch)
                 return a.batch < b.batch;
             return displayLess(a.v, a.tier, a.rank, b.v, b.tier, b.rank, a.sort, b.sort);
@@ -4386,6 +4381,25 @@ private:
     bool m_fromServer = false;       // this scan probes the server's batch
     bool m_serverExhausted = false;
 
+    // What the scope menu counts for a scope and the list does not show (the menu counts the pool's servers: a server whose
+    // probe failed here, one this host cannot probe, a refused one never reaches the list). The honest end message says
+    // how many (the menu cannot know before a scan which of them answer).
+    int unshownInScope(const QString &scope) const
+    {
+        int pool = 0;
+        if (scope == QLatin1String(kScanScopeWhitelist))
+            pool = qMax(0, m_poolWhitelist);
+        else
+            for (const ScanCountryView &c : scopeList())
+                if (c.countryCode == scope)
+                    pool += c.count;
+        int shown = 0;
+        for (const ListEntry &e : m_list)
+            if (scope == QLatin1String(kScanScopeWhitelist) ? e.row.countryCode.isEmpty() : e.row.countryCode == scope)
+                ++shown;
+        return qMax(0, pool - shown);
+    }
+
     QList<ScanCountryView> scopeList() const { return m_poolCountries.isEmpty() ? m_scopeCountries : m_poolCountries; }
 
     // A scope (a country, the white lists) or «Найти ещё» asks the server for its batch while it may answer.
@@ -4629,6 +4643,8 @@ inline QJsonObject scanViewToJson(const ScanView &v)
             more.insert(QStringLiteral("blocked"), v.moreBlocked);
             more.insert(QStringLiteral("retry_min"), v.moreRetryMin);
         }
+        if (v.moreUnshown > 0)
+            more.insert(QStringLiteral("unshown"), v.moreUnshown);
         o.insert(QStringLiteral("more"), more);
     }
     if (!v.netRadio.isEmpty())

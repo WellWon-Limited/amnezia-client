@@ -809,6 +809,8 @@ struct ScanCachedRow {
     ScanSpeed speed = ScanSpeed::None;
     int ms = -1;
     bool crowdWorks = false;
+    int batch = 0;            // the batch of the series the row was shown in (0 = unknown: the newest); a reopened
+                              // list keeps each batch's own cap, so every row the person saw comes back
 };
 
 struct ScanCachedFailure {
@@ -829,6 +831,12 @@ struct ScanCachedResult {
     std::vector<ScanCachedResult> otherScopes;
     bool present() const { return savedAtMs > 0 && !networkKey.isEmpty(); }
 };
+
+// What one cached result keeps: every row the list showed (the series' batches of 10 each), bounded. A series of
+// «Найти ещё» is limited by the server's `seen` cap (512); the cache keeps the first 120 rows of the list (12 batches)
+// and their batch numbers - the list a person sees after a relaunch is the one they saw (device round 13, A10).
+inline constexpr int kScanCacheRowsMax = 120;
+inline constexpr int kScanCacheBatchMax = 64;
 
 // How many scopes' results one network keeps (this one and the others): a small bound, the TTL applies to each.
 inline constexpr int kScanCacheScopeSlots = 4;
@@ -852,6 +860,8 @@ inline QJsonObject scanCachedRowToJson(const ScanCachedRow &r)
     o.insert(QStringLiteral("ms"), r.ms);
     if (r.crowdWorks)
         o.insert(QStringLiteral("crowd_works"), true);
+    if (r.batch > 0)
+        o.insert(QStringLiteral("batch"), r.batch);
     return o;
 }
 
@@ -873,6 +883,7 @@ inline bool scanCachedRowFromJson(const QJsonObject &o, ScanCachedRow &r)
     r.speed = scanSpeedFrom(o.value(QLatin1String("speed")).toString());
     r.ms = o.value(QLatin1String("ms")).toInt(-1);
     r.crowdWorks = o.value(QLatin1String("crowd_works")).toBool(false);
+    r.batch = qBound(0, o.value(QLatin1String("batch")).toInt(0), kScanCacheBatchMax);
     // Only working rows are cached as rows.
     return scanClassWorking(r.cls);
 }
