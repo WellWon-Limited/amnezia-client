@@ -1251,6 +1251,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // ConfigService (the edge walk); the engine reads it per network generation and keeps no copy. "This provider
     // can start without the API" = the usable standby-pack entry the bring-up itself uses.
     m_configSvc->setNetworkGenerationSource([this]() { return m_engine.network().generation; });
+    m_configSvc->setTunnelUpSource([this]() {
+        return m_lastTunnelState == Vpn::Connecting || m_lastTunnelState == Vpn::Connected
+            || m_lastTunnelState == Vpn::Reconnecting || m_lastTunnelState == Vpn::Disconnecting;
+    });
     m_engine.setControlPlaneSource([this]() { return m_configSvc ? m_configSvc->directApiReach() : avpn::ApiReach::Unknown; });
     m_engine.setStandbyEntryProbe([this](const avpn::SubscriptionNode &n) {
         const std::optional<avpn::StandbyPack> &pack = m_tunnel.standbyPack();
@@ -5796,6 +5800,8 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         observeTunnelState(m_latch, observedTunnelOf(m_lastTunnelState), observedTunnelOf(s), errorProvesTeardown);
         if (s == Vpn::Disconnected) {
             syncControlPlaneEdge(false);   // E10: the stored edge again before the release goes out directly
+            if (m_configSvc)
+                m_configSvc->noteTunnelDown(); // lane C: the direct route is observable again - asked once
             m_tunnel.upstreamTunnelDown(); // seat releases held for this stop go now, over the direct path
             m_stopGeneration = SessionGeneration{};
             m_stopRetries = 0;
@@ -9804,12 +9810,18 @@ void AvpnEngineQml::noteApiOutcome(QNetworkReply *reply)
     // заморозки = последний уход в фон или выход на экран, что позже.
     const ApiOutcome o = classifyApiOutcome(code, canceled, timedOut, t0, std::max(m_lastResumeMs, m_lastHiddenMs),
                                             m_lastTunnelTransitionMs, now);
+    // Lane C: the success says something about the DIRECT route only when the request was sent with no tunnel of ours
+    // up (none now and none since it was sent) and after the last network change.
+    const bool tunnelUpNow = m_lastTunnelState == Vpn::Connecting || m_lastTunnelState == Vpn::Connected
+        || m_lastTunnelState == Vpn::Reconnecting || m_lastTunnelState == Vpn::Disconnecting;
+    const bool directRoute = !tunnelUpNow && t0 > 0 && t0 > m_lastTunnelTransitionMs
+        && (!m_configSvc || t0 > m_configSvc->lastNetworkChangeMs());
     if (m_configSvc) {
         if (o == ApiOutcome::Failure)
             m_configSvc->reportNetworkFailure();
         // 5.1.109 (S4.1, iOS and macOS): an API path works again while the process is still on the
         // cached config - the config is asked for now, not on the next return to the screen.
-        else if (o == ApiOutcome::Success && m_configSvc->reportNetworkSuccess())
+        else if (o == ApiOutcome::Success && m_configSvc->reportNetworkSuccess(directRoute))
             reliabilityEvent(QStringLiteral("config_refetch why=api_path_back"));
     }
     if (m_whitelistDetector) {

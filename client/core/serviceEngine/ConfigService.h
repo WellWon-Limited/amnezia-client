@@ -64,6 +64,16 @@ public:
     // directApiReach() converges in a few seconds instead of waiting for the next config refresh. Not under a
     // session edge (a tunnel carries the requests) and not on a pinned dev backend.
     void noteNetworkChanged();
+    // Our tunnel went down (the facade's one place that sees it): the direct route is observable again and nothing
+    // learned through the tunnel applies - when the fact of this network generation is not known directly (Unknown),
+    // the direct route is asked once (askDirectOnce).
+    void noteTunnelDown();
+    // Read-only: is a tunnel of ours up now (any state in which it may carry the app's requests). A request sent while
+    // one is up says nothing about the direct route; stamped at send time. Unset = never.
+    void setTunnelUpSource(std::function<bool()> up) { m_tunnelUpFn = std::move(up); }
+    // When the physical network last changed (the system clock of nowMs); the facade uses it to tell whether an API
+    // request was sent before the change.
+    qint64 lastNetworkChangeMs() const { return m_netChangeMs; }
     // Lane C: can the direct control plane be reached on this network now (see ApiReach.h). Unknown when nothing was
     // observed under the CURRENT generation of the network (the source below). The one owner of this fact.
     ApiReach directApiReach() const;
@@ -78,7 +88,9 @@ public:
     // asks for /v1/config - at once, then not closer than the refresh throttle to the previous such
     // refetch (ConfigCachePolicy.h::refetchConfigOnApiSuccess); true = it was asked for now. The
     // failure of such a refetch does not vote in the edge walk.
-    bool reportNetworkSuccess();
+    // directRoute: the request that succeeded was sent while no tunnel of ours was up and after the last network
+    // change (only then does the success say the DIRECT control plane is reachable on this network).
+    bool reportNetworkSuccess(bool directRoute = false);
     // Decision 2026-11-05: /v1/subscription outcome for its own per-edge streak (EdgeWalk.h::
     // SubscriptionEdgeStreak); requestBase = the edge the request went to. failed = transport failure
     // (classifySubscriptionEdgeOutcome); ignored outcomes are not reported. true = the active edge
@@ -123,6 +135,16 @@ private:
     int          m_walkRounds = 0;
     QTimer       m_walkPause;
     void setReach(ApiReach r);
+    bool tunnelUp() const { return m_tunnelUpFn && m_tunnelUpFn(); }
+    quint64 generationNow() const { return m_generationFn ? m_generationFn() : 0; }
+    void askDirectOnce();
+    // At most one direct ask per network generation and per kAskSpacingMs (flapping LTE: a few asks a minute at most).
+    static constexpr qint64 kAskSpacingMs = 30000;
+    std::function<bool()> m_tunnelUpFn;
+    quint64        m_askedGen = 0;
+    bool           m_askedAny = false;
+    qint64         m_lastAskMs = -1;
+    qint64         m_netChangeMs = 0;
     ApiReach       m_reach = ApiReach::Unknown;
     quint64        m_reachGen = 0;                    // the network generation the fact was observed under
     std::function<quint64()> m_generationFn;
