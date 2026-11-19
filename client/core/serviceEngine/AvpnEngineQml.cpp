@@ -2782,6 +2782,8 @@ QVariantMap AvpnEngineQml::currentNode() const
     // AVPN upstream nodes (point 16): the shown node is a provider profile (its own badge, no provider name).
     node["upstream"]     = pick ? pick->upstream : false;
     node["upstreamTier"] = pick ? pick->upstreamTier : 0;
+    // the same string the node pool rows carry ("whitelist" draws the white-list flag on the home card)
+    node["upstreamKind"] = pick ? QString::fromLatin1(avpn::upstreamKindName(pick->upstreamKind)) : QString();
     node["protoVersion"] = pick ? pick->protoVersion : QString(); // "2"/"3"/"3.1"; xray — пусто
     node["connected"] = (s.state == QLatin1String("connected"));
     node["hasNode"]   = (pick != nullptr) || hintOnly;

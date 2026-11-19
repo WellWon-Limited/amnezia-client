@@ -9,7 +9,7 @@ import ".."   // Theme, ScanTexts, ScanSwitches
 // ScanTexts; the key "notice" carries a ready text in args[0] (the engine's notices, PageStart.onNotice).
 // A binary without TribeScanner.shade (dev preview, mock scenes) uses a local fallback with the same rules in
 // short: one visible, FIFO with warnings first, identical requests coalesced, info / success older than 3 s
-// dropped, at most 3 waiting, hold 1500 ms, a tap hides at once.
+// dropped, at most 3 waiting, hold Theme.shade.holdMs (2.5 s), a tap hides at once.
 // Only while the `scanner` switch is on: with it off nothing here ever shows (today's toasts stay).
 Item {
     id: host
@@ -18,7 +18,7 @@ Item {
     readonly property bool active: ScanSwitches.scanner
     readonly property bool queueDriven: typeof TribeScanner !== "undefined" && TribeScanner.shade !== undefined
     readonly property var q: queueDriven ? (TribeScanner.shade || ({})) : ({})
-    readonly property int holdMs: 1500
+    readonly property int holdMs: Theme.shade.holdMs
     readonly property int staleMs: 3000
     readonly property int maxPending: 3
 

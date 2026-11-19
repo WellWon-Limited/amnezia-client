@@ -137,7 +137,7 @@ Item {
                 selected: root.chosen
                 // menu bottom = 4 px under the bar's top edge (artboard .mn bottom: calc(100% - 4px))
                 menuLift: barRow.y + Theme.space.sm - 4
-                // up to 150, but never squeezing the action button below its own text (360 px phones)
+                // up to Theme.scan.menuButtonMax, but never squeezing the action button below its own text (360 px phones)
                 maxButtonWidth: Math.max(Theme.scan.barHeight * 2,
                                          Math.min(Theme.scan.menuButtonMax,
                                                   root.width - 2 * Theme.space.xl - barRow.spacing - actionButton.textNeed))

@@ -54,6 +54,25 @@ PageType {
     // the shown node is not the person's choice (a manual pick replaced by another node); undefined on older binaries
     readonly property bool choiceElsewhere: curNode.choiceNodeId !== undefined && String(curNode.choiceNodeId) !== ""
                                             && curNode.choiceIsShown === false
+    // the person chose a server (Scanner / server list tap): the card says so and offers the way back to Auto
+    readonly property bool hasChoice: curNode.choiceNodeId !== undefined && String(curNode.choiceNodeId) !== ""
+    // disconnected with a choice the engine already knows fails on this network (the node pool row's
+    // lastAttemptFailed = the path ledger says suspect / dead here); the pool is read only while this can show
+    readonly property bool choiceFailsHere: {
+        if (!hasEngine || !hasChoice || isOn || isBusy || choiceElsewhere)
+            return false
+        const pool = TribeEngine.nodePool || []
+        for (let i = 0; i < pool.length; ++i)
+            if (pool[i] && String(pool[i].nodeId) === String(curNode.choiceNodeId))
+                return pool[i].lastAttemptFailed === true
+        return false
+    }
+    // «Сбросить»: the same path as the server list's «Умный выбор» row (PageStart.onPickAuto: online - reprobe, else
+    // selectAuto), so no second way to clear the choice exists
+    function resetChoice() {
+        Haptic.play("selection"); Haptic.arm()
+        root.pickAuto()
+    }
     readonly property int attemptTotalNow: hasEngine && TribeEngine.attemptTotal !== undefined ? Number(TribeEngine.attemptTotal) : 0
     readonly property int attemptCheckedNow: hasEngine && TribeEngine.attemptChecked !== undefined ? Number(TribeEngine.attemptChecked) : 0
 
@@ -97,6 +116,7 @@ PageType {
     signal requestNotifications()
     signal requestAdminServers()  // AVPN: админ-просмотр пула нод (только Dev.adminMode)
     signal requestServerPicker()  // AVPN: страница выбора сервера (замена шторки TribeNodeSheet)
+    signal pickAuto()             // "Сбросить" on the card: the server list's «Умный выбор» path (PageStart.onPickAuto)
     signal requestSupportChat(string draft)  // AVPN (store-flow 2026-07-11): CTA мобилок → чат с черновиком
     signal requestDoctor()        // AVPN (Доктор v1): кнопка «Доктор» → попап диагностики (хост PageStart)
     signal requestScanner()       // AVPN (Scanner): the home button «Сканер» -> PageScannerTribe (host PageStart)
@@ -912,6 +932,7 @@ PageType {
             Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
             Item {
                 anchors.fill: parent; anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+                z: 1   // above the whole-card tap area: the «Сбросить» hit area wins, the rest falls through to it
                 // якорная раскладка (не Row-позиционер): флаг слева, сигнал-блок справа с симметричным
                 // отступом lg, имя/IP — между ними. // AVPN
                 // иконка региона: КРУГЛЫЙ флаг по country_code «во всю плашку» (SVG из flagKit,
@@ -921,6 +942,8 @@ PageType {
                     width: 52; height: 52
                     anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
                     code: root.curNode.hasNode ? (root.curNode.countryCode || "") : ""
+                    // a white-list profile: the white disc with a black globe (currentNode.upstreamKind)
+                    whitelist: root.curNode.hasNode && root.curNode.upstream === true && root.curNode.upstreamKind === "whitelist"
                     fallback: Component {
                         Rectangle {
                             radius: width / 2
@@ -1080,7 +1103,8 @@ PageType {
                                 width: subRow.width - (protoBadge.visible ? protoBadge.width + subRow.spacing : 0)
                                 visible: text.length > 0
                                 elide: Text.ElideRight
-                                text: root.curNode.hasNode ? (root.curNode.auto === true && !root.choiceElsewhere ? qsTr("Авто") : "")
+                                text: root.curNode.hasNode ? (root.curNode.auto === true && !root.choiceElsewhere ? qsTr("Авто")
+                                                              : root.choiceFailsHere ? qsTr("в этой сети не отвечает") : "")
                                       : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Повторяем автоматически")
                                                                                  : qsTr("Секунду…"))
                                       // one text in Auto, as the Auto card of the server list (U4/V5)
@@ -1090,17 +1114,59 @@ PageType {
                                 font.family: Theme.font.mono; font.pixelSize: Theme.font.micro
                             }
                         }
-                        // Device test of 142 (second round): the card names the node CONNECTED now; when it is not
-                        // the person's choice (a failover left it), its own line says what was chosen
-                        // (currentNode.choiceNodeId / choiceName / choiceIsShown from the engine)
-                        Text {
-                            width: parent.width
-                            visible: root.choiceElsewhere
-                            text: qsTr("Ваш выбор сейчас недоступен: %1").arg(String(root.curNode.choiceName || ""))
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            color: Theme.color.warning
-                            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                        // The person's choice (currentNode.choiceNodeId / choiceName / choiceIsShown from the engine). The
+                        // line runs under the signal cluster (the full width of the info column): a quiet «Ваш выбор»
+                        // label, or - when a failover left the choice and the card names the node CONNECTED now - the
+                        // yellow «Ваш выбор сейчас недоступен: …» line; both carry «Сбросить» (back to Auto) at the end.
+                        Item {
+                            id: choiceLine
+                            visible: root.hasChoice
+                            width: infoCol.width
+                            height: Math.max(choiceBadge.implicitHeight, resetLabel.implicitHeight)
+                            TribeLabelBadge {
+                                id: choiceBadge
+                                visible: !root.choiceElsewhere
+                                small: true
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                label: qsTr("Ваш выбор")
+                                fg: Theme.color.text2
+                                fill: Theme.color.glass
+                            }
+                            Text {
+                                id: choiceWarn
+                                visible: root.choiceElsewhere
+                                anchors.left: parent.left
+                                anchors.right: resetLabel.left
+                                anchors.rightMargin: Theme.space.sm
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: qsTr("Ваш выбор сейчас недоступен: %1").arg(String(root.curNode.choiceName || ""))
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight   // the end of the line is the server name: it gives way, not the action
+                                color: Theme.color.warning
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.micro
+                            }
+                            Text {
+                                id: resetLabel
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: qsTr("Сбросить")
+                                textFormat: Text.PlainText
+                                color: Theme.color.accent
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.micro
+                                font.weight: Theme.font.wSemibold
+                                Accessible.role: Accessible.Button
+                                Accessible.name: qsTr("Сбросить выбор сервера, вернуть умный выбор")
+                                Accessible.onPressAction: root.resetChoice()
+                                // a 44 pt tap target around the small label (it may extend beyond the label's box)
+                                MouseArea {
+                                    anchors.centerIn: parent
+                                    width: Math.max(Theme.tap.min, parent.width + 2 * Theme.space.md)
+                                    height: Theme.tap.min
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.resetChoice()
+                                }
+                            }
                         }
                     }
                 }

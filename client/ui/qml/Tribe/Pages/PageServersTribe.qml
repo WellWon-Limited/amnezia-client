@@ -562,6 +562,7 @@ PageType {
                             // AVPN upstream nodes: a provider row without a country - the kit's globe on a
                             // flag tile (own rows keep their previous look)
                             fallback: row.modelData.upstream ? globeTile : null
+                            whitelist: row.modelData.group === 2   // a white-list profile: the white disc with a black globe
                         }
 
                         ColumnLayout {

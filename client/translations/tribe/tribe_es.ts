@@ -1084,7 +1084,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+182"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+202"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1150,12 +1150,12 @@
     </message>
     <message>
         <location line="+203"/>
-        <location line="+489"/>
+        <location line="+535"/>
         <source>Проверяем трафик…</source>
         <translation>Comprobando el tráfico…</translation>
     </message>
     <message>
-        <location line="-487"/>
+        <location line="-533"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>El tráfico iba por fuera de la VPN: probando otra ruta</translation>
     </message>
@@ -1171,12 +1171,12 @@
     </message>
     <message>
         <location line="+3"/>
-        <location line="+480"/>
+        <location line="+526"/>
         <source>Отключаемся…</source>
         <translation>Desconectando…</translation>
     </message>
     <message>
-        <location line="-479"/>
+        <location line="-525"/>
         <source>Проверяем…</source>
         <translation>Verificando…</translation>
     </message>
@@ -1216,7 +1216,7 @@
         <translation>Conéctate: toca el botón de arriba</translation>
     </message>
     <message>
-        <location line="+117"/>
+        <location line="+120"/>
         <source>ONLINE</source>
         <translation>ONLINE</translation>
     </message>
@@ -1261,7 +1261,7 @@
         <translation>Selección inteligente de servidor</translation>
     </message>
     <message>
-        <location line="+33"/>
+        <location line="+34"/>
         <source>Повторяем автоматически</source>
         <translation>Reintentando automáticamente</translation>
     </message>
@@ -1271,12 +1271,12 @@
         <translation>Un momento…</translation>
     </message>
     <message>
-        <location line="-58"/>
+        <location line="-59"/>
         <source> мс</source>
         <translation> ms</translation>
     </message>
     <message>
-        <location line="+118"/>
+        <location line="+161"/>
         <source>Российский сервер: доступность сервисов — как внутри РФ</source>
         <translation>Servidor ruso: la disponibilidad de servicios es la misma que dentro de Rusia</translation>
     </message>
@@ -1303,9 +1303,14 @@
         <translation>¿Cómo renuevo el acceso?</translation>
     </message>
     <message>
-        <location line="-141"/>
+        <location line="-184"/>
         <source>Авто</source>
         <translation>Auto</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>в этой сети не отвечает</source>
+        <translation>no responde en esta red</translation>
     </message>
     <message>
         <location line="+4"/>
@@ -1313,12 +1318,27 @@
         <translation>El servicio elige el nodo más rápido</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="+21"/>
+        <source>Ваш выбор</source>
+        <translation>Tu elección</translation>
+    </message>
+    <message>
+        <location line="+11"/>
         <source>Ваш выбор сейчас недоступен: %1</source>
         <translation>Tu elección no está disponible ahora: %1</translation>
     </message>
     <message>
-        <location line="+244"/>
+        <location line="+10"/>
+        <source>Сбросить</source>
+        <translation>Restablecer</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Сбросить выбор сервера, вернуть умный выбор</source>
+        <translation>Restablecer la elección de servidor, volver a la elección inteligente</translation>
+    </message>
+    <message>
+        <location line="+250"/>
         <location line="+4"/>
         <source>Заменить сервер</source>
         <translation>Cambiar servidor</translation>
@@ -1329,8 +1349,8 @@
         <translation>Instalando…</translation>
     </message>
     <message>
-        <location line="-479"/>
-        <location line="+480"/>
+        <location line="-525"/>
+        <location line="+526"/>
         <source>Подключаемся…</source>
         <translation>Conectando…</translation>
     </message>
@@ -1874,7 +1894,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>TODAS LAS UBICACIONES</translation>
     </message>
     <message>
-        <location line="+97"/>
+        <location line="+98"/>
         <source>ONLINE</source>
         <translation>ONLINE</translation>
     </message>
@@ -3131,7 +3151,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4278"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4286"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3231,7 +3251,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-3020"/>
+        <location line="-3029"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3281,7 +3301,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Servidor actual</translation>
     </message>
     <message>
-        <location line="+375"/>
+        <location line="+384"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No hay una suscripción activa. Consigue una para conectarte.</translation>
     </message>
@@ -3504,7 +3524,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
     <message>
-        <location line="+676"/>
+        <location line="+680"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>
