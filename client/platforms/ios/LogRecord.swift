@@ -42,7 +42,15 @@ extension Log {
 
       defer { fileHandle.closeFile() }
 
+#if AVPN_DEV_TOOLS
+      // AVPN (device round 19.11): the always-on file log of a development build starts over past its cap
+      guard let end = try? fileHandle.seekToEnd() else { return }
+      if end > Log.devLogCapBytes {
+        try? fileHandle.truncate(atOffset: 0)
+      }
+#else
       guard (try? fileHandle.seekToEnd()) != nil else { return }
+#endif
       try? fileHandle.write(contentsOf: data)
     }
   }
