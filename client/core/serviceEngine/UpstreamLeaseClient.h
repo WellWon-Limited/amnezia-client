@@ -60,6 +60,7 @@ public:
     // Asked before every resend of a release and before a held one is sent: false = the owner took the release back
     // (a start of its profile - UpstreamLeaseOwner.h, row S1): it is dropped silently, no onReleaseDone.
     std::function<bool(quint64 requestId)> releaseWanted;
+    void releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route) override;
     bool releaseInFlight(quint64 requestId) const override { return m_inFlight.contains(requestId); }
     bool acquireAlive(const QString &profileId) const override { return acquireOutFor(profileId); }
     // The spacing budget of a release's resends (UpstreamLeaseWire.h::seatReleaseNext; tests shorten it).

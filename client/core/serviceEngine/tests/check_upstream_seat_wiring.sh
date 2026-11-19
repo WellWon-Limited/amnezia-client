@@ -99,7 +99,7 @@ has "$rel" 'onReleaseDone(requestId, true);' && has "$rel" 'onReleaseDone(reques
 
 # N1 (round 2): a release that ended reaches the owner, so an acquire of its profile that waited goes out
 ctor="$(body_of "$ADP" 'VpnConnectionTunnelControl::VpnConnectionTunnelControl(')"
-has "$ctor" 'applyUpstreamEvents(m_upOwner.onReleaseDone(id, upstreamClockMs()));' \
+has "$ctor" 'applyUpstreamEvents(m_upOwner.onReleaseDone(id, upstreamClockMs(), confirmed));' \
     || bad "N1: the lease client's onReleaseDone must reach the owner (m_upOwner.onReleaseDone)"
 has "$ctor" 'applyUpstreamEvents(m_upOwner.onAcquireReply(id, r, upstreamClockMs()));' \
     || bad "N1: every acquire answer must reach the owner"
@@ -178,6 +178,10 @@ has "$ctor" 'm_upOwner.releaseWanted(id,' || bad "S1: the adapter must give the 
 # leg's no_handshake, and the adapter answers from the owner's own fact.
 has "$(grep -n 'upstreamRequestSent' "$SE/ServiceEngine.cpp")" 'upstreamRequestSent' || bad "S3: the Report effect must check that the provider leg sent something"
 has "$(grep 'upstreamRequestSent' "$ADH")" 'm_upOwner.requestSent()' || bad "S3: the adapter must answer upstreamRequestSent from the owner"
+
+# S2: a release that gave up is not abandoned - the adapter tells the owner whether the server answered it.
+has "$ctor" 'm_upOwner.onReleaseDone(id, upstreamClockMs(), confirmed)' || bad "S2: the adapter must pass the release's outcome to the owner (onReleaseDone confirmed)"
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::releaseVia(')" 'sendRelease(requestId, leaseId, UpstreamMeter{}, route' || bad "S2: releaseVia must send over the route it is given (no direct-path strip)"
 
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"

@@ -2135,9 +2135,10 @@ static void lateGrantOwnership()
             answer(i, "200 OK", b, key.sign(QByteArrayLiteral("tribe-upstream-lease-v1\n") + b));
         }
         static QString cfgSha() { return QString::fromLatin1(QCryptographicHash::hash("{\"inbounds\":[]}", QCryptographicHash::Sha256).toHex()); }
-        static QJsonObject leaseObject()
+        QString leaseId = QLatin1String(kLease);
+        QJsonObject leaseObject() const
         {
-            return QJsonObject{{"type", "upstream_lease"}, {"lease_id", QLatin1String(kLease)},
+            return QJsonObject{{"type", "upstream_lease"}, {"lease_id", leaseId},
                                {"profile_id", "aaaaaaaaaaaaaaa0"}, {"kind", "session"},
                                {"expires_at", QDateTime::fromMSecsSinceEpoch(kServerT0 + 900000, QTimeZone::UTC).toString(Qt::ISODateWithMs)},
                                {"ttl_s", 900}, {"renew_after_s", 300}, {"seq", 0}, {"config", QStringLiteral("{\"inbounds\":[]}")},
@@ -2159,6 +2160,7 @@ static void lateGrantOwnership()
     // events that need the I/O (ReleaseAfterStop) are applied the way the adapter applies them.
     struct Rig {
         LeaseEdge edge;
+        LeaseEdge edge2; // the tunnel's API base (row S2)
         QNetworkAccessManager nam;
         UpstreamLeaseClient client;
         UpstreamLeaseOwner owner;
@@ -2173,7 +2175,7 @@ static void lateGrantOwnership()
             client.configure(&nam, [base] { return base; }, edge.key.pubHex(), [] { return QStringLiteral("token"); });
             owner.setIo(&client);
             client.onAcquire = [this](quint64 id, const AcquireReply &r) { apply(owner.onAcquireReply(id, r, now())); };
-            client.onReleaseDone = [this](quint64 id, bool) { apply(owner.onReleaseDone(id, now())); };
+            client.onReleaseDone = [this](quint64 id, bool confirmed) { apply(owner.onReleaseDone(id, now(), confirmed)); };
             client.onLateGrant = [this](const QString &p, const QString &l, const LeaseRoute &r, bool newer) {
                 apply(owner.lateGrant(p, l, r, newer));
             };
@@ -2390,6 +2392,47 @@ static void lateGrantOwnership()
         pump(1500);
         CHECK(r.edge.deletes.size() > triesBefore); // the release of the old lease was reinstated
     }
+    // Row S2: the direct API cannot carry the release; it is kept (bounded) and goes out over the tunnel's API base as
+    // soon as a session of the standby pack has its seat confirmed through it - not left to the lease's TTL.
+    {
+        Rig r;
+        r.owner.setOptions({});
+        r.client.releaseRetryBudgetMs = 900;
+        r.edge2.leaseId = QStringLiteral("LeaseBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+        runningSession(r);
+        r.edge.dropDeletes = true;
+        r.client.holdReleasesForStop();
+        r.apply(r.owner.disconnect(r.now()));
+        r.client.tunnelStopped();
+        QElapsedTimer t;
+        t.start();
+        while (r.owner.unsentCount() == 0 && t.elapsed() < 6000)
+            pump(10);
+        CHECK(r.owner.unsentCount() == 1 && r.edge2.deletes.isEmpty()); // kept, not abandoned
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"inbounds\":[]}");
+        sc.configSha256 = LeaseEdge::cfgSha();
+        sc.tunnelApiBase = r.edge2.base();
+        sc.packRevision = 5;
+        r.begin(sc); // the direct API is dead: the acquire fails at once; the standby pack starts the tunnel
+        t.start();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 2000)
+            pump(10);
+        r.edge.posts.value(1)->disconnectFromHost(); // the second session's acquire: no answer, a transport failure
+        t.start();
+        while (!r.owner.provisionalPending() && t.elapsed() < 6000)
+            pump(10);
+        r.client.tunnelStarted();
+        r.apply(r.owner.tunnelUp(r.now())); // Connected: the seat is confirmed through the tunnel's API base
+        t.start();
+        while (r.edge2.posts.isEmpty() && t.elapsed() < 2000)
+            pump(10);
+        r.edge2.grant(0);
+        t.start();
+        while (r.edge2.deletes.isEmpty() && t.elapsed() < 3000)
+            pump(10);
+        CHECK(r.edge2.deletes == QStringList{ QLatin1String(kLease) } && r.owner.unsentCount() == 0);
+    }
     // Row G1: the direct acquire exceeds its wait, the tunnel starts from the STANDBY pack (provisional); the original
     // request then returns L late and is released; Connected -> tunnelUp() confirms the seat with an acquire of the
     // same profile. That acquire must wait for the release (the server would hand back the L the DELETE is ending).
@@ -2470,7 +2513,7 @@ struct LedgerWorld {
     int serial = 0;
     QList<Acq> acqs;
     QList<Rel> rels;
-    bool stopPending = false, tunnelDown = true, nativeStarted = false;
+    bool stopPending = false, tunnelDown = true, nativeStarted = false, forceGrant = false, deadApi = false;
     qint64 now = 40000000;
     QStringList violations, trace;
     int deletesSent = 0;
@@ -2596,7 +2639,7 @@ struct LedgerWorld {
         Acq &a = acqs[i];
         a.processed = true;
         // sometimes no seat; a refusal (disabled, not entitled) leaves a live lease alone
-        a.grant = (acqs.size() * 7 + serial) % 5 != 4 && (!live.isEmpty() || serial % 5 != 4);
+        a.grant = forceGrant || ((acqs.size() * 7 + serial) % 5 != 4 && (!live.isEmpty() || serial % 5 != 4));
         if (!live.isEmpty())
             a.lease = live;
         else if (a.grant) {
@@ -2667,7 +2710,7 @@ struct LedgerWorld {
         }
         ++r.tries;
         r.done = true;
-        apply(o.onReleaseDone(r.id, now));
+        apply(o.onReleaseDone(r.id, now, ok));
     }
     void tunnelUp()
     {
@@ -2696,8 +2739,10 @@ struct LedgerWorld {
             apply(o.disconnect(now));
         }
     }
+    bool unsentSeen = false;
     void checkSeat(const char *where)
     {
+        unsentSeen = unsentSeen || o.unsentCount() > 0;
         if (o.active() && !o.provisionalPending() && o.holdsLease(live) == false) {
             // a live session whose machine holds a lease must have it live on the server
         }
@@ -2715,6 +2760,7 @@ struct LedgerWorld {
     // every sequence ends: everything answered, the tunnel confirmed down, the session stopped
     void drain()
     {
+        bool unsentTried = false;
         for (int guard = 0; guard < 400; ++guard) {
             bool did = false;
             for (int i = 0; i < acqs.size() && !did; ++i) {
@@ -2742,6 +2788,13 @@ struct LedgerWorld {
                     disconnected(); // with no native tunnel there is no state change, so no Disconnected comes
                 continue;
             }
+            if (o.unsentCount() > 0 && !unsentTried) {
+                // row S2: releases that never reached the server wait for a route that works - a later direct answer
+                unsentTried = true;
+                forceGrant = true;
+                begin(false);
+                continue;
+            }
             break;
         }
     }
@@ -2749,18 +2802,19 @@ struct LedgerWorld {
 
 static void ledgerModel()
 {
-    int sequences = 0, steps = 0, failedSeqs = 0, deletes = 0;
+    int sequences = 0, steps = 0, failedSeqs = 0, deletes = 0, unsentSeqs = 0;
     QMap<QString, int> kinds;
     for (int seed = 1; seed <= 6000; ++seed) {
         quint32 rng = quint32(seed) * 2654435761u + 12345u;
         const auto rnd = [&rng](int n) { rng = rng * 1664525u + 1013904223u; return int((rng >> 8) % quint32(n)); };
         LedgerWorld w;
+        w.deadApi = seed % 3 == 0;
         UpstreamLeaseOwner::Options op;
         op.keepOwnership = seed % 4 == 0; // the macOS GUI owner releases itself; elsewhere the tunnel owner does
         w.o.setOptions(op);
         for (int step = 0; step < 36; ++step, ++steps) {
             w.now += 150;
-            switch (rnd(14)) {
+            switch (rnd(17)) {
             case 0: case 1: w.begin(rnd(2) == 0); break;
             case 2: case 3: { // the server processes an acquire
                 for (int i = 0; i < w.acqs.size(); ++i)
@@ -2799,7 +2853,7 @@ static void ledgerModel()
                     if (!w.rels[i].done && !w.rels[i].held && (w.rels[i].unprocessed > 0 || w.rels[i].unanswered > 0)) c << i;
                 if (c.isEmpty()) break;
                 const int i = c[rnd(c.size())];
-                const int what = rnd(5);
+                const int what = w.deadApi ? 4 : rnd(5); // a dead direct API: every DELETE is cut
                 if (w.rels[i].unprocessed > 0 && (what < 3 || w.rels[i].unanswered == 0))
                     what == 4 ? w.relCut(i) : w.relHit(i);
                 else if (w.rels[i].unanswered > 0)
@@ -2819,6 +2873,7 @@ static void ledgerModel()
             w.violations << QStringLiteral("something still waits after everything was answered and stopped");
         if (!w.violations.isEmpty() && std::getenv("LEDGER_TRACE")) { std::printf("seed %d:", seed); for (const QString &t : w.trace) std::printf(" %s", qPrintable(t)); std::printf(" => %s\n", qPrintable(w.violations[0])); }
         ++sequences;
+        unsentSeqs += w.unsentSeen ? 1 : 0;
         deletes += w.deletesSent;
         if (!w.violations.isEmpty()) {
             ++failedSeqs;
@@ -2828,8 +2883,9 @@ static void ledgerModel()
     }
     for (auto it = kinds.constBegin(); it != kinds.constEnd(); ++it)
         std::printf("ledger model violation x%d: %s\n", it.value(), qPrintable(it.key()));
-    std::printf("ledger model: %d sequences, %d steps, %d DELETEs sent, %d sequences broke an invariant\n", sequences, steps, deletes, failedSeqs);
-    CHECK(failedSeqs == 0 && deletes > 1000);
+    std::printf("ledger model: %d sequences, %d steps, %d DELETEs sent, %d sequences kept an unsent release, %d sequences broke an invariant\n",
+                sequences, steps, deletes, unsentSeqs, failedSeqs);
+    CHECK(failedSeqs == 0 && deletes > 1000 && unsentSeqs > 100);
 }
 
 int main(int argc, char **argv)

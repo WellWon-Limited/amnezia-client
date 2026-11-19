@@ -209,6 +209,12 @@ void UpstreamLeaseClient::release(quint64 requestId, const QString &leaseId, con
     sendRelease(requestId, leaseId, meter, direct, /*attempt=*/0);
 }
 
+void UpstreamLeaseClient::releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route)
+{
+    m_lastReleaseId = requestId;
+    sendRelease(requestId, leaseId, UpstreamMeter{}, route, /*attempt=*/0); // a route that works: no hold, no strip
+}
+
 void UpstreamLeaseClient::holdReleasesForStop()
 {
     m_tunnelDown = false; // the app is stopping a tunnel it believes running

@@ -208,6 +208,11 @@ public:
     // A DELETE of this release is on the wire right now (its request has not ended). The only thing a start of the
     // same profile may wait for (UpstreamLeaseOwner.h, ledger row S1): a request on the wire cannot be recalled.
     virtual bool releaseInFlight(quint64 /*requestId*/) const { return false; }
+    // A release over the route given (a working tunnel's API base), not forced to the direct path (row S2).
+    virtual void releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route)
+    {
+        release(requestId, leaseId, UpstreamMeter{}, route);
+    }
     // An acquire request of this profile is still alive (answered or not: its HTTP request has not ended).
     virtual bool acquireAlive(const QString & /*profileId*/) const { return false; }
 };

@@ -112,7 +112,7 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
         if (!confirmed)
             qWarning() << "avpn upstream: seat release not confirmed by the server - it frees the seat at the lease TTL";
         // The machine first: an acquire of the same profile that waited for this release goes out now.
-        applyUpstreamEvents(m_upOwner.onReleaseDone(id, upstreamClockMs()));
+        applyUpstreamEvents(m_upOwner.onReleaseDone(id, upstreamClockMs(), confirmed));
     };
     if (m_conn) {
         connect(m_conn, &VpnConnection::bytesChanged, this,
