@@ -1327,9 +1327,12 @@ bool ServiceEngine::feedProbeResult(bool ok)
         m_probeFailStreak = 0;
         return false;
     }
-    if (!currentNodeIsXray())
-        return false; // у awg критерий DEAD — handshake/rx в HealthLoop, не проба
-    if (++m_probeFailStreak < xrayProbeFailCyclesTuned())
+    // Xray has no handshake: the live probe is its DEAD criterion. AmneziaWG keeps its handshake/rx criterion in the
+    // health loop AND ends on the same probe (ConnectTunables.h awgProbeFailCyclesTuned: device round 19.11).
+    const int cycles = currentNodeIsXray() ? xrayProbeFailCyclesTuned() : awgProbeFailCyclesTuned();
+    if (cycles <= 0)
+        return false;
+    if (++m_probeFailStreak < cycles)
         return false;
     m_probeFailStreak = 0;
     return onDead(/*tunnelStillUp=*/true, QStringLiteral("probe failed (failover)"));

@@ -234,6 +234,17 @@ inline int xrayProbeFailCyclesTuned()
     return qBound(1, int(TuningStore::numberOr(QStringLiteral("xray_probe_fail_cycles"), 3)), 10);
 }
 
+// Device round 19.11 (airplane mode / Wi-Fi <-> LTE with an AmneziaWG session): the tunnel stayed "Connected" with no
+// data for minutes - the extension's handshake/rx health saw "progress" (148 bytes for every handshake the SERVER
+// started) while the in-tunnel live probe failed every time. The live probe is evidence of the data plane for every
+// transport: this many failures in a row end an AmneziaWG session too (the failover attempt of the owner; with no
+// uplink it waits for the network). One more cycle than Xray: the extension heals a path change by itself within
+// about 15 s. 0 = off (the handshake/rx criterion alone, as before).
+inline int awgProbeFailCyclesTuned()
+{
+    return qBound(0, int(TuningStore::numberOr(QStringLiteral("awg_probe_fail_cycles"), 4)), 10);
+}
+
 // AVPN awg31-xray-v1 (независимое ревью волны, MAJOR-3; инвариант §22.5 «Подключено по xray —
 // только после реального трафика ЧЕРЕЗ туннель»). Успешный HEAD generate_204 доказывает ИНТЕРНЕТ,
 // а не туннель: если tun2socks/маршруты не встали, а протокол уже отдал Connected, проба уходит
