@@ -142,6 +142,13 @@ public:
         qint64 awg = 90 * 1024;
         qint64 xray = 160 * 1024;
         qint64 provider = 160 * 1024;
+        // The part of each projection spent OUTSIDE the probe host (the API calls around a probe: opening the scan,
+        // a provider's seat batch with its config, the release). The host's byte count does not include it, so a
+        // finished probe is charged its reported bytes PLUS this part (second review of 141, F8: a provider probe was
+        // refunded its API share and the race could pass its cap).
+        qint64 awgFixed = 0;
+        qint64 xrayFixed = 0;
+        qint64 providerFixed = 0;
     };
 
     // A new race (an older one ends first, its probes cancelled). bytesLeft < 0 = no byte cap (Wi-Fi without a
@@ -209,7 +216,9 @@ public:
         // Device round 19.11 (LTE, three dead first candidates): 11 KB were spent, 327 KB stayed reserved, the race
         // ended "bytes" with nothing proven and the working servers were never probed.
         if (m_bytesLeft >= 0)
-            m_bytesLeft += reserved - std::clamp<qint64>(bytes, std::min(kMinProbeChargeBytes, reserved), reserved);
+            m_bytesLeft += reserved
+                - std::clamp<qint64>(std::max<qint64>(0, bytes) + fixedOf(path), std::min(kMinProbeChargeBytes, reserved),
+                                     reserved);
         if (bytes > 0) { // the Scanner's ledger
             RaceEffect e;
             e.type = RaceEffectType::Spent;
@@ -362,6 +371,16 @@ private:
         case PathKind::Provider: return m_costs.provider;
         }
         return m_costs.xray;
+    }
+
+    qint64 fixedOf(const PathCandidate &c) const
+    {
+        switch (c.kind) {
+        case PathKind::OwnAwg: return m_costs.awgFixed;
+        case PathKind::OwnXray: return m_costs.xrayFixed;
+        case PathKind::Provider: return m_costs.providerFixed;
+        }
+        return 0;
     }
 
     bool affordable(const PathCandidate &c) const { return m_bytesLeft < 0 || costOf(c) <= m_bytesLeft; }

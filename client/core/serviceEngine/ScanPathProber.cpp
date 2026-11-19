@@ -53,6 +53,10 @@ path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayB
     c.xray = data + qint64(qBound(1, xrayBurst, 6) - 1) * scanXrayBurstPartCostBytes(t) + access;
     c.awg = kScanAwgHandshakeBytes + qint64(t.awgPrimeEchoes) * kScanAwgEchoBytes + data + access;
     c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes /* release */ + access;
+    // what of each projection is spent outside the host (PathRace charges it on top of the host's count)
+    c.awgFixed = access;
+    c.xrayFixed = access;
+    c.providerFixed = qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes + access;
     return c;
 }
 

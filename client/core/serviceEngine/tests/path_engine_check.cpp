@@ -1575,6 +1575,36 @@ static void scenarioRace()
         CHECK(spent <= cap);
     }
 
+    // Second review of 141, F8: a provider probe also spends bytes OUTSIDE the host (its seat batch with the config,
+    // the release). With 112 640 B left a provider probe reports 40 000 B from the host and its API share is 40 000 B:
+    // 32 640 B remain, and an AmneziaWG probe of 54 572 B must NOT start (the refund of the host count alone left
+    // 72 640 B and let the race pass its cap).
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.awg = 54572;
+        costs.provider = 107520;
+        costs.providerFixed = 40000;
+        const QList<PathCandidate> list = { prov("up:p", UpstreamKind::Country, "NL", 0), awg("a1", "EE") };
+        RaceTimings rt;
+        rt.hedgeMs = 5000;
+        PathRace race(rt);
+        QStringList started;
+        QList<RaceEffect> fx = race.begin(0, list, tr.current(), hostCaps(), 112640, costs);
+        ProbeStamp provider;
+        for (const RaceEffect &e : fx)
+            if (e.type == RaceEffectType::StartProbe) {
+                started << e.path.id.id;
+                provider = e.stamp;
+            }
+        CHECK(started == QStringList({ "up:p" })); // the AmneziaWG probe does not fit beside the reservation
+        for (const RaceEffect &e : race.probeDone(1500, provider, PathOutcome::Inconclusive, 40000))
+            if (e.type == RaceEffectType::StartProbe)
+                started << e.path.id.id;
+        CHECK(started == QStringList({ "up:p" })); // 32 640 B left: still no room for 54 572 B
+    }
+
     // B3a: the first candidate works. With no evidence the race goes first: the first leg waits for the first proof
     // (here that candidate's own probe) and costs at most that probe over no race - never a dropped leg. A known path
     // (the second tap) starts at once: never slower than no race.
