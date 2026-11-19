@@ -363,6 +363,9 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                                .arg(e.stamp.attempt).arg(e.stamp.network).arg(e.stamp.leg).arg(e.path.id.id)
                                .arg(QLatin1String(path::pathKindName(e.path.kind))).arg(e.timeoutMs)
                                .arg(m_owner.progressDone()).arg(m_owner.progressTotal()));
+            // the leg's own path leaves the race before its tunnel starts (CONNECT-INVARIANTS §32 p. 3)
+            if (m_race.running())
+                applyRaceEffects(m_race.legStarted(nowMs(), e.path.id.id));
             m_state = EngineState::Connecting;
             if (m_currentNodeId != e.path.id.id)
                 resetHealSession(e.path.id.id);
@@ -579,6 +582,7 @@ void ServiceEngine::maybePreemptStarvedCheck()
     attemptJournal(QStringLiteral("leg_preempted_for_proof node=%1 (no first byte, a proven path waits)").arg(current.id.id));
     feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(), path::PathOutcome::Inconclusive));
 }
+
 
 void ServiceEngine::startOwnerAfterRace(const char *why)
 {

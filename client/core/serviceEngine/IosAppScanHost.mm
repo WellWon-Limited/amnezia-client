@@ -176,6 +176,8 @@ struct IosHybridScanHost::State
         s.bindIndex = IosScanHost::appBindInterfaceIndex(&sat);
         s.pathSatisfied = sat;
         s.awgBesideTunnelRefuse = awgBesideTunnelRefuse;
+        const int own = IosController::Instance()->ownStartLivePeer(nullptr);
+        s.livePeer = own == 2 ? IosLivePeer::Known : own == 1 ? IosLivePeer::NotAwg : IosLivePeer::Unknown;
         return s;
     }
 
@@ -183,7 +185,11 @@ struct IosHybridScanHost::State
     {
         ScanNetSource g;
         const bool hasGen = IosScanHost::appGeneration(g);
-        return iosAppScanHostOptions(withBind ? IosScanHost::appBindInterfaceIndex() : 0, hasGen, g, epoch);
+        // beside a tunnel this process started: its AmneziaWG peer with every message (the engine keeps awg_mini off it)
+        QJsonObject peer;
+        if (!tunnelDown && IosController::Instance()->ownStartLivePeer(&peer) != 2)
+            peer = QJsonObject();
+        return iosAppScanHostOptions(withBind ? IosScanHost::appBindInterfaceIndex() : 0, hasGen, g, epoch, peer);
     }
 
     void stopApp(const QString &reason)

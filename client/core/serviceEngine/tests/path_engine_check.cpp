@@ -1054,15 +1054,16 @@ static void scenarioRace()
     {
         World w;
         const NetworkObservation lte = cell("25001", "lte");
-        w.setProbe(k, QStringLiteral("17"), ProbeBehaviour::ok(2500));
+        // (the hedged first choice 17 is never probed beside its own leg: the spare 12 carries the late answer)
+        w.setProbe(k, QStringLiteral("12"), ProbeBehaviour::ok(2500));
         w.set(key(lte), QStringLiteral("17"), Behaviour::works(700, 400, 120));
-        Sim s({ awg("17", "EE") }, w, home);
+        Sim s({ awg("17", "EE", false, 2.0), awg("12", "DE") }, w, home);
         s.caps = hostCaps();
         s.changeNetworkAt(1000, lte);
         const AttemptResult r = s.raceTap(UserChoice::automatic());
         row("race 4: results after a network change", s, r, 0);
         CHECK(r.connected && s.raceLog.contains(QStringLiteral("done:network_changed")));
-        CHECK(s.ledger.view(k, awg("17", "EE").id, s.wall()).state == PathState::Unknown); // the late probe ok: dropped
+        CHECK(s.ledger.view(k, awg("12", "DE").id, s.wall()).state == PathState::Unknown); // the late probe ok: dropped
     }
 
     // 5. Cellular budget exhausted: no probe can be paid - one path at a time, exactly as stage 1.
@@ -1160,6 +1161,55 @@ static void scenarioRace()
         CHECK(race.inFlight() <= 4 && awg <= 1); // two AmneziaWG at once (a + b), the third waits
         const ProbeStamp old{ race.raceNumber() + 7, tr.current().generation, 1 };
         CHECK(race.probeDone(800, old, PathOutcome::ProbeOk, 1000).isEmpty()); // another race: dropped
+    }
+    // CONNECT-INVARIANTS §32 p. 3 (device round 19.11: the hedged leg's own AmneziaWG node was probe 1 of every race,
+    // with the device's key beside the leg coming up): the path the owner raises leaves the race - its probe in
+    // flight is cancelled, it is never started again in that race; the others go on.
+    {
+        NetworkTracker tr;
+        tr.observe(home);
+        const QList<PathCandidate> list = { awg("a", "EE"), awg("b", "NL"), xray("c", "FI") };
+        // hedge at once: the first candidate is the leg raised now - never probed
+        {
+            PathRace race;
+            QStringList started;
+            for (const RaceEffect &e : race.begin(0, list, tr.current(), hostCaps(), -1, PathRace::Costs{}))
+                if (e.type == RaceEffectType::StartProbe)
+                    started << e.path.id.id;
+            for (qint64 t = 250; t <= 2000; t += 250)
+                for (const RaceEffect &e : race.tick(t))
+                    if (e.type == RaceEffectType::StartProbe)
+                        started << e.path.id.id;
+            CHECK(started == QStringList({ "b", "c" }));
+        }
+        RaceTimings later;
+        later.hedgeMs = 5000; // the owner's leg comes later: its probe in flight is cancelled then
+        PathRace race(later);
+        QList<RaceEffect> fx = race.begin(0, list, tr.current(), hostCaps(), -1, PathRace::Costs{});
+        CHECK(fx.size() >= 1 && fx.first().type == RaceEffectType::StartProbe && fx.first().path.id.id == QLatin1String("a"));
+        const ProbeStamp a = fx.first().stamp;
+        fx = race.legStarted(10, QStringLiteral("a"));
+        bool cancelled = false;
+        for (const RaceEffect &e : fx)
+            cancelled = cancelled || (e.type == RaceEffectType::CancelProbe && e.stamp == a);
+        CHECK(cancelled && race.inFlight() == 0);
+        QStringList started;
+        for (qint64 t = 250; t <= 2000; t += 250)
+            for (const RaceEffect &e : race.tick(t))
+                if (e.type == RaceEffectType::StartProbe)
+                    started << e.path.id.id;
+        CHECK(started == QStringList({ "b", "c" }));
+        CHECK(race.probeDone(2100, a, PathOutcome::ProbeOk, 1000).isEmpty()); // its late answer: dropped
+        // a path still waiting in the window leaves it too
+        PathRace r2(later);
+        r2.begin(0, list, tr.current(), hostCaps(), -1, PathRace::Costs{});
+        r2.legStarted(10, QStringLiteral("c"));
+        QStringList s2;
+        for (qint64 t = 250; t <= 2000; t += 250)
+            for (const RaceEffect &e : r2.tick(t))
+                if (e.type == RaceEffectType::StartProbe)
+                    s2 << e.path.id.id;
+        CHECK(s2 == QStringList({ "b" }));
     }
 }
 

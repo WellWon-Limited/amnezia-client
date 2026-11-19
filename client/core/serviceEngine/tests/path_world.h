@@ -280,6 +280,8 @@ private:
         for (const AttemptEffect &e : effects) {
             switch (e.type) {
             case EffectType::StartPath: {
+                if (race.running()) // the leg's own path leaves the race (CONNECT-INVARIANTS §32 p. 3)
+                    applyRace(race.legStarted(now, e.path.id.id));
                 const QString net = tracker.current().local;
                 legs.append({ e.stamp, e.path.id.id, net, now });
                 const Behaviour b = m_world.at(net, e.path.id.id, now);

@@ -141,11 +141,17 @@ public:
         m_winner.clear();
         m_providersStarted = 0;
         m_proven = 0;      // B2: per race
+        m_legs.clear();
         m_hedged = false;
         m_lastNow = now;
         m_awake = 0;
         m_budgetEnd = m_t.raceBudgetMs;
         m_nextStartAt = 0;
+        // Hedge at once: the first candidate (the owner's first choice, the same order) is the leg the engine raises
+        // now - it is never probed beside it (legStarted); a different first choice of the owner is excluded when
+        // its leg starts.
+        if (m_t.hedgeMs <= 0)
+            m_legs.insert(order.first().id.id);
         pump(out);
         if (m_running && m_t.hedgeMs <= 0) {
             m_hedged = true;
@@ -239,6 +245,32 @@ public:
         return out;
     }
 
+    // The owner brings this path up now (a leg): it leaves the race - a probe of it in flight is cancelled, it is
+    // never started again in this race. CONNECT-INVARIANTS §32 p. 3: the target of a connect attempt is never probed
+    // with the device's key from another socket (an AmneziaWG handshake from the probe would move the server's peer
+    // address away from the tunnel coming up). Device round 19.11: the hedged leg's own node was probe 1 of every race.
+    QList<RaceEffect> legStarted(qint64 now, const QString &pathId)
+    {
+        QList<RaceEffect> out;
+        advance(now);
+        if (!m_running || pathId.isEmpty())
+            return out;
+        m_legs.insert(pathId);
+        for (int i = m_pending.size() - 1; i >= 0; --i)
+            if (m_pending.at(i).id.id == pathId)
+                m_pending.removeAt(i);
+        for (auto it = m_inFlight.begin(); it != m_inFlight.end();) {
+            if (it.value().path.id.id == pathId) {
+                out << cancelEffect(it.key(), it.value().path);
+                it = m_inFlight.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        pump(out);
+        return out;
+    }
+
     QList<RaceEffect> stop(qint64 now)
     {
         QList<RaceEffect> out;
@@ -325,6 +357,8 @@ private:
         }
         while (m_next < int(m_order.size()) && int(m_pending.size() + m_inFlight.size()) < m_t.waveSize) {
             const PathCandidate &c = m_order.at(m_next++);
+            if (m_legs.contains(c.id.id))
+                continue; // the owner raises it: never probed beside its own leg
             if (c.kind == PathKind::Provider && m_providersQueued >= m_t.providerPerRace)
                 continue; // over the probe-seat bound of this race: left to the owner's walk
             m_providersQueued += c.kind == PathKind::Provider ? 1 : 0;
@@ -395,6 +429,7 @@ private:
     qint64 m_nextStartAt = 0;
     int m_next = 0;
     QList<PathCandidate> m_pending; // the window's candidates not started yet
+    QSet<QString> m_legs;           // paths the owner raised during this race (legStarted): never probed
     int m_providersQueued = 0;
     int m_providersStarted = 0;
     int m_proven = 0;

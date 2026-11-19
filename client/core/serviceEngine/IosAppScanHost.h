@@ -181,6 +181,11 @@ inline const char *iosAppScanRouteName(IosAppScanRoute r)
     return "refuse_no_path";
 }
 
+// The AmneziaWG peer of the tunnel this process started last (IosController::ownStartLivePeer): what the app engine
+// needs to keep an awg_mini session off the live peer (CONNECT-INVARIANTS §32 p. 3/3a). Unknown = not a start of this
+// process (a session the system raised, an adopted one) - only the extension can tell then.
+enum class IosLivePeer { Unknown, NotAwg, Known };
+
 struct IosAppScanState {
     IosAppScanMode mode = IosAppScanMode::Always;
     bool tunnelDown = true;        // the tunnel is Disconnected / Error (not preparing, connecting, up, stopping)
@@ -189,7 +194,18 @@ struct IosAppScanState {
     unsigned bindIndex = 0;        // the app path's physical interface (0 = none)
     bool pathSatisfied = false;
     bool awgBesideTunnelRefuse = false; // IosAppScanControl::awgBesideTunnelRefuse
+    IosLivePeer livePeer = IosLivePeer::Unknown; // of this process's own start (see IosLivePeer)
 };
+
+// The app engine may run awg_mini beside a tunnel that is not down only when the live peer is known to it: the
+// tunnel this process started is not AmneziaWG, or its peer goes along as the host option awg_live_peer (the
+// engine refuses a candidate with that key or address). Device round of 19.11 (iPhone Air, LTE, mode Amnezia): while
+// the hedged AmneziaWG leg came up the extension did not answer yet, every spare AmneziaWG probe of the race was
+// refused awg_live_peer_unknown and the race proved nothing (11.3 s and 11.6 s to data).
+inline bool iosAppScanAwgBesideTunnelInApp(const IosAppScanState &s)
+{
+    return s.livePeer != IosLivePeer::Unknown && s.foreground && s.bindIndex > 0 && !s.awgBesideTunnelRefuse;
+}
 
 // Where a scan_start goes. A start of the app engine needs a physical interface to bind to (the engine refuses one
 // without it as well; refused here so the extension never sees a start it would run unbound).
@@ -208,16 +224,22 @@ inline IosAppScanRoute iosAppScanRouteStart(const IosAppScanState &s, bool hasAw
     // A tunnel exists (or is coming up / going down).
     if (s.mode == IosAppScanMode::BeforeTunnel)
         return IosAppScanRoute::Extension;
-    if (hasAwgMini) // only the extension knows the live AmneziaWG peer (§32 p. 3a): never in-app beside a tunnel
-        return s.extensionRunning && !s.awgBesideTunnelRefuse ? IosAppScanRoute::Extension : IosAppScanRoute::RefuseLivePeerUnknown;
+    if (hasAwgMini) { // the live AmneziaWG peer must be known (§32 p. 3a): the extension's, or the one this app started
+        if (s.extensionRunning && !s.awgBesideTunnelRefuse)
+            return IosAppScanRoute::Extension;
+        return iosAppScanAwgBesideTunnelInApp(s) ? IosAppScanRoute::App : IosAppScanRoute::RefuseLivePeerUnknown;
+    }
     if (!s.foreground)
         return s.extensionRunning ? IosAppScanRoute::Extension : IosAppScanRoute::RefuseNoPath;
     return appPath ? IosAppScanRoute::App : (s.extensionRunning ? IosAppScanRoute::Extension : IosAppScanRoute::RefuseNoPath);
 }
 
 // A scan_add for a scan that runs in the app: awg_mini beside a tunnel is refused the same way (its start had none,
-// or the tunnel came up after the start).
-inline bool iosAppScanAddRefusedAwg(const IosAppScanState &s, bool hasAwgMini) { return hasAwgMini && !s.tunnelDown; }
+// or the tunnel came up after the start) unless the live peer is known to the app (it goes along with the add).
+inline bool iosAppScanAddRefusedAwg(const IosAppScanState &s, bool hasAwgMini)
+{
+    return hasAwgMini && !s.tunnelDown && !iosAppScanAwgBesideTunnelInApp(s);
+}
 
 // In-app scans stop when a tunnel starts coming up only in before_tunnel mode; when the app leaves the front in
 // every mode.
@@ -268,9 +290,14 @@ private:
 // message: scan_caps answers them, scan_start runs with them), the bind index with scan_start, the app's
 // path element as `gen` when known (the engine stamps progress and access attempts with it; the coordinator's tuple
 // has the same "app" element, so the exclusion bracket compares like for like), host_epoch always.
-inline QByteArray iosAppScanHostOptions(unsigned bindIndex, bool hasGen, const ScanNetSource &gen, quint64 epoch)
+// awgLivePeer: the awg_live_peer object (iosAwgLivePeerJson) while a tunnel of this process is not down - every
+// message, so a scan started before the tunnel learns it with its next add.
+inline QByteArray iosAppScanHostOptions(unsigned bindIndex, bool hasGen, const ScanNetSource &gen, quint64 epoch,
+                                        const QJsonObject &awgLivePeer = QJsonObject())
 {
     QJsonObject o;
+    if (!awgLivePeer.isEmpty())
+        o.insert(QStringLiteral("awg_live_peer"), awgLivePeer);
     if (bindIndex > 0)
         o.insert(QStringLiteral("bind_interface_index"), double(bindIndex));
     if (hasGen)
@@ -278,6 +305,24 @@ inline QByteArray iosAppScanHostOptions(unsigned bindIndex, bool hasGen, const S
     o.insert(QStringLiteral("host_epoch"), double(epoch));
     o.insert(QStringLiteral("platform_limits"), iosAppScanPlatformLimits());
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
+}
+
+// The awg_live_peer object of an AmneziaWG config this process starts (the extension's TribeScanHost.awgLivePeerJSON
+// shape): the server's public key as 64 lower-case hex digits (the config carries it in base64) and "host:port". An
+// unusable key = an empty object (the peer stays unknown).
+inline QJsonObject iosAwgLivePeerJson(const QString &serverPubKeyBase64, const QString &host, int port)
+{
+    const QByteArray key = QByteArray::fromBase64(serverPubKeyBase64.trimmed().toLatin1());
+    if (key.size() != 32)
+        return QJsonObject();
+    QJsonObject o{{QStringLiteral("public_key"), QString::fromLatin1(key.toHex())}};
+    const QString h = host.trimmed();
+    if (!h.isEmpty() && port > 0 && port < 65536) {
+        const QString ep = (h.contains(QLatin1Char(':')) ? QStringLiteral("[%1]").arg(h) : h) + QLatin1Char(':') + QString::number(port);
+        if (ep.size() <= 64)
+            o.insert(QStringLiteral("endpoint"), ep);
+    }
+    return o;
 }
 
 inline QByteArray iosAppScanLivePeerUnknownReply()

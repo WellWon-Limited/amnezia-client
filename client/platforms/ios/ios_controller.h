@@ -114,6 +114,10 @@ public:
     void sendScanMessage(const QByteArray &message, int timeoutMs,
                          std::function<void(ScanSendResult, const QByteArray &)> done);
     bool scanHostRunning(); // the extension runs (Connected/Reasserting): the scan host can answer
+    // AVPN (path engine, device round 19.11): the tunnel this process started last - 0 none (no start of this process:
+    // only the extension can tell the live peer), 1 not AmneziaWG, 2 AmneziaWG with `peer` (the awg_live_peer object,
+    // IosAppScanHost.h::iosAwgLivePeerJson). Any thread.
+    int ownStartLivePeer(QJsonObject *peer) const;
 
     bool shareText(const QStringList &filesToSend);
     QString openFile();
@@ -285,6 +289,9 @@ private:
     NSDictionary *providerMetadata();
 
     NSString *m_serverAddress {};
+    mutable std::mutex m_ownPeerLock;  // AVPN (path engine): ownStartLivePeer, written by connectVpn
+    int m_ownPeerKind = 0;
+    QJsonObject m_ownPeer;
     bool isOurManager(NETunnelProviderManager *manager);
     void sendVpnExtensionMessage(NETunnelProviderManager *tunnel, NSDictionary *message,
                                  std::function<void(NSDictionary *)> callback = nullptr);
