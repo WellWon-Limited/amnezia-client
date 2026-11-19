@@ -488,7 +488,12 @@ void ConfigService::noteTunnelDown()
 {
     if (m_pinned)
         return;
-
+    // R5 (round 9): a negative fact learned before the tunnel came up is stale now - the direct route may have
+    // recovered meanwhile and an answer through the tunnel stopped the walk. Forget it and ask again (rate-bounded).
+    if (m_reach == ApiReach::Unreachable)
+        clearReach();
+    m_silentEdges.clear();
+    m_askedAny = false;
     QTimer::singleShot(0, this, [this]() { askDirectOnce(); }); // after the facade has recorded the tunnel as down
 }
 
@@ -532,6 +537,14 @@ ApiReach ConfigService::directApiReach() const
     if (m_generationFn && m_reachGen != m_generationFn())
         return ApiReach::Unknown;
     return m_reach;
+}
+
+void ConfigService::clearReach()
+{
+    const ApiReach before = directApiReach();
+    m_reach = ApiReach::Unknown;
+    if (before != ApiReach::Unknown)
+        emit directApiReachChanged(ApiReach::Unknown);
 }
 
 void ConfigService::setReach(ApiReach r)

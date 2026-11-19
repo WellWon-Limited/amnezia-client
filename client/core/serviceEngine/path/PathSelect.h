@@ -178,6 +178,22 @@ inline QHash<QString, double> restrictedNetworkPrior(const QList<PathCandidate> 
     return out;
 }
 
+inline bool modeAllows(PathKind k, TransportMode mode);
+
+// Lane C (C1) is an optimisation (skip what certainly fails), never a reason to have nothing to try: with the control
+// plane unreachable the providers that need it are left out only when something else remains for this choice and
+// mode (round 9, R5b). Exact choices are never filtered.
+inline bool controlPlaneFilterActive(const QList<PathCandidate> &pool, TransportMode mode, const QSet<QString> &tried,
+                                     ApiReach controlPlane, bool exactChoice)
+{
+    if (controlPlane != ApiReach::Unreachable || exactChoice)
+        return false;
+    for (const PathCandidate &c : pool)
+        if (modeAllows(c.kind, mode) && !tried.contains(c.id.id) && !needsControlPlane(c))
+            return true;
+    return false;
+}
+
 inline bool modeAllows(PathKind k, TransportMode mode)
 {
     switch (mode) {
@@ -276,6 +292,8 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
     // [preference level][group] for the sections before the quarantined tail; level 0 = the choice itself,
     // 1 = the chosen server's country, 2 = the rest
     QList<RankedPath> sec[3][5]; // 0 Working, 1 Unknown, 2 LastWave, 3 Suspect, 4 QuarantineOver
+    const bool skipNeedingControlPlane = controlPlaneFilterActive(in.pool, in.mode, in.tried, in.controlPlane,
+                                                                 in.choice.kind == UserChoice::Kind::ExactPath);
     for (const PathCandidate &c : in.pool) {
         if (!modeAllows(c.kind, in.mode) || in.tried.contains(c.id.id))
             continue;
@@ -289,7 +307,7 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
             }
             continue;
         }
-        if (in.controlPlane == ApiReach::Unreachable && needsControlPlane(c))
+        if (skipNeedingControlPlane && needsControlPlane(c))
             continue; // C1: cannot start on this network (no journal here: the engine counts and names the skip)
         r.preferred = isPreferred(in.choice, c);
         r.sameCountry = isSameCountryAsChoice(in.choice, c);

@@ -578,10 +578,16 @@ void ServiceEngine::journalControlPlaneSkips()
     if (controlPlane() != ApiReach::Unreachable || m_choice.kind == path::UserChoice::Kind::ExactPath)
         return;
     int skipped = 0;
-    for (const path::PathCandidate &c : pathPool())
+    const QList<path::PathCandidate> pool = pathPool();
+    for (const path::PathCandidate &c : pool)
         if (path::needsControlPlane(c) && path::modeAllows(c.kind, transportMode()))
             ++skipped;
-    if (skipped > 0)
+    if (skipped == 0)
+        return;
+    // Round 9 (R5b): nothing else to try for this mode - the filter stands down, the providers are offered
+    if (!path::controlPlaneFilterActive(pool, transportMode(), {}, ApiReach::Unreachable, false))
+        attemptJournal(QStringLiteral("paths_skipped reason=no_control count=0 kept_all=1 would_skip=%1").arg(skipped));
+    else
         attemptJournal(QStringLiteral("paths_skipped reason=no_control count=%1").arg(skipped));
 }
 

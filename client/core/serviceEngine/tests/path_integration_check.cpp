@@ -672,6 +672,24 @@ int main(int argc, char **argv)
             r.journal << r.eng.takeAttemptJournal();
             CHECK(r.last() == QLatin1String("up:w1"));
         }
+        {   // Round 9 (R5b, R5c): Xray mode leaves only providers that need the control plane - never "nothing to try":
+            // they are offered (journal kept_all), and with the race skipped (no session, API dead) a leg starts at once
+            TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true},
+                                  {QStringLiteral("upstream_nodes"), true}, {avpn::ServiceEngine::raceFlagKey(), true}}, {}, {});
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            r.eng.setStandbyCandidates({ stub("up:n1", UpstreamKind::Auto, false, 0) });
+            r.eng.setTransportMode(TransportMode::Awg); // own AmneziaWG only ...
+            r.eng.setTransportMode(TransportMode::Xray); // ... then Xray: the only candidate is the non-pack provider
+            r.eng.setControlPlaneSource([] { return avpn::ApiReach::Unreachable; });
+            CHECK(r.eng.connect(err));
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(journalHas(r.journal, "paths_skipped reason=no_control count=0 kept_all=1"));
+            CHECK(journalHas(r.journal, "race_done reason=no_control") && r.last() == QLatin1String("up:n1"));
+        }
         avpn::upstreamPlatformRuntimeReady().store(false);
     }
 

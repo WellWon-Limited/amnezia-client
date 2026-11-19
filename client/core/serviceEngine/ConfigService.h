@@ -135,6 +135,7 @@ private:
     int          m_walkSilent = 0;       // pacing of the walk's rounds only; the FACT is derived from m_silentEdges
     QSet<QString> m_silentEdges;         // edges silent on their quick try under m_silentGen, sent with no tunnel up
     quint64      m_silentGen = 0;
+    void clearReach();
     int          m_walkRounds = 0;
     QTimer       m_walkPause;
     QTimer       m_askLater;                         // the one deferred direct ask (askDirectOnce's spacing)
