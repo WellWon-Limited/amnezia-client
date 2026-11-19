@@ -88,6 +88,9 @@ class IRaceSeat
 {
 public:
     virtual ~IRaceSeat() = default;
+    // The probe gave the seat up: release it, and call `idle` once nothing of the seat can spend a byte any more (its batch
+    // request answered, its release done). Default: nothing is in flight - at once. The owner is destroyed right after.
+    virtual void retire(std::function<void()> idle) { if (idle) idle(); }
 };
 
 // The server calls of the race (production: ScanApiClient, ScanPathProberApi.cpp; tests: a fake).
@@ -263,6 +266,16 @@ private:
     // probes cancelled while it ran are settled with it.
     void dropBook(const QString &scanId);
     QHash<QString, QList<path::ProbeStamp>> m_unsettled; // scan id -> cancelled probes whose spend that scan may still show
+    // A cancelled probe is settled (its hold on the race's cap may end) when NOTHING that can still spend for it is outstanding:
+    // the host scan it ran in, its seat (the probe-batch request, the release), the session fetch it asked for. Each such spender
+    // is one count; the probe is settled when the count is zero - whichever stage the cancel landed in.
+    struct Settling {
+        path::ProbeStamp stamp;
+        int open = 0;
+    };
+    QHash<quint64, Settling> m_settling;
+    QSet<quint64> m_sessionWatchers; // cancelled probes waiting for the session fetch they asked for
+    void settleOne(quint64 key);
     void fetchSession(quint64 race);
     quint64 m_fetchRace = 0;
     bool pollable(const QString &id, const ScanBook &b) const;

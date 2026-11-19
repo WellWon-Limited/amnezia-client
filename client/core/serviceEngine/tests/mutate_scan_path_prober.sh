@@ -71,8 +71,8 @@ mutate_engine() { # name, expected, old, new  (engine mutants: ServiceEngine.h, 
 }
 
 # ---- the prober (model + unit check)
-mutate cancelled_result I1 "    m_probes.erase(it); // its seat goes with it (a seat still asked" "    if (onResult) onResult(stamp, path::PathOutcome::Inconclusive, 0);
-    m_probes.erase(it); // its seat goes with it (a seat still asked"
+mutate cancelled_result I1 "    settleOne(key); // the count's own 1" "    if (onResult) onResult(stamp, path::PathOutcome::Inconclusive, 0);
+    settleOne(key); // the count's own 1"
 mutate result_twice I1 "    if (onResult)
         onResult(p.stamp, outcome, p.bytes);
 " "    if (onResult) {
@@ -143,8 +143,8 @@ mutate_engine hour_ledger_skips_other_race finding3 "        if (m_chargeProbeBy
     }" "        if (m_chargeProbeBytes && (race == 0 || race == m_race.raceNumber()))
             m_chargeProbeBytes(bytes);
     }"
-mutate settled_at_cancel_not_at_final I8 "    if (followed)
-        m_unsettled[it->scanId] << stamp;" "    if (false)
-        m_unsettled[it->scanId] << stamp;"
+mutate settled_at_cancel_not_at_final I8 "    if (!it->sent.isEmpty() && m_books.contains(it->scanId)) { // the host scan" "    if (false) { // the host scan"
+mutate settle_at_cancel_while_api_request_in_flight R1 "    if (seat) { // the seat: the batch request still runs" "    if (false) { // the seat: the batch request still runs"
+mutate settle_at_cancel_while_session_fetch_runs R1 "    if (it->waitingSession && m_sessionFetching) {" "    if (false) {"
 echo "work dir: $WORK"
 exit $failed
