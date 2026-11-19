@@ -112,14 +112,25 @@ l3="$(printf '%s\n' "$stop_fn" | grep -nF 'm_tunnel.down();' | head -1 | cut -d:
 { [ -n "$l1" ] && [ -n "$l2" ] && [ -n "$l3" ] && [ "$l1" -lt "$l2" ] && [ "$l2" -lt "$l3" ]; } \
     || bad "B1: a stop with nothing native must settle before any native stop is asked"
 
-# R3 (review of 141): a Scanner row's restore dies with its request. noteIntentChange drops it (stop, Auto, another
-# choice, a connect all pass through it) and the row's own tap arms it again only AFTER its intent calls.
+# R3 + F2 (reviews of 141): a Scanner row's request is ONE object (avpn::ExactRowRequest: the exact row, the choice
+# before it, the live session before it). It is set in one place - pinAndReconnectImpl, right after its intent move -
+# and ended by noteIntentChange (any other action), by the owner's result (endExactRowRequest) or by the person's
+# stop (the choice from before the tap comes back); no second flag holds "the row is exact".
 ni_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::noteIntentChange\(\)/{f=1} f{print} f&&/^}/{exit}')"
-printf '%s\n' "$ni_fn" | grep -qF 'm_exactRestoreArmed = false;' || bad "R3: noteIntentChange must drop an armed Scanner-row restore"
-a1="$(code "$FACADE" | grep -nF 'm_exactRestoreArmed = true;' | head -1 | cut -d: -f1)"
-a2="$(code "$FACADE" | grep -nF 'rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap, &pinBefore);' | head -1 | cut -d: -f1)"
-{ [ -n "$a1" ] && [ -n "$a2" ] && [ "$a1" -gt "$a2" ]; } || bad "R3: the row's restore must be armed after its pinAndReconnectImpl (which drops an older one)"
-[ "$(count "$FACADE" 'm_exactRestoreArmed = true;')" = 1 ] || bad "R3: one place arms the restore"
+printf '%s\n' "$ni_fn" | grep -qF 'm_exactReq.clear();' || bad "F2: noteIntentChange must end an exact row request"
+[ "$(count "$FACADE" 'm_exactReq = *exact;')" = 1 ] || bad "F2: one place sets the exact row request"
+[ "$(count "$FACADE" 'm_exactRow')" = 0 ] && [ "$(count "$FACADE" 'm_exactRestoreArmed')" = 0 ] \
+    || bad "F2: no second holder of the row (m_exactRow / m_exactRestoreArmed)"
+pin_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::pinAndReconnectImpl/{f=1} f{print} f&&/^}/{exit}')"
+c1="$(printf '%s\n' "$pin_fn" | grep -nF 'noteIntentChange();' | head -1 | cut -d: -f1)"
+c2="$(printf '%s\n' "$pin_fn" | grep -nF 'm_exactReq = *exact;' | head -1 | cut -d: -f1)"
+{ [ -n "$c1" ] && [ -n "$c2" ] && [ "$c1" -lt "$c2" ]; } || bad "F2: the request is armed after the intent move (which drops an older one)"
+stop_fn2="$(code "$FACADE" | awk '/^void AvpnEngineQml::stop\(\)/{f=1} f{print} f&&/^}/{exit}')"
+d1="$(printf '%s\n' "$stop_fn2" | grep -nF 'const avpn::ExactRowRequest cancelledRow = m_exactReq;' | head -1 | cut -d: -f1)"
+d2="$(printf '%s\n' "$stop_fn2" | grep -nF 'noteIntentChange();' | head -1 | cut -d: -f1)"
+d3="$(printf '%s\n' "$stop_fn2" | grep -nF 'restoreChoiceBeforeRow(cancelledRow);' | head -1 | cut -d: -f1)"
+{ [ -n "$d1" ] && [ -n "$d2" ] && [ -n "$d3" ] && [ "$d1" -lt "$d2" ] && [ "$d2" -lt "$d3" ]; } \
+    || bad "F2: a stop must read the request, then end it, then restore the choice from before the tap"
 
 # T1 (one starving rule): both data checks - own (whoami) and provider (the probe) - feed the engine through the one
 # first-byte watch and the one sink (behaviour: upstream_engine_check providerLegStarvedCheck).

@@ -41,7 +41,9 @@ PageType {
     // страницы (таб-свитч), покрывает отмену недоехавшего коннекта и teardown из шторки (selectAuto).
     // Гард на undefined — старый бинарь без свойства ведёт себя как раньше (busy = Connecting).
     readonly property bool engineStopping: hasEngine && TribeEngine.stopping === true
-    readonly property bool showBusy: isBusy && !engineStopping
+    // F1 (round 2): the intent waits for the physical network - the orb looks pending, the caption says why, a tap cancels
+    readonly property bool waitingNet: hasEngine && TribeEngine.waitingUplink === true
+    readonly property bool showBusy: (isBusy && !engineStopping) || waitingNet
     // Our own stop in flight (not a foreign transition with intent off): orb "Disconnecting…".
     readonly property bool engineOwnStopping: hasEngine && TribeEngine.ownStopping === true
     // Волна-4 (P1-4): подхват уже живой сессии — «Проверяем…», а не «Connecting…».
@@ -869,7 +871,8 @@ PageType {
         // Plan v3 step 5: подпись следует вердикту проверки пути; не прошла — честно говорим, что
         // пробуем следующий путь. Пройденная проверка — бейдж ONLINE на карточке сервера, не текст
         // (владелец, тест 5.1.102).
-        text: root.verifyingNow ? qsTr("Проверяем трафик…")
+        text: root.waitingNet ? qsTr("Нет сети — подключимся, когда она появится")
+              : root.verifyingNow ? qsTr("Проверяем трафик…")
               : root.nextPathNow ? (root.pathCheckNow === "bypass"
                                     ? qsTr("Трафик шёл мимо VPN — пробуем другой путь")
                                     : qsTr("Сервер не пропускает данные — пробуем другой путь"))

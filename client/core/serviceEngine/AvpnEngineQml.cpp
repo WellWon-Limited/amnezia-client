@@ -1776,10 +1776,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         reliabilityEvent(QStringLiteral("uplink %1").arg(up ? QStringLiteral("up") : QStringLiteral("down")));
         if (!up || !m_wantConnected || !m_waitUplink)
             return;
+        // F1: the pending look stays through the 1.5 s the network needs to settle: busy replaces "waiting", so the
+        // orb never flashes the idle "Connect" and a tap in this window is still a Stop.
         m_waitUplink = false;
+        m_busy = true;
+        emit changed();
         QTimer::singleShot(1500, this, [this]() {
             if (m_wantConnected && m_lastTunnelState != Vpn::Connected)
                 reconcile();
+            if (!m_opInFlight && !m_engine.attemptRunning() && !m_engine.isVerifying()) {
+                m_busy = false; // nothing started (the person stopped, a pause): the pending look ends with it
+                emit changed();
+            }
         });
     });
     // Волна-3: §16-сторож десктопа не дождался ответа демона — упал компонент, не пользователь.
@@ -3229,7 +3237,7 @@ void AvpnEngineQml::syncChoice()
     const QString pin = m_engine.pinnedNodeId().isEmpty() ? m_savedPin : m_engine.pinnedNodeId();
     const avpn::SubscriptionNode *n = m_engine.nodeById(pin);
     avpn::path::UserChoice c;
-    if (!pin.isEmpty() && !m_exactRow.isEmpty() && m_exactRow == pin) {
+    if (m_exactReq.exactFor(pin)) {
         c = avpn::path::UserChoice::exactPath(pin); // a Scanner row: the one exact node, an honest error if it fails
     } else if (!n && !pin.isEmpty() && !m_savedPinCountry.isEmpty()) {
         c = avpn::path::UserChoice::preferCountry(m_savedPinCountry); // the server is gone: its country stays preferred
@@ -3272,8 +3280,6 @@ bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err)
         reliabilityEvent(QStringLiteral("transport_mode_auto why=server_tap mode_was=%1 node=%2").arg(was, nodeId));
         emit notice(tr("Режим подключения переключён на «Авто», чтобы подключить выбранный сервер"));
     }
-    if (m_exactRow != nodeId)
-        m_exactRow.clear();
     syncChoice();
     return true;
 }
@@ -3335,26 +3341,31 @@ void AvpnEngineQml::endScanRowRequest(const QString &node, const char *why)
     }
 }
 
-// R3 (device round 4): the end of a Scanner row's one request.
+// R3 (device round 4): the end of a Scanner row's one request by the owner's result. On success the row stays as an
+// ordinary preferred server (never an exact home choice); on a failure the choice before the tap comes back.
 void AvpnEngineQml::endExactRowRequest(bool connected)
 {
-    m_exactRestoreArmed = false;
-    const QString row = m_exactRow;
-    m_exactRow.clear();
-    m_exactRestoreReconnectNow = !connected && m_exactRestoreReconnect;
-    m_exactRestoreReconnect = false;
-    if (!connected) {
-        QString err;
-        if (m_exactRestorePin.isEmpty())
-            m_engine.clearPin();
-        else
-            m_engine.setPinnedNode(m_exactRestorePin, err); // refused (not in the pool now): the saved choice stays
-        m_savedPin = m_exactRestorePin;
-        QSettings().setValue(QStringLiteral("avpn/pinnedNode"), m_savedPin);
-    }
+    const avpn::ExactRowRequest req = m_exactReq;
+    m_exactReq.clear();
+    m_exactRestoreReconnectNow = !connected && req.reconnect;
+    if (!connected)
+        restoreChoiceBeforeRow(req);
     syncChoice();
     reliabilityEvent(QStringLiteral("exact_row_request_end row=%1 connected=%2 choice=%3")
-                         .arg(row).arg(int(connected)).arg(choiceJournal()));
+                         .arg(req.row).arg(int(connected)).arg(choiceJournal()));
+}
+
+// F2 (round 2): the choice from before a row's request comes back (the request failed, or the person cancelled it:
+// nothing was chosen). Refused by the engine (not in the pool now): the saved choice stays.
+void AvpnEngineQml::restoreChoiceBeforeRow(const avpn::ExactRowRequest &req)
+{
+    QString err;
+    if (req.restorePin.isEmpty())
+        m_engine.clearPin();
+    else
+        m_engine.setPinnedNode(req.restorePin, err);
+    m_savedPin = req.restorePin;
+    QSettings().setValue(QStringLiteral("avpn/pinnedNode"), m_savedPin);
 }
 
 // Review E1 of 18.11: the one place a finished operation releases the facade's latches (the operation in
@@ -3408,7 +3419,7 @@ bool AvpnEngineQml::syncAttempt()
         m_whitelistDetector->noteConnectFailure(); // the detector gates its round (cellular, tunnel down, debounce)
     if (const std::optional<avpn::path::AttemptResult> &r = result) {
         changedAny = true;
-        if (m_exactRestoreArmed && r->reason != avpn::path::FailReason::StoppedByUser)
+        if (m_exactReq.active() && r->reason != avpn::path::FailReason::StoppedByUser)
             endExactRowRequest(r->connected);
         if (!r->connected && r->reason != avpn::path::FailReason::StoppedByUser)
             endScanRowRequest(QString(), "attempt_failed"); // S1: the owner's terminal result ends the row's request
@@ -3591,7 +3602,7 @@ void AvpnEngineQml::restorePin(const QString &pinBefore)
     case PinRestoreAction::ApplySaved: {
         QString error;
         // Временно отфильтрованная/отсутствующая нода не стирает сохранённый выбор пользователя.
-        // A pin saved by an earlier run is a preference (m_exactRow is of this run only); an exact Scanner row of
+        // A pin saved by an earlier run is a preference (the exact row request is of this run only); an exact Scanner row of
         // this run stays exact across a refresh (review E8 of 18.11).
         if (m_engine.setPinnedNode(m_savedPin, error))
             persistPin();
@@ -6382,10 +6393,10 @@ void AvpnEngineQml::noteIntentChange()
     // R3: a Scanner row's restore belongs to that one request: any other action on the intent (stop, Auto, another
     // choice, a connect) ends it without restoring - the person's newer choice is never overwritten later. The row's
     // own tap arms it again right after its own call (scanConnectRow).
-    if (m_exactRestoreArmed) {
-        reliabilityEvent(QStringLiteral("exact_row_restore_dropped row=%1").arg(m_exactRow));
-        m_exactRestoreArmed = false;
-        m_exactRestoreReconnect = false;
+    if (m_exactReq.active()) {
+        reliabilityEvent(QStringLiteral("exact_row_request_dropped row=%1").arg(m_exactReq.row));
+        m_exactReq.clear();
+        syncChoice(); // no longer exact: an ordinary preferred server (or Auto)
     }
     // Every action on the intent (stop, start, Auto, another pick, ...) ends a seat taken for a switch that has not
     // brought it up yet - before any operation guard (review F1 of 17.11: Stop during the switch's own teardown
@@ -6401,10 +6412,10 @@ QString AvpnEngineQml::orbTap()
 {
     const QString st = state();
     const OrbTap d = decideOrbTap(st == QLatin1String("connected"), m_busy, m_wantConnected, ownStopping(),
-                                  m_op != Op::None, m_preparingStart, m_liveSessionPending);
-    reliabilityEvent(QStringLiteral("orb_tap state=%1 busy=%2 decision=%3 pending=%4")
+                                  m_op != Op::None, m_preparingStart, m_liveSessionPending, waitingUplink());
+    reliabilityEvent(QStringLiteral("orb_tap state=%1 busy=%2 decision=%3 pending=%4 waiting_uplink=%5")
                          .arg(st).arg(int(m_busy)).arg(QLatin1String(orbTapName(d)))
-                         .arg(int(m_liveSessionPending)));
+                         .arg(int(m_liveSessionPending)).arg(int(waitingUplink())));
     switch (d) {
     case OrbTap::Start:
         start();
@@ -6422,6 +6433,9 @@ QString AvpnEngineQml::orbTap()
 
 void AvpnEngineQml::stop()
 {
+    // F2: the person cancels a Scanner row's request - nothing was chosen: the choice from before the tap comes back
+    // (restored below, after the owner is told to stop). Any other action on the intent just drops the request.
+    const avpn::ExactRowRequest cancelledRow = m_exactReq;
     noteIntentChange(); // AVPN Scanner
     Avpn_recordGuiIntent(false);
     m_userIntentKnown = true;
@@ -6429,6 +6443,11 @@ void AvpnEngineQml::stop()
     if (m_probe) m_probe->cancel();
     // Cancel internal failover immediately, even while its down/up is awaiting native.
     m_engine.requestStop();
+    if (cancelledRow.active()) {
+        restoreChoiceBeforeRow(cancelledRow);
+        syncChoice();
+        reliabilityEvent(QStringLiteral("exact_row_request_cancelled row=%1 choice=%2").arg(cancelledRow.row, choiceJournal()));
+    }
     // AVPN (Task 7): явный stop() отменяет ожидающую авто-паузу (пользователь сам выключил VPN).
     m_pauseTimer.stop();
     m_paused = false;
@@ -6558,6 +6577,7 @@ void AvpnEngineQml::reconcile()
                 emit changed();
                 return;
             }
+            m_waitUplink = false; // the wait is over: the start goes (a stale flag would read "waiting" at an attempt)
             guardedStart();
         }
     } else {                             // хотим офлайн
@@ -7276,7 +7296,6 @@ void AvpnEngineQml::reprobe()
     // AVPN: re-pick авто-ноды через единый reconcile (не дёргаем m_engine.connect() напрямую — это
     // обходило бы стейт-машину и давало back-to-back up()). Снимаем pin; если онлайн — перевыбираем.
     m_engine.clearPin();
-    m_exactRow.clear();
     persistPin();
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
     if (avpn::isTunnelUpStateName(st)) { // AVPN awg31-xray-v1: verifying = туннель поднят
@@ -7391,9 +7410,11 @@ void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
 // AVPN (фикс-волна 2026-09-22, A6): Доктор зовёт с persist=false — его пересадки и возвраты
 // не становятся постоянным pin (иначе после перезапуска всегда та же нода без замера).
 void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, bool forceConnect,
-                                        StartOrigin origin, const QString *pinBefore)
+                                        StartOrigin origin, const QString *pinBefore, const avpn::ExactRowRequest *exact)
 {
     noteIntentChange(); // AVPN Scanner
+    if (exact)
+        m_exactReq = *exact; // F2: the one place a row's request is set (after the intent move cleared an older one)
     cancelSeatFirst();  // a new pick supersedes a seat still being taken for the previous one
     m_startOrigin = origin; // plan v3 step 5: picker tap = user, Doctor alternatives/restore = Doctor
     if (pinReconnectSelectOnly(forceConnect, featureEnabled(QStringLiteral("picker_instant_reconnect"), true))) {
@@ -7451,7 +7472,6 @@ void AvpnEngineQml::selectAutoImpl(bool persist)
 {
     noteIntentChange(); // AVPN Scanner
     m_engine.clearPin();
-    m_exactRow.clear();
     if (persist) persistPin();
     m_wantConnected = false;
     reliabilityEvent(QStringLiteral("intent_off why=select_auto")); // U10: кто снял намерение
@@ -7924,26 +7944,20 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
                  {QStringLiteral("order"), int(attemptOrder.size())}});
     // A second row tapped while the first still runs keeps the first one's "before" (the choice to come back to);
     // read before noteUserStart(), which drops an older arming.
-    const bool restoreHeld = m_exactRestoreArmed;
-    const QString heldPin = m_exactRestorePin;
-    const bool heldReconnect = m_exactRestoreReconnect;
+    const avpn::ExactRowRequest held = m_exactReq;
     if (rc.userStartBookkeeping)
         noteUserStart();
     Q_UNUSED(attemptOrder)
     Q_UNUSED(hintTtlMs)
     // R3 (device round 4): the exact row applies to this one request - the previous choice comes back if it fails,
     // and on success the row stays as an ordinary preferred server (never an exact home choice).
-    const QString restorePin = restoreHeld ? heldPin : m_savedPin;
     // S6 (device round 5): a live session before the tap comes back if the row fails
-    const bool restoreReconnect = restoreHeld ? heldReconnect
-                                              : (m_wantConnected && m_engine.state() == avpn::EngineState::Connected);
-    m_exactRow = nodeId; // a Scanner row is one exact path (never a fallback to another row or server)
+    const avpn::ExactRowRequest req = avpn::ExactRowRequest::begin(
+        held, nodeId, m_savedPin, m_wantConnected && m_engine.state() == avpn::EngineState::Connected);
+    // a Scanner row is one exact path (never a fallback to another row or server); armed inside pinAndReconnectImpl
+    // right after its intent move (which ends an older request), before the start reads the choice
     pinAndReconnectImpl(nodeId, pinOriginPersists(PinOrigin::UserChoice), rc.forceConnect,
-                        rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap, &pinBefore);
-    // R3: armed AFTER the intent calls above (noteIntentChange drops an older arming) - this request's own.
-    m_exactRestoreArmed = true;
-    m_exactRestorePin = restorePin;
-    m_exactRestoreReconnect = restoreReconnect;
+                        rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap, &pinBefore, &req);
     scanRowAttemptBegin(m_scanRow, nodeId, m_intentSerial);
 }
 
@@ -12026,9 +12040,8 @@ void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, quint64 prepareId,
         if (p.persistPin)
             persistPin();
         // S1 (device round 5): the tapped row's request ends here - it never reached the owner, the live tunnel stays
-        if (m_exactRestoreArmed) {
-            m_exactRestoreArmed = false;
-            m_exactRow.clear();
+        if (m_exactReq.active()) {
+            m_exactReq.clear();
             syncChoice();
         }
         endScanRowRequest(nodeId, "seat_first_failed");

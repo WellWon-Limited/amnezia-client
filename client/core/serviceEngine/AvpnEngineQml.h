@@ -79,6 +79,9 @@ class AvpnEngineQml : public QObject {
     // поэтому переживает пересоздание страницы и покрывает ВСЕ пути teardown (орб/шторка/отмена коннекта).
     Q_PROPERTY(bool stopping READ stopping NOTIFY changed)
     Q_PROPERTY(bool ownStopping READ ownStopping NOTIFY changed)
+    // F1 (round 2): the intent is on and the start waits for the physical network: the orb looks pending, the caption
+    // says so, a tap cancels it.
+    Q_PROPERTY(bool waitingUplink READ waitingUplink NOTIFY changed)
     // AVPN (macOS, beachball-фикс 2026-07-21): идёт установка root-демона Tribe-service (фоновый
     // поток, GUI живой) — QML показывает «Устанавливаем службу VPN…» вместо «Подбираем сервер…».
     // На остальных платформах всегда false.
@@ -376,6 +379,10 @@ public:
     bool ownStopping() const
     {
         return ownStopInFlight(m_wantConnected, m_op == Op::Stopping, m_latch.awaitingStopConfirm);
+    }
+    bool waitingUplink() const
+    {
+        return m_wantConnected && m_waitUplink && !m_busy && !m_paused && m_lastTunnelState != Vpn::Connected;
     }
     bool lastSelectionMeasured() const { return m_lastSelectionMeasured; }
     // AVPN (macOS): идёт фоновая установка root-демона (см. Q_PROPERTY выше). Прочие ОС — false.
@@ -1073,11 +1080,12 @@ private:
     QString m_sessionEdge;                    // E10: the session edge in force ("" = the stored edge)
     bool m_scanNetCompareArmed = false;
     QString m_scanNetKeyTold; // the network key (kind|reporting key|gateway hash) of the Scanner's last notice
-    bool m_exactRestoreArmed = false;  // R3: a Scanner row's request is running
-    QString m_exactRestorePin;         // R3: the choice before it
-    bool m_exactRestoreReconnect = false;    // S6: the VPN was connected when the row was tapped
+    avpn::ExactRowRequest m_exactReq;  // F2: a Scanner row's one request - the exact row, the choice before it (R3), the
+                                       // live session before it (S6); armed by pinAndReconnectImpl, ended by noteIntentChange
+                                       // (any other action), endExactRowRequest (the owner's result) or the stop's restore
     bool m_exactRestoreReconnectNow = false; // S6: bring that session back after the row failed
     void endExactRowRequest(bool connected);
+    void restoreChoiceBeforeRow(const avpn::ExactRowRequest &req);
     void endScanRowRequest(const QString &node, const char *why); // S1: the one end of a Scanner row's request
     qint64 m_verifyWallStartMs = 0;  // R1: wall clock at the start of the data check
     qint64 m_verifyRxStart = -1;     // R1: the tunnel's receive counter then (-1 = unknown)       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
@@ -1173,7 +1181,8 @@ private:
     enum class StartOrigin { User, AutoTap, Rotate, Doctor };
     // pinBefore: the pin as it was before the caller changed it itself (connectToNode), for the seat-first rollback.
     void pinAndReconnectImpl(const QString &nodeId, bool persist, bool forceConnect = false,
-                             StartOrigin origin = StartOrigin::User, const QString *pinBefore = nullptr);
+                             StartOrigin origin = StartOrigin::User, const QString *pinBefore = nullptr,
+                             const avpn::ExactRowRequest *exact = nullptr); // exact: the Scanner row's request, armed after the intent move
     void selectAutoImpl(bool persist);
     void docRestoreSelection(); // Доктор: вернуть исходный выбор (pin или авто), не гася VPN
     // AVPN awg31-xray-v1 (спека §2.3):
@@ -1758,7 +1767,6 @@ private:
     // current attempt (guardedStart); the engine's own heals inside the attempt inherit it.
     StartOrigin                  m_startOrigin = StartOrigin::User;
     StartOrigin                  m_attemptOrigin = StartOrigin::User;
-    QString                      m_exactRow;                       // a Scanner row: one exact path
     int                          m_lastVerifyTtfbMs = -1;          // first byte of the data check that passed
     int                          m_lastUpstreamTtfbMs = -1;
     int                          m_attemptCheckedShown = 0;
