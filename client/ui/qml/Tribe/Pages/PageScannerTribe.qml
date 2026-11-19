@@ -236,10 +236,13 @@ PageType {
     property bool bandHeld: false
     property real heldFrac: 1   // the share of the block's height shown when the scan ended (a scan that ends while the block
                                 // still opens holds what is there, never the full height: that moved the visible row down)
+    // The share of the block's height on the screen: a held block never shrinks while the rings reopen under it, and
+    // grows with them once they pass the held share (no jump when the hold ends at heroFrac == 1).
+    readonly property real shownFrac: bandHeld ? Math.max(heldFrac, heroFrac) : heroFrac
     onHeroFracChanged: if (heroFrac >= 1) bandHeld = false     // the rings are back: the block is its own again
     onHeroChanged: {
         if (!hero) {
-            heldFrac = heroFrac
+            heldFrac = shownFrac   // what is on the screen now: a held block that a short «Найти ещё» only began to reopen keeps its height
             bandHeld = rowsModel.count > 0
         }
         heroAnim.to = hero ? 1 : 0
@@ -334,7 +337,7 @@ PageType {
         anchors.left: parent.left
         anchors.right: parent.right
         readonly property real full: Theme.scan.hero + status.implicitHeight
-        height: full * (root.bandHeld ? root.heldFrac : root.heroFrac)   // held at full while the finished list is on the screen
+        height: full * root.shownFrac   // held while the finished list is on the screen
         clip: true
         visible: height > 0
         SignalRing {
