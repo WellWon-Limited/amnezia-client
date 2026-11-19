@@ -521,8 +521,7 @@ void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
         applyRaceEffects(m_race.networkChanged(nowMs(), m_net.current()));
     if (m_raceWait)
         endRaceWait("network_changed"); // its session was asked for the old network
-    if (m_prober && m_net.current().usable())
-        m_prober->prepare(m_net.current()); // the host warms up for the new network (caps, probe session)
+    prepareProber(); // the host warms up for the new network (caps, probe session)
     feedOwner(path::AttemptEvent::networkChanged(nowMs(), m_net.current()));
 }
 
@@ -555,6 +554,12 @@ bool ServiceEngine::raceAllowed() const
         && m_choice.kind != path::UserChoice::Kind::ExactPath; // an exact node is the person's: nothing to race
 }
 
+void ServiceEngine::prepareProber()
+{
+    if (m_prober && m_net.current().usable() && controlPlane() != ApiReach::Unreachable)
+        m_prober->prepare(m_net.current());
+}
+
 // Lane C (C1): the paths the choice leaves out because they cannot start on this network - one journal line per
 // attempt with the count and the reason, never a path outcome. They return by themselves when the control plane answers.
 void ServiceEngine::journalControlPlaneSkips()
@@ -574,7 +579,7 @@ void ServiceEngine::beginRaceForTap()
     m_raceFailed.clear(); // per tap
     m_raceWait.reset(); // a race of an older tap never begins under this one
     m_raisedPaths.clear();
-    m_prober->prepare(m_net.current()); // idempotent: a fresh session is kept
+    prepareProber(); // idempotent: a fresh session is kept (not asked for while the control plane is unreachable)
     m_race.setTimings(m_raceTimingsForTest ? *m_raceTimingsForTest : raceTimingsTuned());
     const path::SelectionContext ctx = ownerContext();
     path::SelectInput in;
@@ -606,7 +611,16 @@ void ServiceEngine::beginRaceForTap()
         bytesLeft = bytesLeft < 0 ? rt.cellularMaxBytes : std::min<qint64>(bytesLeft, rt.cellularMaxBytes);
     m_raceFirst = !known;
     const path::ProberCaps pc = m_prober->caps();
+    const bool noControl = controlPlane() == ApiReach::Unreachable;
     if (!pc.ready) {
+        // Lane C (C2): the race's session (GET /v1/scan/manifest) comes over the direct API; with that unreachable on
+        // this network it cannot come - the owner starts at once, no wait, no manifest bytes (device round 10: 3.0 s
+        // of wait and 34 KB of the cellular cap per tap).
+        if (noControl) {
+            attemptJournal(QStringLiteral("race_done reason=no_control proven=0 waited_ms=0"));
+            m_raceFirst = false; // the owner walks at once
+            return;
+        }
         // Device round 19.11 (LTE, right after launch): the session was not there, four probes "started" that never
         // left the app, 386 KB of the 393 KB cap were reserved for them and the owner walked blind. A probe that
         // cannot leave is not started: the race waits for the session within its own wait, or does not run.
@@ -667,7 +681,9 @@ void ServiceEngine::pollRaceWait()
             startOwnerAfterRace("not_raced"); // nothing could be raced: the owner walks now
         return;
     }
-    if (!pc.preparing || waited >= m_raceWait->boundMs)
+    if (controlPlane() == ApiReach::Unreachable)
+        endRaceWait("no_control"); // lane C (C2): the session cannot come over a dead direct API
+    else if (!pc.preparing || waited >= m_raceWait->boundMs)
         endRaceWait("no_session");
 }
 

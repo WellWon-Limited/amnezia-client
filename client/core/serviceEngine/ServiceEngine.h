@@ -549,6 +549,7 @@ private:
     // The pool of the attempt owner: supported, alive nodes as paths (path::pathCandidateFromNode).
     QList<path::PathCandidate> pathPool() const;
     path::SelectionContext ownerContext() const;
+    void prepareProber(); // prober->prepare() unless the control plane is known unreachable (lane C2)
     void journalControlPlaneSkips(); // one line per attempt: the provider paths C1 leaves out
     void feedOwner(const path::AttemptEvent &ev);
     void applyOwnerEffects(const QList<path::AttemptEffect> &effects);

@@ -694,6 +694,34 @@ int main(int argc, char **argv)
             CHECK(p.started.isEmpty() && charged == 0 && journalHas(r.journal, "race_done reason=no_session proven=0")
                   && !journalHas(r.journal, "race_begin") && !journalHas(r.journal, "race_probe "));
         }
+        {   // lane C (C2): the direct control plane is unreachable on this network - the session (a manifest over the
+            // direct API) cannot come: no wait (even while "preparing"), no prepare, no probe bytes, the owner starts at
+            // once; the journal names the reason. UNKNOWN keeps the wait (the test below).
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            r.eng.setControlPlaneSource([] { return avpn::ApiReach::Unreachable; });
+            const int before = p.prepares;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17") && !r.eng.raceRunning());
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(p.started.isEmpty() && p.prepares == before);
+            CHECK(journalHas(r.journal, "race_done reason=no_control proven=0 waited_ms=0") && !journalHas(r.journal, "race_wait_session"));
+        }
+        {   // and when the fact flips to unreachable DURING a wait, the wait ends at once
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            bool dead = false;
+            r.eng.setControlPlaneSource([&dead] { return dead ? avpn::ApiReach::Unreachable : avpn::ApiReach::Unknown; });
+            CHECK(r.eng.connect(err) && r.eng.attemptRunning() && r.tun.ups.isEmpty());
+            dead = true;
+            r.pass(500);
+            CHECK(!r.tun.ups.isEmpty() && journalHas(r.journal, "race_done reason=no_control"));
+        }
         {   // the session arrives inside the wait: the probes start then, not before
             Rig r(pool);
             FakeProber p;
