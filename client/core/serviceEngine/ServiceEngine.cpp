@@ -359,8 +359,10 @@ void ServiceEngine::feedOwner(const path::AttemptEvent &ev)
     while (!m_ownerQueue.isEmpty()) {
         const path::AttemptEvent e = m_ownerQueue.takeFirst();
         const QList<path::AttemptEffect> effects = m_owner.handle(e, ownerContext());
-        for (quint64 a = m_stampedAttempt + 1; a <= m_owner.attempt(); ++a)
+        for (quint64 a = m_stampedAttempt + 1; a <= m_owner.attempt(); ++a) {
             m_attemptEpochs.insert(a, m_intentEpoch); // H3: an attempt begun by this event serves the intent in force
+            m_attemptModes.insert(a, int(transportMode())); // K1: ... and began under the mode in force now
+        }
         m_stampedAttempt = qMax(m_stampedAttempt, m_owner.attempt());
         applyOwnerEffects(effects);
     }
@@ -468,6 +470,8 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
             m_lastResult = r;
             m_lastResult->intentEpoch = m_attemptEpochs.value(r.attempt, m_intentEpoch);
             m_attemptEpochs.remove(r.attempt);
+            m_lastResult->startMode = m_attemptModes.value(r.attempt, -1);
+            m_attemptModes.remove(r.attempt);
             if (!r.connected && m_tunnel)
                 m_tunnel->startRefused(); // an attempt that ends before Connected holds no seat (G2): idempotent, no StopPath needed
             m_raceWait.reset(); // a race still waiting for its session is not needed any more

@@ -120,6 +120,7 @@ inline const char *failReasonName(FailReason r)
 
 struct AttemptResult {
     quint64 attempt = 0;
+    int startMode = -1;          // filled by the engine: the transport mode IN FORCE when the attempt began (K1)
     quint64 intentEpoch = 0;     // filled by the engine: the facade's intent epoch the attempt was begun under (H3)
     bool connected = false;
     FailReason reason = FailReason::None;

@@ -660,6 +660,7 @@ private:
     QList<path::AttemptEvent> m_ownerQueue;
     quint64 m_intentEpoch = 0;
     quint64 m_stampedAttempt = 0;                  // the highest attempt number already stamped
+    QHash<quint64, int> m_attemptModes;            // attempt number -> transport mode in force when it began (K1)
     QHash<quint64, quint64> m_attemptEpochs;       // attempt number -> intent epoch it was begun under
     bool m_inOwner = false;
     int m_legStartFailures = 0;
