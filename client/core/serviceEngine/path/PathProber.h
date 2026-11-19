@@ -34,7 +34,12 @@ public:
     // changes and at every tap before a race - the host's caps and the probe session of this network can be fetched
     // ahead, so the adapter needs no timer of its own. Idempotent; never touches the tunnel.
     virtual void prepare(const NetworkKey &net) { Q_UNUSED(net) }
-    virtual void setSpendSink(std::function<void(qint64)> sink) { Q_UNUSED(sink) }
+    // Every real byte, with the race it belongs to (the hour ledger takes all, the race's cap only its own).
+    virtual void setSpendSink(std::function<void(quint64 race, qint64 bytes)> sink) { Q_UNUSED(sink) }
+    // A cancelled probe's spend is final (see PathRace::settled). A prober that returns true from holdsAfterCancel() calls the
+    // sink when that is so; any other prober's cancel settles at once (the engine does it).
+    virtual bool holdsAfterCancel() const { return false; }
+    virtual void setSettleSink(std::function<void(const ProbeStamp &)> sink) { Q_UNUSED(sink) }
     virtual void raceEnded(quint64 race) { Q_UNUSED(race) }
     virtual void start(const ProbeStamp &stamp, const PathCandidate &path, int timeoutMs) = 0;
     virtual void cancel(const ProbeStamp &stamp) = 0;

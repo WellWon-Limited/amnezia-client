@@ -674,7 +674,7 @@ static void caseReopenRound3()
       // arrives as the scan's delta, once; the cancel itself charges nothing and the race gets no result
         World w;
         qint64 charged = 0;
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.prober.xrayBurst = 4;
         w.ready();
         charged = 0;
@@ -718,7 +718,7 @@ static void caseRound4()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.host.cancelFinalBytes = 9000;
         const path::ProbeStamp a = w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
         spin(30);
@@ -732,7 +732,7 @@ static void caseRound4()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.start(1, 1, QStringLiteral("19"), path::PathKind::OwnAwg); // no peer in the manifest: refused locally
         spin(30);
         check(w.resultOf(1) && w.resultOf(1)->bytes == 0 && charged == 0 && w.host.of("scan_start").isEmpty(),
@@ -787,7 +787,7 @@ static void caseRound5()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.host.openingBytes = 4096;
         w.start(1, 1, QStringLiteral("12:xray"), path::PathKind::OwnXray);
         spin(30);
@@ -840,7 +840,7 @@ static void caseAccounting()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.host.openingBytes = 4096;
         w.host.closingBytes = 4096;
         w.host.finalDelayPolls = 3; // three polls say "closing" before the final
@@ -861,7 +861,7 @@ static void caseAccounting()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.host.cancelFinalBytes = 9000;
         w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
         spin(30);
@@ -875,7 +875,7 @@ static void caseAccounting()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
         spin(30);
         const QString scan = w.host.scanOf(1);
@@ -893,7 +893,7 @@ static void caseAccounting()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.start(1, 1, QStringLiteral("17"), path::PathKind::OwnAwg);
         w.start(1, 2, QStringLiteral("99:xray"), path::PathKind::OwnXray);
         spin(40);
@@ -908,7 +908,7 @@ static void caseAccounting()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.host.openingBytes = 1000;
         w.host.closingBytes = 500;
         w.host.holdCancels = true;
@@ -937,11 +937,66 @@ static void caseAccounting()
         check(charged == expected, "a late ack charges nothing more");
         (void)last;
     }
+    { // seventh review, finding 2: a cancelled probe is SETTLED (the race may release its hold) only when its scan's spend is final;
+      // a probe that never reached the host settles at once
+        World w;
+        QList<quint64> settled;
+        w.ready();
+        w.prober.onSettled = [&settled](const path::ProbeStamp &s) { settled << s.probe; };
+        w.host.finalDelayPolls = 30; // the closing /netinfo takes a while
+        const path::ProbeStamp a = w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.prober.cancel(a);
+        spin(20);
+        check(settled.isEmpty(), "cancelled at the host: its spend is not final yet - not settled");
+        spin(400);
+        check(settled == QList<quint64>{1}, "settled when the scan reached its final total");
+        const path::ProbeStamp b = w.start(2, 2, QStringLiteral("17"), path::PathKind::OwnAwg); // refused locally: never at the host
+        w.prober.cancel(b);
+        check(settled == (QList<quint64>{1, 2}), "a probe that never reached the host settles at once");
+    }
+    { // finding 3: every delta carries the race of the scan it came from; the late closing bytes of race 1 are race 1's
+      // even though race 2 is running by then; session and seat bytes carry the race of the probe that asked
+        World w;
+        QList<std::pair<quint64, qint64>> got;
+        w.ready();
+        w.prober.onSpent = [&got](quint64 race, qint64 b) { got << std::make_pair(race, b); };
+        w.host.closingBytes = 700;
+        w.host.finalDelayPolls = 40;
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.host.spend(w.host.scanOf(1), 1000);
+        spin(30);
+        w.prober.raceEnded(1);
+        w.start(2, 2, QStringLiteral("12:xray"), path::PathKind::OwnXray); // race 2 begins while race 1's scan is closing
+        spin(30);
+        w.host.spend(w.host.scanOf(2), 300);
+        spin(400);
+        qint64 r1 = 0, r2 = 0;
+        for (const auto &g : got)
+            (g.first == 1 ? r1 : g.first == 2 ? r2 : r1) += g.second; // anything else would show below
+        bool other = false;
+        for (const auto &g : got)
+            other = other || (g.first != 1 && g.first != 2);
+        check(!other && r1 == 1700 && r2 == 300, "race 1's late closing bytes stay race 1's (1000 + 700), race 2 has its own 300");
+    }
+    { // finding 3: a provider probe's seat batch and its release carry the probe's race
+        World w;
+        QList<std::pair<quint64, qint64>> got;
+        w.ready();
+        w.prober.onSpent = [&got](quint64 race, qint64 b) { got << std::make_pair(race, b); };
+        w.start(7, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
+        spin(40);
+        bool seat = false;
+        for (const auto &g : got)
+            seat = seat || (g.first == 7 && g.second == 2000);
+        check(seat, "the seat batch's bytes are charged to the race of the probe");
+    }
     { // a scan whose final never comes: polled for the bound (kScanFinalWaitMs), then forgotten - counted, not charged twice
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.host.noFinalAfterCancel = true;
         w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
         spin(30);
@@ -958,7 +1013,7 @@ static void caseAccounting()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](quint64, qint64 b) { charged += b; };
         w.host.oneScanOnly = true;
         w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
         spin(30);

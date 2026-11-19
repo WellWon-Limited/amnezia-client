@@ -710,8 +710,11 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
                 m_prober->start(e.stamp, e.path, e.timeoutMs);
             break;
         case path::RaceEffectType::CancelProbe:
-            if (m_prober)
+            if (m_prober) {
                 m_prober->cancel(e.stamp);
+                if (!m_prober->holdsAfterCancel())
+                    m_race.settled(e.stamp); // nothing runs on after a cancel: its hold ends now
+            }
             break;
         case path::RaceEffectType::Report:
             if (findNode(e.path.id.id) && m_net.isCurrent(e.networkGeneration)

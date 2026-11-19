@@ -248,8 +248,10 @@ public:
     void setProber(path::IPathProber *prober)
     {
         m_prober = prober;
-        if (m_prober)
-            m_prober->setSpendSink([this](qint64 bytes) { spendProbeBytes(bytes); });
+        if (m_prober) {
+            m_prober->setSpendSink([this](quint64 race, qint64 bytes) { spendProbeBytes(race, bytes); });
+            m_prober->setSettleSink([this](const path::ProbeStamp &s) { m_race.settled(s); });
+        }
         if (m_prober && m_net.current().usable())
             m_prober->prepare(m_net.current());
     }
@@ -261,13 +263,17 @@ public:
         m_chargeProbeBytes = std::move(charge);
     }
     // bytesSeen: the journal's figure only (a probe's host items); the bytes are charged through spendProbeBytes.
+    qint64 raceSpentBytes() const { return m_race.spentBytes(); } // real bytes the running race has counted (tests, journal)
     void onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSeen);
     // One real byte count of the race's traffic, from the prober: the race's cap and the hour ledger, once.
-    void spendProbeBytes(qint64 bytes)
+    // The hour ledger always gets the bytes (they were really spent); the race's cap only the bytes of the race that is
+    // running now (a stopped race's late spend must not stop the next one).
+    void spendProbeBytes(quint64 race, qint64 bytes)
     {
         if (bytes <= 0)
             return;
-        m_race.spent(bytes);
+        if (race != 0 && race == m_race.raceNumber())
+            m_race.spent(bytes);
         if (m_chargeProbeBytes)
             m_chargeProbeBytes(bytes);
     }

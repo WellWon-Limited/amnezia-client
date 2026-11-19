@@ -440,7 +440,9 @@ private:
                 });
                 break;
             }
-            case RaceEffectType::CancelProbe: break;
+            case RaceEffectType::CancelProbe:
+                race.settled(e.stamp); // the simulated host has no spend left after a cancel
+                break;
             case RaceEffectType::Failed:
                 raceFailed.insert(e.path.id.id); // the engine's rule: the worst prior for this attempt
                 raceLog << QStringLiteral("failed:%1").arg(e.path.id.id);

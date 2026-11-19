@@ -55,6 +55,21 @@ mutate_race() { # name, expected, old, new  (race mutants: path_engine_check on 
   else echo "SURVIVED  $name (expected $want)"; failed=1; fi
 }
 
+mutate_engine() { # name, expected, old, new  (engine mutants: ServiceEngine.h, run by path_integration_check on a mirror of the tree)
+  local name="$1" want="$2" old="$3" new="$4"
+  local d="$WORK/engine-$name" c="$WORK/engine-$name/client"
+  mkdir -p "$c/core/serviceEngine/tests"
+  for f in "$CLIENT"/*; do [ "$(basename "$f")" = core ] || ln -sf "$f" "$c/"; done
+  for f in "$CLIENT"/core/*; do [ "$(basename "$f")" = serviceEngine ] || ln -sf "$f" "$c/core/"; done
+  for f in "$SE"/*; do case "$(basename "$f")" in tests|ServiceEngine.h) ;; *) ln -sf "$f" "$c/core/serviceEngine/" ;; esac; done
+  cp "$HERE"/* "$c/core/serviceEngine/tests/" 2>/dev/null
+  edit "$SE/ServiceEngine.h" "$c/core/serviceEngine/ServiceEngine.h" "$old" "$new" || { echo "ERROR  $name (anchor)"; failed=1; return; }
+  if OUT="$d/check" bash "$c/core/serviceEngine/tests/build_path_integration.sh" >"$d/build.log" 2>&1; then
+    echo "SURVIVED  $name (expected $want)"; failed=1
+  elif [ -x "$d/check" ]; then echo "caught    $name (expected $want) by: path_integration_check"
+  else echo "ERROR     $name: the mutant did not build"; failed=1; fi
+}
+
 # ---- the prober (model + unit check)
 mutate cancelled_result I1 "    m_probes.erase(it); // its seat goes with it (a seat still asked" "    if (onResult) onResult(stamp, path::PathOutcome::Inconclusive, 0);
     m_probes.erase(it); // its seat goes with it (a seat still asked"
@@ -139,5 +154,19 @@ mutate_race reservation_kept_when_leg_raised cap "            if (it.value().pat
                 ++it;"
 mutate_race admission_ignores_holds cap "m_spent + reservedInFlight() + costOf(c) <= m_cap" "m_spent + costOf(c) <= m_cap"
 mutate_race spent_not_counted cap "            m_spent += bytes;" "            m_spent += 0;"
+mutate_race reservation_released_at_timeout cap "                m_held.insert(it.key(), costOf(it.value().path)); // it is no longer a candidate, its bytes are not settled yet
+" ""
+mutate_race reservation_released_when_leg_raised cap "                out << cancelEffect(it.key(), it.value().path);
+                m_held.insert(it.key(), costOf(it.value().path));" "                out << cancelEffect(it.key(), it.value().path);"
+mutate_race race_ends_while_hold_waits cap "m_inFlight.isEmpty() && m_held.isEmpty() && m_next" "m_inFlight.isEmpty() && m_next"
+mutate_engine late_spend_charged_to_current_race finding3 "        if (race != 0 && race == m_race.raceNumber())" "        if (race != 0)"
+mutate_engine hour_ledger_skips_other_race finding3 "        if (m_chargeProbeBytes)
+            m_chargeProbeBytes(bytes);
+    }" "        if (m_chargeProbeBytes && (race == 0 || race == m_race.raceNumber()))
+            m_chargeProbeBytes(bytes);
+    }"
+mutate settled_at_cancel_not_at_final I8 "    if (followed)
+        m_unsettled[it->scanId] << stamp;" "    if (false)
+        m_unsettled[it->scanId] << stamp;"
 echo "work dir: $WORK"
 exit $failed

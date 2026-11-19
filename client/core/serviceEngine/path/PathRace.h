@@ -19,9 +19,10 @@
 //   Byte cap (device round 19.11: two of three LTE races spent 0.28 MB against 256 KB): the cap is spent by REAL bytes,
 //   as the prober reports them (spent(): the host's own counter as deltas, the API calls' bytes - the same stream that
 //   goes to the Scanner's hour ledger). A probe in flight additionally HOLDS its upper bound (IPathProber::costs) for
-//   admission only: it starts only if `spent so far + what is held in flight + its own bound <= cap`; the hold is
-//   released in full when the probe ends however it ends (result, cancel, timeout) - it is derived from the probes in
-//   flight, so nothing can leak. A probe that never left the app holds its bound while it is "in flight" and costs
+//   admission only: it starts only if `spent so far + what is held + its own bound <= cap`. A probe's hold ends with its
+//   result; a probe cancelled by the race (timeout, the owner raising its path) is no candidate any more but keeps its hold
+//   until its spend is FINAL (settled(): the host's final total, or the bound of the prober's polling) - the host may still
+//   be spending its bytes. The race's end drops every hold with the race. A probe that never left the app holds its bound while it is "in flight" and costs
 //   nothing by itself. A candidate that does not fit waits (deferred) for the cap to free; the next, cheaper ones
 //   still start.
 //   The window refills as probes end (the next wave); nothing left, the race budget
@@ -177,6 +178,7 @@ public:
         m_deferred.clear();
         m_providersQueued = 0;
         m_inFlight.clear();
+        m_held.clear();
         m_winner.clear();
         m_providersStarted = 0;
         m_unpaid = false;
@@ -246,6 +248,15 @@ public:
         return out;
     }
 
+    // A cancelled probe's spend is final (the host's final total, or the bound of the prober's polling): its hold on the cap
+    // ends. Until then the probe is no candidate (the race may raise others) but its upper bound still counts for admission,
+    // because the host may still be spending its bytes. No pump here: the next tick admits what now fits.
+    void settled(const ProbeStamp &s)
+    {
+        if (s.race == m_race)
+            m_held.remove(s.probe);
+    }
+
     // Real bytes of this race, as the prober reports them (the host's counter as deltas, API calls as they are spent).
     // Counted only while the race runs; the same stream goes to the Scanner's hour ledger (ServiceEngine).
     void spent(qint64 bytes)
@@ -278,6 +289,7 @@ public:
         for (auto it = m_inFlight.begin(); it != m_inFlight.end();) {
             if (m_awake >= it.value().deadline) {
                 out << cancelEffect(it.key(), it.value().path);
+                m_held.insert(it.key(), costOf(it.value().path)); // it is no longer a candidate, its bytes are not settled yet
                 it = m_inFlight.erase(it);
             } else {
                 ++it;
@@ -316,6 +328,7 @@ public:
         for (auto it = m_inFlight.begin(); it != m_inFlight.end();) {
             if (it.value().path.id.id == pathId) {
                 out << cancelEffect(it.key(), it.value().path);
+                m_held.insert(it.key(), costOf(it.value().path));
                 it = m_inFlight.erase(it);
             } else {
                 ++it;
@@ -376,12 +389,14 @@ private:
         return m_costs.xray;
     }
 
-    // What the probes in flight hold: their upper bounds, nothing else (no state to leak: a probe that is gone holds nothing).
+    // What the probes in flight hold, and what a cancelled probe still holds until its spend is final (settled()).
     qint64 reservedInFlight() const
     {
         qint64 n = 0;
         for (const Flight &f : m_inFlight)
             n += costOf(f.path);
+        for (auto it = m_held.constBegin(); it != m_held.constEnd(); ++it)
+            n += it.value();
         return n;
     }
 
@@ -492,7 +507,8 @@ private:
                 m_nextStartAt = std::max(m_nextStartAt, m_awake - m_t.staggerMs) + m_t.staggerMs;
             }
         }
-        if (m_pending.isEmpty() && m_inFlight.isEmpty() && m_next >= int(m_order.size()))
+        // (a cancelled probe whose spend is not final yet still holds cap room: the candidates it keeps waiting may fit after it)
+        if (m_pending.isEmpty() && m_inFlight.isEmpty() && m_held.isEmpty() && m_next >= int(m_order.size()))
             finish(m_unpaid && m_proven == 0 ? RaceDoneReason::Bytes : RaceDoneReason::Exhausted, out);
     }
 
@@ -501,6 +517,7 @@ private:
         for (auto it = m_inFlight.constBegin(); it != m_inFlight.constEnd(); ++it)
             out << cancelEffect(it.key(), it.value().path);
         m_inFlight.clear();
+        m_held.clear(); // the race is over: its cap goes with it
         m_pending.clear();
         m_deferred.clear();
         m_running = false;
@@ -517,6 +534,7 @@ private:
     NetworkKey m_net;
     QList<PathCandidate> m_order;
     QHash<quint64, Flight> m_inFlight;
+    QHash<quint64, qint64> m_held; // cancelled probes whose spend is not final yet: probe -> the bound it still holds
     QString m_winner;
     quint64 m_race = 0;
     quint64 m_probeSeq = 0;
