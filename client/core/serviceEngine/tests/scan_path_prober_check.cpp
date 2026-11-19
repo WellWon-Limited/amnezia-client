@@ -48,6 +48,7 @@ struct FakeHost : IScanHost {
     QHash<QString, bool> doneNext;
     QHash<QString, bool> unknownScan;
     bool refuseAdds = false;
+    bool refuseStarts = false;                 // scan_start is answered with an error
     bool holdAdds = false;                     // scan_add answers wait in `heldAdds` until releaseAdds()
     QList<std::function<void()>> heldAdds;
     void releaseAdds()
@@ -83,6 +84,8 @@ struct FakeHost : IScanHost {
         QJsonObject r;
         if (a == "scan_caps") {
             r = caps;
+        } else if (a == "scan_start" && refuseStarts) {
+            r = QJsonObject{{"error", "internal"}, {"scan_id", id}};
         } else if (a == "scan_start") {
             scanOpen.insert(id, true);
             r = QJsonObject{{"type", "scan_ack"}, {"scan_id", id}, {"accepted", o.value("candidates").toArray().size()}, {"mem_mb", 40}};
@@ -111,7 +114,12 @@ struct FakeHost : IScanHost {
         }
         const QByteArray bytes = QJsonDocument(r).toJson(QJsonDocument::Compact);
         if (a == "scan_add" && holdAdds) {
-            heldAdds << [reply, bytes]() { reply(bytes); };
+            const int n = o.value("candidates").toArray().size();
+            heldAdds << [this, reply, id, n]() { // answered when released: by what the host's scan is then
+                const bool ok = scanOpen.value(id) && !refuseAdds;
+                reply(QJsonDocument(QJsonObject{{"type", "scan_ack"}, {"scan_id", id}, {"accepted", ok ? n : 0}, {"mem_mb", 40}})
+                          .toJson(QJsonDocument::Compact));
+            };
             return;
         }
         QTimer::singleShot(0, [reply, bytes]() { reply(bytes); });
@@ -557,6 +565,79 @@ static void caseReopen()
     }
 }
 
+// Round 3 (G5, G6): every part named by an older scan's answer is resolved from its probe's own state; the bytes a
+// probe reported are never lost, whatever ends it.
+static void caseReopenRound3()
+{
+    g_case = "reopen3";
+    { // G5: the host ended the scan before four scan_add messages were processed: every part still runs once
+        World w;
+        w.prober.xrayBurst = 4;
+        w.ready();
+        w.start(1, 1, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(30);
+        const QString s1 = w.host.scanOf(1);
+        w.host.holdAdds = true;
+        w.start(1, 2, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        check(w.host.heldAdds.size() == 4, "four scan_add messages are on their way");
+        w.host.scanOpen.insert(s1, false); // the engine ended that scan
+        w.host.holdAdds = false;
+        w.host.releaseAdds();
+        spin(60);
+        const QString s2 = w.host.scanOf(2);
+        check(s2 != s1 && !s2.isEmpty(), "a new scan took the parts");
+        const QStringList parts = w.host.partIdsOf(2);
+        int inS2 = 0;
+        QStringList seen;
+        for (const QJsonObject &rq : w.host.requests)
+            if (rq.value("scan_id").toString() == s2)
+                for (const QJsonValue &v : rq.value("candidates").toArray()) {
+                    ++inS2;
+                    seen << v.toObject().value("id").toString();
+                }
+        check(inS2 == 4 && QSet<QString>(seen.begin(), seen.end()).size() == 4, "all four parts reach the new scan, each exactly once");
+        for (const QString &id : parts)
+            w.host.itemFor(id, s2, true, 5000);
+        spin(40);
+        check(w.resultOf(2) && w.resultOf(2)->outcome == path::PathOutcome::ProbeOk, "the working four-part probe is proven");
+        check(w.host.of("scan_start").size() == 2, "one new scan, not one per refusal");
+    }
+    { // G6: parts reported, then the re-opened scan is refused: the probe ends with what it spent
+        World w;
+        w.prober.xrayBurst = 4;
+        w.ready();
+        const path::ProbeStamp a = w.start(1, 1, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(30);
+        w.start(1, 2, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(40);
+        const QStringList parts = w.host.partIdsOf(2);
+        w.host.itemFor(parts.at(1), w.host.scanOf(2), true, 5000);
+        w.host.itemFor(parts.at(2), w.host.scanOf(2), true, 5000);
+        spin(40);
+        w.host.refuseStarts = true;
+        w.prober.cancel(a);
+        spin(40);
+        check(w.resultOf(2) && w.resultOf(2)->outcome == path::PathOutcome::Inconclusive && w.resultOf(2)->bytes == 10000,
+              "the reopened scan is refused: the probe still reports the 10000 bytes its parts spent");
+    }
+    { // G6: a cancelled probe's reported bytes go to the ledger at once (the race gets no result for it)
+        World w;
+        qint64 charged = 0;
+        w.prober.chargeApiBytes = [&charged](qint64 b) { charged += b; };
+        w.prober.xrayBurst = 4;
+        w.ready();
+        charged = 0;
+        const path::ProbeStamp p = w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(40);
+        const QStringList parts = w.host.partIdsOf(1);
+        w.host.itemFor(parts.at(1), w.host.scanOf(1), true, 5000);
+        spin(40);
+        w.prober.cancel(p);
+        check(charged == 5000 && w.results.isEmpty(), "cancel: the 5000 bytes it reported are charged, no result");
+    }
+}
+
 static void caseCancel()
 {
     g_case = "cancel";
@@ -779,6 +860,7 @@ int main(int argc, char **argv)
     caseProvider();
     caseCancel();
     caseReopen();
+    caseReopenRound3();
     caseScanReplaced();
     caseSession();
     caseBurst();

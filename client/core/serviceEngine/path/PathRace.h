@@ -149,6 +149,11 @@ public:
         qint64 awgFixed = 0;
         qint64 xrayFixed = 0;
         qint64 providerFixed = 0;
+        // The part of each `fixed` the Scanner's ledger already holds from the API calls themselves (real bytes): the
+        // Spent effect carries the cap's charge minus this, so no byte reaches the hour budget twice or not at all.
+        qint64 awgOutside = 0;
+        qint64 xrayOutside = 0;
+        qint64 providerOutside = 0;
     };
 
     // A new race (an older one ends first, its probes cancelled). bytesLeft < 0 = no byte cap (Wi-Fi without a
@@ -215,14 +220,17 @@ public:
         // kMinProbeChargeBytes - a host that reports nothing still used the network; never more than it reserved).
         // Device round 19.11 (LTE, three dead first candidates): 11 KB were spent, 327 KB stayed reserved, the race
         // ended "bytes" with nothing proven and the working servers were never probed.
+        // One number: what the cap is charged is what the hour ledger gets (less what the API calls already put there).
+        const qint64 raw = std::max<qint64>(0, bytes) + fixedOf(path);
+        const qint64 charge = reserved > 0 ? std::clamp<qint64>(raw, std::min(kMinProbeChargeBytes, reserved), reserved) : raw;
         if (m_bytesLeft >= 0)
-            m_bytesLeft += reserved
-                - std::clamp<qint64>(std::max<qint64>(0, bytes) + fixedOf(path), std::min(kMinProbeChargeBytes, reserved),
-                                     reserved);
-        if (bytes > 0) { // the Scanner's ledger
+            m_bytesLeft += reserved - charge;
+        // (a probe that went past its reservation - the host cuts at cost_bytes, so rarely - is charged what it used)
+        const qint64 ledger = std::max<qint64>(0, std::max(charge, raw) - outsideOf(path));
+        if (ledger > 0) { // the Scanner's ledger
             RaceEffect e;
             e.type = RaceEffectType::Spent;
-            e.bytes = bytes;
+            e.bytes = ledger;
             out << e;
         }
         if (outcome == PathOutcome::ProbeOk) {
@@ -371,6 +379,16 @@ private:
         case PathKind::Provider: return m_costs.provider;
         }
         return m_costs.xray;
+    }
+
+    qint64 outsideOf(const PathCandidate &c) const
+    {
+        switch (c.kind) {
+        case PathKind::OwnAwg: return m_costs.awgOutside;
+        case PathKind::OwnXray: return m_costs.xrayOutside;
+        case PathKind::Provider: return m_costs.providerOutside;
+        }
+        return 0;
     }
 
     qint64 fixedOf(const PathCandidate &c) const

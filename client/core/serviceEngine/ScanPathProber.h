@@ -197,6 +197,7 @@ private:
         QSet<QString> doneParts; // host ids of the parts that reported data, in whatever scan (a repeat is ignored)
         bool allOk = true;
         qint64 bytes = 0;
+        QHash<QString, QString> partScan; // part host id -> the scan its last message named (pending or accepted)
         QList<ScanHostCandidate> sent; // the probe's host candidates (all its parts), kept for the probe's life; a reopen sends those not in doneParts
     };
     struct HostScan {
@@ -223,7 +224,12 @@ private:
     void closeScan(const QString &scanId);
     void cancelScanIfIdle();
     void endHostScan();
-    void finish(quint64 key, path::PathOutcome outcome, qint64 bytes, const char *why);
+    // One owner of what an answer of a scan that is no longer the current one (or a refusal of the current one) means:
+    // every named part that is neither reported nor already named in another scan goes into the current scan.
+    void placeParts(const QString &fromScan, const QList<ScanHostCandidate> &cands);
+    // A probe's bytes are a ledger with one entry point (Probe::bytes, added once per reported part); every end of the
+    // probe - proven, refused, timed out, ended with its scan - reports that total.
+    void finish(quint64 key, path::PathOutcome outcome, const char *why);
     void finishLater(quint64 key, const char *why);
     void armPoll();
     ScanTunables tunables() const;
