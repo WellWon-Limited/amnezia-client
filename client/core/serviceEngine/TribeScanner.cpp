@@ -531,6 +531,23 @@ void TribeScanner::persistCache(const ScanCachedResult &c)
     QJsonObject stored = scanCachedResultToJson(c);
     stored.insert(QLatin1String(kScanCachedLabelRuleKey), QLatin1String(kScanCachedLabelRule));
     m_store->write(key, QJsonDocument(stored).toJson(QJsonDocument::Compact));
+    loadCachedStubs(key); // a save before the network is announced must not drop what the stored result still needs
+    // The stub nodes (public ids, names, country, kind: no config, no key) of the batch rows this result shows live
+    // next to it under the same key and die with it: after a restart a cached row that looks tappable can still be
+    // connected (ConnectRow offers the stub again).
+    QJsonArray stubs;
+    const auto keep = [this, &stubs](const QList<ScanCachedRow> &rows) {
+        for (const ScanCachedRow &r : rows)
+            if (m_batchStubs.contains(r.id))
+                stubs << m_batchStubs.value(r.id);
+    };
+    keep(c.rows);
+    for (const ScanCachedResult &o : c.otherScopes)
+        keep(o.rows);
+    if (stubs.isEmpty())
+        m_store->remove(key + QLatin1String(".stubs"));
+    else
+        m_store->write(key + QLatin1String(".stubs"), compactArray(stubs));
     QJsonArray idx = QJsonDocument::fromJson(m_store->read(QLatin1String(kScanCacheIndexKey))).array();
     for (int i = idx.size() - 1; i >= 0; --i)
         if (idx.at(i).toString() == key)
@@ -538,10 +555,29 @@ void TribeScanner::persistCache(const ScanCachedResult &c)
     idx << key;
     while (idx.size() > kScanCacheMaxNetworks) {
         m_store->remove(idx.first().toString());
+        m_store->remove(idx.first().toString() + QLatin1String(".stubs"));
         idx.removeFirst();
     }
     m_store->write(QLatin1String(kScanCacheIndexKey), compactArray(idx));
     emitLog(QStringLiteral("action persist_results rows=%1").arg(c.rows.size()));
+}
+
+// The stubs persisted with this network's cache (persistCache) back into memory, so a restart keeps every cached batch
+// row connectable. A stub already known stays as it is.
+void TribeScanner::loadCachedStubs(const QString &cacheKey)
+{
+    const QByteArray raw = m_store->read(cacheKey + QLatin1String(".stubs"));
+    if (raw.isEmpty())
+        return;
+    for (const QJsonValue &v : QJsonDocument::fromJson(raw).array()) {
+        const QString nid = v.toObject().value(QLatin1String("node_id")).toString();
+        if (nid.isEmpty() || m_batchStubs.contains(nid))
+            continue;
+        m_batchStubOrder << nid;
+        m_batchStubs.insert(nid, v.toObject());
+    }
+    while (m_batchStubOrder.size() > kScanBatchStubsMax)
+        m_batchStubs.remove(m_batchStubOrder.takeFirst());
 }
 
 void TribeScanner::notifyNetwork()
@@ -554,6 +590,7 @@ void TribeScanner::notifyNetwork()
                 .arg(QLatin1String(scanNetKindName(n.kind)), n.key, n.generation())
                 .arg(n.sources.size())
                 .arg(cachedFor(n).present()));
+    loadCachedStubs(scanCacheStoreKey(n.key, n.fingerprint));
     const ScanPhase before = m_m.phase();
     dispatch(m_m.networkChanged(n, cachedFor(n), now()));
     // «Сеть сменилась — проверяем заново» (artboard): only for the person's running scan the change restarted on

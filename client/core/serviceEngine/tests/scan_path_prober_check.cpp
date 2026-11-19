@@ -446,6 +446,27 @@ static void caseCancel()
     spin(30);
     check(w.results.isEmpty(), "a cancelled probe's result is dropped");
 
+    // Two probes share one host scan; cancelling one must stop exactly that one AT THE HOST (the host has only a
+    // per-scan stop: the scan is cancelled and the other probe is re-opened in a new scan), the other still reports.
+    World t;
+    t.ready();
+    t.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+    spin(40);
+    const path::ProbeStamp a1 = t.start(1, 2, QStringLiteral("16"), path::PathKind::OwnAwg);
+    spin(40);
+    const QString firstScan = t.host.scanOf(2);
+    t.prober.cancel(a1);
+    spin(40);
+    check(t.host.of("scan_cancel").size() == 1 && t.host.of("scan_cancel").first().value("scan_id").toString() == firstScan,
+          "cancel (an AmneziaWG probe) with a neighbour in the scan: the host scan that held it is stopped");
+    const QString secondScan = t.host.scanOf(1);
+    check(!secondScan.isEmpty() && secondScan != firstScan && t.host.scanOf(2) == firstScan,
+          "the still-wanted probe is re-opened in a new scan, the cancelled one is never re-sent");
+    t.host.item(1, true);
+    spin(40);
+    check(t.resultOf(1) && t.resultOf(1)->outcome == path::PathOutcome::ProbeOk && !t.resultOf(2),
+          "the neighbour still reports, the cancelled probe does not");
+
     World x;
     x.api.holdSeat = true;
     x.ready();

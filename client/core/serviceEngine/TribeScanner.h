@@ -439,6 +439,7 @@ private:
     ScanCachedResult cachedFor(const ScanNetwork &n) const;
     void persistCache(const ScanCachedResult &c);
     void notifyNetwork();
+    void loadCachedStubs(const QString &cacheKey);
     void foldHostGen(const ScanNetSource &g, bool fromProgress);
     bool hostGenStale(const ScanNetSource &g) const; // older than the joined element: a late reply's past
     void setHostGen(const ScanNetSource &g);

@@ -267,6 +267,7 @@ void ScanPathProber::sendCandidate(quint64 key, const ScanHostCandidate &c)
         return;
     if (it->hostId.isEmpty() || !c.id.contains(QLatin1Char('.')))
         it->hostId = c.id;
+    it->sent << c;
     const quint64 race = it->stamp.race;
     if (m_scan.closed || m_scan.race != race) {
         openScan(race, {c});
@@ -455,8 +456,37 @@ void ScanPathProber::cancel(const path::ProbeStamp &stamp)
     auto it = m_probes.find(stamp.probe);
     if (it == m_probes.end() || !(it->stamp == stamp))
         return;
+    const bool atHost = !it->sent.isEmpty() && it->scanId == m_scan.id && !m_scan.closed;
     m_probes.erase(it); // its seat goes with it (a seat still asked: released by its operation id once the ask ends)
-    cancelScanIfIdle();
+    if (!atHost) {
+        cancelScanIfIdle();
+        return;
+    }
+    // The host stops per scan only: end the scan (the cancelled probe, an AmneziaWG session included, ends with it)
+    // and re-open the probes that are still wanted in a new scan.
+    const quint64 race = m_scan.race;
+    QList<ScanHostCandidate> again;
+    for (Probe &p : m_probes) {
+        if (p.scanId != m_scan.id || p.sent.isEmpty())
+            continue;
+        p.partsDone = 0;
+        p.allOk = true;
+        again << p.sent;
+        p.sent.clear();
+    }
+    endHostScan();
+    if (!again.isEmpty())
+        openScan(race, again);
+}
+
+void ScanPathProber::endHostScan()
+{
+    const QString scanId = m_scan.id;
+    m_scan.closed = true;
+    m_pollTimer.stop();
+    if (m_scan.startSent)
+        m_host->sendMessage(scanCompact(scanEncodeCancel(scanId)), [](const QByteArray &) {});
+    say(QStringLiteral("race_prober scan_cancel scan=%1").arg(scanId));
 }
 
 void ScanPathProber::cancelScanIfIdle()
@@ -467,12 +497,7 @@ void ScanPathProber::cancelScanIfIdle()
         if (p.scanId == m_scan.id)
             return;
     // nothing of the scan is wanted any more: end it (its AmneziaWG sessions too) before the owner raises a tunnel
-    const QString scanId = m_scan.id;
-    m_scan.closed = true;
-    m_pollTimer.stop();
-    if (m_scan.startSent)
-        m_host->sendMessage(scanCompact(scanEncodeCancel(scanId)), [](const QByteArray &) {});
-    say(QStringLiteral("race_prober scan_cancel scan=%1").arg(scanId));
+    endHostScan();
 }
 
 void ScanPathProber::finishLater(quint64 key, const char *why)

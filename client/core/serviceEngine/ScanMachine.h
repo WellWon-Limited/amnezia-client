@@ -595,6 +595,7 @@ private:
 
 // «Найти ещё»: candidates one batch probes (the next untried ones, mixed across tiers; UI spec 18.11).
 inline constexpr int kScanMoreBatch = 10;
+inline constexpr int kScanSeenMax = 512; // contract 1.14.0: POST /v1/scan/candidates `seen` maxItems
 // The first batch of a scope scan (a country, the white lists): the server's default page.
 inline constexpr int kScanScopeFirstBatch = 12;
 // The white-list scope (no country): chooseCountry("whitelist"), scanned_scope "whitelist".
@@ -4384,13 +4385,15 @@ private:
         a.batch = m_continuation ? kScanMoreBatch : kScanScopeFirstBatch;
         QStringList seen = QStringList(m_shownNet.begin(), m_shownNet.end());
         seen.sort();
-        a.ids = seen.mid(0, 512);
+        a.ids = seen.mid(0, kScanSeenMax); // the contract's `seen` limit (maxItems 512)
         if (!sendApp(QStringLiteral("candidates"), qint64(m_t.costManifestBytes), now, s, a)) {
             startHost(now, s); // no room for the request: the device's own candidates
             return;
         }
         m_candReqId = a.requestId;
-        m_candSeen = QSet<QString>(a.ids.begin(), a.ids.end());
+        // The whole judged set, not the truncated list the request carries: a batch of rows the request could not
+        // list but the device already judged brings nothing new either (it ends the series, never loops).
+        m_candSeen = QSet<QString>(seen.begin(), seen.end());
         s.actions << a;
     }
     bool m_completed = false;
