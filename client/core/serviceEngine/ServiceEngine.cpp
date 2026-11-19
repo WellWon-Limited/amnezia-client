@@ -455,6 +455,7 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
             m_lastResult = r;
             if (!r.connected && m_tunnel)
                 m_tunnel->startRefused(); // an attempt that ends before Connected holds no seat (G2): idempotent, no StopPath needed
+            m_raceWait.reset(); // a race still waiting for its session is not needed any more
             if (m_race.running()) // the attempt has its result: the spares are not needed any more
                 m_ownerQueueRaceStop = true;
             if (r.connected) {
@@ -487,6 +488,8 @@ void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
                        .arg(m_net.current().generation));
     if (m_race.running())
         applyRaceEffects(m_race.networkChanged(nowMs(), m_net.current()));
+    if (m_raceWait)
+        endRaceWait("network_changed"); // its session was asked for the old network
     if (m_prober && m_net.current().usable())
         m_prober->prepare(m_net.current()); // the host warms up for the new network (caps, probe session)
     feedOwner(path::AttemptEvent::networkChanged(nowMs(), m_net.current()));
@@ -495,6 +498,8 @@ void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
 void ServiceEngine::attemptTick()
 {
     m_owner.setTimings(attemptTimings());
+    if (m_raceWait)
+        pollRaceWait();
     if (m_race.running())
         applyRaceEffects(m_race.tick(nowMs()));
     feedOwner(path::AttemptEvent::tick(nowMs()));
@@ -522,6 +527,7 @@ bool ServiceEngine::raceAllowed() const
 void ServiceEngine::beginRaceForTap()
 {
     m_raceFailed.clear(); // per tap
+    m_raceWait.reset();
     m_prober->prepare(m_net.current()); // idempotent: a fresh session is kept
     m_race.setTimings(m_raceTimingsForTest ? *m_raceTimingsForTest : raceTimingsTuned());
     const path::SelectionContext ctx = ownerContext();
@@ -550,14 +556,74 @@ void ServiceEngine::beginRaceForTap()
     // B3d: on cellular one race spends at most cellularMaxBytes (the Scanner's hour budget stays its own)
     if (m_net.current().cellular())
         bytesLeft = bytesLeft < 0 ? rt.cellularMaxBytes : std::min<qint64>(bytesLeft, rt.cellularMaxBytes);
-    // wait_ms: how long the owner waits for a first proof before a blind start (0 = a known path starts at once)
-    attemptJournal(QStringLiteral("race_begin known=%1 candidates=%2 bytes_left=%3 wait_ms=%4")
-                       .arg(known ? order.first().path.id.id : QStringLiteral("-")).arg(race.size()).arg(bytesLeft)
-                       .arg(known ? 0 : rt.hedgeAfterMs()));
     m_raceFirst = !known;
-    applyRaceEffects(m_race.begin(nowMs(), race, m_net.current(), m_prober->caps(), bytesLeft, m_prober->costs()));
+    const path::ProberCaps pc = m_prober->caps();
+    if (!pc.ready) {
+        // Device round 19.11 (LTE, right after launch): the session was not there, four probes "started" that never
+        // left the app, 386 KB of the 393 KB cap were reserved for them and the owner walked blind. A probe that
+        // cannot leave is not started: the race waits for the session within its own wait, or does not run.
+        if (!pc.preparing) {
+            attemptJournal(QStringLiteral("race_done reason=no_session proven=0 waited_ms=0"));
+            m_raceFirst = false; // the owner walks at once
+            return;
+        }
+        RaceWait w;
+        w.race = race;
+        w.bytesLeft = bytesLeft;
+        w.sinceMs = nowMs();
+        w.boundMs = rt.hedgeAfterMs();
+        w.knownId = known ? order.first().path.id.id : QString();
+        m_raceWait = w;
+        attemptJournal(QStringLiteral("race_wait_session known=%1 candidates=%2 bound_ms=%3")
+                           .arg(known ? order.first().path.id.id : QStringLiteral("-")).arg(race.size()).arg(w.boundMs));
+        return;
+    }
+    launchRace(race, bytesLeft, known ? order.first().path.id.id : QString(), 0);
     if (m_raceFirst && !m_race.running())
         m_raceFirst = false; // nothing could be raced: the owner walks at once
+}
+
+void ServiceEngine::launchRace(const QList<path::PathCandidate> &race, qint64 bytesLeft, const QString &knownId, qint64 waitedMs)
+{
+    const bool known = !knownId.isEmpty();
+    // The owner's wait for a first proof counts from the tap: a session that came late shortens it.
+    if (!known && waitedMs > 0) {
+        path::RaceTimings t = m_race.timings();
+        t.hedgeMs = int(std::max<qint64>(1, t.hedgeAfterMs() - waitedMs));
+        m_race.setTimings(t);
+    }
+    // wait_ms: how long the owner waits for a first proof before a blind start (0 = a known path starts at once)
+    attemptJournal(QStringLiteral("race_begin known=%1 candidates=%2 bytes_left=%3 wait_ms=%4")
+                       .arg(known ? knownId : QStringLiteral("-")).arg(race.size()).arg(bytesLeft)
+                       .arg(known ? 0 : m_race.timings().hedgeAfterMs()));
+    applyRaceEffects(m_race.begin(nowMs(), race, m_net.current(), m_prober->caps(), bytesLeft, m_prober->costs()));
+}
+
+void ServiceEngine::pollRaceWait()
+{
+    if (!m_raceWait || !m_prober)
+        return;
+    const path::ProberCaps pc = m_prober->caps();
+    const qint64 waited = nowMs() - m_raceWait->sinceMs;
+    if (pc.ready) {
+        const RaceWait w = *m_raceWait;
+        m_raceWait.reset();
+        launchRace(w.race, w.bytesLeft, w.knownId, waited);
+        if (m_raceFirst && !m_race.running())
+            startOwnerAfterRace("not_raced"); // nothing could be raced: the owner walks now
+        return;
+    }
+    if (!pc.preparing || waited >= m_raceWait->boundMs)
+        endRaceWait("no_session");
+}
+
+// The race of this tap never began: no probe was started, nothing is reserved. The owner starts at once.
+void ServiceEngine::endRaceWait(const char *reason)
+{
+    const qint64 waited = m_raceWait ? nowMs() - m_raceWait->sinceMs : 0;
+    m_raceWait.reset();
+    attemptJournal(QStringLiteral("race_done reason=%1 proven=0 waited_ms=%2").arg(QLatin1String(reason)).arg(waited));
+    startOwnerAfterRace(reason);
 }
 
 void ServiceEngine::onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent)
@@ -1605,6 +1671,7 @@ void ServiceEngine::requestStop() // AVPN
     m_sessionHintEndpoint.clear();
     resetHealSession(QString());
     m_raceFirst = false; // the person stops: a race in front of the owner ends without starting it
+    m_raceWait.reset();
     if (m_race.running())
         applyRaceEffects(m_race.stop(nowMs()));
     if (m_owner.running() || m_owner.phase() != path::AttemptPhase::Idle) {

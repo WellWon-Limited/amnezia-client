@@ -618,6 +618,19 @@ private:
     bool m_attemptAfterLiveLoss = false; // the attempt in flight (or just ended) is the failover of a lost live session
     bool raceAllowed() const;
     void beginRaceForTap();
+    // The race of this tap waits for the prober's session (caps().ready) for at most the race's own wait
+    // (hedgeAfterMs): probes are started, and bytes reserved, only when the session is there.
+    struct RaceWait {
+        QList<path::PathCandidate> race;
+        qint64 bytesLeft = -1;
+        qint64 sinceMs = 0;
+        int boundMs = 0;
+        QString knownId; // the proven path that already leads ("" = none)
+    };
+    std::optional<RaceWait> m_raceWait;
+    void launchRace(const QList<path::PathCandidate> &race, qint64 bytesLeft, const QString &knownId, qint64 waitedMs);
+    void pollRaceWait();
+    void endRaceWait(const char *reason);
     void applyRaceEffects(const QList<path::RaceEffect> &effects);
     // lead: the race's first proof - the owner's first leg goes to that path (AttemptOwner.h "Lead").
     void startOwnerAfterRace(const char *why, const QString &lead = {});

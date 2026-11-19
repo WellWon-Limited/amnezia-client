@@ -44,12 +44,16 @@ struct FakeTunnel : ITunnelControl {
 // Stage 2: a probe host double - records what the race asked; the test answers through onProbeResult.
 struct FakeProber : path::IPathProber {
     bool on = true;
+    bool ready = true;      // the session of the host is in hand
+    bool preparing = false; // it is being fetched
     QList<std::pair<path::ProbeStamp, QString>> started;
     int cancels = 0;
     path::ProberCaps caps() const override
     {
         path::ProberCaps c;
         c.available = on;
+        c.ready = ready;
+        c.preparing = preparing;
         return c;
     }
     void start(const path::ProbeStamp &s, const path::PathCandidate &p, int) override { started.append({ s, p.id.id }); }
@@ -578,6 +582,92 @@ int main(int argc, char **argv)
         off.on = false;
         q.eng.setProber(&off);
         CHECK(q.eng.connect(err) && q.last() == QLatin1String("17") && off.started.isEmpty());
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true}}, {}, {});
+    }
+
+    // Device round 19.11 (LTE, first tap after launch): the prober's session was not in hand. The race must not
+    // pretend to probe: no probe started, nothing reserved or charged; the session arriving within the race's own wait
+    // starts the probes; no session (failed, or not arriving in time) ends the race `no_session` and the owner starts.
+    {
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true},
+                              {avpn::ServiceEngine::raceFlagKey(), true}}, {}, {});
+        QString err;
+        {   // not ready, nothing coming: the owner starts at once
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            qint64 charged = 0;
+            r.eng.setProber(&p);
+            r.eng.setProbeBudget([] { return qint64(-1); }, [&charged](qint64 b) { charged += b; });
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17") && !r.eng.raceRunning());
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(p.started.isEmpty() && charged == 0 && journalHas(r.journal, "race_done reason=no_session proven=0")
+                  && !journalHas(r.journal, "race_begin") && !journalHas(r.journal, "race_probe "));
+        }
+        {   // the session arrives inside the wait: the probes start then, not before
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            CHECK(r.eng.connect(err) && r.eng.attemptRunning() && r.tun.ups.isEmpty() && !r.eng.raceRunning());
+            r.pass(1000);
+            CHECK(p.started.isEmpty() && r.tun.ups.isEmpty() && !r.eng.raceRunning());
+            p.ready = true;
+            p.preparing = false;
+            r.pass(500);
+            CHECK(r.eng.raceRunning() && !p.started.isEmpty() && r.tun.ups.isEmpty());
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(journalHas(r.journal, "race_wait_session") && journalHas(r.journal, "race_begin known=-"));
+            // the owner's wait for a first proof counts from the tap: it is shortened by the 1.5 s spent waiting
+            r.pass(1000);
+            CHECK(r.tun.ups.isEmpty());
+            r.pass(500);
+            CHECK(!r.tun.ups.isEmpty()); // 2750 - 1500 = 1250 ms after the race began, not 2750
+        }
+        {   // the session does not arrive within the bound: `no_session`, the owner starts, nothing was started
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            qint64 charged = 0;
+            r.eng.setProber(&p);
+            r.eng.setProbeBudget([] { return qint64(-1); }, [&charged](qint64 b) { charged += b; });
+            CHECK(r.eng.connect(err) && r.tun.ups.isEmpty());
+            r.pass(2000);
+            CHECK(r.tun.ups.isEmpty());
+            r.pass(1500);
+            CHECK(r.last() == QLatin1String("17") && !r.eng.raceRunning() && p.started.isEmpty() && charged == 0);
+            r.journal << r.eng.takeAttemptJournal();
+            CHECK(journalHas(r.journal, "race_done reason=no_session proven=0") && journalHas(r.journal, "race_owner_start why=no_session"));
+            p.ready = true; // a late session does not start a race of a tap that moved on
+            r.pass(1000);
+            CHECK(p.started.isEmpty());
+        }
+        {   // the fetch failed while waiting: the owner starts at the next tick, not at the bound
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            CHECK(r.eng.connect(err) && r.tun.ups.isEmpty());
+            r.pass(500);
+            p.preparing = false;
+            r.pass(500);
+            CHECK(r.last() == QLatin1String("17") && p.started.isEmpty());
+        }
+        {   // the person stops while the race waits: nothing starts afterwards
+            Rig r(pool);
+            FakeProber p;
+            p.ready = false;
+            p.preparing = true;
+            r.eng.setProber(&p);
+            CHECK(r.eng.connect(err));
+            r.eng.requestStop();
+            p.ready = true;
+            r.pass(3000);
+            CHECK(p.started.isEmpty() && r.tun.ups.isEmpty());
+        }
         TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true}}, {}, {});
     }
 

@@ -90,6 +90,12 @@ struct ProberCaps {
     int inFlight = 6;   // probes the host keeps in flight in total (any kind)
     int providerAtOnce = 1;
     int awgAtOnce = 2;
+    // The host can send a probe NOW (ScanPathProber: its signed session - manifest and token - is in hand). A host
+    // that needs none keeps the default. Not ready and `preparing` (the session is being fetched): the engine holds
+    // the race for a short bound; not ready and not preparing (nothing will come): no race, the owner walks at once.
+    // A probe that cannot leave is never started (nothing reserved, nothing reported failed).
+    bool ready = true;
+    bool preparing = false;
 };
 
 struct ProbeStamp {
