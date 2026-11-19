@@ -1847,7 +1847,7 @@ struct ProbeEdge {
 static void providerLegStarvedCheck()
 {
     TuningStore::set({}, {{QStringLiteral("upstream_nodes"), true}, {QStringLiteral("xray_client"), true},
-                          {QStringLiteral("path_race"), true}}, {}, {});
+                          {avpn::ServiceEngine::raceFlagKey(), true}}, {}, {});
     QJsonObject own = awgNode("9", 9, "EE");
     own.insert("manual_only", true); // the own path is the race's: the owner's first leg is the provider
     const QJsonArray pool{stubNode("aaaaaaaaaaaaaaa0", 1, 0), own};

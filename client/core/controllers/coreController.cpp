@@ -324,7 +324,7 @@ void CoreController::initControllers()
         avpnEngine->attachScanner(tribeScanner);
         tribeScanner->setRadioSource([]() { return avpn::cellularGeneration(); }); // view.net_radio (the engine's source)
         setQmlContextProperty("TribeScanner", tribeScanner);
-#if defined(Q_OS_IOS) && defined(AVPN_IOS_APP_SCAN_HOST)
+#if defined(Q_OS_IOS) && defined(AVPN_IOS_APP_SCAN_HOST) && defined(AVPN_DEV_TOOLS)
         avpn::IosHybridScanHost::installAutorun(tribeScanner); // AVPN: debug run without UI taps (control file)
 #endif
 #if defined(AVPN_PATH_PROBER_FACADE) && ((defined(Q_OS_IOS) && defined(AVPN_IOS_APP_SCAN_HOST)) \

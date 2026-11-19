@@ -113,6 +113,7 @@ void record(QJsonObject o)
 {
     o.insert(QStringLiteral("ts"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
     const QByteArray line = QJsonDocument(o).toJson(QJsonDocument::Compact);
+#ifdef AVPN_DEV_TOOLS // the results file in Documents is a development aid: a release build never writes it
     static std::mutex lock;
     {
         std::lock_guard<std::mutex> g(lock);
@@ -122,6 +123,7 @@ void record(QJsonObject o)
             f.write("\n");
         }
     }
+#endif
     TribeJournal::append(QStringLiteral("app_probe"), o);
     qInfo().noquote() << "app_probe" << QString::fromUtf8(line);
 }
@@ -140,6 +142,9 @@ QString IosHybridScanHost::resultsPath()
 
 IosAppScanControl IosHybridScanHost::readControl()
 {
+#ifndef AVPN_DEV_TOOLS
+    return IosAppScanControl(); // a release build never reads the control file: mode always, no autorun
+#endif
     QFile f(controlPath());
     if (!f.open(QIODevice::ReadOnly))
         return IosAppScanControl(); // no file: mode always, no autorun

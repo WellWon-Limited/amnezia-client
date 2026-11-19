@@ -468,7 +468,7 @@ int main(int argc, char **argv)
     }
     {
         TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true},
-                              {QStringLiteral("path_race"), true}}, {}, {});
+                              {avpn::ServiceEngine::raceFlagKey(), true}}, {}, {});
         Rig r(pool);
         FakeProber prober;
         qint64 charged = 0;

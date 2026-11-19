@@ -495,9 +495,20 @@ void ServiceEngine::attemptTick()
 
 // ---- Stage 2: the probe race (path/PathRace.h) ------------------------------------------------------------------
 
+// The server switch of the race, one per platform family: the race was measured on iPhone only (rounds 17-19.11), so
+// a desktop build turns it on by its own switch, after its own device round.
+QString ServiceEngine::raceFlagKey()
+{
+#if defined(Q_OS_IOS)
+    return QStringLiteral("path_race");
+#else
+    return QStringLiteral("path_race_desktop");
+#endif
+}
+
 bool ServiceEngine::raceAllowed() const
 {
-    return m_prober && m_prober->caps().available && TuningStore::flag(QStringLiteral("path_race"), false)
+    return m_prober && m_prober->caps().available && TuningStore::flag(raceFlagKey(), false)
         && m_choice.kind != path::UserChoice::Kind::ExactPath; // an exact node is the person's: nothing to race
 }
 

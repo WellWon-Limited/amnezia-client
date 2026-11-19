@@ -44,6 +44,8 @@ enum class ReseedResult { Applied, Deferred, Rejected, Unchanged };
 
 class ServiceEngine {
 public:
+    // The server switch of the probe race: "path_race" on iOS, "path_race_desktop" elsewhere (ServiceEngine.cpp).
+    static QString raceFlagKey();
     ServiceEngine() : m_owner(path::AttemptTimings{})
     {
         m_net.observe(path::NetworkObservation{}); // "unknown" until the platform tells the network (observeNetwork)
