@@ -18,6 +18,8 @@
 //      scan's FINAL total where a final reply was delivered (the opening and closing /netinfo and a stopped probe's bytes
 //      included), the last total shown otherwise. Never more than the host sent. The only shortfall is a scan whose final
 //      never arrived (the host replaced it, or its final never came): counted and printed (MODEL_STATS)
+//   I8 settling: a cancelled probe is settled (its hold on the race's cap may end) at most once, and - once no scan is followed
+//      any more - every probe cancelled by the race has been settled (never earlier than its cancel)
 //   I7 liveness: a probe whose parts all succeed at the host ends proven (when the host refused nothing)
 //
 // Host contract the model follows (quoted from the real host, recipes/amnezia-libxray/patches/0012-tribe-scan-engine.patch,
@@ -380,7 +382,15 @@ static int runModel(unsigned seed, QStringList &broke)
         host.deliverOne();
         QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
     }
-    prober.onSpent = [&charged](qint64 b) { charged += b; };
+    QSet<quint64> cancelledByCall, settledProbes;
+    prober.onSpent = [&charged](quint64 race, qint64 b) { charged += (race == 1 ? b : 0); }; // one race: any other tag is a leak
+    prober.onSettled = [&](const path::ProbeStamp &st) {
+        if (settledProbes.contains(st.probe))
+            broke << QStringLiteral("I8 probe %1 settled twice").arg(st.probe);
+        if (!cancelledByCall.contains(st.probe))
+            broke << QStringLiteral("I8 probe %1 settled without being cancelled").arg(st.probe);
+        settledProbes.insert(st.probe);
+    };
 
     host.refuseStarts = rng() % 4 == 0;
     host.refuseAddPercent = rng() % 3 == 0 ? 40 : 0;
@@ -437,6 +447,7 @@ static int runModel(unsigned seed, QStringList &broke)
             if (!live.isEmpty()) {
                 const quint64 k = live.at(int(rng() % unsigned(live.size())));
                 cancelled.insert(k);
+                cancelledByCall.insert(k);
                 prober.cancel(stamps.value(k));
             }
         } else {
@@ -553,6 +564,11 @@ static int runModel(unsigned seed, QStringList &broke)
     if (charged != expected)
         fail(QStringLiteral("I6 charged %1 bytes, the host's counters showed %2 (the host sent %3, %4 of it in %5 scans whose final never came)")
                  .arg(charged).arg(expected).arg(sent).arg(missing).arg(noFinal));
+    // I8: once nothing is followed, every probe cancelled by call is settled
+    if (prober.scansFollowed() == 0)
+        for (quint64 k : cancelledByCall)
+            if (!settledProbes.contains(k))
+                fail(QStringLiteral("I8 probe %1 was cancelled but never settled").arg(k));
     // I5: nothing leaks - what the prober still follows is only a scan whose final never came
     int neverFinalScans = 0;
     for (const MScan &s : host.scans)

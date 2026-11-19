@@ -48,9 +48,9 @@ struct FakeProber : path::IPathProber {
     bool preparing = false; // it is being fetched
     QList<std::pair<path::ProbeStamp, QString>> started;
     int cancels = 0;
-    std::function<void(qint64)> sink; // the engine's byte sink (setSpendSink): the test spends through it
+    std::function<void(quint64, qint64)> sink; // the engine's byte sink (setSpendSink): the test spends through it
     QList<quint64> endedRaces;        // raceEnded(race) calls
-    void setSpendSink(std::function<void(qint64)> f) override { sink = std::move(f); }
+    void setSpendSink(std::function<void(quint64, qint64)> f) override { sink = std::move(f); }
     void raceEnded(quint64 race) override { endedRaces << race; }
     path::ProberCaps caps() const override
     {
@@ -489,7 +489,7 @@ int main(int argc, char **argv)
         CHECK(r.eng.connect(err) && r.eng.attemptRunning() && r.tun.ups.isEmpty() && r.eng.raceRunning());
         r.pass(1000); // the stagger: more probes start
         CHECK(prober.started.size() >= 2);
-        prober.sink(70000); // the prober's one byte stream: the hour ledger gets it once (and the race's cap, PathRace)
+        prober.sink(prober.started.first().first.race, 70000); // the prober's one byte stream: the hour ledger gets it once (and the race's cap, PathRace)
         CHECK(charged == 70000);
         r.eng.onProbeResult(prober.stampOf("16"), path::PathOutcome::ProbeOk, 70000); // the figure is the journal's only
         CHECK(r.last() == QLatin1String("16") && charged == 70000); // the proven path is the owner's first leg; the result charged nothing
@@ -498,6 +498,32 @@ int main(int argc, char **argv)
         r.up();
         CHECK(r.eng.verifySucceeded() && r.result().connected && !r.eng.raceRunning()); // the race ends with the result
         CHECK(prober.endedRaces.size() == 1); // the prober is told once that the race is over (it ends its host scan)
+        // Seventh review, finding 3: the hour ledger gets every byte, the race's cap only its own race's - a stopped race's late
+        // spend (its scan still being polled, a seat release in flight) must not use up the next race's cap.
+        {
+            Rig q(pool);
+            FakeProber qp;
+            qint64 hour = 0;
+            q.eng.setProber(&qp);
+            q.eng.setProbeBudget([] { return qint64(-1); }, [&hour](qint64 b) { hour += b; });
+            path::RaceTimings slow;
+            slow.hedgeMs = 5000;
+            q.eng.setRaceTimingsForTest(slow);
+            QString e2;
+            CHECK(q.eng.connect(e2) && q.eng.raceRunning() && !qp.started.isEmpty());
+            const quint64 raceA = qp.started.first().first.race;
+            qp.sink(raceA, 1000);
+            CHECK(hour == 1000 && q.eng.raceSpentBytes() == 1000);
+            CHECK(q.eng.connect(e2));  // a new tap: race A ends, race B begins
+            const quint64 raceB = qp.started.last().first.race;
+            CHECK(raceB != raceA && q.eng.raceRunning());
+            qp.sink(raceA, 7000);      // A's late spend (a closing /netinfo, a seat release)
+            CHECK(hour == 8000 && q.eng.raceSpentBytes() == 0); // the hour ledger has it, B's cap does not
+            qp.sink(raceB, 500);
+            CHECK(hour == 8500 && q.eng.raceSpentBytes() == 500);
+            qp.sink(0, 300);           // outside any race (a warm-up fetch): the hour ledger only
+            CHECK(hour == 8800 && q.eng.raceSpentBytes() == 500);
+        }
         // a stale result of that race changes nothing
         r.eng.onProbeResult(prober.stampOf("17"), path::PathOutcome::ProbeOk, 1000);
         CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));

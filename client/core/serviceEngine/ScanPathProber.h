@@ -158,8 +158,13 @@ public:
     // ledger (see raceCosts for the table). wallNow: wall clock (token expiry).
     std::function<void(const path::ProbeStamp &, path::PathOutcome, qint64)> onResult;
     std::function<bool()> hostBusy;
-    std::function<void(qint64)> onSpent;
-    void setSpendSink(std::function<void(qint64)> sink) override { onSpent = std::move(sink); }
+    std::function<void(quint64 race, qint64 bytes)> onSpent; // race 0 = outside any race (warm-up): the hour ledger only
+    void setSpendSink(std::function<void(quint64, qint64)> sink) override { onSpent = std::move(sink); }
+    // A cancelled probe's spend is final: the scan it ran in reached its final total, or went unknown, or its polling bound ended
+    // (a probe that never reached the host settles at once). The race holds the probe's bound on its cap until then.
+    std::function<void(const path::ProbeStamp &)> onSettled;
+    bool holdsAfterCancel() const override { return true; }
+    void setSettleSink(std::function<void(const path::ProbeStamp &)> sink) override { onSettled = std::move(sink); }
     void raceEnded(quint64 race) override;
     std::function<qint64()> wallNow;
     std::function<void(const QString &)> log; // ids, kinds, codes, counts only
@@ -220,6 +225,7 @@ private:
     };
     // What the prober follows of one host scan: the last cumulative bytes_spent seen (the only thing it charges from).
     struct ScanBook {
+        quint64 race = 0;         // the race the scan was opened for: its spend is that race's
         qint64 seen = 0;
         qint64 lastSeq = 0;
         qint64 forgetAtMs = 0;    // 0 = the scan is open (no bound); else the time this entry is dropped if `final` never came
@@ -236,7 +242,6 @@ private:
 
     qint64 now() const;
     QString networkKey() const;
-    void fetchSession();
     void sessionArrived(const RaceScanSession &s);
     void launch(quint64 key);
     void sendCandidate(quint64 key, const ScanHostCandidate &c);
@@ -253,7 +258,13 @@ private:
     void retireScan();
     // Host spend: one counter per scan, the last total seen; only a larger total charges, the difference, once.
     void noteTotal(const QString &scanId, qint64 total);
-    void spend(qint64 bytes);
+    void spend(quint64 race, qint64 bytes);
+    // The one place a scan leaves the book (its final came, it went unknown, the bound passed, the host never held it): the
+    // probes cancelled while it ran are settled with it.
+    void dropBook(const QString &scanId);
+    QHash<QString, QList<path::ProbeStamp>> m_unsettled; // scan id -> cancelled probes whose spend that scan may still show
+    void fetchSession(quint64 race);
+    quint64 m_fetchRace = 0;
     bool pollable(const QString &id, const ScanBook &b) const;
     qint64 mono() const { return m_clock.elapsed(); }
     static constexpr qint64 kPollStaleMs = 1000; // an unanswered poll is asked again after this

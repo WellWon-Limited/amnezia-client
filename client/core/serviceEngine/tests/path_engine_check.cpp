@@ -1703,11 +1703,14 @@ static void scenarioRace()
                                             awg("a2", "EE"), xray("x2", "DE"), xray("x3", "NL"), awg("a3", "PL") };
         QStringList started;
         bool bytesDone = false;
+        QList<ProbeStamp> cancelledNow;
         const auto take = [&](const QList<RaceEffect> &fx) {
             for (const RaceEffect &e : fx) {
                 bytesDone = bytesDone || (e.type == RaceEffectType::Done && e.reason == RaceDoneReason::Bytes);
                 if (e.type == RaceEffectType::StartProbe)
                     started << e.path.id.id;
+                if (e.type == RaceEffectType::CancelProbe)
+                    cancelledNow << e.stamp;
             }
         };
         take(race.begin(0, list, tr.current(), hostCaps(), 393216, costs));
@@ -1722,10 +1725,49 @@ static void scenarioRace()
                 race.spent(9000 + 4000);
             }
             take(race.tick(t));
+            for (const ProbeStamp &c : cancelledNow) // the host's final total of the stopped scan arrives a tick later
+                race.settled(c);
+            cancelledNow.clear();
         }
         CHECK(!bytesDone);                       // before: ended "bytes" at +6.3 s with nothing proven
         CHECK(race.spentBytes() >= 22000 && race.spentBytes() <= 393216 / 4); // real bytes only, far below the cap
         CHECK(started.size() >= 6);              // the candidates behind the cancelled probes were still started
+    }
+
+    // Seventh review, finding 2: a probe the race cancels (timeout) keeps its hold on the cap until its spend is final. Cap 120 KB;
+    // an Xray probe really spent 90 KB but the last counter shown says 9 KB: at its timeout the AmneziaWG probe (54.6 KB) must
+    // not be admitted (before: the reservation went with the probe and the race passed its cap: 90 + 36 KB of real bytes).
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.awg = 54572;
+        costs.xray = 100000;
+        RaceTimings rt;
+        rt.hedgeMs = 20000;
+        rt.probeTimeoutMs = 1000;
+        PathRace race(rt);
+        QStringList started;
+        ProbeStamp x1;
+        const auto take = [&](const QList<RaceEffect> &fx) {
+            for (const RaceEffect &e : fx)
+                if (e.type == RaceEffectType::StartProbe) {
+                    started << e.path.id.id;
+                    if (e.path.id.id == QLatin1String("x1"))
+                        x1 = e.stamp;
+                }
+        };
+        take(race.begin(0, { xray("x1", "FI"), awg("a1", "EE") }, tr.current(), hostCaps(), 120000, costs));
+        race.spent(9000);
+        take(race.tick(2500)); // x1 times out
+        CHECK(started == QStringList({ "x1" }));
+        CHECK(race.spentBytes() + race.reservedBytes() >= 109000);       // still held: no room for a 54.6 KB probe
+        race.spent(81000);                                               // the late counter: 90 KB in all
+        take(race.tick(2750));
+        race.settled(x1);
+        take(race.tick(3000));
+        CHECK(started == QStringList({ "x1" }));                         // 90 KB spent + 54.6 KB > 120 KB: still not admitted
+        CHECK(race.spentBytes() <= 120000);
     }
 
     // The hold of a probe in flight is released in full however the probe ends (a result, its timeout, the owner raising its
@@ -1757,13 +1799,17 @@ static void scenarioRace()
         CHECK(started == QStringList({ "x1" }) && race.reservedBytes() == 50000);
         const ProbeStamp s2 = starts(race.probeDone(300, s1, PathOutcome::Inconclusive)); // a result releases it
         CHECK(started == QStringList({ "x1", "x2" }) && race.reservedBytes() == 50000);
-        const ProbeStamp s3 = starts(race.tick(2500));                                     // its timeout releases it
+        starts(race.tick(2500));                                                           // its timeout: no candidate, still held
+        CHECK(started == QStringList({ "x1", "x2" }) && race.reservedBytes() == 50000); // x2: no candidate, still held
+        race.settled(s2);                                                                  // its spend is final: the hold ends
+        const ProbeStamp s3 = starts(race.tick(2750));
         CHECK(started == QStringList({ "x1", "x2", "x3" }) && race.reservedBytes() == 50000);
-        (void)s2;
-        (void)s3;
         starts(race.legStarted(2800, QStringLiteral("x3")));                              // the owner raises its path
+        CHECK(started.size() == 3 && race.reservedBytes() == 50000);                       // x3 held until settled
+        race.settled(s3);
+        starts(race.tick(3050));
         CHECK(started == QStringList({ "x1", "x2", "x3", "x4" }) && race.reservedBytes() == 50000);
-        race.stop(2900);                                                                   // the race ends
+        race.stop(3100);                                                                   // the race ends
         CHECK(race.reservedBytes() == 0 && !race.running());
     }
 

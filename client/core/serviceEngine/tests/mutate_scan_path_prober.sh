@@ -55,6 +55,21 @@ mutate_race() { # name, expected, old, new  (race mutants: path_engine_check on 
   else echo "SURVIVED  $name (expected $want)"; failed=1; fi
 }
 
+mutate_engine() { # name, expected, old, new  (engine mutants: ServiceEngine.h, run by path_integration_check on a mirror of the tree)
+  local name="$1" want="$2" old="$3" new="$4"
+  local d="$WORK/engine-$name" c="$WORK/engine-$name/client"
+  mkdir -p "$c/core/serviceEngine/tests"
+  for f in "$CLIENT"/*; do [ "$(basename "$f")" = core ] || ln -sf "$f" "$c/"; done
+  for f in "$CLIENT"/core/*; do [ "$(basename "$f")" = serviceEngine ] || ln -sf "$f" "$c/core/"; done
+  for f in "$SE"/*; do case "$(basename "$f")" in tests|ServiceEngine.h) ;; *) ln -sf "$f" "$c/core/serviceEngine/" ;; esac; done
+  cp "$HERE"/* "$c/core/serviceEngine/tests/" 2>/dev/null
+  edit "$SE/ServiceEngine.h" "$c/core/serviceEngine/ServiceEngine.h" "$old" "$new" || { echo "ERROR  $name (anchor)"; failed=1; return; }
+  if OUT="$d/check" bash "$c/core/serviceEngine/tests/build_path_integration.sh" >"$d/build.log" 2>&1; then
+    echo "SURVIVED  $name (expected $want)"; failed=1
+  elif [ -x "$d/check" ]; then echo "caught    $name (expected $want) by: path_integration_check"
+  else echo "ERROR     $name: the mutant did not build"; failed=1; fi
+}
+
 # ---- the prober (model + unit check)
 mutate cancelled_result I1 "    m_probes.erase(it); // its seat goes with it (a seat still asked" "    if (onResult) onResult(stamp, path::PathOutcome::Inconclusive, 0);
     m_probes.erase(it); // its seat goes with it (a seat still asked"
@@ -76,11 +91,11 @@ mutate drained_scan_closed "I1/I4/I6" "    if (r.progress.done && (r.progress.fi
         closeScan(scanId);" "    if (r.progress.done)
         closeScan(scanId);"
 mutate delta_charged_twice I6 "    it->seen = total;
-    spend(delta);" "    it->seen = total;
-    spend(delta);
-    spend(delta);"
+    spend(it->race, delta);" "    it->seen = total;
+    spend(it->race, delta);
+    spend(it->race, delta);"
 mutate delta_dropped I6 "    it->seen = total;
-    spend(delta);" "    it->seen = total;"
+    spend(it->race, delta);" "    it->seen = total;"
 mutate total_not_delta I6 "    const qint64 delta = total - it->seen;" "    const qint64 delta = total;"
 mutate polling_stopped_at_cancel_ack I6 "    book->forgetAtMs = qMax(book->forgetAtMs, mono() + kScanFinalWaitMs);
 }" "    m_books.erase(book);
@@ -91,9 +106,9 @@ mutate scan_forgotten_before_final I6 "            book->forgetAtMs = mono() + k
 mutate final_ack_ignored I6 "    if (r.kind == ScanHostReplyKind::Ack && r.bytesSpent >= 0)
         noteTotal(scanId, r.bytesSpent);" "    if (false)
         noteTotal(scanId, r.bytesSpent);"
-mutate size_bound_on_table J6 "    m_books.insert(m_scan.id, ScanBook()); // its host counter" "    while (m_books.size() >= 16)
+mutate size_bound_on_table J6 "    m_books.insert(m_scan.id, book); // its host counter" "    while (m_books.size() >= 16)
         m_books.erase(m_books.begin());
-    m_books.insert(m_scan.id, ScanBook()); // its host counter"
+    m_books.insert(m_scan.id, book); // its host counter"
 mutate idle_scan_cancelled J4 "    if (onResult)
         onResult(p.stamp, outcome, p.bytes);
 }" "    if (onResult)
@@ -104,40 +119,32 @@ mutate idle_scan_cancelled J4 "    if (onResult)
     if (!bound && !m_scan.closed)
         endHostScan();
 }"
-mutate local_failure_charged J5 "            finish(key, path::PathOutcome::Inconclusive, m_caps.maxAwgConcurrent <= 0 ? \"awg_no_host\"" "            spend(1000);
+mutate local_failure_charged J5 "            finish(key, path::PathOutcome::Inconclusive, m_caps.maxAwgConcurrent <= 0 ? \"awg_no_host\"" "            spend(0, 1000);
             finish(key, path::PathOutcome::Inconclusive, m_caps.maxAwgConcurrent <= 0 ? \"awg_no_host\""
 
 # ---- the race's cap (path_engine_check)
-mutate_race reservation_kept_at_timeout cap "                out << cancelEffect(it.key(), it.value().path);
-                it = m_inFlight.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        pump(out);
-        return out;
-    }
-
-    QList<RaceEffect> networkChanged" "                out << cancelEffect(it.key(), it.value().path);
-                it.value().deadline = std::numeric_limits<qint64>::max();
-                ++it;
-            } else {
-                ++it;
-            }
-        }
-        pump(out);
-        return out;
-    }
-
-    QList<RaceEffect> networkChanged"
+mutate_race reservation_kept_at_timeout cap "                m_held.insert(it.key(), costOf(it.value().path)); // it is no longer a candidate, its bytes are not settled yet
+                it = m_inFlight.erase(it);" "                it.value().deadline = std::numeric_limits<qint64>::max(); // mutant: the flight stays
+                ++it;"
 mutate_race reservation_kept_at_result cap "        m_inFlight.erase(it); // its hold on the cap ends with it" "        it.value().deadline = std::numeric_limits<qint64>::max(); // mutant: the flight stays"
-mutate_race reservation_kept_when_leg_raised cap "            if (it.value().path.id.id == pathId) {
-                out << cancelEffect(it.key(), it.value().path);
-                it = m_inFlight.erase(it);" "            if (it.value().path.id.id == pathId) {
-                out << cancelEffect(it.key(), it.value().path);
-                it.value().path.id.id = QStringLiteral(\"-\");
+mutate_race reservation_kept_when_leg_raised cap "                m_held.insert(it.key(), costOf(it.value().path));
+                it = m_inFlight.erase(it);" "                it.value().path.id.id = QStringLiteral(\"-\");
                 ++it;"
 mutate_race admission_ignores_holds cap "m_spent + reservedInFlight() + costOf(c) <= m_cap" "m_spent + costOf(c) <= m_cap"
 mutate_race spent_not_counted cap "            m_spent += bytes;" "            m_spent += 0;"
+mutate_race reservation_released_at_timeout cap "                m_held.insert(it.key(), costOf(it.value().path)); // it is no longer a candidate, its bytes are not settled yet
+" ""
+mutate_race reservation_released_when_leg_raised cap "                m_held.insert(it.key(), costOf(it.value().path));
+                it = m_inFlight.erase(it);" "                it = m_inFlight.erase(it);"
+mutate_race race_ends_while_hold_waits cap "m_inFlight.isEmpty() && m_held.isEmpty() && m_next" "m_inFlight.isEmpty() && m_next"
+mutate_engine late_spend_charged_to_current_race finding3 "        if (race != 0 && race == m_race.raceNumber())" "        if (race != 0)"
+mutate_engine hour_ledger_skips_other_race finding3 "        if (m_chargeProbeBytes)
+            m_chargeProbeBytes(bytes);
+    }" "        if (m_chargeProbeBytes && (race == 0 || race == m_race.raceNumber()))
+            m_chargeProbeBytes(bytes);
+    }"
+mutate settled_at_cancel_not_at_final I8 "    if (followed)
+        m_unsettled[it->scanId] << stamp;" "    if (false)
+        m_unsettled[it->scanId] << stamp;"
 echo "work dir: $WORK"
 exit $failed
