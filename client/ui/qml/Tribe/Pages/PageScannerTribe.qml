@@ -30,9 +30,8 @@ PageType {
     readonly property var view: (hasScanner && TribeScanner.view) ? TribeScanner.view : ({ phase: "idle" })
     readonly property string phase: view.phase || "idle"
     readonly property bool scanning: phase === "preparing" || phase === "connecting" || phase === "reach"
-                                     || phase === "data" || phase === "self"
+                                     || phase === "data"
     readonly property bool hero: view.hero === true
-    readonly property var card: view.card || ({ mode: "hidden" })
     readonly property var barView: view.bar || ({})
     readonly property var emptyView: view.empty || ({})
     readonly property string reason: emptyView.reason || ""
@@ -95,7 +94,24 @@ PageType {
         : (TribeEngine.busy === true && TribeEngine.stopping !== true) || TribeEngine.state === "verifying" ? "connecting"
         : "off"
     readonly property bool emptyResult: phase === "empty"
-    readonly property bool showBar: phase !== "idle" && !blocked && !emptyResult
+    // the bar is up in every state but blocked / empty: on page open too (idle) - it holds the one Scan button
+    readonly property bool showBar: !blocked && !emptyResult
+    // Owner 19.11 (device test, iPhone Air): the country is the SCOPE of the next scan over the whole pool, never a
+    // filter of rows found before. A scope the shown result does not cover = nothing of that result is shown, only
+    // the scope's summary («Германия · 12 серверов») and the Scan button; its own result appears after its scan.
+    readonly property string scope: String(barView.scope || "")
+    readonly property bool scopeKnown: barView.scope !== undefined && Array.isArray(barView.scope_countries)
+    readonly property bool scopePending: scopeKnown && !scanning && scope !== String(barView.scanned_scope || "")
+    onScopePendingChanged: syncRows()
+    // nothing of this scope on the screen yet (page open without results, or a scope not scanned): its summary
+    readonly property bool scopeStart: !scanning && !blocked && !emptyResult && (scopePending || rowsModel.count === 0)
+    function scopeCount(cc) {
+        const list = Array.isArray(barView.scope_countries) ? barView.scope_countries : []
+        let n = 0
+        for (let i = 0; i < list.length; ++i)
+            if (cc === "" || list[i].cc === cc) n += Number(list[i].count || 0)
+        return n
+    }
     readonly property bool showMark: phase === "done" || phase === "empty"
     property bool allCache: false         // every shown row is a cached one (set by syncRows)
     readonly property bool lastResult: !scanning && rowsModel.count > 0 && (blocked || allCache)
@@ -120,7 +136,11 @@ PageType {
         completed = true
         refreshServiceAction()
         // the check with the report runs from Support now (variant B, 18.11): the Scanner never opens with it
-        if (hasScanner) TribeScanner.open(false)
+        // owner 19.11: opening the Scanner never starts a scan - the Scan button does (show(); open() scans)
+        if (hasScanner) {
+            if (typeof TribeScanner.show === "function") TribeScanner.show()
+            else TribeScanner.open(false)
+        }
     }
     // leaving the screen = closed(): a running scan stops, a pending connect the scan started is cancelled (S19)
     Component.onDestruction: if (hasScanner) TribeScanner.close()
@@ -194,7 +214,7 @@ PageType {
         onTriggered: root.syncRows()
     }
     function syncRows() {
-        const src = view.rows || []
+        const src = root.scopePending ? [] : (view.rows || [])
         const vmap = src.some(r => r.transport === "awg" && r.version === undefined) ? versionMap() : {}
         let cacheAll = src.length > 0, crowd = false, liveL = "", liveC = ""
         const byId = {}
@@ -365,7 +385,6 @@ PageType {
                 case "connecting": return ScanTexts.stageConnecting
                 case "reach": return ScanTexts.stageReach.arg(v.stage_count || 0).arg(v.stage_total || 0)
                 case "data": return ScanTexts.stageData.arg(v.stage_count || 0).arg(v.stage_total || 0)
-                case "self": return ScanTexts.stageSelf
                 }
                 return ScanTexts.stageReachShort
             }
@@ -469,7 +488,7 @@ PageType {
                         // the service flow running: the button says so and waits (the artboard's busy pattern, «Проверяем…»)
                         text: root.block.action === "gotIt" ? (root.block.actionText || "")
                               : parent.ensure ? (root.serviceBusy ? (root.svc.busy || "") : (root.svc.button || ""))
-                              : parent.act === "retryNow" ? ScanTexts.retry
+                              : parent.act === "retryNow" ? ScanTexts.scanScope
                               : bar.retryText
                         enabled: (root.block.action === "gotIt" || parent.act === "retryNow") ? true
                                  : (parent.ensure ? !root.serviceBusy : bar.retryEnabled)
@@ -494,10 +513,57 @@ PageType {
                     liveProto: (typeof TribeEngine !== "undefined") ? String(TribeEngine.activeProto || "") : ""
                     liveProtoVersion: (typeof TribeEngine !== "undefined" && TribeEngine.currentNode)
                                       ? String(TribeEngine.currentNode.protoVersion || "") : ""
-                    serverLabel: root.card.server_label || root.liveLabel
+                    serverLabel: root.liveLabel
                                  || ((typeof TribeEngine !== "undefined" && TribeEngine.currentNode) ? (TribeEngine.currentNode.name || "") : "")
-                    serverCc: root.card.server_cc || root.liveCc
+                    serverCc: root.liveCc
                               || ((typeof TribeEngine !== "undefined" && TribeEngine.currentNode) ? (TribeEngine.currentNode.countryCode || "") : "")
+                }
+
+                // «Все страны · 46 серверов» / «Германия · 12 серверов» + what the Scan button does: page open
+                // without results, or a scope the shown result does not cover (the kit's empty-state pattern: icon,
+                // title, text; the action is the bar's Scan button - one button, one meaning)
+                Column {
+                    visible: root.scopeStart
+                    width: parent.width
+                    topPadding: Theme.space.xxl
+                    bottomPadding: Theme.space.lg
+                    spacing: Theme.space.md
+                    readonly property int count: root.scopeCount(root.scope)
+                    TribeStrokeIcon {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: 40; height: 40
+                        icon: "radar"
+                        tint: Theme.color.accent
+                        weight: 1.8
+                    }
+                    Heading {
+                        maxWidth: parent.width - 2 * Theme.space.lg
+                        x: (parent.width - width) / 2
+                        text: parent.count > 0
+                              ? ScanTexts.scopeTitle.arg(root.scope === "" ? ScanTexts.allCountries : bar.countryName(root.scope))
+                                                    .arg(ScanTexts.servers(parent.count))
+                              : ScanTexts.startTitle
+                        textFormat: Text.PlainText
+                        color: Theme.color.text1
+                        font.family: Theme.font.display
+                        font.pixelSize: Theme.font.h3
+                        font.weight: Theme.font.wBold
+                        lineHeight: 24
+                        lineHeightMode: Text.FixedHeight
+                    }
+                    Text {
+                        x: Theme.space.lg
+                        width: parent.width - 2 * Theme.space.lg
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
+                        text: parent.count > 0 ? ScanTexts.scopeText : ScanTexts.startText
+                        textFormat: Text.PlainText
+                        color: Theme.color.text2
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.bodyS
+                        lineHeight: 20
+                        lineHeightMode: Text.FixedHeight
+                    }
                 }
 
                 Text {
@@ -587,7 +653,7 @@ PageType {
                     visible: w !== "none" && !root.blocked
                     width: parent.width
                     // alone in the list it sits in the middle (artboard .list.empty: centred with its 32 margin)
-                    topPadding: (rowsModel.count === 0 && (root.card.mode || "hidden") === "hidden")
+                    topPadding: rowsModel.count === 0
                                 ? Math.max(Theme.space.xxl, (list.height - list.padTop - list.padBottom - 20 + Theme.space.xxl) / 2)
                                 : Theme.space.xxl - content.spacing
                     horizontalAlignment: Text.AlignHCenter
@@ -606,6 +672,8 @@ PageType {
                     id: moreBox
                     readonly property string st: (root.view.more && root.view.more.state) ? String(root.view.more.state) : ""
                     readonly property bool canAsk: root.hasScanner && typeof TribeScanner.findMore === "function"
+                    // the engine's one gate (view.more.blocked): a limit is said on the button, never a dead tap
+                    readonly property string limit: (root.view.more && root.view.more.blocked) ? String(root.view.more.blocked) : ""
                     visible: !root.blocked && rowsModel.count > 0 && (st === "available" || st === "running" || st === "exhausted")
                     width: parent.width
                     height: st === "exhausted" ? moreDone.implicitHeight + Theme.space.sm : moreBtn.implicitHeight + Theme.space.sm
@@ -616,8 +684,10 @@ PageType {
                         width: parent.width
                         variant: "glass"
                         strokeIcon: moreBox.st === "running" ? "" : "radar"
-                        text: moreBox.st === "running" ? ScanTexts.moreRunning : ScanTexts.more
-                        enabled: moreBox.st === "available" && moreBox.canAsk
+                        text: moreBox.st === "running" ? ScanTexts.moreRunning
+                              : moreBox.limit === "budget" ? ScanTexts.moreInMin.arg(root.view.more.retry_min || 1)
+                              : ScanTexts.more
+                        enabled: moreBox.st === "available" && moreBox.limit === "" && moreBox.canAsk
                         onClicked: { Haptic.play("light"); TribeScanner.findMore() }
                     }
                     Text {
@@ -627,7 +697,9 @@ PageType {
                         width: parent.width
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.WordWrap
-                        text: ScanTexts.moreExhausted
+                        // a country scope: every server of that country was checked («Найти ещё» has nothing left)
+                        text: root.scope !== "" && root.scope === String(root.barView.scanned_scope || "")
+                              ? ScanTexts.moreExhaustedScope.arg(bar.countryName(root.scope)) : ScanTexts.moreExhausted
                         textFormat: Text.PlainText
                         color: Theme.color.text3
                         font.family: Theme.font.body

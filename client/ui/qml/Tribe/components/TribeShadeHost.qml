@@ -49,7 +49,7 @@ Item {
         }
         shade.shown = qShown
     }
-    // a key without a text (wifi_intent today) must not hold the queue: let it go (after this change settles)
+    // a key without a text must not hold the queue: let it go (after this change settles)
     onQChanged: {
         if (queueDriven && active && q.visible === true && q.leaving !== true
                 && textOf(q.text_key || "", q.args || []) === "") {

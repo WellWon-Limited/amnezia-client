@@ -2,7 +2,7 @@
 // clock, with a fake probe host that speaks real `tribe-scan-v1` JSON (ScanHostContract.h encoders and
 // decoders: freeze ack, final totals, opening / closing access attempts, the shared byte gate), a fake HTTP
 // layer playing the server (signed manifest with ETag and 304, scan token, signed probe-batch, release,
-// outcomes) and a fake engine (the three tunnel actions, light checks, report checks). One QTcpServer case
+// outcomes) and a fake engine (the three tunnel actions, report checks). One QTcpServer case
 // proves the production QNAM layer cuts an answer at its reservation.
 // Build + run: tests/build_scanner_facade.sh (--mutate: the coordinator rule breaks, each must fail here).
 
@@ -159,21 +159,18 @@ struct FakeEngine : IScanEngine {
         bool force = false;
     };
     QList<RowCall> rowCalls;
-    int lights = 0;
     int reports = 0;
     QString lastReportId;
     QHash<QString, ScanAwgNodeInput> awg;
     QHash<QString, QStringList> knownIps;
     QString liveBase;
     bool queueFull = false;
-    std::function<void(const QString &, quint64)> lightHook; // set by the world: answers the facts (with the ask id)
 
     ScanCurrent current() const override { return cur; }
     ScanNetFacts network() const override { return net; }
     void fillManifestInput(ScanManifestInput &in) const override
     {
         in.ownNodes = own;
-        in.ruSplitOn = true;
     }
     QString ownProbeConfig(const ScanCandidate &c) const override { return QStringLiteral("OWN-CONFIG-") + c.id; }
     QString liveProbeBase(const ScanCurrent &) const override { return liveBase; }
@@ -185,7 +182,6 @@ struct FakeEngine : IScanEngine {
         return true;
     }
     QStringList knownHostIps(const QString &host) const override { return knownIps.value(host); }
-    bool appInFront() const override { return true; }
     bool reportQueueFull() const override { return queueFull; }
     QString uiLanguage() const override { return QStringLiteral("ru"); }
     void userConnectForScan() override { ++userConnects; }
@@ -193,13 +189,6 @@ struct FakeEngine : IScanEngine {
     void connectRow(const QString &nodeId, const QStringList &order, qint64 ttl, bool userOrigin, bool force) override
     {
         rowCalls << RowCall{nodeId, order, ttl, userOrigin, force};
-    }
-    void startLightChecks(const QString &nodeId) override { startLightChecksFor(nodeId, 0); }
-    void startLightChecksFor(const QString &nodeId, quint64 askId) override
-    {
-        ++lights;
-        if (lightHook)
-            lightHook(nodeId, askId);
     }
     void startReportCheck(const QString &id, const QJsonObject &, bool) override
     {
@@ -939,8 +928,6 @@ struct World {
     bool liveWorks = true;
     bool liveBadDigest = false; // the body arrives in full but is not the one the nonce defines
     QList<QPair<int, bool>> liveScript; // per runner call (warm, data, ...): {delay ms, bad digest}; empty = 120 ms, liveBadDigest
-    int lightAnswers = -1;              // -1 = every light check is answered; n = only the first n
-    int lightDelayMs = 300;
     QList<QPair<QString, qint64>> charges; // the coordinator's own host charges (onHostCharge): host scan id, bytes
     int crossEvents = 0;                // machine events a host answer caused for ANOTHER scan than its own (must stay 0)
     bool poolOnOpen = false;
@@ -993,24 +980,6 @@ struct World {
                                            {"projection", projection}};
             host.outcomes.insert(QStringLiteral("up:") + pid, Outcome{true, 70 + 10 * i, 500});
         }
-        engine.lightHook = [this](const QString &, quint64 askId) {
-            if (lightAnswers == 0)
-                return;
-            if (lightAnswers > 0)
-                --lightAnswers;
-            ev.at(lightDelayMs, [this, askId]() {
-                ScanLightFact sv;
-                sv.kind = ScanFactKind::Services;
-                sv.state = ScanFactState::Done;
-                sv.chips = {2, 2, 2, 2};
-                s->lightFactFor(askId, sv);
-                ScanLightFact st;
-                st.kind = ScanFactKind::Sites;
-                st.state = ScanFactState::Done;
-                st.ok = true;
-                s->lightFactFor(askId, st);
-            });
-        };
     }
 
     void start()
@@ -1186,7 +1155,7 @@ struct World {
 // --- cases -------------------------------------------------------------------------------------------------------
 
 // A full scan end to end: manifest (signed 200, stored with its ETag), caps, the host scan, the seats, the
-// live-tunnel proof, the light checks, the stop (freeze, cancel, final), outcomes, cache, ledger.
+// live-tunnel proof, the stop (freeze, cancel, final), outcomes, cache, ledger.
 static void caseFullScan()
 {
     g_case = QStringLiteral("full_scan");
@@ -1231,12 +1200,11 @@ static void caseFullScan()
     CHECK(!w.rowFlag(QStringLiteral("4:xray"), "live_unverified")); // proven by the live-tunnel probe
     CHECK_EQ(w.liveProbes.size(), 2); // warm + data on one connection
     CHECK(w.liveProbes.size() == 2 && w.liveProbes.at(0).scanToken == st->value("probe").toObject().value("token").toString());
-    // seats released with their lease ids, outcomes sent, cache + ledger persisted, light checks ran
+    // seats released with their lease ids, outcomes sent, cache + ledger persisted
     CHECK(!w.server.releasedLeases.isEmpty());
     CHECK(w.server.outcomeItems > 0);
     CHECK(w.store.m.contains(QLatin1String(kScanBudgetStoreKey)));
     CHECK(w.store.m.contains(scanCacheStoreKey(QStringLiteral("wifi"), w.s->lastNetwork().fingerprint)));
-    CHECK_EQ(w.engine.lights, 1);
     CHECK_EQ(w.engine.userConnects, 0);
     CHECK_EQ(w.engine.cancels, 0);
     CHECK(w.engine.rowCalls.isEmpty());
@@ -1244,9 +1212,8 @@ static void caseFullScan()
     qint64 hostFinal = 0;
     for (const FakeHost::Scan &sc : w.host.scans)
         hostFinal += sc.gate.spent();
-    const qint64 lightWorst = w.s->machine().tunables().costLightBytes;
     const qint64 live = kLiveSpent;
-    CHECK_EQ(w.ledgerLast(), w.http.totalBytes + hostFinal + lightWorst + live);
+    CHECK_EQ(w.ledgerLast(), w.http.totalBytes + hostFinal + live);
     CHECK(w.logsClean());
 }
 
@@ -1447,7 +1414,7 @@ static void caseCellularBudget()
     CHECK(st != nullptr);
     const qint64 grant = st ? qint64(st->value("max_bytes").toDouble(-1)) : -1;
     const qint64 a = t.budgetScanBytes; // a fresh hour: A = scan_budget_scan_bytes
-    const qint64 slice = m.resp.bytes + t.costTunnelProbeBytes + t.costLightBytes + t.costOutcomesBytes
+    const qint64 slice = m.resp.bytes + t.costTunnelProbeBytes + t.costOutcomesBytes
                          + t.costBatchBytes + t.costApiBytes;
     CHECK_EQ(grant, a - slice);
 
@@ -1465,7 +1432,7 @@ static void caseCellularBudget()
     for (const FakeHost::Scan &sc : w.host.scans)
         hostFinal += sc.gate.spent();
     qint64 live = kLiveSpent;
-    CHECK_EQ(w.ledgerLast(), w.http.totalBytes + hostFinal + t.costLightBytes + live);
+    CHECK_EQ(w.ledgerLast(), w.http.totalBytes + hostFinal + live);
     CHECK(w.logsClean());
 }
 
@@ -1502,7 +1469,7 @@ static qint64 drainCase(FakeHost::Freeze fz, FakeHost::Cancel cn, qint64 *grantO
     *finalOut = fin;
     const ScanTunables t = w.s->machine().tunables();
     qint64 live = kLiveSpent;
-    *appOut = w.http.totalBytes + t.costLightBytes + live;
+    *appOut = w.http.totalBytes + live;
     CHECK_EQ(w.engine.cancels, 0);
     CHECK_EQ(w.engine.userConnects, 0);
     return w.ledgerLast();
@@ -1545,7 +1512,7 @@ static void caseDrain()
         const ScanTunables t = w.s->machine().tunables();
         qint64 live = kLiveSpent;
         CHECK(!w.s->machine().draining());
-        CHECK_EQ(w.ledgerLast(), w.http.totalBytes + t.costLightBytes + live + spent + reserved);
+        CHECK_EQ(w.ledgerLast(), w.http.totalBytes + live + spent + reserved);
     }
 
     g_case = QStringLiteral("drain_no_ack");
@@ -1664,7 +1631,7 @@ static void caseAbandonedManifest()
         hostFinal += sc.gate.spent();
     const qint64 live = kLiveSpent;
     CHECK_EQ(w.ledgerCount(), 1);
-    CHECK_EQ(w.ledgerLast(), w.http.totalBytes + hostFinal + t.costLightBytes + live);
+    CHECK_EQ(w.ledgerLast(), w.http.totalBytes + hostFinal + live);
     // the engine moves to a node the scan did not prove (chosen elsewhere): its live proof uses the token of
     // the scan the screen shows
     w.liveOn(QStringLiteral("12:xray"));
@@ -1788,7 +1755,7 @@ static void caseHostUnavailable()
     CHECK_EQ(c.host.count("scan_start"), 0);
     CHECK(!c.s->machine().draining());
     const ScanTunables t = c.s->machine().tunables();
-    const qint64 appSlice = qint64(t.costManifestBytes) + t.costApiBytes + t.costTunnelProbeBytes + t.costLightBytes
+    const qint64 appSlice = qint64(t.costManifestBytes) + t.costApiBytes + t.costTunnelProbeBytes
                             + t.costOutcomesBytes + t.costBatchBytes + t.costApiBytes;
     CHECK(onlyScanEntryAppSide(c, appSlice, t)); // the app side only: host charge 0
 }
@@ -1801,7 +1768,7 @@ static bool onlyScanEntryAppSide(const World &w, qint64 appSlice, const ScanTuna
     const QList<ScanLedgerEntry> &e = w.s->machine().ledger().entries();
     if (e.isEmpty() || e.first().bytes <= 0 || e.first().bytes > appSlice)
         return false;
-    const qint64 postMax = qMax(qMax<qint64>(t.costApiBytes, t.costOutcomesBytes), qMax<qint64>(t.costLightBytes, t.costTunnelProbeBytes));
+    const qint64 postMax = qMax(qMax<qint64>(t.costApiBytes, t.costOutcomesBytes), qint64(t.costTunnelProbeBytes));
     for (int i = 1; i < e.size(); ++i)
         if (e.at(i).bytes > postMax)
             return false;
@@ -1951,7 +1918,7 @@ static void caseRefusedStart()
     const qint64 grant = st ? qint64(st->value("max_bytes").toDouble(-1)) : -1;
     CHECK(grant > 0);
     const ScanTunables t = w.s->machine().tunables();
-    const qint64 appSlice = qint64(t.costManifestBytes) + t.costApiBytes + t.costTunnelProbeBytes + t.costLightBytes
+    const qint64 appSlice = qint64(t.costManifestBytes) + t.costApiBytes + t.costTunnelProbeBytes
                             + t.costOutcomesBytes + t.costBatchBytes + t.costApiBytes;
     CHECK(onlyScanEntryAppSide(w, appSlice, t));
     CHECK_EQ(w.host.count("scan_freeze"), 0); // nothing to freeze: the host never took it
@@ -1997,7 +1964,7 @@ static void caseHostDied()
     CHECK_EQ(w.host.count("scan_poll"), pollsBefore); // a dead host is not polled
     const ScanTunables t = w.s->machine().tunables();
     const qint64 live = kLiveSpent;
-    CHECK_EQ(w.ledgerLast(), w.http.totalBytes + t.costLightBytes + live + grant);
+    CHECK_EQ(w.ledgerLast(), w.http.totalBytes + live + grant);
 
     g_case = QStringLiteral("host_lost_scan");
     World l(capsMac(), ScanNetKind::Cellular, 8);
@@ -2016,7 +1983,7 @@ static void caseHostDied()
     CHECK(l.phase() != QStringLiteral("reach") && l.phase() != QStringLiteral("data"));
     CHECK_EQ(l.ledgerCount(), 1);
     const qint64 llive = kLiveSpent;
-    CHECK_EQ(l.ledgerLast(), l.http.totalBytes + t.costLightBytes + llive + lgrant);
+    CHECK_EQ(l.ledgerLast(), l.http.totalBytes + llive + lgrant);
 }
 
 // Outside a scan the iOS extension reports its path element in the scan_caps reply: it joins the tuple at the
@@ -2041,10 +2008,10 @@ static void caseCapsGen()
     w.host.avail = ScanHostAvailability::Available;
     w.host.onAvailabilityChanged();
     w.run(50);
-    // a network change after a finished result: the screen rescans by itself (artboard, 17.11)
-    CHECK_EQ(w.phase(), QStringLiteral("preparing"));
+    // a network change after a finished result: seen (the host's new gen), no scan by itself (owner 19.11)
+    CHECK_EQ(w.phase(), QStringLiteral("idle"));
     w.run(20000);
-    CHECK_EQ(w.host.count("scan_start"), 2);
+    CHECK_EQ(w.host.count("scan_start"), 1);
 }
 
 // The machine is built from the host's own scan_caps answer, not the compiled guess.
@@ -2069,8 +2036,7 @@ static void caseCapsFromHost()
     CHECK(st && st->value("limits").toObject().value("leg_concurrency").toInt() > 0);
 }
 
-// The screen fields the core's JSON leaves out: the row's protocol version, the card's server name and
-// country, the country menu's localized names, the return-home switch, the network-change shade.
+// The screen fields the core's JSON leaves out: the row's protocol version, the country menu's localized names, the return-home switch, the network-change shade.
 static void caseScreenFields()
 {
     g_case = QStringLiteral("screen_fields");
@@ -2084,9 +2050,7 @@ static void caseScreenFields()
     CHECK_EQ(w.phase(), QStringLiteral("done"));
     CHECK_EQ(w.row(QStringLiteral("5:xray")).value("version").toString(), QStringLiteral("v-5"));
     CHECK_EQ(w.row(QStringLiteral("4:xray")).value("version").toString(), QStringLiteral("v-live"));
-    const QVariantMap card = w.s->view().value("card").toMap();
-    CHECK_EQ(card.value("server_label").toString(), QStringLiteral("Live"));
-    CHECK_EQ(card.value("server_cc").toString(), QStringLiteral("DE"));
+    CHECK(!w.s->view().contains("card")); // the Scanner has no connection card (variant B, 19.11)
     bool de = false, fi = false;
     for (const QVariant &c : w.s->view().value("bar").toMap().value("countries").toList()) {
         const QVariantMap m = c.toMap();
@@ -2136,20 +2100,20 @@ static void caseScreenFields()
         g_case = QStringLiteral("screen_fields");
     }
 
-    // a change while results are shown: the shade «Сеть сменилась — проверяем заново» and a new scan by itself
-    // (artboard, «Сеть сменилась после скана»)
-    g_case = QStringLiteral("network_changed_shade_results");
+    // a change while results are shown (owner 19.11: no scan unless the person presses «Сканировать»): no scan by
+    // itself, no «проверяем заново» shade - the open page of the new network
+    g_case = QStringLiteral("network_changed_results_no_rescan");
     w.run(5000);
     const int startsBefore = w.host.count("scan_start");
     w.engine.net.appSources[0].counter = 5;
     w.s->networkChanged();
-    CHECK_EQ(w.phase(), QStringLiteral("preparing"));
-    CHECK_EQ(w.s->shade().value("text_key").toString(), QStringLiteral("network_changed"));
+    CHECK_EQ(w.phase(), QStringLiteral("idle"));
+    CHECK(!w.s->shade().value("visible").toBool());
     w.run(20000);
-    CHECK_EQ(w.host.count("scan_start"), startsBefore + 1);
+    CHECK_EQ(w.host.count("scan_start"), startsBefore);
     CHECK_EQ(w.engine.userConnects, 0);
 
-    // a change mid-scan: the machine rescans by itself, the same shade says so
+    // a change mid-scan: the person's scan restarts on the new network, the shade says so
     g_case = QStringLiteral("network_changed_shade_scan");
     World m;
     m.liveOn(QStringLiteral("4:xray"));
@@ -2365,7 +2329,7 @@ static void caseBaseIps()
 }
 
 // The engine refuses the full check (another diagnostic runs, the queue filled in a race): a notice, the
-// card restored, no «sent» text.
+// check over, no «sent» text.
 static void caseReportRefused()
 {
     for (const auto &rc : QList<QPair<QString, QString>>{{QStringLiteral("busy"), QStringLiteral("report_check_busy")},
@@ -2376,71 +2340,13 @@ static void caseReportRefused()
         w.start();
         w.s->open();
         w.run(20000);
-        w.s->tapCheck();
+        w.s->checkFromSupport();
         CHECK_EQ(w.engine.reports, 1);
-        CHECK_EQ(w.s->view().value("card").toMap().value("mode").toString(), QStringLiteral("checking"));
+        CHECK(w.s->view().value("support_check").toMap().value("running").toBool());
         w.s->reportCheckRefused(w.engine.lastReportId, rc.first);
         CHECK_EQ(w.s->shade().value("text_key").toString(), rc.second);
-        CHECK(w.s->view().value("card").toMap().value("mode").toString() != QStringLiteral("checking"));
+        CHECK(!w.s->view().value("support_check").toMap().value("running").toBool());
     }
-}
-
-// The full check's card facts are bound to their report: a fact of report A after a new scan started, or after
-// report B started, never fills the current card.
-static void caseReportBoundFacts()
-{
-    const auto speedFact = []() {
-        ScanLightFact f;
-        f.kind = ScanFactKind::Speed;
-        f.state = ScanFactState::Done;
-        f.bars = 5;
-        f.word = QStringLiteral("comfortable");
-        return f;
-    };
-    const auto cardSpeed = [](World &w) { return w.s->view().value("card").toMap().value("speed").toMap().value("state").toString(); };
-
-    g_case = QStringLiteral("report_fact_current");
-    World w;
-    w.liveOn(QStringLiteral("4:xray"));
-    w.start();
-    w.s->open();
-    w.run(20000);
-    w.s->tapCheck();
-    const QString a = w.engine.lastReportId;
-    CHECK(!a.isEmpty());
-    w.s->lightFactForReport(a, speedFact());
-    CHECK_EQ(cardSpeed(w), QStringLiteral("done")); // the check's own fact fills the card
-
-    g_case = QStringLiteral("report_fact_after_report_b");
-    w.s->reportCheckDone(true, a);
-    w.run(2000);
-    w.s->tapCheck();                                   // report B
-    const QString b = w.engine.lastReportId;
-    CHECK(!b.isEmpty() && b != a);
-    w.s->lightFactForReport(a, speedFact());           // a late fact of A
-    CHECK(cardSpeed(w) != QStringLiteral("done"));
-    w.s->lightFactForReport(b, speedFact());
-    CHECK_EQ(cardSpeed(w), QStringLiteral("done"));
-
-    g_case = QStringLiteral("report_fact_after_new_scan");
-    World n;
-    n.liveOn(QStringLiteral("4:xray"));
-    n.start();
-    n.s->open();
-    n.run(20000);
-    n.s->tapCheck();                                   // report A runs ...
-    const QString ra = n.engine.lastReportId;
-    n.lightAnswers = 0;                                // ... the new scan's own light checks never answer
-    n.run(31000);
-    n.s->retry();                                      // a new scan while A still runs
-    n.run(500);
-    CHECK(n.host.count("scan_start") == 2);
-    ScanLightFact sites;
-    sites.kind = ScanFactKind::Sites;
-    sites.state = ScanFactState::Done;
-    sites.ok = true;
-    n.s->lightFactForReport(ra, sites);                // a late fact of A
-    CHECK(n.s->view().value("card").toMap().value("sites").toMap().value("state").toString() != QStringLiteral("done"));
 }
 
 // The Doctor's speed sample: one sized /v1/probe through the live tunnel with the scan's token, its digest
@@ -3569,27 +3475,6 @@ static void caseStaleBatch()
     CHECK_EQ(w.server.releasedLeases.size(), 6);
 }
 
-// The light checks' facts belong to the scan / network / live node that asked: after a change a late fact of
-// the old check is dropped (here the new check never answers: its card rows end unknown, not the old facts).
-static void caseStaleLightFacts()
-{
-    g_case = QStringLiteral("stale_light_facts");
-    World w;
-    w.lightAnswers = 1;     // only the first light check (scan A's) ever answers
-    w.lightDelayMs = 600;
-    w.liveOn(QStringLiteral("4:xray"));
-    w.start();
-    w.s->open();
-    w.run(200);
-    CHECK_EQ(w.engine.lights, 1);
-    w.engine.net.appSources[0].counter = 7;
-    w.s->networkChanged();
-    w.run(20000);
-    CHECK(w.engine.lights >= 2);
-    const QVariantMap card = w.s->view().value("card").toMap();
-    CHECK_EQ(card.value("sites").toMap().value("state").toString(), QStringLiteral("unknown"));
-}
-
 // F2: the live-tunnel probe's allowance is enforced on the wire (headers + body as read, aborted at once) and
 // the ledger gets what really came - an oversized error body, oversized headers - never a clamped figure.
 static void caseWireCap()
@@ -3901,7 +3786,6 @@ int main(int argc, char **argv)
     propertyBytes();
     propertySeats();
     caseStaleBatch();
-    caseStaleLightFacts();
     caseWireCap();
     caseManifestFailureBytes();
     caseScannerOff();
@@ -3910,7 +3794,6 @@ int main(int argc, char **argv)
     caseBaseIps();
     caseReportRefused();
     caseSpeedSample();
-    caseReportBoundFacts();
     caseScreenFields();
     caseQnamCut();
     if (g_fail) {

@@ -25,7 +25,7 @@
 //                          never for a tunnel this machine did not start (a fresh machine after an app
 //                          relaunch never cancels anything), never on completion. The machine has no other
 //                          way to turn the VPN off.
-// The scan's own deadline and the light-check bound are wake-ups of this machine (wakeAtMs); they stop
+// The scan's own deadline and the allowance's settle bounds are wake-ups of this machine (wakeAtMs); they stop
 // probes and fill the screen, they never act on the tunnel. An AmneziaWG mini-session (the device's own key)
 // is never planned for, and leaves the scan the moment it becomes, the live tunnel's node or the target of a
 // connect attempt in progress (awg-probe-plan.md §5: the same key there would move the live endpoint).
@@ -61,11 +61,11 @@
 //    the outcome and the Doctor row carry evidence "exclusion", contract 1.7.0).
 //  - The live connection (F2) is a row «Подключено» at once, but «works» (counted, cached, in the summary)
 //    only after ProbeLiveTunnel - the sized, digest-checked /v1/probe through the live tunnel - says so, once
-//    per scan; the light checks (S8) also run again with every scan (F9).
+//    per scan.
 //  - Bytes (plan §2.2b, F6/F7): ONE allowance per scan A = min(scan_budget_scan_bytes, the rolling cellular
 //    hour) on cellular, the server device budget where named, else unlimited. The app side is reserved FIRST
 //    at its worst cases (scan_cost_*: manifest + token before the host; then probe-batch (+ configs on Wi-Fi),
-//    one batch release, the live-tunnel probe, the light checks, the outcome batch); every app request is
+//    one batch release, the live-tunnel probe, the outcome batch); every app request is
 //    admitted against that slice with the atomic rule and its reservation is replaced by the real bytes
 //    (appRequestDone). The host gets the rest as max_bytes; below the cheapest probe the host is not started
 //    (app side only, shade "scan_budget"). Stop: FreezeHostScan, then StopHostScan after the freeze ack; the
@@ -75,8 +75,8 @@
 //  - Cellular budget (ScanBudget.h): a scan starts only when the rolling hour covers its projection; the
 //    button becomes «Повторить через N мин» (hint «Лимит сканов в мобильной сети на этот час»).
 //  - Flow: Preparing (manifest requested) -> [Connecting (S1, VPN-required host, VPN off)] -> Reach (S2) ->
-//    Data (S3: from the first data item or the host's phase) -> Self (S4: the light checks of «Ваше
-//    подключение», only with a live connection, bounded by scan_light_timeout_ms) -> Done (S5) | Empty (S7).
+//    Data (S3: from the first data item or the host's phase) -> Done (S5) | Empty (S7). No separate step checks
+//    the live connection (owner 18.11, variant B: that check with its report lives in Support).
 //    NoScan = a scan could not run (scanner switched off / manifest unavailable, budget, host error,
 //    network changed while showing results): cached rows within scan_cache_works_ttl_s are the result.
 //  - Stop at scan_stop_works working rows (works + slow, the live connection included) or scan_stop_ms
@@ -96,7 +96,8 @@
 //    the scan, which has its reservation. Refused: no_seat / rate_limited / transport -> «Не проверено»
 //    (never «Не работает»); disabled / not_entitled / over_quota / lease_gone -> dropped. Seats asked go to
 //    the Doctor summary (seats_requested, contract 1.7.0) and lastStats().
-//  - Rows: at most scan_list_target_works verified rows (the live connection, the connecting row and rows
+//  - Rows («Найти ещё» series: per batch, the batches in their order - rowBatch): at most scan_list_target_works
+//    verified rows (the live connection, the connecting row and rows
 //    whose connect failed always kept; the rest admitted by tier first, fresh before cached, then speed),
 //    shown by speed class (fast, medium, slow), then ms, then tier, rank, id - a total order, so a row moves
 //    only when its own facts change; the live connection sits where its live ms puts it (artboard). Then
@@ -104,19 +105,18 @@
 //  - Country filter after the scan (the menu is disabled while scanning, hidden with one country), reset
 //    by a new scan; the attempt order hint follows the filtered order.
 //  - Tap (S8): during a scan the scan stops at once and keeps its fresh rows. Connecting -> «Подключение…»;
-//    the engine's live data (vpnState dataFlowing) -> «Подключено», the screen STAYS (owner 15.11), the card
-//    refills for the new node; connectFailed -> «Не удалось» + warning shade «… подключаем следующую» while
+//    the engine's live data (vpnState dataFlowing) -> «Подключено», the screen STAYS (owner 15.11);
+//    connectFailed -> «Не удалось» + warning shade «… подключаем следующую» while
 //    the hint has a candidate left, else «… проверьте снова через минуту».
-//  - Card «Ваше подключение»: Off without a live data path; Filling / Filled from the light facts; Checking
-//    while the button's check runs («Проверяем…»); Checked after the report: shade success (sent) or info
-//    (queued offline, «Отчёт уйдёт, когда появится связь»). The report is always sent (the coordinator).
-//  - Empty (S7): «Понял, подключусь к Wi‑Fi» (cellular) arms the Wi-Fi intent for scan_wifi_rescan_window_s:
-//    a Wi-Fi network delivered while the app is in front (networkChanged with appInFront, or appForeground)
-//    opens the Scanner and scans once (A5).
+//  - Support's check (supportCheckTapped): the full check with its report, running + progress; after the
+//    report: shade success (sent) or info (queued offline, «Отчёт уйдёт, когда появится связь»). The report is
+//    always sent (the coordinator). The Scanner's view has no card of it.
+//  - Empty (S7): «Понял, подключусь к Wi‑Fi» closes the screen; nothing scans later by itself.
+//  - No scan starts unless the person presses «Сканировать» (owner 19.11): shown() opens the screen without one.
 //  - Network change during a scan: the scan is cancelled (its finished results still reported under the old
-//    key) and restarted on the new network; while the open screen shows a finished result: a new scan by itself
-//    (artboard; scanRescanOnNetworkChange - cooldown cleared, the cellular hour still applies, never starting the
-//    VPN), otherwise the new network's cached rows (NoScan network_changed).
+//    key) and restarted on the new network; after a finished result: the new network's cached result with its
+//    age and scope, else the open page without a result (phase Idle) - never a scan by itself.
+//  - A persisted result keeps the scope it covered (ScanCachedResult.scope): shown again under that scope.
 //  - Outcomes (ScanOutcomes.h): one batch per scan (also for a cancelled one: what was measured is true),
 //    one per tap's connect chain. Budget actuals go to the ledger at every scan end (PersistBudget).
 //  - Doctor summary (lab seam S4, 16.11): every planned candidate ends in exactly one bucket - works, slow, a
@@ -159,7 +159,7 @@ namespace avpn {
 
 // --- phases --------------------------------------------------------------------------------------------------
 
-enum class ScanPhase { Idle, Preparing, Connecting, Reach, Data, Self, Done, Empty, NoScan };
+enum class ScanPhase { Idle, Preparing, Connecting, Reach, Data, Done, Empty, NoScan };
 
 inline const char *scanPhaseName(ScanPhase p)
 {
@@ -169,7 +169,6 @@ inline const char *scanPhaseName(ScanPhase p)
     case ScanPhase::Connecting: return "connecting";
     case ScanPhase::Reach: return "reach";
     case ScanPhase::Data: return "data";
-    case ScanPhase::Self: return "self";
     case ScanPhase::Done: return "done";
     case ScanPhase::Empty: return "empty";
     case ScanPhase::NoScan: break;
@@ -179,28 +178,7 @@ inline const char *scanPhaseName(ScanPhase p)
 
 inline bool scanPhaseScanning(ScanPhase p)
 {
-    return p == ScanPhase::Preparing || p == ScanPhase::Connecting || p == ScanPhase::Reach || p == ScanPhase::Data
-           || p == ScanPhase::Self;
-}
-
-// A network change while the open screen shows a finished result (artboard, «Сеть сменилась после скана»: the
-// shade «Сеть сменилась — проверяем заново» and a new scan by itself, instead of the old result and «Повторить»).
-// Only from a result the person is looking at - Done, Empty, or NoScan for the pause, the cellular hour or an
-// earlier network change (the new network clears the pause, §32 п. 9; the hour is checked again by beginScan,
-// which shows frame 22 when it is still used up). Never by starting the VPN: a host that needs the VPN (iPhone,
-// Android) with no tunnel working, up or coming keeps «Повторить» - only opening the Scanner or its button starts
-// the user's connect (§32 п. 2б). Every other NoScan (service, host, server switch, vpn_off, manifest) keeps
-// «Повторить» as before. No new timer and no new limit: the scan runs under the existing budget and cooldown. Pure.
-inline bool scanRescanOnNetworkChange(bool screenOpen, ScanPhase phase, const QString &noScanReason, bool hostNeedsVpn,
-                                      bool tunnelUpOrComing)
-{
-    if (!screenOpen || (hostNeedsVpn && !tunnelUpOrComing))
-        return false;
-    if (phase == ScanPhase::Done || phase == ScanPhase::Empty)
-        return true;
-    return phase == ScanPhase::NoScan
-           && (noScanReason == QLatin1String("cooldown") || noScanReason == QLatin1String("budget")
-               || noScanReason == QLatin1String("network_changed"));
+    return p == ScanPhase::Preparing || p == ScanPhase::Connecting || p == ScanPhase::Reach || p == ScanPhase::Data;
 }
 
 // --- actions -------------------------------------------------------------------------------------------------
@@ -213,14 +191,12 @@ enum class ScanActionKind {
     StopHostScan,       // scanId: scan_cancel (after the freeze ack, or when it did not come)
     RequestProbeBatch,  // ids + candidates (profile ids), includeConfig: POST /v1/upstream/lease/probe-batch (once per scan)
     ReleaseProbeLeases, // ids (<= 12): POST /v1/upstream/lease/probe-batch/release with their lease ids
-    StartLightChecks,   // nodeId: server + chips state + RU sites, answer with lightFact events
     StartReportCheck,   // withConnection: the full check + report (sent ALWAYS)
     ShowShade,          // shade: enqueue in the app's ShadeQueue
     SendOutcomes,       // networkKey, outcomes: POST /v1/telemetry/path-outcomes (ScanOutcomeCollector batches)
     PersistResults,     // cached: store per network key
     PersistBudget,      // ledger: QSettings avpn/scanBudget
     CloseScreen,        // leave the Scanner page
-    OpenScreen,         // open the Scanner page (the Wi-Fi intent fired)
     ProbeLiveTunnel,    // nodeId, warmBytes, bytes: the sized /v1/probe through the LIVE tunnel (review F2), answer
                         // with liveProbeResult - the connected row is «works» only after it
     RequestCandidates,  // networkKey, scopeCountry ("" | cc | "whitelist"), ids = seen, batch = limit: POST
@@ -241,14 +217,12 @@ inline const char *scanActionName(ScanActionKind k)
     case ScanActionKind::StopHostScan: return "stop_host_scan";
     case ScanActionKind::RequestProbeBatch: return "request_probe_batch";
     case ScanActionKind::ReleaseProbeLeases: return "release_probe_leases";
-    case ScanActionKind::StartLightChecks: return "start_light_checks";
     case ScanActionKind::StartReportCheck: return "start_report_check";
     case ScanActionKind::ShowShade: return "show_shade";
     case ScanActionKind::SendOutcomes: return "send_outcomes";
     case ScanActionKind::PersistResults: return "persist_results";
     case ScanActionKind::PersistBudget: return "persist_budget";
     case ScanActionKind::CloseScreen: return "close_screen";
-    case ScanActionKind::OpenScreen: return "open_screen";
     case ScanActionKind::ProbeLiveTunnel: return "probe_live_tunnel";
     case ScanActionKind::RequestCandidates: return "request_candidates";
     case ScanActionKind::UserConnectForScan: return "user_connect_for_scan";
@@ -339,7 +313,9 @@ struct ScanOpen {
 
 inline constexpr char kScannerConnectOnOpenFlag[] = "scanner_connect_on_open";
 
-// REQ S3 (b) kill switch: the scan-initiated user connect on open; compiled default ON.
+// REQ S3 (b) kill switch, compiled default ON. The server key keeps its name (contract), its meaning since 19.11
+// (no scan on page open): «Сканировать» connects the VPN first when it is off (a host that probes through the
+// tunnel); off = the button reads «Подключиться и проверить» and that tap is the person's explicit connect.
 inline bool scanConnectOnOpenFlag() { return TuningStore::flag(QLatin1String(kScannerConnectOnOpenFlag), true); }
 
 struct ScanManifestInput {
@@ -356,50 +332,17 @@ struct ScanManifestInput {
     QStringList probeBaseIps;             // IP literals of the probe base's host (scan_start probe.base_ips)
     bool strictUnverifiable = false;      // features.upstream_unverifiable_strict: true = no proof by exclusion
     qint64 apiBytes = -1;                 // what the manifest / token requests really transferred (-1 unknown)
-    bool ruSplitOn = true;                // the RU split is on: the light checks open RU sites (else they cost 0)
-};
-
-enum class ScanFactKind { Server, Services, Sites, Speed };
-enum class ScanFactState { Pending, Running, Done, Unknown, Off };
-
-inline const char *scanFactStateName(ScanFactState s)
-{
-    switch (s) {
-    case ScanFactState::Pending: return "pending";
-    case ScanFactState::Running: return "running";
-    case ScanFactState::Done: return "done";
-    case ScanFactState::Unknown: return "unknown";
-    case ScanFactState::Off: break;
-    }
-    return "off";
-}
-
-inline bool scanFactFinal(ScanFactState s)
-{
-    return s == ScanFactState::Done || s == ScanFactState::Unknown || s == ScanFactState::Off;
-}
-
-struct ScanLightFact {
-    ScanFactKind kind = ScanFactKind::Sites;
-    ScanFactState state = ScanFactState::Done;
-    QList<int> chips;        // Services: TribeServiceChips states (Telegram, YouTube, Instagram, WhatsApp), -1 unknown
-    bool ok = false;         // Sites: «работают» / «не открываются»
-    int bars = 0;            // Speed: LoadBars level
-    QString word;            // Speed: "comfortable" | "slow"
-    bool needsButton = false; // Services: chips did not run in this connection («?», «проверим по кнопке»)
 };
 
 enum class ScanReportDelivery { Sent, Queued };
 
 // --- view --------------------------------------------------------------------------------------------------------
 
-enum class ScanStageKey { None, Preparing, Connecting, Reach, Data, Self };
+enum class ScanStageKey { None, Preparing, Connecting, Reach, Data };
 enum class ScanWaitKey { None, RowsAppearHere, SearchingMore };
 enum class ScanRowState { Works, Slow, NotVerified, Connecting, Connected, Failed };
-enum class ScanCardMode { Hidden, Off, Filling, Filled, Checking, Checked };
-enum class ScanCardButton { Hidden, Ready, Disabled, Busy };
 enum class ScanBarButton { Stop, Retry, RetryInSeconds, RetryInMinutes, ConnectAndScan };
-enum class ScanHint { None, CellularCost, CellularBudgetHour };
+enum class ScanHint { None, CellularBudgetHour };
 enum class ScanEmptyVariant { None, Cellular, Wifi, NoScan };
 
 inline const char *scanStageKeyName(ScanStageKey k)
@@ -409,7 +352,6 @@ inline const char *scanStageKeyName(ScanStageKey k)
     case ScanStageKey::Connecting: return "connecting";
     case ScanStageKey::Reach: return "reach";
     case ScanStageKey::Data: return "data";
-    case ScanStageKey::Self: return "self";
     case ScanStageKey::None: break;
     }
     return "none";
@@ -428,30 +370,6 @@ inline const char *scanRowStateName(ScanRowState s)
     return "failed";
 }
 
-inline const char *scanCardModeName(ScanCardMode m)
-{
-    switch (m) {
-    case ScanCardMode::Hidden: return "hidden";
-    case ScanCardMode::Off: return "off";
-    case ScanCardMode::Filling: return "filling";
-    case ScanCardMode::Filled: return "filled";
-    case ScanCardMode::Checking: return "checking";
-    case ScanCardMode::Checked: break;
-    }
-    return "checked";
-}
-
-inline const char *scanCardButtonName(ScanCardButton b)
-{
-    switch (b) {
-    case ScanCardButton::Hidden: return "hidden";
-    case ScanCardButton::Ready: return "ready";
-    case ScanCardButton::Disabled: return "disabled";
-    case ScanCardButton::Busy: break;
-    }
-    return "busy";
-}
-
 inline const char *scanBarButtonName(ScanBarButton b)
 {
     switch (b) {
@@ -467,7 +385,6 @@ inline const char *scanBarButtonName(ScanBarButton b)
 inline const char *scanHintName(ScanHint h)
 {
     switch (h) {
-    case ScanHint::CellularCost: return "cellular_cost";
     case ScanHint::CellularBudgetHour: return "cellular_budget_hour";
     case ScanHint::None: break;
     }
@@ -507,27 +424,6 @@ struct ScanRowView {
     QString notVerifiedReason;
 };
 
-struct ScanFactView {
-    ScanFactState state = ScanFactState::Pending;
-    QList<int> chips;
-    bool ok = false;
-    int bars = 0;
-    QString word;
-    bool needsButton = false;
-};
-
-struct ScanCardView {
-    ScanCardMode mode = ScanCardMode::Hidden;
-    ScanCardButton button = ScanCardButton::Hidden;
-    double progress = -1;            // Checking: 0..1
-    QString serverLabel;
-    QString serverCountry;
-    int serverMs = -1;
-    ScanFactView server, services, sites, speed;
-    bool speedVisible = false;       // the fourth row appears with the button's check only
-    bool reportQueueFull = false;    // the support queue is full: the button shows the backpressure notice (F12)
-};
-
 struct ScanCountryView {
     QString countryCode;
     int count = 0;
@@ -543,7 +439,6 @@ struct ScanBarView {
     bool buttonEnabled = true;
     int buttonValue = 0;             // seconds / minutes of the countdown
     ScanHint hint = ScanHint::None;
-    qint64 hintBytes = 0;            // CellularCost: «Скан потратит до N МБ»
     QList<ScanCountryView> scopeCountries; // the pool's countries (own nodes + provider profiles), most paths first
     int scopeWhitelist = -1;         // the pool's white-list rows (/v1/scan/pool; -1 = unknown)
     QString scannedScope;            // the country the shown result covers ("" = all)
@@ -576,7 +471,6 @@ struct ScanView {
     QList<ScanRowView> rows;         // display order, filter applied
     int verifiedCount = 0;           // fresh verified rows, before the filter (cached rows never count)
     int unverifiedCount = 0;
-    ScanCardView card;
     ScanBarView bar;
     ScanEmptyView empty;
     ScanNetKind net = ScanNetKind::Unknown;
@@ -585,8 +479,11 @@ struct ScanView {
     // false after a batch that found nothing left = «nothing more». batch = 1 for the first scan of a series.
     bool moreAvailable = false;
     int batch = 0;
-    QString moreCountry;             // the country of the running / last continuation ("" = whole pool)
+    QString moreCountry;             // the scope the running / last series covers ("" = whole pool)
     QString moreState;               // view.more.state: available | running | exhausted ("" = none yet)
+    QString moreBlocked;             // view.more.blocked: why «Найти ещё» cannot run now ("" = it can; "budget" =
+                                     // the cellular hour, moreRetryMin = view.more.retry_min)
+    int moreRetryMin = 0;
     QString netRadio;                // view.net_radio: the cellular radio generation ("" = unknown / not cellular)
 };
 
@@ -750,6 +647,31 @@ public:
         return s;
     }
 
+    // The screen shows WITHOUT starting a scan (owner 19.11, device test of the iPhone Air: opening the Scanner never
+    // scans by itself; the Scan button does - retryTapped / connectAndScanTapped). The network and the live
+    // connection are adopted as in opened(); with nothing on the screen the last result of this network comes back
+    // as the cache (drawn with its age); a scan already running keeps running; the cooldown is untouched.
+    ScanStep shown(const ScanOpen &o, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        m_screenOpen = true;
+        m_connectOnOpen = o.connectOnOpen;
+        m_net.radio = o.network.radio; // display only, never part of the identity
+        if (o.network != m_net || m_rowsKey != o.network.key) {
+            if (scanPhaseScanning(m_phase))
+                applyNetworkChange(o.network, o.cached, now, s); // reopened on another network mid-scan
+            else
+                adoptNetwork(o.network, o.cached, now);
+        }
+        setCurrent(o.current, now, s);
+        if (!scanPhaseScanning(m_phase) && m_rows.isEmpty())
+            loadCached(o.cached, now);
+        adoptCachedScope(now);
+        finishStep(s, now);
+        return s;
+    }
+
     ScanStep closed(qint64 now)
     {
         now = clock(now);
@@ -801,13 +723,9 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        // The empty result, and «no scan: budget» (the cellular hour is used up) behave the same: close, and
-        // on cellular arm the Wi-Fi intent.
+        // The empty result, and «no scan: budget» (the cellular hour is used up) behave the same: close. Nothing
+        // scans later by itself (owner 19.11: no scan starts unless the person presses «Сканировать»).
         if (m_phase == ScanPhase::Empty || (m_phase == ScanPhase::NoScan && m_noScanReason == QLatin1String("budget"))) {
-            if (m_net.kind == ScanNetKind::Cellular) {
-                m_wifiIntentUntil = now + qint64(m_t.wifiRescanWindowS) * 1000;
-                s.actions << shade(ShadeTone::Info, QStringLiteral("wifi_intent"));
-            }
             m_screenOpen = false;
             s.actions << act(ScanActionKind::CloseScreen);
         }
@@ -817,28 +735,25 @@ public:
 
     // «Найти ещё» (the continuation): the next batch over the whole pool on this network - every candidate this
     // network has not judged yet (a row with a verdict, a failure; «Не проверено» rows are tried again), restricted
-    // to one country when `country` is given (a country scan). Rows already found stay fresh; the batch stops at
-    // scan_stop_works NEW working rows, scan_stop_ms or the byte budget (unchanged). The manual cooldown does not
-    // apply (other candidates). A network that changed since the last scan, or no finished scan yet, runs an
-    // ordinary scan (restricted to the country when given). Nothing left: the scan ends at once,
-    // nothing_to_probe, and moreAvailable stays false - the «nothing more» signal of the view.
+    // to one country when `country` is given (a country scan). Rows already found stay fresh and in their places,
+    // the new batch's rows join after them; the batch stops at scan_stop_works NEW working rows, scan_stop_ms or
+    // the byte budget (unchanged). The manual cooldown of «Повторить» does not apply: «Найти ещё» probes other
+    // candidates, not the same ones again (owner, 19.11). Its one gate is moreBlockedBy(): a reason the view
+    // shows on the button (view.more.blocked), never a silent no-op. A network that changed since the last scan,
+    // or no finished scan yet, runs an ordinary scan (restricted to the country when given). Nothing left: the
+    // scan ends at once, nothing_to_probe, and moreAvailable stays false - the «nothing more» signal of the view.
     ScanStep moreTapped(const QString &country, qint64 now)
     {
         now = clock(now);
         ScanStep s;
-        if (scanPhaseScanning(m_phase)) {
-            finishStep(s, now);
-            return s;
-        }
-        // The normal rules apply (UI spec 18.11): the manual cooldown and the budget (beginScan) hold a batch too.
-        if (now < m_cooldownUntil) {
+        if (scanPhaseScanning(m_phase) || !moreBlockedBy(now).isEmpty()) {
             finishStep(s, now);
             return s;
         }
         const bool sameNet = m_completed && m_scanNet.key == m_net.key && m_scanNet.generation() == m_net.generation();
         m_continuation = true;
         m_moreKeepRows = sameNet;
-        m_moreCountry = country.trimmed().isEmpty() ? m_scope : scanScopeOf(country);
+        m_moreCountry = country.trimmed().isEmpty() ? m_scannedScope : scanScopeOf(country); // the scope it continues
         m_worksBase = sameNet ? freshWorkingCount() : 0;
         if (!sameNet)
             m_shownNet.clear();
@@ -871,24 +786,13 @@ public:
     }
 
     // --- environment ------------------------------------------------------------------------------------------
-    ScanStep networkChanged(const ScanNetwork &n, const ScanCachedResult &cached, bool appInFront, qint64 now)
+    ScanStep networkChanged(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now)
     {
         now = clock(now);
         ScanStep s;
         if (n != m_net)
             applyNetworkChange(n, cached, now, s);
         m_net.radio = n.radio;
-        if (appInFront)
-            maybeFireWifiIntent(now, s);
-        finishStep(s, now);
-        return s;
-    }
-
-    ScanStep appForeground(qint64 now)
-    {
-        now = clock(now);
-        ScanStep s;
-        maybeFireWifiIntent(now, s);
         finishStep(s, now);
         return s;
     }
@@ -904,7 +808,10 @@ public:
 
 private:
     // Another strict tuple, kind or key: before anything was measured the scan just targets it; a running
-    // scan is cancelled and restarted there; shown results become cache rows of their fingerprint.
+    // scan (the person's own «Сканировать») is cancelled and restarted there; shown results become cache rows of
+    // their fingerprint. A finished result never rescans by itself (owner 19.11: no scan starts unless the person
+    // presses «Сканировать»): the screen shows this network's cached result with its age (and its scope), or the
+    // open page without a result - never another network's result as current.
     void applyNetworkChange(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now, ScanStep &s)
     {
         if (m_phase == ScanPhase::Connecting || m_phase == ScanPhase::Preparing) {
@@ -933,14 +840,12 @@ private:
             if (m_screenOpen)
                 beginScan(now, s);
         } else {
-            const bool rescan = scanRescanOnNetworkChange(m_screenOpen, m_phase, m_noScanReason, m_caps.needsVpn,
-                                                          m_current.working() || m_current.live || m_current.connecting);
             adoptNetwork(n, cached, now);
             materializeCurrent();
-            if (rescan)
-                beginScan(now, s); // its own budget / VPN rules decide (NoScan "budget" = the artboard's frame 22)
-            else if (m_screenOpen && m_phase != ScanPhase::Idle)
-                toNoScan(QStringLiteral("network_changed"), now, s);
+            m_phase = ScanPhase::Idle;
+            m_noScanReason.clear();
+            m_emptyReason.clear();
+            adoptCachedScope(now);
         }
     }
 
@@ -1006,9 +911,16 @@ public:
             m_candReqId.clear();
         s.actions << appRequestDone(requestId, apiBytes, now).actions;
         if (current) {
+            // A batch with nothing outside the `seen` it was asked with cannot bring a new row: the scope is done,
+            // whatever its `exhausted` says (the client never offers the same rows again under «Найти ещё»).
+            int fresh = 0;
+            for (const ScanManifestNode &n : c.nodes)
+                fresh += m_candSeen.contains(n.nodeId) ? 0 : 1;
+            for (const ScanManifestUpstream &u : c.upstream)
+                fresh += m_candSeen.contains(upstreamNodeIdFor(u.profileId)) ? 0 : 1;
             m_serverBatch = ServerBatch::Yes;
             m_fromServer = true;
-            m_serverExhausted = c.exhausted;
+            m_serverExhausted = c.exhausted || fresh == 0;
             m_manifest.manifest.nodes = c.nodes;
             m_manifest.manifest.upstream = c.upstream;
             startHost(now, s);
@@ -1264,7 +1176,7 @@ public:
     }
 
     // The support report queue says whether it can take another report (F12): when full no new full check
-    // starts; a backpressure notice shows instead; light checks and the scan go on.
+    // starts; a backpressure notice shows instead; the scan goes on.
     ScanStep reportQueueState(bool full, qint64 now)
     {
         now = clock(now);
@@ -1319,7 +1231,7 @@ public:
             s.actions << d.actions;
             m_liveReqId.clear();
         }
-        if (m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data || m_phase == ScanPhase::Self) {
+        if (m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data) {
             m_outcomes.add(o);
             checkStop(now, s);
         } else {
@@ -1389,43 +1301,10 @@ public:
         return s;
     }
 
-    // --- «Ваше подключение» -----------------------------------------------------------------------------------
-    ScanStep lightFact(const ScanLightFact &f, qint64 now)
-    {
-        now = clock(now);
-        ScanStep s;
-        if (m_lightActive || m_checking) {
-            Fact &x = m_facts[int(f.kind)];
-            x.state = f.state;
-            x.chips = f.chips;
-            x.ok = f.ok;
-            x.bars = f.bars;
-            x.word = f.word;
-            x.needsButton = f.needsButton;
-            if (lightFinal())
-                m_lightDeadline = -1;
-            if (m_phase == ScanPhase::Self && lightFinal())
-                finish(now, s);
-        }
-        finishStep(s, now);
-        return s;
-    }
-
-    ScanStep checkTapped(qint64 now)
-    {
-        now = clock(now);
-        ScanStep s;
-        const ScanCardMode mode = cardMode();
-        if ((mode == ScanCardMode::Filled || mode == ScanCardMode::Checked) && m_connectingId.isEmpty())
-            startReportCheck(s);
-        finishStep(s, now);
-        return s;
-    }
-
+    // --- the support check --------------------------------------------------------------------------------------
     // Support's «Проверить подключение и отправить отчёт» (owner 18.11, variant B: the card and its button left the
-    // Scanner): the card's full check and report, started from the Support screen - no scan and no Scanner screen
-    // needed. With a live connection the stages check it (the view's card turns Checking, its progress is the
-    // coordinator's support_check); without one the report goes with the last scan's summary, like the empty
+    // Scanner): the full check and report, started from the Support screen - no scan and no Scanner screen
+    // needed. With a live connection the stages check it (its progress is the coordinator's support_check); without one the report goes with the last scan's summary, like the empty
     // state's link. A check or a report already running answers «Проверка уже идёт»; a row's connect in flight -
     // nothing (the attempt decides first). The queue's backpressure is startReportCheck's (report_queue_full).
     ScanStep supportCheckTapped(qint64 now)
@@ -1495,19 +1374,14 @@ public:
 
     // The engine could not start or submit the full check (the queue filled up in a race, another diagnostic
     // runs): no report exists, so no «sent» / «will be sent» text - a notice instead (reason "queue_full" or
-    // empty: report_queue_full; otherwise report_check_<reason>, e.g. report_check_busy); the card goes back
-    // to what it showed before the check; the queue state (reportQueueState) is not touched.
+    // empty: report_queue_full; otherwise report_check_<reason>, e.g. report_check_busy); the queue state
+    // (reportQueueState) is not touched.
     ScanStep reportCheckRefused(const QString &reportId, const QString &reason, qint64 now)
     {
         now = clock(now);
         ScanStep s;
         if ((m_checking || m_reportSending) && (reportId.isEmpty() || reportId == m_reportId)) {
-            if (m_checking) {
-                m_checking = false;
-                for (int k = 0; k < 4; ++k)
-                    m_facts[k] = m_factsBeforeCheck[k];
-                m_checked = m_checkedBeforeCheck;
-            }
+            m_checking = false;
             m_reportSending = false;
             const bool full = reason.isEmpty() || reason == QLatin1String("queue_full");
             s.actions << shade(ShadeTone::Warning, full ? QStringLiteral("report_queue_full")
@@ -1524,13 +1398,7 @@ public:
         now = clock(now);
         ScanStep s;
         if ((m_checking || m_reportSending) && (reportId.isEmpty() || reportId == m_reportId)) {
-            if (m_checking) {
-                m_checking = false;
-                m_checked = true;
-                for (Fact &f : m_facts)
-                    if (f.state == ScanFactState::Running || f.state == ScanFactState::Pending)
-                        f.state = ScanFactState::Unknown;
-            }
+            m_checking = false;
             m_reportSending = false;
             if (d == ScanReportDelivery::Sent)
                 s.actions << shade(ShadeTone::Success, QStringLiteral("report_sent"));
@@ -1565,8 +1433,6 @@ public:
                 m_hostDone = true;
                 releaseLeases(s);
             }
-            m_lightActive = false;
-            m_lightDeadline = -1;
             finishKeeping(now, id, s);
         }
         // The attempt order: the visible rows after the filter, after the tapped one, wrapping.
@@ -1663,14 +1529,6 @@ public:
         for (Settle *st : {&m_cur, &m_prev})
             if (st->open && st->deadline >= 0 && now >= st->deadline)
                 settleOnTimeout(*st, now, s);
-        if (m_lightDeadline >= 0 && now >= m_lightDeadline) {
-            for (int k = 0; k < 3; ++k)
-                if (!scanFactFinal(m_facts[k].state))
-                    m_facts[k].state = ScanFactState::Unknown;
-            m_lightDeadline = -1;
-            if (m_phase == ScanPhase::Self)
-                finish(now, s);
-        }
         finishStep(s, now);
         return s;
     }
@@ -1686,15 +1544,20 @@ public:
         v.net = m_net.kind;
         v.moreAvailable = !v.scanning && m_completed && m_moreAvailable;
         v.batch = m_batch;
-        v.moreCountry = m_moreCountry;
+        v.moreCountry = m_scannedScope; // the scope the series covers: «Германия: проверены все серверы» when exhausted
         v.moreState = v.scanning ? (m_continuation && m_batch > 1 ? QStringLiteral("running") : QString())
                       : !m_completed  ? QString()
                       : m_moreAvailable ? QStringLiteral("available")
                                         : QStringLiteral("exhausted");
+        if (v.moreState == QLatin1String("available")) {
+            v.moreBlocked = moreBlockedBy(now);
+            if (!v.moreBlocked.isEmpty())
+                v.moreRetryMin = scanRetryMinutes(budgetBlocked(now).retryInMs);
+        }
         v.netRadio = m_net.kind == ScanNetKind::Cellular ? m_net.radio : QString();
         v.bar.scopeCountries = scopeList();
         v.bar.scopeWhitelist = m_poolWhitelist;
-        v.bar.scannedScope = m_completed || scanPhaseScanning(m_phase) ? m_scannedScope : QString();
+        v.bar.scannedScope = m_completed || scanPhaseScanning(m_phase) ? m_scannedScope : cachedShown(now) ? m_cachedScope : QString();
         v.bar.scope = m_scope;
         if (m_phase == ScanPhase::Empty)
             v.empty.scopeCc = m_scannedScope;
@@ -1733,21 +1596,12 @@ public:
             v.progress = qMin(0.92, qMax(byWorks, byTime));
             break;
         }
-        case ScanPhase::Self: {
-            v.stage = ScanStageKey::Self;
-            int done = 0;
-            for (int k = 0; k < 3; ++k)
-                done += scanFactFinal(m_facts[k].state) ? 1 : 0;
-            v.progress = 0.92 + 0.02 * done;
-            break;
-        }
         default:
             v.progress = 0;
             break;
         }
-        v.card = cardView(now);
         if (v.scanning) {
-            if (all.isEmpty() && v.card.mode == ScanCardMode::Hidden)
+            if (all.isEmpty())
                 v.wait = ScanWaitKey::RowsAppearHere;
             else if (m_phase == ScanPhase::Data && m_deadline >= 0) {
                 const int left = int((m_deadline - now + 999) / 1000);
@@ -1766,7 +1620,7 @@ public:
             v.checkedAgoMin = cachedAt > 0 ? int(qMax<qint64>(0, now - cachedAt) / 60000) : -1;
         else if (m_phase == ScanPhase::Done || m_phase == ScanPhase::Empty)
             v.checkedAgoMin = int(qMax<qint64>(0, now - m_finishedAt) / 60000);
-        else if (m_phase == ScanPhase::NoScan && cachedAt > 0)
+        else if ((m_phase == ScanPhase::NoScan || m_phase == ScanPhase::Idle) && cachedAt > 0)
             v.checkedAgoMin = int(qMax<qint64>(0, now - cachedAt) / 60000);
         // Bottom bar.
         for (const ScanRowView &r : all) {
@@ -1787,10 +1641,6 @@ public:
             v.bar.menuEnabled = false;
             v.bar.button = ScanBarButton::Stop;
             v.bar.buttonEnabled = true;
-            if (cellular) {
-                v.bar.hint = ScanHint::CellularCost;
-                v.bar.hintBytes = m_t.budgetScanBytes;
-            }
         } else {
             v.bar.menuVisible = v.bar.countries.size() >= 2;
             v.bar.menuEnabled = true;
@@ -1811,10 +1661,6 @@ public:
             } else {
                 v.bar.button = ScanBarButton::Retry;
                 v.bar.buttonEnabled = true;
-            }
-            if (cellular && !b.hourly) {
-                v.bar.hint = ScanHint::CellularCost;
-                v.bar.hintBytes = m_t.budgetScanBytes;
             }
         }
         // Empty state.
@@ -1849,11 +1695,10 @@ public:
     qint64 deadline() const { return m_deadline; }
     bool startedVpn() const { return m_startedVpn; }
     bool screenOpen() const { return m_screenOpen; }
-    // The full check / report in flight (Support's action and the card's button share it): running, and the
+    // The full check / report in flight (Support's action): running, and the
     // share of the check's stages done (0..1; -1 = a report without a connection, no stages to count).
     bool reportCheckRunning() const { return m_checking || m_reportSending; }
     double reportCheckProgress() const { return m_checking ? double(m_checkStep) / qMax(1, m_checkTotal) : -1.0; }
-    qint64 wifiIntentUntil() const { return m_wifiIntentUntil; }
     QString connectingId() const { return m_connectingId; }
     const ScanBudgetLedger &ledger() const { return m_ledger; }
     int outstandingLeases() const
@@ -1983,22 +1828,26 @@ private:
         QString fingerprint;       // weak local fingerprint of a CACHED row's network
         QString evidence;          // "exclusion" when proven by exclusion (plan v2.2)
         quint64 arrival = 0;
+        int batch = 0;             // the batch of this series («Найти ещё») that made the row fresh; 0 = none yet
     };
 
     bool rowVerified(const Row &r) const { return !r.fromLive || r.liveVerified; }
 
+    // A row becomes fresh evidence of this scan: its arrival and the batch of the series it joins.
+    void stampArrival(Row &r)
+    {
+        r.arrival = ++m_arrival;
+        r.batch = m_batch;
+    }
+
+    // The batch a row is shown in (displayRows): a series' batches follow each other - the rows of the batches
+    // before keep their places and their order, a new batch's rows join after them. A cached row, and a fresh
+    // row that no batch of this series made (the live connection before the first scan), go with the newest.
+    int rowBatch(const Row &r) const { return r.cached || r.batch < 1 ? qMax(1, m_batch) : r.batch; }
+
     struct Unverified {
         ScanCandidate c;
         QString reason;
-    };
-
-    struct Fact {
-        ScanFactState state = ScanFactState::Pending;
-        QList<int> chips;
-        bool ok = false;
-        int bars = 0;
-        QString word;
-        bool needsButton = false;
     };
 
     // --- helpers ----------------------------------------------------------------------------------------------
@@ -2061,7 +1910,6 @@ private:
         };
         if (m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data)
             take(m_deadline);
-        take(m_lightDeadline);
         if (m_cur.open)
             take(m_cur.deadline);
         if (m_prev.open)
@@ -2080,17 +1928,22 @@ private:
     }
 
     // The app side of one scan at its worst cases (plan §2.2b table): manifest + token, probe-batch (without
-    // configs) + one release, the live-tunnel probe, the light checks, the outcome batch.
+    // configs) + one release, the live-tunnel probe, the outcome batch.
     qint64 appWorstCase() const
     {
         return qint64(m_t.costManifestBytes) + m_t.costApiBytes + m_t.costBatchBytes + m_t.costApiBytes
-               + m_t.costTunnelProbeBytes + lightCost() + m_t.costOutcomesBytes;
+               + m_t.costTunnelProbeBytes + m_t.costOutcomesBytes;
     }
-
-    qint64 lightCost() const { return m_manifest.ruSplitOn ? m_t.costLightBytes : 0; }
 
     // The stamp of CURRENT evidence: the strict generation tuple's hash and this scan's token (the scan id).
     QString currentStamp() const { return m_net.generation() + QLatin1Char('|') + m_scanId; }
+
+    // The one gate of «Найти ещё» (moreTapped and the view's more.blocked read it): "" = a batch may start now.
+    // Only real limits hold it - the cellular hour; the re-scan cooldown never does.
+    QString moreBlockedBy(qint64 now) const
+    {
+        return budgetBlocked(now).hourly ? QStringLiteral("budget") : QString();
+    }
 
     ScanBudgetDecision budgetBlocked(qint64 now) const
     {
@@ -2130,12 +1983,31 @@ private:
         loadCached(cached, now);
     }
 
+    // A cached result on the screen (no scan of this network finished in this run): rows of this network's weak
+    // fingerprint within their show window.
+    bool cachedShown(qint64 now) const
+    {
+        for (const Row &r : m_rows)
+            if (r.cached && rowShown(r, now))
+                return true;
+        return false;
+    }
+
+    // The menu comes back to the scope the shown cached result covered (a Germany scan reopened later is shown
+    // under Germany, not under «Все страны»).
+    void adoptCachedScope(qint64 now)
+    {
+        if (!scanPhaseScanning(m_phase) && !m_completed && cachedShown(now))
+            m_scope = m_cachedScope;
+    }
+
     void loadCached(const ScanCachedResult &cached, qint64 now)
     {
         Q_UNUSED(now);
         if (!cached.present() || cached.networkKey != m_net.key)
             return;
         m_cachedFailures = cached;
+        m_cachedScope = scanScopeOf(cached.scope);
         for (const ScanCachedRow &cr : cached.rows) {
             if (rowIndex(cr.id) >= 0)
                 continue;
@@ -2160,7 +2032,7 @@ private:
         }
     }
 
-    // The live connection: its row (materialized from the live tunnel), the connect chain, S1, the card.
+    // The live connection: its row (materialized from the live tunnel), the connect chain, S1.
     void setCurrent(const ScanCurrent &c, qint64 now, ScanStep &s)
     {
         const ScanCurrent prev = m_current;
@@ -2193,7 +2065,7 @@ private:
                 r.liveVerified = false;
                 r.generation = m_net.generation();
                 r.fingerprint = m_net.fingerprint;
-                r.arrival = ++m_arrival;
+                stampArrival(r);
                 for (const Cand &x : m_cands)
                     if (x.c.id == c.nodeId)
                         r.crowdWorks = x.c.crowdWorks;
@@ -2205,7 +2077,7 @@ private:
                     r.cached = false;
                     r.fromLive = true;
                     r.liveVerified = false; // a cached verdict is not current evidence
-                    r.arrival = ++m_arrival;
+                    stampArrival(r);
                 }
                 r.generation = m_net.generation();
                 r.fingerprint = m_net.fingerprint;
@@ -2262,20 +2134,6 @@ private:
             // rule (the freeze goes unanswered: the whole grant after scan_freeze_ack_ms).
             stopStage2(now, QStringLiteral("tunnel_stopped"), s);
         }
-        // The card follows the live connection.
-        if (!c.working()) {
-            if (prev.working()) {
-                m_lightActive = false;
-                m_lightDeadline = -1;
-                m_lightNode.clear();
-                if (m_phase == ScanPhase::Self)
-                    finish(now, s);
-            }
-        } else if (c.nodeId != m_lightNode && !m_checking
-                   && (m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data || m_phase == ScanPhase::Self
-                       || m_phase == ScanPhase::Done || m_phase == ScanPhase::Empty || m_phase == ScanPhase::NoScan)) {
-            startLight(now, s);
-        }
         if (c.working() && m_phase != ScanPhase::Idle && m_phase != ScanPhase::Preparing && m_phase != ScanPhase::Connecting)
             maybeProbeLive(s);
     }
@@ -2328,53 +2186,11 @@ private:
                                {QStringLiteral("scan_stats"), m_stats.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(m_stats)}};
     }
 
-    void startLight(qint64 now, ScanStep &s)
-    {
-        if (!m_current.working())
-            return;
-        m_lightNode = m_current.nodeId;
-        m_lightActive = true;
-        m_checked = false;
-        for (Fact &f : m_facts)
-            f = Fact();
-        m_facts[int(ScanFactKind::Server)].state = ScanFactState::Done; // name + live ms: known at once
-        m_facts[int(ScanFactKind::Services)].state = ScanFactState::Running;
-        m_facts[int(ScanFactKind::Sites)].state = ScanFactState::Running;
-        m_lightDeadline = now + m_t.lightTimeoutMs;
-        ScanAction a = act(ScanActionKind::StartLightChecks);
-        a.nodeId = m_current.nodeId;
-        if (!sendApp(QStringLiteral("light"), lightCost(), now, s, a)) {
-            // No room in the allowance: the light facts are unknown («проверим по кнопке»).
-            m_facts[int(ScanFactKind::Services)].state = ScanFactState::Unknown;
-            m_facts[int(ScanFactKind::Services)].needsButton = true;
-            m_facts[int(ScanFactKind::Sites)].state = ScanFactState::Unknown;
-            m_lightDeadline = -1;
-            return;
-        }
-        s.actions << a;
-    }
-
-    bool lightFinal() const
-    {
-        for (int k = 0; k < 3; ++k)
-            if (!scanFactFinal(m_facts[k].state))
-                return false;
-        return true;
-    }
-
     void beginChecking()
     {
-        for (int k = 0; k < 4; ++k)
-            m_factsBeforeCheck[k] = m_facts[k];
-        m_checkedBeforeCheck = m_checked;
         m_checking = true;
-        m_checked = false;
         m_checkStep = 0;
         m_checkTotal = 4;
-        for (int k = 0; k < 4; ++k) {
-            m_facts[k].state = ScanFactState::Running;
-            m_facts[k].needsButton = false;
-        }
     }
 
     void startReportCheck(ScanStep &s)
@@ -2451,15 +2267,6 @@ private:
         m_appSideOnly = false;
         m_liveProbeNode.clear();
         m_liveProbeDone = false;
-        // Light checks run again with every scan, also on the same connection (S8, F9).
-        m_lightActive = false;
-        m_lightNode.clear();
-        m_lightDeadline = -1;
-        if (!m_checking) {
-            m_checked = false;
-            for (Fact &f : m_facts)
-                f = Fact();
-        }
         m_scanNet = m_net;
         m_completed = false;
         // «Найти ещё» (moreTapped): a continuation keeps this network's rows fresh and its judged set; any other
@@ -2472,6 +2279,9 @@ private:
             m_worksBase = 0;
         }
         ++m_batch;
+        if (m_batch == 1)
+            for (Row &r : m_rows)
+                r.batch = 1; // a new series: what stays on the screen belongs to its first batch
         m_moreAvailable = false;
         m_cands.clear();
         m_unverified.clear();
@@ -2618,6 +2428,14 @@ private:
         in.awgProbeIpKnown = m_manifest.awgProbeIpKnown;
         in.awgAddressKnown = m_manifest.awgAddressKnown;
         const ScanPlan plan = buildScanPlan(in);
+        // «Найти ещё» never offers again what this series already put on the screen or cannot probe on this host:
+        // the «Не проверено» rows of the host's own limits and the absent ones join the judged rows in `seen` /
+        // the skip set. A scope reason (another country, the white lists) is not «seen»: another scope may offer it.
+        for (const ScanCandidate &c : plan.orderOnly)
+            m_shownNet.insert(c.id);
+        for (const ScanPlanExclusion &x : plan.excluded)
+            if (x.reason != QLatin1String("country") && x.reason != QLatin1String("scope") && x.reason != QLatin1String("shown"))
+                m_shownNet.insert(x.id);
         m_planRemaining = m_fromServer ? (m_serverExhausted ? 0 : 1) : plan.remaining;
         m_planCandidates = plan.probe.size() + plan.orderOnly.size();
         m_manifestRevision = m_manifest.manifest.upstreamRevision;
@@ -2645,13 +2463,11 @@ private:
         for (const ScanCandidate &c : plan.orderOnly)
             addUnverified(c, c.notVerifiedReason);
         // F6 (plan §2.2b step 2b): the app side of this scan is reserved at its worst case BEFORE the host's
-        // grant is cut - the live-tunnel probe, the light checks, the outcome batch, then the probe-batch
+        // grant is cut - the live-tunnel probe, the outcome batch, then the probe-batch
         // (configs only on Wi-Fi) and one release (no room: the providers stay «Не проверено»). The host gets
         // the rest.
-        if (m_current.working()) {
+        if (m_current.working())
             reserveApp(QStringLiteral("live"), m_t.costTunnelProbeBytes);
-            reserveApp(QStringLiteral("light"), lightCost());
-        }
         reserveApp(QStringLiteral("outcomes"), m_t.costOutcomesBytes);
         const BatchPick pick = pickBatch();
         bool batchReserved = false;
@@ -2699,8 +2515,6 @@ private:
         m_s2Start = now;
         m_deadline = now + m_t.stopMs;
         m_phase = ScanPhase::Reach;
-        if (m_current.working() && m_lightNode != m_current.nodeId)
-            startLight(now, s);
         maybeProbeLive(s);
         bool anyHost = false;
         for (const Cand &c : m_cands)
@@ -2974,7 +2788,7 @@ private:
             r.generation = m_scanNet.generation();
             r.fingerprint = m_scanNet.fingerprint;
             if (r.cached || ri < 0)
-                r.arrival = ++m_arrival;
+                stampArrival(r);
             r.cached = false;
             if (ri >= 0)
                 m_rows[ri] = r;
@@ -3229,14 +3043,6 @@ private:
         releaseLeases(s);
         settleUnjudged(); // what the stop cut in flight is «Не проверено» (cancelled), never a failure
         m_stopReason = reason;
-        if (m_current.working() && (!m_lightActive || m_lightNode != m_current.nodeId))
-            startLight(now, s);
-        if (m_current.working() && !lightFinal()) {
-            m_phase = ScanPhase::Self;
-            if (m_lightDeadline < 0)
-                m_lightDeadline = now + m_t.lightTimeoutMs;
-            return;
-        }
         finish(now, s);
     }
 
@@ -3432,7 +3238,6 @@ private:
     {
         if (!scanPhaseScanning(m_phase))
             return;
-        m_lightDeadline = lightFinal() ? -1 : m_lightDeadline;
         const bool connectStep = m_phase == ScanPhase::Connecting || m_phase == ScanPhase::Preparing;
         dropCachedRowsExcept(keep);
         if (connectStep && keep.isEmpty() && m_emptyReason.isEmpty() && !m_current.working())
@@ -3462,6 +3267,7 @@ private:
         cache.networkKey = m_scanNet.key;
         cache.fingerprint = m_scanNet.fingerprint;
         cache.savedAtMs = now;
+        cache.scope = m_scannedScope;
         for (const ScanRowView &r : rows)
             if (r.verified) {
                 ++working;
@@ -3643,7 +3449,7 @@ private:
         const bool sameNet = m_scanNet.generation() == m_net.generation();
         ScanOutcomeCollector late;
         late.begin(m_scanNet.key);
-        const bool scanning = m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data || m_phase == ScanPhase::Self;
+        const bool scanning = m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data;
         for (Cand &c : m_cands) {
             if (!c.exclusionPending)
                 continue;
@@ -3677,7 +3483,7 @@ private:
             r.generation = m_scanNet.generation();
             r.fingerprint = m_scanNet.fingerprint;
             r.evidence = QStringLiteral("exclusion");
-            r.arrival = ++m_arrival;
+            stampArrival(r);
             if (ri >= 0)
                 m_rows[ri] = r;
             else
@@ -3733,6 +3539,7 @@ private:
         cache.networkKey = m_scanNet.key;
         cache.fingerprint = m_scanNet.fingerprint;
         cache.savedAtMs = now;
+        cache.scope = m_scannedScope;
         for (const ScanRowView &r : rows) {
             if (!r.verified)
                 continue;
@@ -3778,11 +3585,6 @@ private:
         m_completed = false;
         m_phase = ScanPhase::Idle;
         m_deadline = -1;
-        if (!lightFinal()) {
-            m_lightActive = false;
-            m_lightDeadline = -1;
-            m_lightNode.clear();
-        }
         m_checkAfterScan = false;
     }
 
@@ -3796,28 +3598,8 @@ private:
         m_completed = false;
         m_cands.clear();
         m_deadline = -1;
-        ensureLight(now, s);
     }
 
-    // The card always has its light facts for the live connection once the scan is over.
-    void ensureLight(qint64 now, ScanStep &s)
-    {
-        if (m_current.working() && !m_checking && (!m_lightActive || m_lightNode != m_current.nodeId))
-            startLight(now, s);
-    }
-
-    void maybeFireWifiIntent(qint64 now, ScanStep &s)
-    {
-        if (m_wifiIntentUntil <= 0 || m_net.kind != ScanNetKind::Wifi)
-            return;
-        const bool valid = now < m_wifiIntentUntil;
-        m_wifiIntentUntil = 0;
-        if (!valid || scanPhaseScanning(m_phase))
-            return;
-        m_screenOpen = true;
-        s.actions << act(ScanActionKind::OpenScreen);
-        beginScan(now, s);
-    }
 
     void addChainOutcome(const QString &nodeId, ScanClass cls)
     {
@@ -3876,6 +3658,7 @@ private:
             int sort;
             bool forced;
             bool cached;
+            int batch;
         };
         QList<Item> verified;
         for (const Row &r : m_rows) {
@@ -3927,10 +3710,14 @@ private:
             it.sort = r.sortMs;
             it.forced = isCurrent || r.id == m_connectingId || m_tapFailed.contains(r.id);
             it.cached = r.cached;
+            it.batch = rowBatch(r);
             verified << it;
         }
-        // Admission: forced rows, then tier first, fresh before cached, speed, ms.
+        // Admission, per batch of the series («Найти ещё» adds its rows, never replaces them): forced rows, then
+        // tier first, fresh before cached, speed, ms - at most the cap per batch.
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
+            if (a.batch != b.batch)
+                return a.batch < b.batch;
             if (a.forced != b.forced)
                 return a.forced;
             if (a.tier != b.tier)
@@ -3940,9 +3727,20 @@ private:
             return displayLess(a.v, a.tier, a.rank, b.v, b.tier, b.rank, a.sort, b.sort);
         });
         const int cap = qMax(1, m_t.listTargetWorks);
-        while (verified.size() > cap)
-            verified.removeLast();
+        QHash<int, int> admitted;
+        for (int i = 0; i < verified.size();) {
+            int &n = admitted[verified.at(i).batch];
+            if (n >= cap) {
+                verified.removeAt(i);
+                continue;
+            }
+            ++n;
+            ++i;
+        }
+        // Shown: the batches in their order, each by speed - a row of an earlier batch never moves for a new one.
         std::stable_sort(verified.begin(), verified.end(), [](const Item &a, const Item &b) {
+            if (a.batch != b.batch)
+                return a.batch < b.batch;
             return displayLess(a.v, a.tier, a.rank, b.v, b.tier, b.rank, a.sort, b.sort);
         });
         QList<ScanRowView> out;
@@ -3951,7 +3749,7 @@ private:
             out << it.v;
             ids.insert(it.v.id);
         }
-        if (out.size() < cap) {
+        if (admitted.value(qMax(1, m_batch)) < cap) {
             int n = 0;
             for (const Unverified &u : m_unverified) {
                 if (n >= m_t.unverifiedRowsMax)
@@ -4018,57 +3816,6 @@ private:
                || (m_phase == ScanPhase::Done && !m_current.working());
     }
 
-    ScanCardMode cardMode() const
-    {
-        if (!m_current.working())
-            return (m_phase == ScanPhase::Idle || m_phase == ScanPhase::Empty) ? ScanCardMode::Hidden : ScanCardMode::Off;
-        if (m_checking)
-            return ScanCardMode::Checking;
-        if (m_phase == ScanPhase::Preparing || m_phase == ScanPhase::Connecting || m_phase == ScanPhase::Reach
-            || m_phase == ScanPhase::Data || m_phase == ScanPhase::Idle)
-            return ScanCardMode::Hidden;
-        if (!m_lightActive || !lightFinal())
-            return ScanCardMode::Filling;
-        return m_checked ? ScanCardMode::Checked : ScanCardMode::Filled;
-    }
-
-    ScanCardView cardView(qint64 now) const
-    {
-        Q_UNUSED(now);
-        ScanCardView c;
-        c.mode = cardMode();
-        c.reportQueueFull = m_reportQueueFull;
-        if (c.mode == ScanCardMode::Hidden || c.mode == ScanCardMode::Off)
-            return c;
-        c.serverLabel = m_current.label;
-        c.serverCountry = m_current.countryCode;
-        c.serverMs = m_current.liveRttMs;
-        const auto fv = [this](ScanFactKind k) {
-            const Fact &f = m_facts[int(k)];
-            ScanFactView v;
-            v.state = f.state;
-            v.chips = f.chips;
-            v.ok = f.ok;
-            v.bars = f.bars;
-            v.word = f.word;
-            v.needsButton = f.needsButton;
-            return v;
-        };
-        c.server = fv(ScanFactKind::Server);
-        c.services = fv(ScanFactKind::Services);
-        c.sites = fv(ScanFactKind::Sites);
-        c.speed = fv(ScanFactKind::Speed);
-        c.speedVisible = c.mode == ScanCardMode::Checking || c.mode == ScanCardMode::Checked;
-        if (c.mode == ScanCardMode::Checking) {
-            c.button = ScanCardButton::Busy;
-            c.progress = double(m_checkStep) / qMax(1, m_checkTotal);
-        } else if (c.mode == ScanCardMode::Filling) {
-            c.button = ScanCardButton::Hidden;
-        } else {
-            c.button = m_connectingId.isEmpty() ? ScanCardButton::Ready : ScanCardButton::Disabled;
-        }
-        return c;
-    }
 
     qint64 nextChange(qint64 now, const ScanView &v) const
     {
@@ -4179,12 +3926,14 @@ private:
     int m_planRemaining = 0;         // probed candidates the batch cap left for the next one
     QString m_scope;                 // the chosen country: the scope of the next scan ("" = all)
     QString m_scannedScope;          // the scope of the running / last scan
+    QString m_cachedScope;           // the scope of the cached result of this network (loadCached)
     QList<ScanCountryView> m_scopeCountries; // the pool's countries of the last manifest
     QList<ScanCountryView> m_poolCountries;  // the server's pool (/v1/scan/pool), preferred when known
     int m_poolWhitelist = -1;
     enum class ServerBatch { Unknown, Yes, No };
     ServerBatch m_serverBatch = ServerBatch::Unknown; // /v1/scan/candidates answered / refused this session
     QString m_candReqId;
+    QSet<QString> m_candSeen;        // the `seen` of that request
     bool m_fromServer = false;       // this scan probes the server's batch
     bool m_serverExhausted = false;
 
@@ -4209,6 +3958,7 @@ private:
             return;
         }
         m_candReqId = a.requestId;
+        m_candSeen = QSet<QString>(a.ids.begin(), a.ids.end());
         s.actions << a;
     }
     bool m_completed = false;
@@ -4218,21 +3968,13 @@ private:
     QString m_stopReason;
     QString m_emptyReason;
     QString m_noScanReason;
-    qint64 m_wifiIntentUntil = 0;
     ScanOutcomeCollector m_outcomes;
     ScanOutcomeCollector m_chain;
     QString m_connectingId;
     QStringList m_chainOrder;
     bool m_chainLaterShown = false;
-    // card
-    Fact m_facts[4];
-    Fact m_factsBeforeCheck[4];       // restored when the engine refuses the check
-    bool m_checkedBeforeCheck = false;
-    bool m_lightActive = false;
-    QString m_lightNode;
-    qint64 m_lightDeadline = -1;
+    // the support check (supportCheckTapped / reportCheck*)
     bool m_checking = false;
-    bool m_checked = false;
     int m_checkStep = 0;
     int m_checkTotal = 4;
     bool m_reportSending = false;
@@ -4328,9 +4070,6 @@ inline QJsonObject scanActionToJson(const ScanAction &a)
         o.insert(QStringLiteral("ids"), ids);
         break;
     }
-    case ScanActionKind::StartLightChecks:
-        o.insert(QStringLiteral("node_id"), a.nodeId);
-        break;
     case ScanActionKind::StartReportCheck:
         o.insert(QStringLiteral("with_connection"), a.withConnection);
         o.insert(QStringLiteral("report_id"), a.reportId);
@@ -4376,32 +4115,10 @@ inline QJsonObject scanActionToJson(const ScanAction &a)
         o.insert(QStringLiteral("bytes"), a.bytes);
         break;
     case ScanActionKind::CloseScreen:
-    case ScanActionKind::OpenScreen:
     case ScanActionKind::UserConnectForScan:
     case ScanActionKind::CancelPendingConnect:
         break;
     }
-    return o;
-}
-
-inline QJsonObject scanFactViewToJson(const ScanFactView &f)
-{
-    QJsonObject o;
-    o.insert(QStringLiteral("state"), QLatin1String(scanFactStateName(f.state)));
-    if (!f.chips.isEmpty()) {
-        QJsonArray c;
-        for (int x : f.chips)
-            c << x;
-        o.insert(QStringLiteral("chips"), c);
-    }
-    if (f.ok)
-        o.insert(QStringLiteral("ok"), true);
-    if (f.bars)
-        o.insert(QStringLiteral("bars"), f.bars);
-    if (!f.word.isEmpty())
-        o.insert(QStringLiteral("word"), f.word);
-    if (f.needsButton)
-        o.insert(QStringLiteral("needs_button"), true);
     return o;
 }
 
@@ -4451,27 +4168,16 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     o.insert(QStringLiteral("more_available"), v.moreAvailable);
     o.insert(QStringLiteral("batch"), v.batch);
     o.insert(QStringLiteral("more_country"), v.moreCountry);
-    if (!v.moreState.isEmpty())
-        o.insert(QStringLiteral("more"), QJsonObject{{QStringLiteral("state"), v.moreState}, {QStringLiteral("batch"), v.batch},
-                                                     {QStringLiteral("country"), v.moreCountry}});
+    if (!v.moreState.isEmpty()) {
+        QJsonObject more{{QStringLiteral("state"), v.moreState}, {QStringLiteral("batch"), v.batch}, {QStringLiteral("country"), v.moreCountry}};
+        if (!v.moreBlocked.isEmpty()) {
+            more.insert(QStringLiteral("blocked"), v.moreBlocked);
+            more.insert(QStringLiteral("retry_min"), v.moreRetryMin);
+        }
+        o.insert(QStringLiteral("more"), more);
+    }
     if (!v.netRadio.isEmpty())
         o.insert(QStringLiteral("net_radio"), v.netRadio);
-    QJsonObject card;
-    card.insert(QStringLiteral("mode"), QLatin1String(scanCardModeName(v.card.mode)));
-    card.insert(QStringLiteral("button"), QLatin1String(scanCardButtonName(v.card.button)));
-    if (v.card.reportQueueFull)
-        card.insert(QStringLiteral("report_queue_full"), true);
-    if (v.card.mode != ScanCardMode::Hidden && v.card.mode != ScanCardMode::Off) {
-        card.insert(QStringLiteral("server"), scanFactViewToJson(v.card.server));
-        card.insert(QStringLiteral("server_ms"), v.card.serverMs);
-        card.insert(QStringLiteral("services"), scanFactViewToJson(v.card.services));
-        card.insert(QStringLiteral("sites"), scanFactViewToJson(v.card.sites));
-        if (v.card.speedVisible)
-            card.insert(QStringLiteral("speed"), scanFactViewToJson(v.card.speed));
-        if (v.card.progress >= 0)
-            card.insert(QStringLiteral("progress"), qRound(v.card.progress * 100) / 100.0);
-    }
-    o.insert(QStringLiteral("card"), card);
     QJsonObject bar;
     bar.insert(QStringLiteral("menu_visible"), v.bar.menuVisible);
     bar.insert(QStringLiteral("menu_enabled"), v.bar.menuEnabled);
@@ -4494,8 +4200,6 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     bar.insert(QStringLiteral("button_enabled"), v.bar.buttonEnabled);
     bar.insert(QStringLiteral("button_value"), v.bar.buttonValue);
     bar.insert(QStringLiteral("hint"), QLatin1String(scanHintName(v.bar.hint)));
-    if (v.bar.hintBytes)
-        bar.insert(QStringLiteral("hint_bytes"), double(v.bar.hintBytes));
     o.insert(QStringLiteral("bar"), bar);
     QJsonObject empty;
     empty.insert(QStringLiteral("variant"), QLatin1String(scanEmptyVariantName(v.empty.variant)));

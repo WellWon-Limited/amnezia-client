@@ -1,5 +1,5 @@
 // AVPN Scanner tests: the event codec (JSON event -> ScanMachine call), a fake world on a fake clock (probe
-// host with pools, reach stage, byte cap and deadline; probe leases; light checks; the report check; the
+// host with pools, reach stage, byte cap and deadline; probe leases; the report check; the
 // engine's connect ladder) and the artboard scenarios. Shared by scan_core_check.cpp (assertions) and
 // scan_vectors_check.cpp (records / replays tests/vectors/scan_machine_vectors.json).
 //
@@ -12,13 +12,12 @@
 //   host_failed {scan_id, error, start_accepted (default true), detail}   candidate_refused {probe_id, reason}
 //   report_check_refused {report_id, reason}   host_progress {reply (the host's scan_progress JSON, decoded by
 //   ScanHostContract.h)}   lease_granted {node_id, access}   lease_refused {node_id, code}
-//   light_fact {kind, state, chips, ok, bars, word, needs_button}   row_tapped {node_id}
-//   connect_failed {node_id}   attempt_ended {}   check_tapped {}   report_link_tapped {}
+//   row_tapped {node_id}   connect_failed {node_id}   attempt_ended {}   support_check_tapped {}   report_link_tapped {}
 //   report_check_started {}   report_check_progress {step, total}   report_check_done {delivery, report_id}
 //   connect_and_scan_tapped {}   live_probe_result {node_id, facts (a data ITEM of ScanHostContract.h)}
 //   host_cancel_ack {scan_id, bytes_spent}   host_freeze_ack {scan_id, spent, reserved}
 //   app_request_done {request_id, bytes}   report_queue_state {full}   tick {}
-//   opened also takes connect_on_open (default true); manifest_ready also api_bytes, ru_split_on,
+//   opened also takes connect_on_open (default true); manifest_ready also api_bytes,
 //   awg_address_known (default true), probe_base_ips
 //   network = {kind, key, fingerprint, sources: [{source, epoch (16 hex), counter}]}; current = {node_id, live,
 //   connecting, data_flowing, failed, live_rtt_ms, origin, label, cc, transport, version, tier};
@@ -153,27 +152,6 @@ inline ScanHostCaps capsFrom(const QJsonObject &o)
     return c;
 }
 
-inline ScanLightFact factFrom(const QJsonObject &o)
-{
-    ScanLightFact f;
-    const QString k = o.value(QLatin1String("kind")).toString();
-    f.kind = k == QLatin1String("server") ? ScanFactKind::Server
-             : k == QLatin1String("services") ? ScanFactKind::Services
-             : k == QLatin1String("speed") ? ScanFactKind::Speed : ScanFactKind::Sites;
-    const QString st = o.value(QLatin1String("state")).toString();
-    f.state = st == QLatin1String("running") ? ScanFactState::Running
-              : st == QLatin1String("unknown") ? ScanFactState::Unknown
-              : st == QLatin1String("off") ? ScanFactState::Off
-              : st == QLatin1String("pending") ? ScanFactState::Pending : ScanFactState::Done;
-    for (const QJsonValue &v : o.value(QLatin1String("chips")).toArray())
-        f.chips << v.toInt();
-    f.ok = o.value(QLatin1String("ok")).toBool();
-    f.bars = o.value(QLatin1String("bars")).toInt();
-    f.word = o.value(QLatin1String("word")).toString();
-    f.needsButton = o.value(QLatin1String("needs_button")).toBool();
-    return f;
-}
-
 inline ScanOwnNode ownFrom(const QJsonObject &o)
 {
     ScanOwnNode n;
@@ -210,7 +188,6 @@ inline ScanManifestInput manifestInputFrom(const QJsonObject &a)
     in.awgProbeIpKnown = a.value(QLatin1String("awg_probe_ip_known")).toBool();
     in.strictUnverifiable = a.value(QLatin1String("strict_unverifiable")).toBool();
     in.apiBytes = qint64(a.value(QLatin1String("api_bytes")).toDouble(-1));
-    in.ruSplitOn = a.value(QLatin1String("ru_split_on")).toBool(true);
     in.awgAddressKnown = a.value(QLatin1String("awg_address_known")).toBool(true);
     for (const QJsonValue &v : a.value(QLatin1String("probe_base_ips")).toArray())
         in.probeBaseIps << v.toString();
@@ -286,9 +263,7 @@ inline ScanStep applyScanEvent(ScanMachine &m, const QJsonObject &ev, bool *know
     if (e == QLatin1String("filter")) return m.filterChosen(a.value(QLatin1String("cc")).toString(), now);
     if (e == QLatin1String("network_changed"))
         return m.networkChanged(netFrom(a.value(QLatin1String("network")).toObject()),
-                                scanCachedResultFromJson(a.value(QLatin1String("cached")).toObject()),
-                                a.value(QLatin1String("app_in_front")).toBool(), now);
-    if (e == QLatin1String("app_foreground")) return m.appForeground(now);
+                                scanCachedResultFromJson(a.value(QLatin1String("cached")).toObject()), now);
     if (e == QLatin1String("vpn_state")) return m.vpnState(currentFrom(a.value(QLatin1String("current")).toObject()), now);
     if (e == QLatin1String("manifest_ready")) return m.manifestReady(manifestInputFrom(a), now);
     if (e == QLatin1String("manifest_unavailable")) return m.manifestUnavailable(a.value(QLatin1String("reason")).toString(), now);
@@ -309,11 +284,10 @@ inline ScanStep applyScanEvent(ScanMachine &m, const QJsonObject &ev, bool *know
         return m.probeLeaseGranted(a.value(QLatin1String("node_id")).toString(), accessFrom(a.value(QLatin1String("access")).toObject()), now);
     if (e == QLatin1String("lease_refused"))
         return m.probeLeaseRefused(a.value(QLatin1String("node_id")).toString(), a.value(QLatin1String("code")).toString(), now);
-    if (e == QLatin1String("light_fact")) return m.lightFact(factFrom(a), now);
     if (e == QLatin1String("row_tapped")) return m.rowTapped(a.value(QLatin1String("node_id")).toString(), now);
     if (e == QLatin1String("connect_failed")) return m.connectFailed(a.value(QLatin1String("node_id")).toString(), now);
     if (e == QLatin1String("attempt_ended")) return m.attemptEnded(now);
-    if (e == QLatin1String("check_tapped")) return m.checkTapped(now);
+    if (e == QLatin1String("support_check_tapped")) return m.supportCheckTapped(now);
     if (e == QLatin1String("report_link_tapped")) return m.reportLinkTapped(now);
     if (e == QLatin1String("report_check_started")) return m.reportCheckStarted(now);
     if (e == QLatin1String("report_check_progress"))
@@ -388,7 +362,6 @@ struct World {
     QString current;           // live connection at open
     QMap<QString, QString> leaseRefuse;
     int leaseDelayMs = 120;
-    bool servicesNeedButton = false;
     QSet<QString> connectFails;
     int connectMs = 1300;
     QString lkg;               // ConnectForScan target
@@ -419,7 +392,6 @@ struct World {
     QString cutApp;
     int appOverrunBytes = 0;    // the cut reply still passed its reservation by this much (one chunk late, <= kScanAppOvershootMaxBytes)
     int liveOverrunBytes = 0;   // the live probe read this much past its reservation before the cut
-    bool ruSplitOn = true;
     bool strict = false;        // features.upstream_unverifiable_strict
     QString hostRefusesStart;   // the host answers scan_start with this error (e.g. "memory"): nothing admitted
     QString hostRefusesDetail;  // ... and this "detail" (e.g. "kill_switch_exemption")
@@ -511,7 +483,7 @@ inline QJsonObject manifestArgs(const World &w)
                       {QStringLiteral("fresh_failures"), QJsonArray()}, {QStringLiteral("last_known_good"), w.lastKnownGood},
                       {QStringLiteral("access"), QJsonObject{{QStringLiteral("asn"), 64500}, {QStringLiteral("net_token"), QStringLiteral("net-access")}}},
                       {QStringLiteral("awg_mini_enabled"), w.awgMini}, {QStringLiteral("awg_probe_ip_known"), w.awgIpKnown},
-                      {QStringLiteral("api_bytes"), w.manifestBytes}, {QStringLiteral("ru_split_on"), w.ruSplitOn},
+                      {QStringLiteral("api_bytes"), w.manifestBytes},
                       {QStringLiteral("strict_unverifiable"), w.strict}};
     // later inputs only when set (the recorded vectors of earlier scenarios stay byte for byte)
     if (!w.awgAddressKnown)
@@ -574,7 +546,7 @@ public:
     ScanMachine m;
     QList<Recorded> steps;
     qint64 now = kT0;
-    QStringList closes, opens;
+    QStringList closes;
     int releases = 0;
     int batches = 0;
     int maxReleaseIds = 0;
@@ -773,15 +745,6 @@ public:
                 releases += a.ids.size();
                 maxReleaseIds = qMax(maxReleaseIds, int(a.ids.size()));
                 break;
-            case ScanActionKind::StartLightChecks: {
-                const QJsonObject services = w.servicesNeedButton
-                    ? QJsonObject{{QStringLiteral("kind"), QStringLiteral("services")}, {QStringLiteral("state"), QStringLiteral("unknown")}, {QStringLiteral("needs_button"), true}}
-                    : QJsonObject{{QStringLiteral("kind"), QStringLiteral("services")}, {QStringLiteral("state"), QStringLiteral("done")},
-                                  {QStringLiteral("chips"), QJsonArray{2, 2, 2, 2}}};
-                schedule(now + 40, ev("light_fact", now + 40, services));
-                schedule(now + 900, ev("light_fact", now + 900, {{QStringLiteral("kind"), QStringLiteral("sites")}, {QStringLiteral("state"), QStringLiteral("done")}, {QStringLiteral("ok"), true}}));
-                break;
-            }
             case ScanActionKind::StartReportCheck: {
                 if (!w.reportRefuse.isEmpty()) {
                     schedule(now + 300, ev("report_check_refused", now + 300, {{QStringLiteral("report_id"), a.reportId},
@@ -792,9 +755,6 @@ public:
                 if (a.withConnection) {
                     for (int k = 1; k <= 3; ++k)
                         schedule(now + 600 * k, ev("report_check_progress", now + 600 * k, {{QStringLiteral("step"), k}, {QStringLiteral("total"), 4}}));
-                    schedule(now + 700, ev("light_fact", now + 700, {{QStringLiteral("kind"), QStringLiteral("services")}, {QStringLiteral("state"), QStringLiteral("done")}, {QStringLiteral("chips"), QJsonArray{2, 2, 1, 2}}}));
-                    schedule(now + 1300, ev("light_fact", now + 1300, {{QStringLiteral("kind"), QStringLiteral("sites")}, {QStringLiteral("state"), QStringLiteral("done")}, {QStringLiteral("ok"), true}}));
-                    schedule(now + 2000, ev("light_fact", now + 2000, {{QStringLiteral("kind"), QStringLiteral("speed")}, {QStringLiteral("state"), QStringLiteral("done")}, {QStringLiteral("bars"), 5}, {QStringLiteral("word"), QStringLiteral("comfortable")}}));
                     schedule(now + 2400, ev("report_check_done", now + 2400, {{QStringLiteral("delivery"), d}, {QStringLiteral("report_id"), a.reportId}}));
                 } else {
                     schedule(now + 1600, ev("report_check_done", now + 1600, {{QStringLiteral("delivery"), d}, {QStringLiteral("report_id"), a.reportId}}));
@@ -822,9 +782,6 @@ public:
             case ScanActionKind::CloseScreen:
                 closes << QString::number(now - kT0);
                 break;
-            case ScanActionKind::OpenScreen:
-                opens << QString::number(now - kT0);
-                break;
             default:
                 break;
             }
@@ -843,7 +800,7 @@ public:
         if (bytes > a.costBytes)
             ++overruns;
         appBytesReported += bytes;
-        const qint64 at = now + (a.kind == ScanActionKind::StartLightChecks ? 900 : a.kind == ScanActionKind::RequestProbeBatch ? w.leaseDelayMs : 60);
+        const qint64 at = now + (a.kind == ScanActionKind::RequestProbeBatch ? w.leaseDelayMs : 60);
         schedule(at, ev("app_request_done", at, {{QStringLiteral("request_id"), a.requestId}, {QStringLiteral("bytes"), double(bytes)}}));
     }
     qint64 appBytesReported = 0; // real bytes of the app requests the coordinator reported (incl. manifest, live)

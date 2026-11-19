@@ -695,48 +695,6 @@ inline StageResult speedStageFromSample(bool ok, qint64 bytes, qint64 ms, bool d
     return r;
 }
 
-// The card's «Скорость» (bars of LoadBars + one word) from the speed stage.
-struct SpeedCardFact {
-    bool known = false;
-    int bars = 0;
-    QString word; // "comfortable" | "slow"
-};
-inline SpeedCardFact speedCardFact(double downMbit, int status)
-{
-    SpeedCardFact f;
-    if (downMbit < 0 || status == Skip)
-        return f;
-    f.known = true;
-    f.bars = downMbit >= 20.0 ? 5 : downMbit >= 5.0 ? 3 : downMbit > 0.0 ? 2 : 0;
-    f.word = (status == Ok && downMbit >= 5.0) ? QStringLiteral("comfortable") : QStringLiteral("slow");
-    return f;
-}
-
-// The four home chips of the card (Telegram, YouTube, Instagram, WhatsApp) from AvpnEngineQml's
-// serviceStatus ({key, state, stale}): -1 = unknown. A chip measured on another connection (stale) is
-// unknown here; anyFresh = at least one chip ran on THIS connection (else the card says «проверим по кнопке»).
-inline QList<int> scanChipStates(const QVariantList &serviceStatus, bool *anyFresh = nullptr)
-{
-    static const QStringList order{QStringLiteral("telegram"), QStringLiteral("youtube"),
-                                   QStringLiteral("instagram"), QStringLiteral("whatsapp")};
-    QList<int> out(order.size(), -1);
-    bool fresh = false;
-    for (const QVariant &v : serviceStatus) {
-        const QVariantMap m = v.toMap();
-        const int i = int(order.indexOf(m.value(QStringLiteral("key")).toString()));
-        if (i < 0 || m.value(QStringLiteral("stale"), false).toBool())
-            continue;
-        const int st = m.value(QStringLiteral("state"), -1).toInt();
-        if (st < 0)
-            continue;
-        out[i] = st;
-        fresh = true;
-    }
-    if (anyFresh)
-        *anyFresh = fresh;
-    return out;
-}
-
 inline constexpr int kCheckReportMaxBytes = 256 * 1024; // BENCH_DOCTOR_REPORT_MAX_BYTES (413 above)
 inline constexpr int kCheckStageMax = 12;
 inline constexpr int kCheckNoteMax = 500;

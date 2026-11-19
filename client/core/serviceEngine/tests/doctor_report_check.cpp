@@ -481,19 +481,6 @@ int main()
         CHECK(checkDelivery("unsaved_sending", "acked", "pending", false) == CheckDelivery::Wait, "delivery: unsaved, sending -> wait");
         CHECK(checkDelivery("unsaved_sending", "acked", "pending", true) == CheckDelivery::NotSaved, "delivery: unsaved at the bound -> not saved");
         CHECK(checkDelivery("queued", "acked", "", false) == CheckDelivery::Sent, "delivery: a report without a log part");
-
-        // The card's facts.
-        CHECK(!speedCardFact(-1, Skip).known, "speed card: not measured");
-        CHECK(speedCardFact(24.0, Ok).bars == 5 && speedCardFact(24.0, Ok).word == "comfortable", "speed card: fast");
-        CHECK(speedCardFact(3.0, Warn).bars == 2 && speedCardFact(3.0, Warn).word == "slow", "speed card: slow");
-        bool fresh = true;
-        const QVariantList svc{QVariantMap{{"key", "whatsapp"}, {"state", 2}, {"stale", false}},
-                               QVariantMap{{"key", "telegram"}, {"state", 0}, {"stale", true}},
-                               QVariantMap{{"key", "youtube"}, {"state", -1}, {"stale", false}}};
-        const QList<int> chips = scanChipStates(svc, &fresh);
-        CHECK(chips == (QList<int>{-1, -1, -1, 2}) && fresh, "chips: order Telegram YouTube Instagram WhatsApp, stale = unknown");
-        scanChipStates({QVariantMap{{"key", "telegram"}, {"state", 2}, {"stale", true}}}, &fresh);
-        CHECK(!fresh, "chips: only stale ones = «проверим по кнопке»");
     }
 
     // ==== AVPN Scanner, second pass: the check's speed = one /v1/probe sample (TribeScanner::sampleSpeed) ====
@@ -502,7 +489,6 @@ int main()
         CHECK(ok.id == "speed" && ok.status == Ok, "speed sample: 1 MiB in 0.8 s -> ok");
         CHECK(qAbs(ok.data.value("down_mbit").toDouble() - 10.48576) < 0.001, "speed sample: Mbit/s = bytes*8/ms/1000");
         CHECK(ok.data.value("method").toString() == "probe", "speed sample: the method is in the report");
-        CHECK(speedCardFact(ok.data.value("down_mbit").toDouble(), ok.status).word == "comfortable", "speed sample: card comfortable");
         const StageResult slow = speedStageFromSample(true, 262144, 1500, true, QString());
         CHECK(slow.status == Warn, "speed sample: 1.4 Mbit/s -> warn");
         const StageResult bad = speedStageFromSample(true, 1048576, 800, /*digestOk=*/false, QString());

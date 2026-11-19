@@ -2009,12 +2009,12 @@ You can attach a photo or video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+70"/>
+        <location line="+66"/>
         <source>Сканер</source>
         <translation>Scanner</translation>
     </message>
     <message>
-        <location line="-69"/>
+        <location line="-65"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2040,11 +2040,6 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+2"/>
-        <source>Проверяем ваше подключение</source>
-        <translation>Checking your connection</translation>
-    </message>
-    <message>
-        <location line="+1"/>
         <source>Рабочие ноды появятся здесь</source>
         <translation>Working nodes will appear here</translation>
     </message>
@@ -2120,21 +2115,6 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <source>Повторить</source>
-        <translation>Retry</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Повторить через %1&#xa0;с</source>
-        <translation>Retry in %1&#xa0;s</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Повторить через %1&#xa0;мин</source>
-        <translation>Retry in %1&#xa0;min</translation>
-    </message>
-    <message>
-        <location line="+1"/>
         <source>Лимит сканов в мобильной сети на этот час</source>
         <translation>Cellular scan limit for this hour</translation>
     </message>
@@ -2144,12 +2124,7 @@ You can attach a photo or video.</translation>
         <translation>Nothing works on the cellular network right now</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Подключитесь к Wi‑Fi — через него VPN обычно работает. Когда телефон подключится, откройте приложение — проверим ещё раз сами.</source>
-        <translation>Connect to Wi‑Fi — the VPN usually works through it. When the phone is connected, open the app — we will check again by ourselves.</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Понял, подключусь к Wi‑Fi</source>
         <translation>Got it, I will connect to Wi‑Fi</translation>
     </message>
@@ -2175,12 +2150,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+74"/>
+        <location line="+86"/>
         <source>Отправляем отчёт…</source>
         <translation>Sending the report…</translation>
     </message>
     <message>
-        <location line="-67"/>
+        <location line="-79"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>All seats are taken right now — connecting the next server</translation>
     </message>
@@ -2326,6 +2301,11 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
+        <source>Найти ещё через %1 мин</source>
+        <translation>Find more in %1 min</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Больше доступных нод в этой сети нет</source>
         <translation>No more available nodes on this network</translation>
     </message>
@@ -2333,6 +2313,56 @@ You can attach a photo or video.</translation>
         <location line="+1"/>
         <source>Сканировать</source>
         <translation>Scan</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сканировать через %1 с</source>
+        <translation>Scan in %1 s</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сканировать через %1 мин</source>
+        <translation>Scan in %1 min</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>%1 · %2</source>
+        <translation>%1 · %2</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 сервер</source>
+        <translation>%1 server</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 сервера</source>
+        <translation>%1 servers</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 серверов</source>
+        <translation>%1 servers</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Нажмите «Сканировать» — проверим, какие из них работают в этой сети.</source>
+        <translation>Tap «Scan» — we will check which of them work on this network.</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Найдём, через что подключиться</source>
+        <translation>Let&apos;s find what you can connect through</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Нажмите «Сканировать» — проверим серверы в этой сети.</source>
+        <translation>Tap «Scan» — we will check the servers on this network.</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1: проверены все серверы</source>
+        <translation>%1: all servers checked</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2365,12 +2395,12 @@ You can attach a photo or video.</translation>
         <translation>Up to 20 seconds — the report will arrive in the chat</translation>
     </message>
     <message>
-        <location line="-30"/>
+        <location line="-42"/>
         <source>Запустить службу</source>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-97"/>
+        <location line="-93"/>
         <source>только что</source>
         <translation>just now</translation>
     </message>
@@ -2430,12 +2460,17 @@ You can attach a photo or video.</translation>
         <translation>Checking data transfer · %1 of&#xa0;%2 available</translation>
     </message>
     <message>
-        <location line="+9"/>
+        <location line="+8"/>
         <source>Доступно</source>
         <translation>Available</translation>
     </message>
     <message>
-        <location line="+31"/>
+        <location line="+19"/>
+        <source>Подключитесь к Wi‑Fi — через него VPN обычно работает. Потом откройте Сканер и нажмите «Сканировать».</source>
+        <translation>Connect to Wi‑Fi — VPN usually works through it. Then open the Scanner and tap “Scan”.</translation>
+    </message>
+    <message>
+        <location line="+9"/>
         <source>Найдена 1 доступная нода</source>
         <translation>1 available server found</translation>
     </message>
@@ -3091,7 +3126,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4175"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4272"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3191,7 +3226,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-2953"/>
+        <location line="-3026"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3241,7 +3276,7 @@ You can attach a photo or video.</translation>
         <translation>Current server</translation>
     </message>
     <message>
-        <location line="+371"/>
+        <location line="+375"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No active subscription. Get one to connect.</translation>
     </message>
@@ -3256,7 +3291,7 @@ You can attach a photo or video.</translation>
         <translation>Connection mode is now “Auto” to connect the selected server</translation>
     </message>
     <message>
-        <location line="+111"/>
+        <location line="+157"/>
         <source>«%1» в этой сети не работает — подключено через другой сервер</source>
         <translation>“%1” does not work on this network — connected via another server</translation>
     </message>
@@ -3276,7 +3311,7 @@ You can attach a photo or video.</translation>
         <translation>“%1” recently did not work on this network — connected via “%2”</translation>
     </message>
     <message>
-        <location line="+10"/>
+        <location line="+17"/>
         <source>Выбранный сервер сейчас не работает в этой сети — выберите другой или «Авто»</source>
         <translation>The selected server does not work on this network right now — choose another one or “Auto”</translation>
     </message>
@@ -3287,12 +3322,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3796"/>
+        <location line="+3824"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>There is no server in the selected mode — switch to “Auto”</translation>
     </message>
     <message>
-        <location line="-3793"/>
+        <location line="-3821"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>No network — connect when it is back</translation>
     </message>
@@ -3302,7 +3337,7 @@ You can attach a photo or video.</translation>
         <translation>No working server was found on this network — check the network and try again</translation>
     </message>
     <message>
-        <location line="+483"/>
+        <location line="+495"/>
         <source>Отправляем…</source>
         <translation>Sending…</translation>
     </message>
@@ -3317,7 +3352,7 @@ You can attach a photo or video.</translation>
         <translation>Recording, sent at %1</translation>
     </message>
     <message>
-        <location line="+1124"/>
+        <location line="+1128"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>This report has already been delivered</translation>
     </message>
@@ -3408,7 +3443,7 @@ You can attach a photo or video.</translation>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
     <message>
-        <location line="+481"/>
+        <location line="+493"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation>Could not turn off the VPN. Try again or turn it off in iOS Settings.</translation>
     </message>
@@ -3464,12 +3499,12 @@ You can attach a photo or video.</translation>
         <translation>Not enough live servers to switch</translation>
     </message>
     <message>
-        <location line="+807"/>
+        <location line="+672"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray is not available in this app version</translation>
     </message>
     <message>
-        <location line="+603"/>
+        <location line="+629"/>
         <source>Введите код доступа</source>
         <translation>Enter your access code</translation>
     </message>
@@ -3580,7 +3615,7 @@ You can attach a photo or video.</translation>
         <translation>Auto</translation>
     </message>
     <message>
-        <location line="+584"/>
+        <location line="+582"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Sign in or connect first</translation>
     </message>

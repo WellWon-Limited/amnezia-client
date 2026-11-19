@@ -1097,27 +1097,6 @@ static void scannerKillSwitchImmediate()
     CHECK(cfg.asks == 2 && cfg.fetches == 2);
 }
 
-// Review F1: a light fact goes back with the ask it answers; a fact of an older ask is dropped.
-struct FakeLightScanner {
-    QList<QPair<quint64, int>> bound;
-    QList<int> plain;
-    void lightFactFor(quint64 ask, int f) { bound.append({ask, f}); }
-    void lightFact(int f) { plain.append(f); }
-};
-static void scannerLightFactsBoundToAsk()
-{
-    FakeLightScanner sc;
-    ScanLightAsk first{41, true, 1};
-    ScanLightAsk second{42, true, 2};
-    CHECK(scanDeliverLightFact(sc, second, 2, 7));
-    CHECK(sc.bound == (QList<QPair<quint64, int>>{{42, 7}})); // its own ask id, not a "latest" one
-    CHECK(!scanDeliverLightFact(sc, first, 2, 8));             // the RU sites of the previous scan arrive late
-    CHECK(sc.bound.size() == 1 && sc.plain.isEmpty());
-    ScanLightAsk legacy{0, false, 3};
-    CHECK(scanDeliverLightFact(sc, legacy, 3, 9));             // an old-style ask answers through lightFact
-    CHECK(sc.plain == QList<int>{9} && sc.bound.size() == 1);
-}
-
 // Item 6: the service step of Connect as a decision; the Scanner's tap runs the same one (upgradeDeclined false).
 static void scannerServicePlan()
 {
@@ -1296,7 +1275,6 @@ int main()
     scannerPhysicalNetworkKind();
     scannerKnownHostIps();
     scannerCheckRefusal();
-    scannerLightFactsBoundToAsk();
     scannerKillSwitchImmediate();
     scannerServicePlan();
     preNativeErrorNeedsNoStatus();

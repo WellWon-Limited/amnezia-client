@@ -31,7 +31,6 @@ QtObject {
     readonly property string stageReach: qsTr("Проверяем доступность · %1 из %2")
     readonly property string stageReachShort: qsTr("Проверяем доступность")
     readonly property string stageData: qsTr("Проверяем передачу данных · доступно %1 из %2")
-    readonly property string stageSelf: qsTr("Проверяем ваше подключение")
     readonly property string waitRows: qsTr("Рабочие ноды появятся здесь")
     readonly property string waitMore: qsTr("Ищем ещё… до %1 с")
     readonly property string legend: qsTr("работает у других в вашей сети — по обезличенным отчётам устройств того же оператора")
@@ -54,14 +53,11 @@ QtObject {
     // ── bottom bar ──
     readonly property string allCountries: qsTr("Все страны")
     readonly property string stop: qsTr("Остановить")
-    readonly property string retry: qsTr("Повторить")
-    readonly property string retryInS: qsTr("Повторить через %1 с")
-    readonly property string retryInMin: qsTr("Повторить через %1 мин")
     readonly property string hourLimit: qsTr("Лимит сканов в мобильной сети на этот час")
 
     // ── empty result ──
     readonly property string emptyCellTitle: qsTr("В мобильной сети сейчас ничего не работает")
-    readonly property string emptyCellText: qsTr("Подключитесь к Wi‑Fi — через него VPN обычно работает. Когда телефон подключится, откройте приложение — проверим ещё раз сами.")
+    readonly property string emptyCellText: qsTr("Подключитесь к Wi‑Fi — через него VPN обычно работает. Потом откройте Сканер и нажмите «Сканировать».")
     readonly property string emptyCellOk: qsTr("Понял, подключусь к Wi‑Fi")
     readonly property string emptyWifiTitle: qsTr("В этой сети Wi‑Fi сейчас ничего не работает")
     readonly property string emptyWifiText: qsTr("Попробуйте мобильный интернет или другую сеть Wi‑Fi.")
@@ -133,8 +129,20 @@ QtObject {
     // (waits for bar.scope_countries + empty.scope_cc)
     readonly property string more: qsTr("Найти ещё")                                       // button under the list, a finished scan
     readonly property string moreRunning: qsTr("Ищем ещё…")                                // the same button while the next batch runs
+    readonly property string moreInMin: qsTr("Найти ещё через %1 мин")                     // the same button, disabled: the cellular hour's limit (view.more.blocked "budget"; the bar says hourLimit)
     readonly property string moreExhausted: qsTr("Больше доступных нод в этой сети нет")   // replaces the button: nothing left to check
-    readonly property string scanScope: qsTr("Сканировать")                               // bar button: a country chosen that the shown result does not cover
+    readonly property string scanScope: qsTr("Сканировать")                               // THE Scan button (owner 19.11: one button, one meaning - scan the chosen scope)
+    readonly property string scanInS: qsTr("Сканировать через %1 с")                      // the same button during the 30 s pause between scans
+    readonly property string scanInMin: qsTr("Сканировать через %1 мин")                  // the same button while the cellular hour's budget is spent
+    // owner 19.11: page open without results / a scope the shown result does not cover - its summary
+    readonly property string scopeTitle: qsTr("%1 · %2")                                 // «Германия · 12 серверов» (%1 = country or «Все страны», %2 = servers())
+    readonly property string serverOne: qsTr("%1 сервер")
+    readonly property string serverFew: qsTr("%1 сервера")
+    readonly property string serverMany: qsTr("%1 серверов")
+    readonly property string scopeText: qsTr("Нажмите «Сканировать» — проверим, какие из них работают в этой сети.")
+    readonly property string startTitle: qsTr("Найдём, через что подключиться")          // no pool counts yet
+    readonly property string startText: qsTr("Нажмите «Сканировать» — проверим серверы в этой сети.")
+    readonly property string moreExhaustedScope: qsTr("%1: проверены все серверы")        // «Найти ещё» has nothing left in a country scope
     readonly property string emptyScopeTitle: qsTr("%1: доступных нод сейчас нет")         // empty result of a country scan (%1 = the country)
     readonly property string emptyScopeText: qsTr("Попробуйте другую страну или проверьте все страны.") // text, the same state
     // variant B (owner decision 18.11): the check with the report lives in Support - the bar under the chat header
@@ -148,8 +156,7 @@ QtObject {
     //  - stage «preparing» (manifest requested): stageReachShort without the counts + an indeterminate bar
     //  - NoScan not_entitled / over_quota / manifest_invalid / manifest_unavailable / host_* (generic): state 23
     //    texts (engineTitle + engineText + «Повторить»)
-    //  - NoScan network_changed: the last result + the bar's «Повторить» + the shade networkChanged
-    //  - shade scan_budget: hourLimit; shade wifi_intent: none (dismissed at once)
+    //  - shade scan_budget: hourLimit
     //  - network chip for ethernet / unknown: no chip
     // NEWTEXTS-END
 
@@ -189,7 +196,6 @@ QtObject {
                                         // closes itself when the engine's scannerEnabled turns false
             return { layout: "blocked", icon: "alert-circle", title: t.scannerOffTitle, text: t.scannerOffText, action: "none", primary: true }
         case "vpn_off":                 // state 20: last result + «Подключиться и проверить» (the bar)
-        case "network_changed":         // NO FRAME: last result + «Повторить» (cooldown cleared)
             return { layout: "list" }
         case "cooldown":                // state 21
             return { layout: "blocked", icon: "clock", title: t.pauseTitle, text: t.pauseText, action: "retry", primary: false }
@@ -235,6 +241,7 @@ QtObject {
         const a = n % 10, b = n % 100
         return a === 1 && b !== 11 ? one : ((a >= 2 && a <= 4 && (b < 12 || b > 14)) ? few : many)
     }
+    function servers(n) { return t.plural(n, t.serverOne, t.serverFew, t.serverMany).arg(n) }
     function found(n) {
         return n === 1 ? t.foundOne : t.plural(n, t.foundFormOne, t.foundFormFew, t.foundFormMany).arg(n)
     }
@@ -279,7 +286,6 @@ QtObject {
         case "report_check_unavailable": return t.checkUnavailable
         case "report_check_not_saved": return t.checkNotSaved
         case "report_check_rejected": return t.checkRejected
-        // wifi_intent: no text (NO FRAME) - the host lets it go at once
         }
         return ""
     }
