@@ -1128,6 +1128,9 @@ private:
     // AVPN (разбор 2026-09-23): держать фоновое время iOS, пока намерение ON, а туннель не устоялся
     // (перезапуск «стоп → старт», начатый приложением, иначе замерзал между стопом и стартом).
     void syncRestartGuard();
+    // AVPN (build 142): background time while the attempt owner runs (BackgroundTaskHook.h; iOS only,
+    // a no-op elsewhere). Level driven: Begin when the attempt runs, End when it settles or is stopped.
+    void syncAttemptBgHold();
     // AVPN (iOS data watch, build 141; TunnelWatchPlan.h, TunnelWatchStatus.h). Called only under Q_OS_IOS;
     // with features.ios_tunnel_watch / ios_on_demand_bg_arm false (default) each is a no-op for decisions.
     void writeTunnelWatchPlan(const char *why);       // plan file for the extension (contract C1)
@@ -1409,6 +1412,7 @@ private:
     avpn::TribeJournalUploader *m_journal = nullptr;     // журнал тестирования: досылка
     QTimer                      m_journalTimer;          // журнал тестирования: 15 мин, пока на экране
     QString                     m_journalLastState;      // журнал тестирования: прошлое состояние для перехода
+    bool                        m_attemptBgHeld = false; // build 142: the attempt's background-time hold is open
     avpn::RestartGuardLatch     m_restartGuard;          // разбор 2026-09-23: удержание фонового времени iOS
     // AVPN (iOS data watch, build 141): the hand-over at a return of the app - the resume freeze, the
     // background hold and the decisions that wait (TunnelWatchResume.h). Null outside iOS.

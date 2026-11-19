@@ -312,7 +312,7 @@ public:
 private:
     // One try of a probe-seat release; a try with no HTTP answer or a 5xx is sent again (seatReleaseNext).
     void sendRelease(const IScanHttp::Request &rq, int leases, int attempt, qint64 spent, qint64 spacedMs,
-                     std::function<void(qint64)> done);
+                     std::function<void(qint64)> done, quint64 bgKey = 0);
     // One send of a probe-seat batch; a send our own transition cut is sent again with the same body (operation id).
     void sendBatch(std::shared_ptr<ScanSeatBatch::State> st, IScanHttp::Request rq, int attempt);
     void finishBatch(std::shared_ptr<ScanSeatBatch::State> st, const IScanHttp::Response &r);

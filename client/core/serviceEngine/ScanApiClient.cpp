@@ -1,4 +1,5 @@
 #include "ScanApiClient.h"
+#include "BackgroundTaskHook.h" // AVPN (build 142): background time while a seat release is resent
 
 #include "NetAwait.h" // armTimeout: the per-request bound of the app's API client (no timer of our own)
 #include "ScanBudget.h"
@@ -1038,12 +1039,14 @@ void ScanApiClient::releaseLeases(const QStringList &leaseIds, qint64 costBytes,
 // release (UpstreamLeaseWire.h::seatReleaseNext, shared with the session seat's DELETE): no HTTP answer or a 5xx is
 // sent again on the shared growing spacing within its budget; any other answer is final.
 void ScanApiClient::sendRelease(const IScanHttp::Request &rq, int leases, int attempt, qint64 spent, qint64 spacedMs,
-                                std::function<void(qint64)> done)
+                                std::function<void(qint64)> done, quint64 bgKey)
 {
     QPointer<ScanApiClient> self(this);
-    m_http->send(rq, [self, rq, leases, attempt, spent, spacedMs, done](const IScanHttp::Response &r) {
+    m_http->send(rq, [self, rq, leases, attempt, spent, spacedMs, done, bgKey](const IScanHttp::Response &r) {
         const qint64 total = spent + r.bytes;
         if (!self) {
+            if (bgKey)
+                avpn::bgtask::end(avpn::bgtask::Reason::Release, bgKey, avpn::bgtask::EndWhy::Settled);
             if (done)
                 done(total);
             return;
@@ -1057,15 +1060,23 @@ void ScanApiClient::sendRelease(const IScanHttp::Request &rq, int leases, int at
                                : next.kind == UpstreamReleaseTry::NotConfirmed ? QStringLiteral(" gave_up=1 tries=%1").arg(attempt + 1)
                                                                                : QString()));
         if (!again) {
+            if (bgKey)
+                avpn::bgtask::end(avpn::bgtask::Reason::Release, bgKey, avpn::bgtask::EndWhy::Settled);
             if (done)
                 done(total);
             return;
         }
-        QTimer::singleShot(next.delayMs, self.data(), [self, rq, leases, attempt, total, spacedMs, next, done]() {
+        // Build 142: a release waiting to be resent holds background time (BackgroundTaskHook.h, iOS only).
+        const quint64 key = bgKey ? bgKey : avpn::bgtask::newKey();
+        avpn::bgtask::begin(avpn::bgtask::Reason::Release, key);
+        QTimer::singleShot(next.delayMs, self.data(), [self, rq, leases, attempt, total, spacedMs, next, done, key]() {
             if (self)
-                self->sendRelease(rq, leases, attempt + 1, total, spacedMs + next.delayMs, done);
-            else if (done)
-                done(total);
+                self->sendRelease(rq, leases, attempt + 1, total, spacedMs + next.delayMs, done, key);
+            else {
+                avpn::bgtask::end(avpn::bgtask::Reason::Release, key, avpn::bgtask::EndWhy::Settled);
+                if (done)
+                    done(total);
+            }
         });
     });
 }

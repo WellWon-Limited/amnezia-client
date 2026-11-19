@@ -1,4 +1,5 @@
 #include "UpstreamLeaseClient.h"
+#include "BackgroundTaskHook.h" // AVPN (build 142): background time while a seat release is resent
 
 #include <QDebug>
 
@@ -212,7 +213,7 @@ void UpstreamLeaseClient::flushHeld(bool tunnelDown)
 }
 
 void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
-                                      const LeaseRoute &route, int attempt, qint64 spacedMs)
+                                      const LeaseRoute &route, int attempt, qint64 spacedMs, quint64 bgKey)
 {
     const QString base = baseFor(route);
     const QString bearer = !route.renewToken.isEmpty() ? route.renewToken : (m_token ? m_token() : QString());
@@ -237,7 +238,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         });
         return;
     }
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt, spacedMs]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt, spacedMs, bgKey]() {
         r->deleteLater();
         // The release goes out just before the tunnel transition it belongs to, and that transition aborts every
         // API request in flight (owner's iPhone 16.11: "net_error 5" within 40-80 ms); an API restart answers 502
@@ -250,17 +251,27 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         case UpstreamReleaseTry::Resend:
             qInfo().noquote() << QStringLiteral("avpn upstream: seat release status=%1 net_error=%2 resend=%3 in %4 ms")
                                      .arg(status).arg(int(r->error())).arg(attempt + 1).arg(next.delayMs);
-            QTimer::singleShot(next.delayMs, this, [this, requestId, leaseId, meter, route, attempt, spacedMs, next]() {
-                sendRelease(requestId, leaseId, meter, route, attempt + 1, spacedMs + next.delayMs);
-            });
+            // Build 142: a release waiting to be resent holds background time (iOS), so the resend is not
+            // delayed by a suspended app; BackgroundTaskHook.h (no-op off iOS). The key ends with the release.
+            {
+                const quint64 key = bgKey ? bgKey : avpn::bgtask::newKey();
+                avpn::bgtask::begin(avpn::bgtask::Reason::Release, key);
+                QTimer::singleShot(next.delayMs, this, [this, requestId, leaseId, meter, route, attempt, spacedMs, next, key]() {
+                    sendRelease(requestId, leaseId, meter, route, attempt + 1, spacedMs + next.delayMs, key);
+                });
+            }
             return;
         case UpstreamReleaseTry::Answered:
+            if (bgKey)
+                avpn::bgtask::end(avpn::bgtask::Reason::Release, bgKey, avpn::bgtask::EndWhy::Settled);
             if (onReleaseDone)
                 onReleaseDone(requestId, true);
             return;
         case UpstreamReleaseTry::NotConfirmed:
             qWarning().noquote() << QStringLiteral("avpn upstream: seat release gave up status=%1 net_error=%2 tries=%3 - left to the server's TTL")
                                         .arg(status).arg(int(r->error())).arg(attempt + 1);
+            if (bgKey)
+                avpn::bgtask::end(avpn::bgtask::Reason::Release, bgKey, avpn::bgtask::EndWhy::Settled);
             if (onReleaseDone)
                 onReleaseDone(requestId, false);
             return;

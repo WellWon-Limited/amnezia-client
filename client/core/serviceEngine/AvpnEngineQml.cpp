@@ -29,6 +29,7 @@
 #include "TunnelWatchPlan.h" // AVPN (iOS data watch, 141): plan file for the packet tunnel extension (pure)
 #ifdef Q_OS_IOS
 #include "platforms/ios/AvpnDiagnostics.h" // AVPN backend-first (2026-07-10): crash-diag следует за edge-walk базой
+#include "BackgroundTaskHook.h" // AVPN (build 142): background time while a connect attempt runs
 #include "platforms/ios/AvpnBackgroundGuard.h" // AVPN (разбор 2026-09-23): фоновое время на перезапуск туннеля
 #include "platforms/ios/TribeJournalIos.h" // AVPN (журнал тестирования): фоновое время на досылку журнала
 #endif
@@ -1321,6 +1322,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // AVPN (разбор 2026-09-23): каждый переход автомата заканчивается changed() — удержание фонового
     // времени iOS следует за ним (RestartGuard.h).
     connect(this, &AvpnEngineQml::changed, this, &AvpnEngineQml::syncRestartGuard);
+    connect(this, &AvpnEngineQml::changed, this, &AvpnEngineQml::syncAttemptBgHold); // build 142
+#ifdef Q_OS_IOS
+    avpn::bgtask::setJournal([this](const QString &line) { reliabilityEvent(line); }); // "bg_task ..." lines
+#endif
 #ifdef Q_OS_IOS
     // AVPN (iOS data watch, 141): the extension's `watch` snapshot (resume freeze) and the journal lines
     // of the On-Demand arming in the background. Both are inert while their flags are off.
@@ -3416,6 +3421,7 @@ bool AvpnEngineQml::syncAttempt()
             }
         }
     }
+    syncAttemptBgHold(); // the owner's result was taken above: the attempt's hold ends with it (build 142)
     if (changedAny)
         emit changed();
     return changedAny;
@@ -3661,6 +3667,28 @@ void AvpnEngineQml::syncRestartGuard()
     case avpn::RestartGuardLatch::Action::None:
         break;
     }
+#endif
+}
+
+// AVPN (build 142, device log 13:22:02-13:23:18): a person taps Connect and leaves for another app; the attempt
+// lives in the app (servers, data check through the tunnel, verdict), and iOS froze it mid-leg for a minute.
+// While the attempt owner runs (or the engine verifies a tunnel), hold iOS background time - level driven from the
+// two places that already know: the start (guardedStart, after connect() began the attempt) and every change of
+// state, incl. syncAttempt's end, where the owner's result is taken. Idempotent; the iOS hook is begin/end per
+// reason (BackgroundTaskHook.h), a no-op on other platforms. iOS's expiry ends the task by itself and journals it;
+// the attempt is left as it is (on wake the suspension gap does not count: AttemptOwner::advance).
+void AvpnEngineQml::syncAttemptBgHold()
+{
+#ifdef Q_OS_IOS
+    const bool wanted = m_engine.attemptRunning() || m_engine.isVerifying();
+    if (wanted == m_attemptBgHeld)
+        return;
+    m_attemptBgHeld = wanted;
+    if (wanted)
+        avpn::bgtask::begin(avpn::bgtask::Reason::Attempt, 0);
+    else
+        avpn::bgtask::end(avpn::bgtask::Reason::Attempt, 0,
+                          m_wantConnected ? avpn::bgtask::EndWhy::Settled : avpn::bgtask::EndWhy::Stopped);
 #endif
 }
 
@@ -6612,6 +6640,7 @@ void AvpnEngineQml::guardedStart()
         emit changed();
         return;
     }
+    syncAttemptBgHold(); // build 142: the attempt began (the owner runs) - hold background time from the tap
 #ifdef Q_OS_IOS
     writeTunnelWatchPlan("start"); // AVPN (iOS data watch, 141): before the queued up() reaches the extension
 #endif

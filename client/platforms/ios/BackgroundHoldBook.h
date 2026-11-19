@@ -24,8 +24,10 @@
 
 namespace avpn_ios {
 
-enum class BgReason : unsigned { TunnelRestart = 0, OnDemandArm = 1 };
-constexpr unsigned kBgReasonCount = 2;
+// ConnectAttempt / SeatRelease (build 142): the connect attempt's own background time and a seat release
+// that is being resent; they are driven by BackgroundTaskBook.h, never directly.
+enum class BgReason : unsigned { TunnelRestart = 0, OnDemandArm = 1, ConnectAttempt = 2, SeatRelease = 3 };
+constexpr unsigned kBgReasonCount = 4;
 
 inline unsigned bgReasonBit(BgReason r) { return 1u << unsigned(r); }
 

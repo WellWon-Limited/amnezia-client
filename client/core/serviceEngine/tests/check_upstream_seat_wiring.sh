@@ -90,7 +90,7 @@ has "$(body_of "$ADP" 'bool VpnConnectionTunnelControl::invokeConnect(')" '++m_s
 # confirmed, everything else reports "not confirmed" (left to the server's TTL) - never a silent "done".
 rel="$(body_of "$CLI" 'void UpstreamLeaseClient::sendRelease(')"
 has "$rel" 'const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs);' \
-    && has "$rel" 'sendRelease(requestId, leaseId, meter, route, attempt + 1, spacedMs + next.delayMs);' \
+    && has "$rel" 'sendRelease(requestId, leaseId, meter, route, attempt + 1, spacedMs + next.delayMs, key);' \
     || bad "F3: a release with no answer or a 5xx must be sent again on the shared spacing (seatReleaseNext)"
 has "$rel" 'onReleaseDone(requestId, true);' && has "$rel" 'onReleaseDone(requestId, false);' \
     || bad "F3: sendRelease must report whether the server answered (onReleaseDone confirmed / not confirmed)"

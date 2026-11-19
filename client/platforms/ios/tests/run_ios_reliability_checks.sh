@@ -10,6 +10,9 @@ xcrun clang++ -std=c++17 -pthread "$here/IosNativePolicyTests.cpp" -o "$work/pol
 "$work/policy-tests"
 # AVPN (build 141, data watch): background-time ownership by reason and the background arming rule.
 xcrun clang++ -std=c++17 -pthread "$here/IosDataWatchTests.cpp" -o "$work/data-watch-tests"
+# AVPN (build 142): the connect attempt's and seat releases' background time (BackgroundTaskBook.h).
+xcrun clang++ -std=c++17 -pthread "$here/BackgroundTaskBookTests.cpp" -o "$work/bg-task-tests"
+"$work/bg-task-tests"
 "$work/data-watch-tests"
 # Поведенческий харнесс настоящего ios_controller.mm / AvpnIntentController.mm (нужен Qt для macOS).
 if [ -d "${QT_ROOT:-$HOME/Qt/6.11.1/macos}" ] || [ -d "$HOME/Qt/6.10.2/macos" ]; then
