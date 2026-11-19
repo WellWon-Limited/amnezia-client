@@ -2029,12 +2029,12 @@ Puedes adjuntar una foto o un video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+66"/>
+        <location line="+63"/>
         <source>Сканер</source>
         <translation>Escáner</translation>
     </message>
     <message>
-        <location line="-65"/>
+        <location line="-62"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2117,11 +2117,6 @@ Puedes adjuntar una foto o un video.</translation>
         <location line="+1"/>
         <source>~%1&#xa0;мс</source>
         <translation>~%1&#xa0;ms</translation>
-    </message>
-    <message>
-        <location line="+3"/>
-        <source>VPN не подключён</source>
-        <translation>La VPN no está conectada</translation>
     </message>
     <message>
         <location line="+3"/>
@@ -2425,7 +2420,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Iniciar el servicio</translation>
     </message>
     <message>
-        <location line="-93"/>
+        <location line="-90"/>
         <source>только что</source>
         <translation>ahora mismo</translation>
     </message>
@@ -2490,7 +2485,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Disponible</translation>
     </message>
     <message>
-        <location line="+19"/>
+        <location line="+16"/>
         <source>Подключитесь к Wi‑Fi — через него VPN обычно работает. Потом откройте Сканер и нажмите «Сканировать».</source>
         <translation>Conéctese a Wi‑Fi: la VPN suele funcionar a través de ella. Luego abra el Escáner y pulse «Escanear».</translation>
     </message>
@@ -3151,7 +3146,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4286"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4314"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3251,7 +3246,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-3029"/>
+        <location line="-3052"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3347,12 +3342,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3824"/>
+        <location line="+3848"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-3821"/>
+        <location line="-3845"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
     </message>
@@ -3362,7 +3357,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se encontró ningún servidor que funcione en esta red: revise la red e inténtelo de nuevo</translation>
     </message>
     <message>
-        <location line="+495"/>
+        <location line="+518"/>
         <source>Отправляем…</source>
         <translation>Enviando…</translation>
     </message>
@@ -3463,7 +3458,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Instalación del servicio VPN cancelada</translation>
     </message>
     <message>
-        <location line="+126"/>
+        <location line="+127"/>
         <source>Не удалось установить службу VPN</source>
         <translation>No se pudo instalar el servicio VPN</translation>
     </message>
