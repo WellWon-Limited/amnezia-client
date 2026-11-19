@@ -3717,6 +3717,91 @@ static void findMoreAppends()
     CHECK(!ev.scanning && ev.moreState == QLatin1String("exhausted") && ids(ev).size() == 1);
 }
 
+// R8: «Найти ещё» with a pool beyond the 512 ids one request may carry. The batch the server returns after 522 judged
+// rows can be ten rows the truncated `seen` did not list but the device already judged: nothing new to probe, so the
+// series ends as exhausted (before: counted against the truncated list as new -> no probe, the button stayed).
+static void findMoreTruncatedSeen()
+{
+    World w = baseWorld("more_truncated", hostMac(), ScanNetKind::Wifi);
+    w.nodes.clear();
+    for (int i = 0; i < 560; ++i) {
+        NodeSpec n;
+        n.id = QStringLiteral("n%1:xray").arg(i + 100);
+        n.label = QStringLiteral("Node %1").arg(i);
+        n.cc = QStringLiteral("DE");
+        n.entryIp = QStringLiteral("198.51.100.%1").arg(1 + i % 250);
+        n.entryPort = 443;
+        n.rank = i;
+        w.nodes << n;
+    }
+    w.out = allWork(w.nodes);
+    w.numbers.insert(QStringLiteral("scan_stop_works"), 100000);
+    const auto actionOf = [](const ScanStep &s, ScanActionKind k) {
+        for (const ScanAction &a : s.actions)
+            if (a.kind == k)
+                return a;
+        return ScanAction();
+    };
+    ScanManifestView mv;
+    scanManifestViewFromJson(manifestBody(w), mv);
+    ScanMachine m(w.caps);
+    m.opened(openOf(w, QString(), false), kT0);
+    qint64 t = kT0;
+    t += 50;
+    ScanAction first = actionOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), t), ScanActionKind::StartHostScan);
+    QSet<QString> judged;
+    const auto judge = [&](const QList<ScanCandidate> &cands) {
+        QList<ScanProbeFacts> items;
+        for (const ScanCandidate &c : cands) {
+            ScanProbeFacts f = goodData(60);
+            f.id = c.id;
+            f.egressNode = c.id.section(QLatin1Char(':'), 0, 0);
+            items << f;
+            judged.insert(c.id);
+        }
+        t += 900;
+        m.hostProgress(progressOf(m, items), t);
+        t += 9000;
+        m.tick(t);
+    };
+    judge(first.candidates);
+    ScanAction rs;
+    for (int round = 0; round < 80 && judged.size() < 530; ++round) {
+        t += 40000;
+        m.moreTapped(QString(), t);
+        t += 50;
+        rs = actionOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), t), ScanActionKind::RequestCandidates);
+        if (rs.requestId.isEmpty())
+            break;
+        ScanCandidatesView cv;
+        for (const ScanManifestNode &n : mv.nodes)
+            if (!rs.ids.contains(n.nodeId) && !judged.contains(n.nodeId) && cv.nodes.size() < 24)
+                cv.nodes << n;
+        t += 50;
+        const ScanAction st = actionOf(m.candidatesReady(rs.requestId, cv, 2000, t), ScanActionKind::StartHostScan);
+        if (st.candidates.isEmpty())
+            break;
+        judge(st.candidates);
+    }
+    CHECK(judged.size() >= 530);
+    // the next request is truncated to 512; ten judged rows lie beyond it
+    t += 40000;
+    m.moreTapped(QString(), t);
+    t += 50;
+    rs = actionOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), t), ScanActionKind::RequestCandidates);
+    CHECK(!rs.requestId.isEmpty() && rs.ids.size() == 512);
+    ScanCandidatesView cv;
+    cv.exhausted = false;
+    for (const ScanManifestNode &n : mv.nodes)
+        if (!rs.ids.contains(n.nodeId) && judged.contains(n.nodeId) && cv.nodes.size() < 10)
+            cv.nodes << n;
+    CHECK(cv.nodes.size() == 10);
+    t += 50;
+    m.candidatesReady(rs.requestId, cv, 2000, t);
+    const ScanView v = m.view(t + 100);
+    CHECK(!v.scanning && v.moreState == QLatin1String("exhausted"));
+}
+
 // A scan always starts a new list (owner 19.11, device test: «Czechia stayed at the top, dark, the new countries below»).
 // «Сканировать» clears the previous result's rows (the live connection's row stays), the scan builds the list from empty,
 // append-only; «Найти ещё» appends; a cached result is shown only for the scope it covered (one slot per scope).
@@ -4507,6 +4592,7 @@ int main(int argc, char **argv)
     xrayBurst();
     findMore();
     findMoreAppends();
+    findMoreTruncatedSeen();
     scanStartsNewList();
     serverBatches();
     overruns();
