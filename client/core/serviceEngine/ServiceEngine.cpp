@@ -640,9 +640,10 @@ void ServiceEngine::endRaceWait(const char *reason)
     startOwnerAfterRace(reason);
 }
 
-void ServiceEngine::onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent)
+void ServiceEngine::onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSeen)
 {
-    applyRaceEffects(m_race.probeDone(nowMs(), stamp, outcome, bytesSpent));
+    Q_UNUSED(bytesSeen) // informational (the prober's journal line has it); the race's bytes come through spendProbeBytes
+    applyRaceEffects(m_race.probeDone(nowMs(), stamp, outcome));
 }
 
 bool ServiceEngine::failedInTunnelHere(const QString &nodeId) const
@@ -722,10 +723,6 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
             attemptJournal(QStringLiteral("race_probe_failed node=%1 outcome=%2")
                                .arg(e.path.id.id, QLatin1String(path::pathOutcomeName(e.outcome))));
             break;
-        case path::RaceEffectType::Spent:
-            if (m_chargeProbeBytes)
-                m_chargeProbeBytes(e.bytes);
-            break;
         case path::RaceEffectType::Winner:
             // only a path the ledger now holds as working wins (a tunnel no-data outranks the probe)
             if (m_ledger.view(m_net.current().local, e.path.id, nowMs()).state == path::PathState::Working) {
@@ -738,6 +735,8 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
             startOwnerAfterRace("hedge"); // nothing proven by hedgeAfterMs: the first choice starts blind, the race runs on
             break;
         case path::RaceEffectType::Done:
+            if (m_prober)
+                m_prober->raceEnded(e.stamp.race); // its host scan ends once (cancelled probes were already told)
             attemptJournal(QStringLiteral("race_done reason=%1 proven=%2")
                                .arg(QLatin1String(path::raceDoneReasonName(e.reason))).arg(m_race.proven()));
             if (e.reason != path::RaceDoneReason::Stopped)

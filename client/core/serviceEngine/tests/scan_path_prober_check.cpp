@@ -61,6 +61,21 @@ struct FakeHost : IScanHost {
             f();
     }
     qint64 seq = 0;
+    // The host's own cumulative counter per scan (bytes_spent of every poll) and how a cancel ends a scan, as the Go engine
+    // does it: the cancel ack comes at once WITHOUT `final` (IosAppScanHost / 0012 scan_cancel: "answered at once"), the
+    // closing /netinfo runs, the final total comes with a later poll.
+    QHash<QString, qint64> total;
+    qint64 openingBytes = 0;           // a scan_start's opening /netinfo
+    qint64 closingBytes = 0;           // the closing /netinfo of a cancelled scan, added at its final
+    int finalDelayPolls = 0;           // polls of a cancelled scan answered "closing" before its final
+    bool noFinalAfterCancel = false;   // a host whose final never comes
+    bool oneScanOnly = false;          // a scan_start makes every other scan unknown (the host keeps one scan)
+    bool holdCancels = false;          // cancel acks wait in `heldCancels`
+    QList<std::function<void()>> heldCancels;
+    QSet<QString> closedScans;          // scans whose closing /netinfo is in their total
+    QHash<QString, int> cancelledPolls; // scan id -> polls answered since its cancel
+    int polls = 0;
+    void spend(const QString &scan, qint64 n) { total[scan] += n; }
 
     ScanHostCaps knownCaps() const override { return ScanHostCaps(); }
     ScanHostAvailability availability() const override { return av; }
@@ -90,18 +105,34 @@ struct FakeHost : IScanHost {
             r = QJsonObject{{"error", "internal"}, {"scan_id", id}};
         } else if (a == "scan_start") {
             scanOpen.insert(id, true);
+            if (oneScanOnly)
+                for (auto it = scanOpen.begin(); it != scanOpen.end(); ++it)
+                    if (it.key() != id)
+                        unknownScan.insert(it.key(), true);
+            total[id] += openingBytes;
             r = QJsonObject{{"type", "scan_ack"}, {"scan_id", id}, {"accepted", o.value("candidates").toArray().size()}, {"mem_mb", 40}};
         } else if (a == "scan_add") {
             const bool ok = scanOpen.value(id) && !refuseAdds;
             r = QJsonObject{{"type", "scan_ack"}, {"scan_id", id}, {"accepted", ok ? o.value("candidates").toArray().size() : 0}, {"mem_mb", 40}};
         } else if (a == "scan_poll") {
+            ++polls;
             if (unknownScan.value(id)) {
                 r = QJsonObject{{"error", "unknown_scan"}, {"scan_id", id}};
+            } else if (cancelledPolls.contains(id)) { // a cancelled scan: closing, then final with the closing /netinfo
+                const bool fin = !noFinalAfterCancel && cancelledPolls[id]++ >= finalDelayPolls;
+                if (fin && !closedScans.contains(id)) {
+                    closedScans.insert(id);
+                    total[id] += closingBytes;
+                }
+                r = QJsonObject{{"type", "scan_progress"}, {"scan_id", id}, {"seq", double(++seq)}, {"phase", "done"},
+                                {"items", QJsonArray()}, {"bytes_spent", double(total.value(id))}, {"bytes_reserved", 0}, {"mem_mb", 41},
+                                {"done", true}, {"reason", "cancelled"}, {"final", fin}, {"access", QJsonValue::Null},
+                                {"access_close", QJsonValue::Null}, {"gen", QJsonValue::Null}};
             } else {
                 const bool drained = drainedNotFinal.take(id);
                 const bool done = doneNext.take(id) || drained;
                 r = QJsonObject{{"type", "scan_progress"}, {"scan_id", id}, {"seq", double(++seq)}, {"phase", done ? "done" : "data"},
-                                {"items", pendingItems.take(id)}, {"bytes_spent", 0}, {"bytes_reserved", 0}, {"mem_mb", 41},
+                                {"items", pendingItems.take(id)}, {"bytes_spent", double(total.value(id))}, {"bytes_reserved", 0}, {"mem_mb", 41},
                                 {"done", done}, {"reason", done ? "complete" : ""}, {"access", QJsonValue::Null},
                                 {"access_close", QJsonValue::Null}, {"gen", QJsonValue::Null}};
                 if (done && !drained) {
@@ -111,6 +142,8 @@ struct FakeHost : IScanHost {
             }
         } else if (a == "scan_cancel") {
             scanOpen.insert(id, false);
+            if (cancelFinalBytes < 0 && !cancelledPolls.contains(id))
+                cancelledPolls.insert(id, 0);
             r = cancelFinalBytes >= 0 ? scanEncodeCancelAck(id, cancelFinalBytes, 40)
                                       : QJsonObject{{"type", "scan_ack"}, {"scan_id", id}, {"accepted", 0}, {"mem_mb", 40}};
         } else {
@@ -126,7 +159,18 @@ struct FakeHost : IScanHost {
             };
             return;
         }
+        if (a == "scan_cancel" && holdCancels) {
+            heldCancels << [reply, bytes]() { reply(bytes); };
+            return;
+        }
         QTimer::singleShot(0, [reply, bytes]() { reply(bytes); });
+    }
+    void releaseCancels()
+    {
+        const auto h = heldCancels;
+        heldCancels.clear();
+        for (const auto &f : h)
+            f();
     }
 
     // A data item for the candidate whose host id ends with "-<probe>".
@@ -626,10 +670,11 @@ static void caseReopenRound3()
         check(w.resultOf(2) && w.resultOf(2)->outcome == path::PathOutcome::Inconclusive && w.resultOf(2)->bytes == 10000,
               "the reopened scan is refused: the probe still reports the 10000 bytes its parts spent");
     }
-    { // G6: a cancelled probe's reported bytes go to the ledger at once (the race gets no result for it)
+    { // G6, rewritten (sixth review): the host's counter is the one source of spend - what the cancelled probe's part spent
+      // arrives as the scan's delta, once; the cancel itself charges nothing and the race gets no result
         World w;
         qint64 charged = 0;
-        w.prober.chargeApiBytes = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
         w.prober.xrayBurst = 4;
         w.ready();
         charged = 0;
@@ -637,9 +682,12 @@ static void caseReopenRound3()
         spin(40);
         const QStringList parts = w.host.partIdsOf(1);
         w.host.itemFor(parts.at(1), w.host.scanOf(1), true, 5000);
+        w.host.spend(w.host.scanOf(1), 5000);
         spin(40);
+        check(charged == 5000, "the host's counter moved by 5000: charged once, as it was reported");
         w.prober.cancel(p);
-        check(charged == 5000 && w.results.isEmpty(), "cancel: the 5000 bytes it reported are charged, no result");
+        spin(40);
+        check(charged == 5000 && w.results.isEmpty(), "cancel: nothing more is charged by the cancel itself, no result");
     }
 }
 
@@ -670,7 +718,7 @@ static void caseRound4()
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.chargeApiBytes = [&charged](qint64 b) { charged += b; };
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
         w.host.cancelFinalBytes = 9000;
         const path::ProbeStamp a = w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
         spin(30);
@@ -680,12 +728,15 @@ static void caseRound4()
         spin(40);
         check(charged == 9000, "the final total of the cancelled scan reaches the ledger");
     }
-    { // H6: a candidate refused locally never reached the host: negative bytes (nothing to charge)
+    { // H6, rewritten: a candidate refused locally never reached the host - no host call, and not one byte charged
         World w;
+        qint64 charged = 0;
         w.ready();
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
         w.start(1, 1, QStringLiteral("19"), path::PathKind::OwnAwg); // no peer in the manifest: refused locally
         spin(30);
-        check(w.resultOf(1) && w.resultOf(1)->bytes < 0, "a probe that sent nothing reports no bytes at all");
+        check(w.resultOf(1) && w.resultOf(1)->bytes == 0 && charged == 0 && w.host.of("scan_start").isEmpty(),
+              "a probe that sent nothing: nothing charged, nothing sent to the host");
     }
 }
 
@@ -730,20 +781,22 @@ static void caseRound5()
         check(w.resultOf(2) && w.resultOf(2)->outcome == path::PathOutcome::ProbeOk, "B reports from the still-open scan");
         check(w.host.of("scan_start").size() == 1, "no new scan was needed");
     }
-    { // I6: the access bytes have ONE owner: the scan's final total. A finished probe A (5000) then the scan's total 9096:
-      // exactly the 4096 the probes did not report are charged - never the whole total on top
+    { // I6, rewritten (sixth review, J4): a finished probe does not end the scan (the host keeps a drained scan open for the
+      // race's next probe); the host's counter (probe 5000 + 4096 of the opening /netinfo = 9096) is charged as it is
+      // reported, once; the scan is cancelled when the race ends
         World w;
         qint64 charged = 0;
         w.ready();
-        w.prober.chargeApiBytes = [&charged](qint64 b) { charged += b; };
-        w.host.cancelFinalBytes = 9096;
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.host.openingBytes = 4096;
         w.start(1, 1, QStringLiteral("12:xray"), path::PathKind::OwnXray);
         spin(30);
+        w.host.spend(w.host.scanOf(1), 5000);
         w.host.item(1, true, 5000);
         spin(60);
-        check(w.resultOf(1) && w.resultOf(1)->bytes == 5000, "A reports its 5000");
-        check(w.host.of("scan_cancel").size() == 1, "the scan nobody wants any more is cancelled to get its final total");
-        check(charged == 4096, "the ledger gets total minus what A reported (4096), once");
+        check(w.resultOf(1) && w.resultOf(1)->bytes == 5000, "A reports its 5000 (informational)");
+        check(w.host.of("scan_cancel").isEmpty(), "a finished probe does not cancel the scan");
+        check(charged == 9096, "the host's own counter (the opening /netinfo included) is charged, once");
     }
     { // I8: the accounting table does not grow with refused starts
         World w;
@@ -753,7 +806,169 @@ static void caseRound5()
             w.start(1, quint64(i), QStringLiteral("11:xray"), path::PathKind::OwnXray);
             spin(15);
         }
-        check(w.host.of("scan_start").size() >= 30 && w.prober.scanLedgerSizeForTest() <= 1, "refused starts leave no entry behind");
+        check(w.host.of("scan_start").size() >= 30 && w.prober.scansFollowed() <= 1, "refused starts leave no entry behind");
+    }
+}
+
+// Sixth review (J3, J4, J5, J6) and the one-stream accounting: the host's cumulative counter per scan is the only source of
+// host spend; a scan is cancelled once (the race ends, or a cancelled probe has to be stopped) and polled to its final.
+static void caseAccounting()
+{
+    g_case = "accounting";
+    { // J4: N sequential probes of a race use ONE scan_start (before: each finished probe cancelled its idle scan and the
+      // next one paid a new scan_start - and its opening /netinfo - inside its own running timeout)
+        World w;
+        w.ready();
+        for (quint64 i = 1; i <= 5; ++i) {
+            w.start(1, i, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+            spin(30);
+            w.host.item(i, true, 5000);
+            spin(30);
+            check(w.resultOf(i) && w.resultOf(i)->outcome == path::PathOutcome::ProbeOk, "each sequential probe is proven");
+        }
+        check(w.host.of("scan_start").size() == 1 && w.host.of("scan_add").size() == 4 && w.host.of("scan_cancel").isEmpty(),
+              "five sequential probes: one scan_start, four scan_add, no cancel");
+        w.prober.raceEnded(1);
+        spin(30);
+        check(w.host.of("scan_cancel").size() == 1, "the race's end cancels its scan, once");
+        w.prober.raceEnded(1);
+        spin(20);
+        check(w.host.of("scan_cancel").size() == 1, "a second end of the same race cancels nothing");
+    }
+    { // J3: the cancel ack comes WITHOUT final (the Go engine answers a scan_cancel at once while the closing /netinfo runs);
+      // the total is polled until `final`: the opening 4096 + the probe's 5000 + the closing 4096 are all charged
+        World w;
+        qint64 charged = 0;
+        w.ready();
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.host.openingBytes = 4096;
+        w.host.closingBytes = 4096;
+        w.host.finalDelayPolls = 3; // three polls say "closing" before the final
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.host.spend(w.host.scanOf(1), 5000);
+        w.host.item(1, true, 5000);
+        spin(40);
+        check(charged == 9096, "before the cancel: the probe and the opening are charged");
+        w.prober.raceEnded(1);
+        const int pollsAtCancel = w.host.polls;
+        spin(120);
+        check(w.host.polls >= pollsAtCancel + 4, "polling goes on past the cancel ack until the final");
+        check(charged == 13192, "the closing /netinfo is charged: exactly the scan's final total (13192)");
+        check(w.prober.scansFollowed() == 0 && w.prober.scansWithoutFinal() == 0, "the scan is forgotten only after its final");
+    }
+    { // J3: a cancel ack that does carry the final total (a scan that was already over) is charged by its delta, once
+        World w;
+        qint64 charged = 0;
+        w.ready();
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.host.cancelFinalBytes = 9000;
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.host.spend(w.host.scanOf(1), 4000);
+        spin(30);
+        w.prober.raceEnded(1);
+        spin(40);
+        check(charged == 9000 && w.prober.scansFollowed() == 0, "4000 from a poll and the 5000 more of the final ack: 9000, no repeat");
+    }
+    { // one number per scan: a repeat, or an older reply that comes late, charges nothing; a larger total charges its difference
+        World w;
+        qint64 charged = 0;
+        w.ready();
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        const QString scan = w.host.scanOf(1);
+        w.host.total[scan] = 7000;
+        spin(30);
+        check(charged == 7000, "7000 shown: 7000 charged");
+        w.host.total[scan] = 3000; // an older reply arrives after a newer one
+        spin(30);
+        check(charged == 7000, "a smaller total charges nothing");
+        w.host.total[scan] = 7500;
+        spin(30);
+        check(charged == 7500, "a larger total charges only the difference");
+    }
+    { // J5: a probe refused locally changes nothing: no byte, no host call (the race's cap is checked in path_engine_check)
+        World w;
+        qint64 charged = 0;
+        w.ready();
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.start(1, 1, QStringLiteral("17"), path::PathKind::OwnAwg);
+        w.start(1, 2, QStringLiteral("99:xray"), path::PathKind::OwnXray);
+        spin(40);
+        check(w.results.size() == 2 && charged == 0 && w.host.requests.size() == 1 /* the caps ask */ && w.host.of("scan_start").isEmpty(),
+              "two local refusals: nothing charged, nothing sent");
+        w.prober.raceEnded(1);
+        spin(20);
+        check(w.host.of("scan_cancel").isEmpty() && w.prober.scansFollowed() == 0, "no scan was ever opened, none is cancelled");
+    }
+    { // J6: seventeen scans overlap (a cancel and a reopen each time, the cancel acks held back): nothing a scan reported is
+      // lost - each one's final total arrives by polling, whatever the acks do
+        World w;
+        qint64 charged = 0;
+        w.ready();
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.host.openingBytes = 1000;
+        w.host.closingBytes = 500;
+        w.host.holdCancels = true;
+        w.host.finalDelayPolls = 200; // the finals come late: many cancelled scans are followed at once
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray); // the probe that stays
+        spin(30);
+        qint64 expected = 0;
+        for (quint64 i = 2; i <= 19; ++i) { // each round: a neighbour joins, is cancelled; the scan is cancelled and reopened
+            const QString before = w.host.scanOf(1);
+            const path::ProbeStamp n = w.start(1, i, QStringLiteral("16"), path::PathKind::OwnAwg);
+            spin(25);
+            w.host.spend(before, 300);
+            expected += 1000 + 300 + 500; // this scan: opening, 300 of traffic, closing
+            w.prober.cancel(n);
+            spin(25);
+        }
+        const QString last = w.host.scanOf(1);
+        w.prober.raceEnded(1);
+        expected += 1000 + 500;
+        spin(1800);
+        check(w.host.of("scan_start").size() == 19, "eighteen reopens: nineteen scans in all");
+        check(charged == expected, "every scan's final total is charged - none lost to a bound on the table");
+        check(w.prober.scansFollowed() == 0 && w.prober.scansWithoutFinal() == 0, "all followed to their final");
+        w.host.releaseCancels(); // the held acks come last: they change nothing
+        spin(30);
+        check(charged == expected, "a late ack charges nothing more");
+        (void)last;
+    }
+    { // a scan whose final never comes: polled for the bound (kScanFinalWaitMs), then forgotten - counted, not charged twice
+        World w;
+        qint64 charged = 0;
+        w.ready();
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.host.noFinalAfterCancel = true;
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.host.spend(w.host.scanOf(1), 6000);
+        spin(30);
+        w.prober.raceEnded(1);
+        spin(500);
+        check(w.prober.scansFollowed() == 1, "still followed inside the bound");
+        spin(int(ScanPathProber::kScanFinalWaitMs) + 200);
+        check(w.prober.scansFollowed() == 0 && w.prober.scansWithoutFinal() == 1 && charged == 6000,
+              "after the bound the scan is forgotten, counted as ended without its final; what it showed was charged");
+    }
+    { // the host keeps one scan: a reopen makes the old scan unknown - the shortfall is only what no poll saw
+        World w;
+        qint64 charged = 0;
+        w.ready();
+        w.prober.onSpent = [&charged](qint64 b) { charged += b; };
+        w.host.oneScanOnly = true;
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        const path::ProbeStamp n = w.start(1, 2, QStringLiteral("16"), path::PathKind::OwnAwg);
+        spin(30);
+        w.host.spend(w.host.scanOf(1), 2000);
+        spin(20);
+        w.prober.cancel(n);
+        spin(60);
+        check(charged == 2000 && w.prober.scansWithoutFinal() >= 0, "what the old scan showed before it went unknown is charged");
     }
 }
 
@@ -998,6 +1213,7 @@ int main(int argc, char **argv)
     caseRefusedLocally();
     caseProvider();
     caseCancel();
+    caseAccounting();
     caseReopen();
     caseReopenRound3();
     caseRound4();

@@ -428,7 +428,13 @@ private:
                 const ProbeStamp st = e.stamp;
                 const PathOutcome o = b.kind == ProbeBehaviour::Kind::Ok ? PathOutcome::ProbeOk : PathOutcome::NoData;
                 const qint64 bytes = b.bytes;
-                at(now + b.ms, [this, st, o, bytes] { applyRace(race.probeDone(now, st, o, bytes)); });
+                at(now + b.ms, [this, st, o, bytes] {
+                    race.spent(bytes); // the prober's real-byte stream (the engine puts it on the cap and the hour ledger)
+                    bytesSpent += bytes;
+                    if (bytesLeft >= 0)
+                        bytesLeft = std::max<qint64>(0, bytesLeft - bytes);
+                    applyRace(race.probeDone(now, st, o));
+                });
                 break;
             }
             case RaceEffectType::CancelProbe: break;
@@ -452,11 +458,6 @@ private:
                     deliver(AttemptEvent::proofReady(now, m_checkStarved,
                                                      rule == Rule::Proposed ? e.path.id.id : QString()));
                 }
-                break;
-            case RaceEffectType::Spent:
-                bytesSpent += e.bytes;
-                if (bytesLeft >= 0)
-                    bytesLeft = std::max<qint64>(0, bytesLeft - e.bytes);
                 break;
             case RaceEffectType::Winner:
                 if (ledger.view(tracker.current().local, e.path.id, wall()).state == PathState::Working) {

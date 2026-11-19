@@ -12,6 +12,6 @@ ARCH_FLAGS=()
 [ "$(uname -m)" = "arm64" ] && ARCH_FLAGS=(-include arm_acle.h)
 clang++ -std=c++17 -fPIC ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} -Wall -Wextra -Wno-unused-parameter \
   -I"$SE" -I"$CLIENT" -I"$QT/lib/QtCore.framework/Headers" -I"$QT/lib/QtNetwork.framework/Headers" -F"$QT/lib" \
-  "$SE/ScanPathProber.cpp" "$HERE/scan_path_prober_check.cpp" -framework QtCore -framework QtNetwork -Wl,-rpath,"$QT/lib" \
+  "${PROBER_CPP:-$SE/ScanPathProber.cpp}" "$HERE/scan_path_prober_check.cpp" -framework QtCore -framework QtNetwork -Wl,-rpath,"$QT/lib" \
   -o "$OUT_DIR/scan_path_prober_check"
 "$OUT_DIR/scan_path_prober_check"

@@ -1471,9 +1471,9 @@ static void scenarioRace()
     //    (Old), 5.59 s (Current). Pool in the device's order: Serbia 1 AmneziaWG (16) first, Finland 1 own Xray, Estonia.
     scenarioTrace1911();
     scenarioHostileCellular1911();
-    // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when its projection fits; a probe that
-    // reports MORE than its projection is charged the projection; a candidate the cap cannot pay does not block the
-    // cheaper ones behind it.
+    // F5 of device round 19.11: the byte cap is a real cap. A probe starts only when real bytes spent + what the probes
+    // in flight hold + its own bound fit; a candidate the cap cannot pay does not block the cheaper ones behind it.
+    // (Rewritten for the real-byte cap: a result no longer carries a byte number, spent() does.)
     {
         NetworkTracker tr;
         tr.observe(cell("", "lte"));
@@ -1502,14 +1502,17 @@ static void scenarioRace()
                 started << e.path.id.id;
                 projected += e.path.kind == PathKind::OwnXray ? costs.xray : e.path.kind == PathKind::OwnAwg ? costs.awg
                                                                                                           : costs.provider;
-                // the host reports MORE than the projection - the cap is still charged by the projection only
-                fx << race.probeDone(t + 100, e.stamp, PathOutcome::Inconclusive, 200000);
+                CHECK(race.spentBytes() + race.reservedBytes() <= cap); // admission: spent + held (this probe too) fits
+                race.spent(20000);                                       // the probe spends 20 KB, then ends without a proof
+                fx << race.probeDone(t + 100, e.stamp, PathOutcome::Inconclusive);
             }
         }
-        CHECK(projected <= cap);
-        CHECK(started == QStringList({ "x1", "x2" }) && bytesDone && !race.running());
-        CHECK(!started.contains(QStringLiteral("up:p"))); // 320 000 B never fits a 256 KiB race
-        CHECK(started.contains(QStringLiteral("x2")));    // the provider that cannot be paid does not block the next
+        CHECK(projected > cap);            // the bounds of every probe together pass the cap: real bytes and holds gate them
+        CHECK(race.spentBytes() <= cap);
+        CHECK(!started.contains(QStringLiteral("up:p")) && started.contains(QStringLiteral("x1")) && started.contains(QStringLiteral("x2")));
+        CHECK(!race.running());
+        CHECK(started.contains(QStringLiteral("x2")));    // the provider that cannot be paid (320 000 B never fits) does not block the next
+        (void)bytesDone;
     }
 
     // Device round 19.11 (LTE at an hour when the first server of every kind was dead): the three first probes spent
@@ -1548,7 +1551,8 @@ static void scenarioRace()
                 const qint64 used = works ? 45000 : 4000; // a dead path costs a few KB
                 spent += used;
                 reservedNow -= reservedOf.take(st.stamp.probe);
-                fx << race.probeDone(t, st.stamp, works ? PathOutcome::ProbeOk : PathOutcome::Inconclusive, used);
+                race.spent(used);
+                fx << race.probeDone(t, st.stamp, works ? PathOutcome::ProbeOk : PathOutcome::Inconclusive);
             }
             while (!fx.isEmpty()) {
                 const RaceEffect e = fx.takeFirst();
@@ -1575,67 +1579,108 @@ static void scenarioRace()
         CHECK(spent <= cap);
     }
 
-    // Second review of 141, F8: a provider probe also spends bytes OUTSIDE the host (its seat batch with the config,
-    // the release). With 112 640 B left a provider probe reports 40 000 B from the host and its API share is 40 000 B:
-    // 32 640 B remain, and an AmneziaWG probe of 54 572 B must NOT start (the refund of the host count alone left
-    // 72 640 B and let the race pass its cap).
+    // Second review of 141, F8 (rewritten for the real-byte cap): a provider probe also spends bytes OUTSIDE the host (its
+    // seat batch with the config, the release). Both streams reach the cap through spent(): with 112 640 B left a provider
+    // probe that spent 40 000 B at the host and 40 000 B at the API leaves 32 640 B, and an AmneziaWG probe of 54 572 B must
+    // NOT start; with the host's 40 000 B alone, 72 640 B remain and it starts.
     {
         NetworkTracker tr;
         tr.observe(cell("", "lte"));
         PathRace::Costs costs;
         costs.awg = 54572;
         costs.provider = 107520;
-        costs.providerFixed = 40000;
         const QList<PathCandidate> list = { prov("up:p", UpstreamKind::Country, "NL", 0), awg("a1", "EE") };
         RaceTimings rt;
         rt.hedgeMs = 5000;
-        PathRace race(rt);
-        QStringList started;
-        QList<RaceEffect> fx = race.begin(0, list, tr.current(), hostCaps(), 112640, costs);
-        ProbeStamp provider;
-        for (const RaceEffect &e : fx)
-            if (e.type == RaceEffectType::StartProbe) {
-                started << e.path.id.id;
-                provider = e.stamp;
-            }
-        CHECK(started == QStringList({ "up:p" })); // the AmneziaWG probe does not fit beside the reservation
-        for (const RaceEffect &e : race.probeDone(1500, provider, PathOutcome::Inconclusive, 40000))
-            if (e.type == RaceEffectType::StartProbe)
-                started << e.path.id.id;
-        CHECK(started == QStringList({ "up:p" })); // 32 640 B left: still no room for 54 572 B
+        const auto run = [&](bool apiShare) {
+            PathRace race(rt);
+            QStringList started;
+            ProbeStamp provider;
+            for (const RaceEffect &e : race.begin(0, list, tr.current(), hostCaps(), 112640, costs))
+                if (e.type == RaceEffectType::StartProbe) {
+                    started << e.path.id.id;
+                    provider = e.stamp;
+                }
+            CHECK(started == QStringList({ "up:p" })); // the AmneziaWG probe does not fit beside the hold
+            race.spent(40000);                         // the host's delta
+            if (apiShare)
+                race.spent(40000);                     // the seat batch, config and release, as the API client spent them
+            for (const RaceEffect &e : race.probeDone(1500, provider, PathOutcome::Inconclusive))
+                if (e.type == RaceEffectType::StartProbe)
+                    started << e.path.id.id;
+            return started;
+        };
+        CHECK(run(true) == QStringList({ "up:p" }));             // 32 640 B left: no room for 54 572 B
+        CHECK(run(false) == QStringList({ "up:p", "a1" }));      // 72 640 B left: it starts
     }
 
-    // Third review of 141, G7: the hour budget gets the same number the race cap is charged. An own probe spends the
-    // host's /netinfo opening and closing (xrayFixed) that no probe result carries: the Spent effect has it. A provider
-    // probe's seat batch, config and release (providerFixed - providerOutside) are charged by the API calls themselves:
-    // never twice; only its access part joins the reported bytes.
+    // J5 of the sixth review (replaces G7/H6 and the *Fixed/*Outside arithmetic): a probe that never left the app (a
+    // candidate refused locally: no peer, no config) spent nothing and holds nothing once it ended. With a cap of exactly
+    // one Xray probe, the failed AmneziaWG probe must not take the Xray probe's place.
     {
         NetworkTracker tr;
         tr.observe(cell("", "lte"));
         PathRace::Costs costs;
-        costs.xray = 100000;
-        costs.xrayFixed = 5000;
-        costs.provider = 107520;
-        costs.providerFixed = 40000;
-        costs.providerOutside = 35000;
-        const auto spentOf = [&](const PathCandidate &cand, qint64 hostBytes) {
-            RaceTimings rt;
-            rt.hedgeMs = 5000;
-            PathRace race(rt);
-            ProbeStamp stamp;
-            for (const RaceEffect &e : race.begin(0, { cand }, tr.current(), hostCaps(), 500000, costs))
-                if (e.type == RaceEffectType::StartProbe)
-                    stamp = e.stamp;
-            qint64 spent = 0;
-            for (const RaceEffect &e : race.probeDone(1500, stamp, PathOutcome::ProbeOk, hostBytes))
-                if (e.type == RaceEffectType::Spent)
-                    spent += e.bytes;
-            return spent;
+        costs.awg = 54572;
+        costs.xray = 116736;
+        const qint64 cap = costs.awg + costs.xray; // the AmneziaWG hold, then the Xray probe fit together
+        RaceTimings rt;
+        rt.hedgeMs = 5000;
+        rt.parallelism = 1;
+        PathRace race(rt);
+        QStringList started;
+        ProbeStamp first;
+        for (const RaceEffect &e : race.begin(0, { awg("a1", "EE"), xray("x1", "NL") }, tr.current(), hostCaps(), cap - 1000, costs))
+            if (e.type == RaceEffectType::StartProbe) {
+                started << e.path.id.id;
+                first = e.stamp;
+            }
+        CHECK(started == QStringList({ "a1" }));
+        CHECK(race.reservedBytes() == costs.awg && race.spentBytes() == 0);
+        for (const RaceEffect &e : race.probeDone(300, first, PathOutcome::Inconclusive)) // refused locally: no bytes at all
+            if (e.type == RaceEffectType::StartProbe)
+                started << e.path.id.id;
+        CHECK(race.spentBytes() == 0 && race.reservedBytes() == costs.xray); // nothing charged, nothing left held
+        CHECK(started == QStringList({ "a1", "x1" }));                       // the Xray probe (116 736 B of 170 308) starts
+    }
+
+    // The hold of a probe in flight is released in full however the probe ends (a result, its timeout, the owner raising its
+    // path, the race's end): with a cap for exactly one probe at a time, each end lets the next one start, and nothing
+    // stays held afterwards.
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.awg = 50000;
+        costs.xray = 50000;
+        RaceTimings rt;
+        rt.hedgeMs = 20000;
+        rt.parallelism = 4;
+        rt.probeTimeoutMs = 1000;
+        PathRace race(rt);
+        const QList<PathCandidate> list = { xray("x1", "FI"), xray("x2", "DE"), xray("x3", "NL"), xray("x4", "PL"), xray("x5", "SE") };
+        QStringList started;
+        const auto starts = [&](const QList<RaceEffect> &fx) {
+            ProbeStamp last;
+            for (const RaceEffect &e : fx)
+                if (e.type == RaceEffectType::StartProbe) {
+                    started << e.path.id.id;
+                    last = e.stamp;
+                }
+            return last;
         };
-        CHECK(spentOf(xray("x1", "NL"), 20000) == 25000);        // host bytes + the host's own access bytes
-        CHECK(spentOf(prov("up:p", UpstreamKind::Country, "NL", 0), 20000) == 25000); // + access only: seat/config/release are charged by the API calls
-        CHECK(spentOf(xray("x1", "NL"), -1) == 0);               // H6: nothing reached the host: nothing charged
-        CHECK(spentOf(xray("x1", "NL"), 0) == 8 * 1024); // the floor (PathRace::kMinProbeChargeBytes): a host that reported nothing still used the network (the floor)
+        ProbeStamp s1 = starts(race.begin(0, list, tr.current(), hostCaps(), 60000, costs));
+        CHECK(started == QStringList({ "x1" }) && race.reservedBytes() == 50000);
+        const ProbeStamp s2 = starts(race.probeDone(300, s1, PathOutcome::Inconclusive)); // a result releases it
+        CHECK(started == QStringList({ "x1", "x2" }) && race.reservedBytes() == 50000);
+        const ProbeStamp s3 = starts(race.tick(2500));                                     // its timeout releases it
+        CHECK(started == QStringList({ "x1", "x2", "x3" }) && race.reservedBytes() == 50000);
+        (void)s2;
+        (void)s3;
+        starts(race.legStarted(2800, QStringLiteral("x3")));                              // the owner raises its path
+        CHECK(started == QStringList({ "x1", "x2", "x3", "x4" }) && race.reservedBytes() == 50000);
+        race.stop(2900);                                                                   // the race ends
+        CHECK(race.reservedBytes() == 0 && !race.running());
     }
 
     // B3a: the first candidate works. With no evidence the race goes first: the first leg waits for the first proof
@@ -1757,7 +1802,7 @@ static void scenarioRace()
             }
         CHECK(race.inFlight() <= 4 && awg <= 1); // two AmneziaWG at once (a + b), the third waits
         const ProbeStamp old{ race.raceNumber() + 7, tr.current().generation, 1 };
-        CHECK(race.probeDone(800, old, PathOutcome::ProbeOk, 1000).isEmpty()); // another race: dropped
+        CHECK(race.probeDone(800, old, PathOutcome::ProbeOk).isEmpty()); // another race: dropped
     }
     // CONNECT-INVARIANTS §32 p. 3 (device round 19.11: the hedged leg's own AmneziaWG node was probe 1 of every race,
     // with the device's key beside the leg coming up): the path the owner raises leaves the race - its probe in
@@ -1798,7 +1843,7 @@ static void scenarioRace()
                 if (e.type == RaceEffectType::StartProbe)
                     started << e.path.id.id;
         CHECK(started == QStringList({ "b", "c" }));
-        CHECK(race.probeDone(2100, a, PathOutcome::ProbeOk, 1000).isEmpty()); // its late answer: dropped
+        CHECK(race.probeDone(2100, a, PathOutcome::ProbeOk).isEmpty()); // its late answer: dropped
         // a path still waiting in the window leaves it too
         PathRace r2(later);
         r2.begin(0, list, tr.current(), hostCaps(), -1, PathRace::Costs{});

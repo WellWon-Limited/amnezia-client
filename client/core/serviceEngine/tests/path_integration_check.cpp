@@ -48,6 +48,10 @@ struct FakeProber : path::IPathProber {
     bool preparing = false; // it is being fetched
     QList<std::pair<path::ProbeStamp, QString>> started;
     int cancels = 0;
+    std::function<void(qint64)> sink; // the engine's byte sink (setSpendSink): the test spends through it
+    QList<quint64> endedRaces;        // raceEnded(race) calls
+    void setSpendSink(std::function<void(qint64)> f) override { sink = std::move(f); }
+    void raceEnded(quint64 race) override { endedRaces << race; }
     path::ProberCaps caps() const override
     {
         path::ProberCaps c;
@@ -485,12 +489,15 @@ int main(int argc, char **argv)
         CHECK(r.eng.connect(err) && r.eng.attemptRunning() && r.tun.ups.isEmpty() && r.eng.raceRunning());
         r.pass(1000); // the stagger: more probes start
         CHECK(prober.started.size() >= 2);
-        r.eng.onProbeResult(prober.stampOf("16"), path::PathOutcome::ProbeOk, 70000);
-        CHECK(r.last() == QLatin1String("16") && charged == 70000); // the proven path is the owner's first leg
+        prober.sink(70000); // the prober's one byte stream: the hour ledger gets it once (and the race's cap, PathRace)
+        CHECK(charged == 70000);
+        r.eng.onProbeResult(prober.stampOf("16"), path::PathOutcome::ProbeOk, 70000); // the figure is the journal's only
+        CHECK(r.last() == QLatin1String("16") && charged == 70000); // the proven path is the owner's first leg; the result charged nothing
         r.journal << r.eng.takeAttemptJournal();
         CHECK(journalHas(r.journal, "race_winner node=16") && journalHas(r.journal, "source=race"));
         r.up();
         CHECK(r.eng.verifySucceeded() && r.result().connected && !r.eng.raceRunning()); // the race ends with the result
+        CHECK(prober.endedRaces.size() == 1); // the prober is told once that the race is over (it ends its host scan)
         // a stale result of that race changes nothing
         r.eng.onProbeResult(prober.stampOf("17"), path::PathOutcome::ProbeOk, 1000);
         CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
