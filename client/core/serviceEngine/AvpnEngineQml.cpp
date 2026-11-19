@@ -8324,15 +8324,18 @@ void AvpnEngineQml::startWhoamiVerification()
     const int epoch = ++m_verifyEpoch;
     m_verifyClock.start();
     m_verifyAttempts = 0;
+    m_whoamiAnswered = 0;
     m_lastVerifyRxProof = false;
     m_whoamiTiebreak = false;
     m_busy = true;
     m_pathCheck = QStringLiteral("checking");
     qInfo() << "[avpn whoami] tunnel up on" << m_engine.currentNodeId() << m_engine.currentNodeProto()
             << "— checking the data path";
-    // Same first-attempt delay as the xray verification: routes/DNS of a fresh tunnel settle within
-    // a few hundred ms (chips probed at 0.6 s used to get HostNotFound).
-    QTimer::singleShot(800, this, [this, epoch]() { whoamiAttempt(epoch); });
+    // Floor 19.11 (DataCheckRetry.h): the request goes as soon as the tunnel is up - no 800 ms wait by the clock.
+    // Next event-loop turn, not inline: after this transition's queued handlers (upstream's connection-cache clear
+    // on Connected, the deferred abort snapshot) so the fresh request is never stranded or cancelled by them. A try
+    // that got nothing (no route / DNS yet / refused) is retried at once on the shared short spacing (whoamiNext).
+    QTimer::singleShot(0, this, [this, epoch]() { whoamiAttempt(epoch); });
 }
 
 void AvpnEngineQml::whoamiAttempt(int epoch)
@@ -8446,6 +8449,8 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
         const avpn::WhoamiVerdict v = avpn::whoamiVerdict(o);
         // Facts for the journal and the bench report; the client IP is not written (node + country
         // are enough to tell "which exit", PII stays out of reports).
+        // sent_ms (floor 19.11): when this request left, from the start of the check (Verifying) - the first try's
+        // value is the wait before the check, ~0 since the 800 ms clock wait is gone.
         const QString facts =
             QStringLiteral("http=%1 err=%2 complete=%3 timeout=%4 bytes=%5 node=%6 country=%7 ms=%8 attempt=%9 edge=%10")
                 .arg(o.httpStatus)
@@ -8457,7 +8462,8 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
                 .arg(QString::fromLatin1(r->rawHeader(QByteArrayLiteral("X-Whoami-Country"))))
                 .arg(m_verifyClock.elapsed() - t0)
                 .arg(m_verifyAttempts)
-                .arg(otherEdge ? QStringLiteral("other") : QStringLiteral("active"));
+                .arg(otherEdge ? QStringLiteral("other") : QStringLiteral("active"))
+            + QStringLiteral(" sent_ms=%1").arg(t0);
         // Review N2: cut before a decisive answer and the timer fired late (monotonic or wall clock -
         // the latter also covers device sleep) = the app was suspended mid-request: no evidence.
         // Not counted as a sent request; Connected without the mark; memory and streak untouched.
@@ -8485,12 +8491,17 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
                          /*tiebreakDone=*/true);
             return;
         }
+        if (!avpn::whoamiNotYet(o))
+            ++m_whoamiAnswered;
         const qint64 leftNow = avpn::whoamiBudgetMs(m_engine.dataCheckMs()) - m_verifyClock.elapsed();
-        if (avpn::whoamiNextStep(v, o.httpStatus, m_verifyAttempts, leftNow) == avpn::WhoamiStep::Retry) {
-            // One retry: no answer at all, or "past the VPN" on the first answer (routes of a fresh
-            // tunnel may not have settled yet).
-            reliabilityEvent(QStringLiteral("whoami_retry verdict=%1 ").arg(avpn::whoamiVerdictName(v)) + facts);
-            QTimer::singleShot(avpn::kWhoamiRetryDelayMs, this, [this, epoch]() { whoamiAttempt(epoch); });
+        const avpn::WhoamiNext next = avpn::whoamiNext(v, o, m_whoamiAnswered, m_verifyAttempts - 1, leftNow);
+        if (next.step == avpn::WhoamiStep::Retry) {
+            // The shared data-check rule (DataCheckRetry.h): a try that got nothing (no route / DNS yet / refused
+            // before any byte), or "past the VPN" on the first answer (routes of a fresh tunnel not applied yet) -
+            // the next request on the short spacing, inside the same whoami budget.
+            reliabilityEvent(QStringLiteral("whoami_retry verdict=%1 in_ms=%2 ").arg(avpn::whoamiVerdictName(v)).arg(next.delayMs)
+                             + facts);
+            QTimer::singleShot(int(next.delayMs), this, [this, epoch]() { whoamiAttempt(epoch); });
             return;
         }
         // S3: the transfer time is the path's speed on this network (the ledger ranks slower working paths lower)
@@ -11664,8 +11675,10 @@ void AvpnEngineQml::startUpstreamVerification()
     m_busy = true;
     m_pathCheck = QStringLiteral("checking");
     qInfo() << "[avpn upstream] tunnel up on" << m_engine.currentNodeId() << "- checking the data path";
-    // The same first-attempt delay as the other checks: routes/DNS of a fresh tunnel settle.
-    QTimer::singleShot(800, this, [this, epoch]() { upstreamVerifyAttempt(epoch); });
+    // Floor 19.11, the same rule as the own-server check (DataCheckRetry.h): the first probe goes as soon as the
+    // tunnel is up (next event-loop turn, after this transition's queued handlers); a probe that got nothing yet is
+    // retried on the short spacing below (decideUpstreamEarlyRetry) - no 800 ms wait by the clock.
+    QTimer::singleShot(0, this, [this, epoch]() { upstreamVerifyAttempt(epoch); });
 }
 
 void AvpnEngineQml::upstreamVerifyAttempt(int epoch)
@@ -11724,7 +11737,8 @@ void AvpnEngineQml::upstreamVerifyAttempt(int epoch)
     pr.firstByteShareMs =
         std::max<qint64>(0, avpn::kWhoamiFirstByteShareMs - (m_verifyClock.elapsed() - m_upstreamFirstProbeMs));
     pr.onStarved = checkStarvedSink(epoch);
-    m_tunnel.upstreamClient()->runProbe(pr, [this, epoch, grant, limits](const avpn::UpstreamProbeFacts &f) {
+    const qint64 sentMs = m_verifyClock.elapsed(); // floor 19.11: journal sent_ms (the first probe's wait, ~0 now)
+    m_tunnel.upstreamClient()->runProbe(pr, [this, epoch, grant, limits, sentMs](const avpn::UpstreamProbeFacts &f) {
         if (epoch != m_verifyEpoch || !m_engine.isVerifying())
             return;
         const avpn::UpstreamCheckInput in =
@@ -11736,7 +11750,8 @@ void AvpnEngineQml::upstreamVerifyAttempt(int epoch)
                                   .arg(f.httpStatus).arg(f.bytesReceived).arg(f.bytesRequested).arg(f.elapsedMs)
                                   .arg(f.ttfbMs).arg(f.maxStallMs)
                                   .arg(f.egressClass.isEmpty() ? QStringLiteral("-") : f.egressClass.left(16))
-                                  .arg(int(in.egressAsn > 0 && in.accessAsn > 0)).arg(m_upstreamVerifyAttempts);
+                                  .arg(int(in.egressAsn > 0 && in.accessAsn > 0)).arg(m_upstreamVerifyAttempts)
+                                + QStringLiteral(" sent_ms=%1").arg(sentMs);
         const qint64 leftNow = m_engine.dataCheckMs() - m_verifyClock.elapsed();
         // Lab 14.11 D3: a profile may refuse every connection in its first seconds - an attempt that got
         // nothing yet is retried inside this check's budget on a short growing spacing; a complete answer

@@ -226,9 +226,11 @@ inline UpstreamVerdictResult upstreamFallbackVerdict(bool dataProven, bool stric
 // judge the node on a single early attempt: an attempt that got nothing yet is retried while the EXISTING
 // budget allows (no timer of its own), with a short growing spacing; only the last outcome decides.
 
-// The spacing (upstreamEarlyRetryDelayMs) lives in UpstreamLeaseMachine.h: the seat confirmation uses it too.
+// The spacing and the budget rule are the one rule of every data check through a fresh tunnel (DataCheckRetry.h:
+// the own-server whoami uses it too; the seat confirmation uses the spacing). The check's first try goes as soon as
+// the tunnel is up - the 800 ms clock wait before it is gone (floor 19.11): a try that got nothing is this retry.
 // A retry is only worth it when at least this much budget is left after the spacing.
-inline constexpr qint64 kUpstreamEarlyRetryMinLeftMs = 1000;
+inline constexpr qint64 kUpstreamEarlyRetryMinLeftMs = kDataCheckRetryMinLeftMs;
 
 // "Not yet": the attempt got nothing at all - no HTTP answer (connection refused / reset / closed by the
 // profile's block fallback) or a 200 without a first byte. Anything else is an answer that is judged at
@@ -239,25 +241,14 @@ inline bool upstreamProbeNotYet(const UpstreamProbeFacts &f)
     return f.bytesReceived <= 0 && (f.httpStatus == 0 || f.httpStatus == 200);
 }
 
-struct UpstreamEarlyRetry {
-    bool retry = false;  // false = the outcome of this attempt is the verdict
-    qint64 delayMs = 0;  // retry: wait this long, then the next attempt
-};
+using UpstreamEarlyRetry = DataCheckRetry; // retry=false: the outcome of this attempt is the verdict
 
 // notYet = this attempt got nothing yet; retriesSoFar = retries already made in this check; budgetLeftMs =
 // what is left of the check's budget now (verify budget for the data check, the confirm budget for the
 // seat). Pure: the caller's clock decides budgetLeftMs.
 inline UpstreamEarlyRetry decideUpstreamEarlyRetry(bool notYet, int retriesSoFar, qint64 budgetLeftMs)
 {
-    UpstreamEarlyRetry d;
-    if (!notYet)
-        return d;
-    const qint64 delay = upstreamEarlyRetryDelayMs(retriesSoFar + 1);
-    if (budgetLeftMs - delay < kUpstreamEarlyRetryMinLeftMs)
-        return d;
-    d.retry = true;
-    d.delayMs = delay;
-    return d;
+    return decideDataCheckRetry(notYet, retriesSoFar, budgetLeftMs);
 }
 
 // --- macOS: the GUI really quits during an upstream session (integration point 15, risk R3) -----------
