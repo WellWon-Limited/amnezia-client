@@ -3214,7 +3214,7 @@ static void lateOlderStart()
 // everything is answered and the session stopped no lease is left live on the server, (4) nothing waits for ever
 // (no start queued, no gated acquire, no release pending or held).
 struct LedgerWorld {
-    struct Acq { quint64 id; bool processed = false, delivered = false, timedOut = false, lateDone = false; QString lease, token, nonce; qint64 order = -1; bool grant = false, stale = false; };
+    struct Acq { quint64 id; bool processed = false, delivered = false, timedOut = false, lateDone = false; QString lease, token, nonce; qint64 order = -1; bool grant = false, stale = false; qint64 floorOrder = -1; };
     struct Rel { quint64 id; QString lease, token; int unprocessed = 0, unanswered = 0, tries = 0; bool done = false, held = false, report = false; };
     struct Io : IUpstreamLeaseIo {
         LedgerWorld *w = nullptr;
@@ -3238,6 +3238,7 @@ struct LedgerWorld {
     qint64 highestOrderSent = 0, highestOrderSeen = 0;  // the client's own sequence / the server's: the highest order it has seen from the device
     int serial = 0, tokenSerial = 0, staleDenials = 0, expiries = 0;
     QList<Acq> acqs;
+    QHash<quint64, int> floorDenials; // per leg (the owner's session serial): floor denials of the current start so far
     QList<Rel> rels;
     bool stopPending = false, tunnelDown = true, nativeStarted = false, forceGrant = false, deadApi = false;
     qint64 now = 40000000;
@@ -3354,8 +3355,10 @@ struct LedgerWorld {
     AcquireReply replyOf(const Acq &a) const
     {
         if (a.stale) {
-            AcquireReply r = refused(UpstreamErrorCode::LeaseGone); // HTTP 404 {"code":"lease_gone","reason":"stale_session"}
+            AcquireReply r = refused(UpstreamErrorCode::LeaseGone); // HTTP 404 {"code":"lease_gone","reason":"stale_session"[,"min_session_order":N]}
             r.error.reason = QStringLiteral("stale_session");
+            r.error.minSessionOrder = a.floorOrder;
+            r.fromTribeApi = true;
             return r;
         }
         if (!a.grant)
@@ -3399,6 +3402,8 @@ struct LedgerWorld {
         // it takes nothing (contract 1.19.0 / 1.20.0); the highest order seen is kept even when no seat is given
         if (staleNonces.contains(a.nonce) || a.order < highestOrderSeen) {
             a.stale = true;
+            if (!staleNonces.contains(a.nonce))
+                a.floorOrder = highestOrderSeen; // contract 1.21.0: the ORDER check names the highest order seen; the tenure denial does not
             ++staleDenials;
             return;
         }
@@ -3438,13 +3443,27 @@ struct LedgerWorld {
         trace << QStringLiteral("%1").arg(QLatin1String("acqDeliver")) + (QLatin1String("") + QString::number(i));
         Acq &a = acqs[i];
         a.delivered = true;
-        if (a.stale && o.machine().acquireInFlight() == a.id)
+        if (a.stale && a.floorOrder < 0 && o.machine().acquireInFlight() == a.id)
             violations << QStringLiteral("a stale_session denial reached the start that waits for its answer (a nonce was reused)");
         const QString before = sessionFingerprint();
         const bool older = olderStart(a);
+        if (a.floorOrder >= 0)
+            o.raiseOrderFloor(a.floorOrder); // UpstreamLeaseClient: the floor of ANY answer of the API, before the owner sees it
+        const bool currentFloorDenial = a.stale && a.floorOrder >= 0 && o.active() && o.machine().acquireInFlight() == a.id;
+        const quint64 serial = o.prepareSerial();
+        const int acquiresBefore = acqs.size();
         apply(o.onAcquireReply(a.id, replyOf(a), now));
         if (older && sessionFingerprint() != before)
             violations << QStringLiteral("an answer of an older start changed a field of the current session");
+        if (currentFloorDenial) { // round 13 R1: the first one of a leg is followed by exactly one new start of the same leg, the second by none
+            const int added = acqs.size() - acquiresBefore;
+            if (++floorDenials[serial] == 1) {
+                if (added != 1 || acqs.last().nonce == a.nonce || acqs.last().order <= a.floorOrder)
+                    violations << QStringLiteral("a floor denial of the current start was not followed by exactly one new start of the same leg");
+            } else if (added != 0) {
+                violations << QStringLiteral("a second floor denial in one leg began yet another start");
+            }
+        }
         apply(o.acquireEnded(profile(), a.grant ? a.lease : QString(), newerOut(i)));
         o.routeProved(a.id, now); // UpstreamLeaseClient: an HTTP answer, whichever path it took
     }
@@ -3463,6 +3482,8 @@ struct LedgerWorld {
         trace << QStringLiteral("%1").arg(QLatin1String("acqLate")) + (QLatin1String("") + QString::number(i));
         Acq &a = acqs[i];
         a.lateDone = true;
+        if (a.floorOrder >= 0)
+            o.raiseOrderFloor(a.floorOrder);
         // UpstreamLeaseClient: a late grant is reported as such; any other late end as the end of the request
         if (a.grant)
             apply(o.lateGrant(profile(), a.lease, LeaseRoute{a.token, QString()}, newerOut(i), a.id));
@@ -3638,7 +3659,7 @@ static void ledgerModel()
         w.o.setOptions(op);
         for (int step = 0; step < 36; ++step, ++steps) {
             w.now += 150;
-            switch (rnd(18)) {
+            switch (rnd(19)) {
             case 0: case 1: w.begin(rnd(2) == 0); break;
             case 2: case 3: { // the server processes an acquire - in ANY order (round 10: the client cannot know it)
                 QList<int> c;
@@ -3673,6 +3694,9 @@ static void ledgerModel()
             case 10: w.stop(); break;
             case 11: w.apply(w.o.abortStart(w.now)); break; // a start that never reached the native service
             case 12: w.now += 4000; w.apply(w.o.tick(w.now)); break;
+            case 13: // the server has seen a far higher order from this device (the counter was lost, the clock had been ahead)
+                w.highestOrderSeen = qMax(w.highestOrderSeen, w.highestOrderSent) + 1 + rnd(5000);
+                break;
             case 17: // the server expires a lease nobody live holds (its TTL ran out); the start's nonce stays fresh
                 if (!w.live.isEmpty() && !w.o.holdsLease(w.live) && w.answeredEverywhere(w.live)) {
                     w.live.clear();
@@ -3841,8 +3865,8 @@ static void orderFloorCheck()
     };
     // the wire: the field is read in one place, bounded to 0..2^53-1, integer only
     CHECK(replyWith("1763120000999").error.minSessionOrder == 1763120000999LL && upstreamOrderFloorOf(replyWith("1763120000999")) == 1763120000999LL);
-    CHECK(replyWith("0").error.minSessionOrder == 0 && replyWith("9007199254740991").error.minSessionOrder == kUpstreamSessionOrderMax);
-    for (const char *bad : {"-1", "9007199254740992", "1e30", "1.5", "\"77\"", "null", "true", "[5]"}) {
+    CHECK(replyWith("0").error.minSessionOrder == 0 && replyWith("4503599627370496").error.minSessionOrder == kUpstreamOrderFloorMax);
+    for (const char *bad : {"-1", "4503599627370497", "9007199254740991", "9007199254740992", "1e30", "1.5", "\"77\"", "null", "true", "[5]"}) {
         CHECK(replyWith(bad).error.minSessionOrder == -1 && upstreamOrderFloorOf(replyWith(bad)) == -1);
         CHECK(replyWith(bad).kind == LeaseReplyKind::Refused && replyWith(bad).error.reason == QLatin1String("stale_session")); // still the same denial
     }
@@ -3869,7 +3893,7 @@ static void orderFloorCheck()
     // a floor that is not above the counter, an invalid one and "none" change nothing and write nothing
     const qint64 before = stored;
     const int savesBefore = saves;
-    for (const qint64 v : {qint64(-1), qint64(0), N - 5, N + 1, kUpstreamSessionOrderMax + 1, qint64(-12345)})
+    for (const qint64 v : {qint64(-1), qint64(0), N - 5, N + 1, kUpstreamOrderFloorMax + 1, kUpstreamSessionOrderMax, qint64(-12345)})
         o.raiseOrderFloor(v);
     CHECK(stored == before && saves == savesBefore);
     // monotonic across a second writer of the store: the counter is read again, never moved backwards
@@ -3882,6 +3906,32 @@ static void orderFloorCheck()
     o.disconnect(T + 500);
     o.begin(a, 1, std::nullopt, T + 600, N + 50000);
     CHECK(io.last("acquire")->order == N + 50000);
+
+    // Round 13 R3: orders keep headroom below 2^53. The top of the accepted floor range gives two consecutive orders that differ ON THE WIRE; a
+    // stored counter beyond the exact range is clamped (saturates, unreachable in practice) and never sent as an inexact number.
+    {
+        qint64 st = 0;
+        FakeIo io3;
+        UpstreamLeaseOwner o3(&io3);
+        o3.setOrderStore([&st]() { return st; }, [&st](qint64 v) { st = v; });
+        o3.raiseOrderFloor(kUpstreamOrderFloorMax);
+        o3.begin(a, 1, std::nullopt, T, 1);
+        const qint64 first = io3.last("acquire")->order;
+        o3.disconnect(T + 10);
+        o3.begin(a, 1, std::nullopt, T + 20, 1);
+        const qint64 second = io3.last("acquire")->order;
+        CHECK(first == kUpstreamOrderFloorMax + 1 && second == first + 1);
+        CHECK(upstreamAcquireBody(QStringLiteral("p"), LeaseKind::Session, QString(), QStringLiteral("N"), first)
+              != upstreamAcquireBody(QStringLiteral("p"), LeaseKind::Session, QString(), QStringLiteral("N"), second));
+        CHECK(QJsonDocument::fromJson(upstreamAcquireBody(QStringLiteral("p"), LeaseKind::Session, QString(), QStringLiteral("N"), second))
+                  .object().value(QLatin1String(kUpstreamAcquireOrderField)).toInteger() == second);
+        for (const qint64 hostile : {kUpstreamSessionOrderMax, kUpstreamSessionOrderMax + 5, qint64(1) << 60}) { // a corrupted store
+            st = hostile;
+            o3.disconnect(T + 30);
+            o3.begin(a, 1, std::nullopt, T + 40, 1);
+            CHECK(io3.last("acquire")->order == kUpstreamSessionOrderMax);
+        }
+    }
 
     // the client: ANY acquire answer of the API that carries the field reaches the counter - in time, late (the attempt stopped
     // waiting), and with the foreign/field-less answers left out
@@ -3938,6 +3988,153 @@ static void orderFloorCheck()
     }
 }
 
+// Round 13 R1: an ORDER-FLOOR denial of the current start (stale_session WITH min_session_order) is "your number was too low": the same
+// leg asks again ONCE as a new start (new nonce, order above the floor) and reports no failure; a second one is the refusal it always was.
+static AcquireReply floorDenial(qint64 floorOrder)
+{
+    AcquireReply r = refused(UpstreamErrorCode::LeaseGone, QStringLiteral("stale_session"));
+    r.error.minSessionOrder = floorOrder;
+    r.fromTribeApi = true;
+    return r;
+}
+static void floorDenialRetry()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const qint64 T = 18000000, N = 424242;
+    // direct leg: denied, asks again once, grant -> bring-up, never a StartFailed
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        const QVector<UpstreamOwnerEvent> b = o.begin(a, 1, std::nullopt, T, 1000);
+        const FakeIo::Call first = *io.last("acquire");
+        CHECK(first.order == 1000 && b.isEmpty());
+        QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(first.id, floorDenial(N), T + 100);
+        CHECK(!findEv(ev, UpstreamOwnerEventKind::StartFailed) && !findEv(ev, UpstreamOwnerEventKind::Leave) && o.active());
+        const FakeIo::Call second = *io.last("acquire");
+        CHECK(second.id != first.id && second.nonce != first.nonce && second.order > N && second.order == o.sessionOrder());
+        ev = o.onAcquireReply(second.id, grantedAs(a, "LeaseRetryXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"), T + 200);
+        CHECK(findEv(ev, UpstreamOwnerEventKind::BringUp) && !findEv(ev, UpstreamOwnerEventKind::StartFailed));
+        // the retry is spent: the next start of the owner may retry again (the flag belongs to the leg)
+        o.disconnect(T + 300);
+        o.begin(a, 1, std::nullopt, T + 400, 1);
+        CHECK(!findEv(o.onAcquireReply(io.last("acquire")->id, floorDenial(N + 5000), T + 500), UpstreamOwnerEventKind::StartFailed));
+    }
+    // two floor denials in one leg: ONE StartFailed (no loop), a denial without the field is a failure at once
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, std::nullopt, T, 1000);
+        o.onAcquireReply(io.last("acquire")->id, floorDenial(N), T + 100);
+        const int acquires = io.calls.size();
+        const QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(io.last("acquire")->id, floorDenial(N + 77), T + 200);
+        const UpstreamOwnerEvent *f = findEv(ev, UpstreamOwnerEventKind::StartFailed);
+        CHECK(f && f->code == QLatin1String("lease_gone") && io.calls.size() == acquires && !o.active());
+        FakeIo io2;
+        UpstreamLeaseOwner o2(&io2);
+        o2.begin(a, 1, std::nullopt, T, 1000);
+        AcquireReply noField = refused(UpstreamErrorCode::LeaseGone, QStringLiteral("stale_session"));
+        noField.fromTribeApi = true;
+        CHECK(findEv(o2.onAcquireReply(io2.last("acquire")->id, noField, T + 100), UpstreamOwnerEventKind::StartFailed) && io2.calls.size() == 1);
+    }
+    // provisional: the hedge started the pack tunnel, the confirmation of the same start is denied with the floor - it goes out again with the
+    // new nonce and order (same running provisional tunnel), the grant confirms; a second denial leaves the node
+    for (const bool second : {false, true}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, packFor(a), T, 1000);
+        o.onAcquireReply(io.last("acquire")->id, failed("transport"), T + 1200); // the hedge: the pack tunnel starts
+        CHECK(o.provisionalPending());
+        o.tunnelUp(T + 1500);
+        const FakeIo::Call conf = *io.last("acquire");
+        CHECK(!conf.route.apiBase.isEmpty());
+        QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(conf.id, floorDenial(N), T + 1600);
+        CHECK(!findEv(ev, UpstreamOwnerEventKind::Leave) && o.provisionalPending() && o.active());
+        const FakeIo::Call again = *io.last("acquire");
+        CHECK(again.id != conf.id && again.nonce != conf.nonce && again.order > N && again.route.apiBase == conf.route.apiBase);
+        if (!second) {
+            ev = o.onAcquireReply(again.id, grantedAs(a, "LeaseRetryXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"), T + 1700);
+            CHECK(findEv(ev, UpstreamOwnerEventKind::LeaseConfirmed));
+        } else {
+            ev = o.onAcquireReply(again.id, floorDenial(N + 9), T + 1700);
+            CHECK(findEv(ev, UpstreamOwnerEventKind::Leave));
+        }
+    }
+    // loopback, the real client wired the way the adapter wires it: the first POST is answered 404 + min_session_order, the leg connects on the
+    // second request without a StartFailed; both answers floor denials -> exactly one StartFailed
+    TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {});
+    for (const int denials : {1, 2}) {
+        struct Edge {
+            TestKey key;
+            QTcpServer server;
+            int posts = 0, denials = 1;
+            QList<qint64> orders;
+            Edge()
+            {
+                server.listen(QHostAddress::LocalHost);
+                QObject::connect(&server, &QTcpServer::newConnection, &server, [this]() {
+                    while (QTcpSocket *s = server.nextPendingConnection())
+                        QObject::connect(s, &QTcpSocket::readyRead, s, [this, s]() {
+                            const QByteArray rq = s->readAll();
+                            if (!rq.startsWith("POST /v1/upstream/lease "))
+                                return;
+                            ++posts;
+                            orders << QJsonDocument::fromJson(rq.mid(rq.indexOf("\r\n\r\n") + 4)).object().value("session_order").toInteger();
+                            QByteArray body, sig;
+                            QByteArray status = "404 X";
+                            if (posts <= denials) {
+                                body = R"({"code":"lease_gone","reason":"stale_session","min_session_order":424242})";
+                            } else {
+                                status = "200 OK";
+                                const QJsonObject o{{"type", "upstream_lease"}, {"lease_id", QLatin1String(kLease)}, {"profile_id", "aaaaaaaaaaaaaaa0"},
+                                                    {"kind", "session"}, {"expires_at", QDateTime::fromMSecsSinceEpoch(kServerT0 + 900000, QTimeZone::UTC).toString(Qt::ISODateWithMs)},
+                                                    {"ttl_s", 900}, {"renew_after_s", 300}, {"seq", 0}, {"config", QStringLiteral("{\"inbounds\":[]}")},
+                                                    {"config_sha256", QString::fromLatin1(QCryptographicHash::hash("{\"inbounds\":[]}", QCryptographicHash::Sha256).toHex())},
+                                                    {"upstream_revision", 5}, {"traffic_accounting_epoch", 1}, {"renew_token", "tok"}};
+                                body = QJsonDocument(o).toJson(QJsonDocument::Compact);
+                                sig = key.sign(QByteArrayLiteral("tribe-upstream-lease-v1\n") + body);
+                            }
+                            s->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size())
+                                     + "\r\n" + (sig.isEmpty() ? QByteArray() : "X-Tribe-Sig: " + sig + "\r\n") + "X-Tribe-Api: 1\r\nConnection: close\r\n\r\n" + body);
+                            s->disconnectFromHost();
+                        });
+                });
+            }
+            QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()); }
+        };
+        Edge edge;
+        edge.denials = denials;
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        UpstreamLeaseOwner owner;
+        SubscriptionNode node = stubOf();
+        node.upstream->configSha256 = QString::fromLatin1(QCryptographicHash::hash("{\"inbounds\":[]}", QCryptographicHash::Sha256).toHex());
+        TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {});
+        const QString base = edge.base();
+        client.configure(&nam, [base] { return base; }, edge.key.pubHex(), [] { return QStringLiteral("token"); });
+        qint64 stored = 0;
+        owner.setIo(&client);
+        owner.setOrderStore([&stored]() { return stored; }, [&stored](qint64 v) { stored = v; });
+        int started = 0, failed = 0;
+        QElapsedTimer clock;
+        clock.start();
+        const auto take = [&](const QVector<UpstreamOwnerEvent> &ev) {
+            started += findEv(ev, UpstreamOwnerEventKind::BringUp) ? 1 : 0;
+            failed += findEv(ev, UpstreamOwnerEventKind::StartFailed) ? 1 : 0;
+        };
+        client.onSessionOrderFloor = [&owner](qint64 v) { owner.raiseOrderFloor(v); };
+        client.onAcquire = [&](quint64 id, const AcquireReply &r) { take(owner.onAcquireReply(id, r, clock.elapsed())); };
+        take(owner.begin(node, 1, std::nullopt, clock.elapsed(), 1000));
+        QElapsedTimer t;
+        t.start();
+        while (started + failed == 0 && t.elapsed() < 5000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        if (denials == 1)
+            CHECK(started == 1 && failed == 0 && edge.posts == 2 && edge.orders.size() == 2 && edge.orders[0] == 1000 && edge.orders[1] > 424242);
+        else
+            CHECK(started == 0 && failed == 1 && edge.posts == 2);
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -3955,6 +4152,7 @@ int main(int argc, char **argv)
     lateOlderStart();
     sessionOrderCheck();
     orderFloorCheck();
+    floorDenialRetry();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();

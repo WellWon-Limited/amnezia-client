@@ -216,6 +216,24 @@ public:
                 m_grantSentMs = m_lastAcquireSentMs;
             }
         }
+        // An ORDER-FLOOR denial (stale_session WITH min_session_order, an answer of the API) of the CURRENT start's own request says "your
+        // number was too low", not a word about the server or the path: the floor is applied (the client did it already; idempotent) and
+        // the same leg asks again ONCE as a new start - a new nonce and an order above the floor, on the same machine session, so the
+        // direct acquire is re-sent, and for a provisional session (the hedge started the pack tunnel) the confirmation through the
+        // tunnel goes out again - without a failure upward. The retry knows it is the retry (m_floorRetried, set with the new nonce): a
+        // second floor denial in the same leg is the refusal it always was (no loop). A stale_session WITHOUT the field for the current
+        // start stays a failure (a reused nonce: a client bug).
+        if (const qint64 floorOrder = upstreamOrderFloorOf(r); floorOrder >= 0) {
+            m_order.raiseFloor(floorOrder);
+            if (m_active && !m_floorRetried && r.kind == LeaseReplyKind::Refused && r.error.code == UpstreamErrorCode::LeaseGone
+                && r.error.reason == QLatin1String("stale_session") && requestId != 0 && requestId == m_machine.acquireInFlight()) {
+                m_floorRetried = true;
+                m_nonce = upstreamNewSessionNonce();
+                m_sessionOrder = m_order.next(m_wallAtStart + qMax<qint64>(0, nowMs - m_monoAtStart));
+                apply(m_machine.reissueAcquire(requestId, nowMs), nowMs, ev);
+                return ev;
+            }
+        }
         // A `stale_session` denial (HTTP 404 lease_gone, reason stale_session: the nonce's tenure ended, or its order is behind a newer
         // start's) is never the answer the CURRENT start waits for: its requests carry its own fresh nonce and order. If one comes
         // anyway it is a refusal like any terminal one (the machine leaves / the leg fails with lease_gone). The answer of an older
@@ -426,6 +444,7 @@ private:
         // another start takes the seat over with a new lease, and a nonce whose lease ended is refused (stale_session) for good.
         // Never reused by a later start, never made per request.
         m_nonce = upstreamNewSessionNonce();
+        m_floorRetried = false; // this leg has not been retried after an order-floor denial yet (onAcquireReply)
     }
 
     QVector<UpstreamOwnerEvent> endSession(qint64 nowMs)
@@ -1111,6 +1130,7 @@ private:
     quint64 m_ownSerial = 0;
     QHash<QString, PendingRelease> m_releases; // ONE pending release per lease id (Out / Unsent / Deferred); it owns the final report
     QHash<quint64, QString> m_acquireNonce;    // acquire request id -> the nonce (start) that sent it
+    bool m_floorRetried = false;               // this leg already began again after an order-floor denial: a second one is a refusal
     QString m_nonce;                           // the session nonce of the current start (resetSession)
     qint64 m_sessionOrder = -1;                // its order: strictly increasing across starts, persisted (m_order)
     UpstreamSessionOrder m_order;

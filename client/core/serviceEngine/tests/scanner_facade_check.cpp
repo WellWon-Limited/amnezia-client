@@ -234,6 +234,7 @@ struct Server {
     QStringList releasedLeases;
     int cancelReleases = 0; // the next N probe-seat releases are cut by our own tunnel transition (canceled, no answer)
     QList<int> releaseStatuses; // the next probe-seat releases are answered with these statuses (nothing released); the API's answers: they carry its mark
+    int foreignReleaseBodyBytes = 0; // the size of each foreign answer's body: what a blocking proxy's page costs on the wire
     QList<int> foreignReleaseStatuses; // ... answered by a blocking proxy instead: no X-Tribe-Api mark, nothing released (round 12 R5)
     int releaseTries = 0;
     // Contract 1.15.0: a batch's operation id. The server's side of an operation: its answer items (a resend gets
@@ -371,6 +372,7 @@ struct Server {
             ++releaseTries;
             if (!foreignReleaseStatuses.isEmpty()) {
                 out.status = foreignReleaseStatuses.takeFirst(); // a proxy's short 200 / 403: no mark, the API got nothing
+                out.body = QByteArray(foreignReleaseBodyBytes, 'x');
                 return out;
             }
             out.headers.insert("x-tribe-api", "1"); // every other answer is the API's own
@@ -3887,10 +3889,12 @@ static void caseReleaseSurvivesTransition()
 {
     g_case = QStringLiteral("release_survives_transition");
     const QStringList ids{QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID9001"), QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID9002")};
-    const auto release = [&ids](World &w) {
+    // The release has ONE byte budget for the whole chain (round 13 R2). Every fake send counts a full TLS handshake (about one costApiBytes), so
+    // the resend cases below give the chain room for several tries; the budget case gives it exactly one worst-case request.
+    const auto release = [&ids](World &w, qint64 cost = qint64(ScanTunables().costApiBytes) * 4) {
         bool done = false;
         qint64 bytes = 0;
-        w.s->api()->releaseLeases(ids, ScanTunables().costApiBytes, [&](qint64 b) {
+        w.s->api()->releaseLeases(ids, cost, [&](qint64 b) {
             done = true;
             bytes = b;
         });
@@ -3959,6 +3963,25 @@ static void caseReleaseSurvivesTransition()
             CHECK_EQ(w.server.releaseTries, 3);
             CHECK(w.server.releasedLeases.isEmpty() && logged(w, "gave_up=1"));
         }
+    }
+    { // round 13 R2: ONE byte budget for the whole chain - foreign answers that each cost a lot never add up past what the release may spend
+        const qint64 budget = ScanTunables().costApiBytes;
+        World w;
+        w.start();
+        w.s->api()->releaseRetryBudgetMs = 600000; // the spacing budget is not what ends it here
+        w.server.foreignReleaseBodyBytes = 1000;
+        w.server.foreignReleaseStatuses = {200, 200, 200, 200, 200, 200, 200, 200, 200, 200};
+        const qint64 spent = release(w, budget);
+        qint64 wire = 0;
+        int sends = 0;
+        for (const auto &sn : w.http.sent)
+            if (QUrl(sn.req.url).path() == QLatin1String("/v1/upstream/lease/probe-batch/release")) {
+                wire += sn.resp.bytes;
+                ++sends;
+                CHECK(sn.req.maxBytes >= 0 && sn.req.maxBytes <= budget); // each send is cut at what is left, never the whole allowance again
+            }
+        CHECK(sends == 2 && wire <= budget && spent == wire); // the total never passes the budget; the sink got every send's bytes
+        CHECK(w.server.releasedLeases.isEmpty() && w.server.releaseTries == sends); // and the chain ended (release() returned) with no seat released
     }
     { // 404 / 409: final, no resend
         for (const int status : {404, 409}) {
