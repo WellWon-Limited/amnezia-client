@@ -135,7 +135,7 @@ has "$rel" 'const LeaseRoute direct = upstreamReleaseRoute(route);' && has "$rel
 # block "Lease id ledger" in UpstreamLeaseOwner.h, the behaviour is tested in upstream_engine_check lateGrantOwnership):
 # every DELETE is a decision of the owner, so the adapter only forwards.
 ctor="$(body_of "$ADP" 'VpnConnectionTunnelControl::VpnConnectionTunnelControl(')"
-has "$ctor" 'm_upOwner.lateGrant(profile, lease, route, newerOut)' || bad "ledger: a late grant must be decided by the owner (lateGrant)"
+has "$ctor" 'm_upOwner.lateGrant(profile, lease, route, newerOut, acquireId)' || bad "ledger: a late grant must be decided by the owner (lateGrant)"
 has "$ctor" 'm_upOwner.acquireEnded(profile, lease, stillOut)' || bad "ledger: the end of an acquire must reach the owner (acquireEnded)"
 has "$ctor" 'm_leaseClient->tunnelStarted();' || bad "ledger: a native tunnel coming up must tell the client (a stop is waited for only while one runs)"
 has "$(grep -F 'm_leaseClient->release(' "$ADP")" 'e.requestId' || bad "R5: the after-stop release must carry the owner's request id"
@@ -157,7 +157,12 @@ has "$lateb" 'onLateGrant(' || bad "R4/F3: a late grant must be reported to the 
 # confirmation in tunnelUp(), provisional re-acquire in tick()); the only call that sends one is sendAcquire().
 OWN="$SE/UpstreamLeaseOwner.h"
 [ "$(grep -v '^[[:space:]]*//' "$OWN" | grep -c 'm_io->acquire(')" = "1" ] || bad "G1: UpstreamLeaseOwner.h must send an acquire from exactly one place (sendAcquire)"
-has "$(body_of "$OWN" '    void sendAcquire(const LeaseAction &a)')" 'releaseOnWireFor(a.profileId)' || bad "G1: sendAcquire must hold an acquire while a DELETE of its profile is on the wire"
+# Round 9 R1: a start never waits for a release, not even one on the wire (a local timeout of a DELETE proves nothing about
+# the server; the DELETE carries its grant's token and the server ends the lease only for the current one).
+! grep -rn --include='*.cpp' --include='*.h' -E 'releaseOnWireFor|releaseInFlight|m_inFlight\.(insert|remove)|m_gatedAcquires' "$SE/UpstreamLeaseOwner.h" "$SE/UpstreamLeaseClient.h" "$SE/UpstreamLeaseClient.cpp" "$SE/UpstreamLeaseMachine.h" | grep -v '^[^:]*:[0-9]*:[[:space:]]*//' | grep -q . \
+    || bad "R1: no release may hold a start (releaseOnWireFor / releaseInFlight / gated acquires are gone)"
+sa="$(awk 'index($0, "    void sendAcquire(const LeaseAction &a)") == 1 { on = 1 } on { print } on && /^    }/ { exit }' "$OWN")"
+! has "$sa" 'return;' || bad "R1: sendAcquire must always send (no early return = no gate)"
 ! grep -v '^[[:space:]]*//' "$OWN" | grep -q 'dispatchLeaseIo(' || bad "G1: the owner must not dispatch machine steps around its gate (dispatchLeaseIo)"
 ! grep -rn --include='*.cpp' --include='*.h' --include='*.mm' -E '(leaseClient|m_leaseClient)(->|\.)acquire\(' "$SE/.." | grep -v '/tests/' | grep -q . \
     || bad "G1: nothing but the owner may ask the lease client for a seat"
@@ -170,9 +175,34 @@ has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::bringUpUpstream(const Up
 
 # S1 (device round 10): a start takes pending releases of its profile back instead of waiting for their retries; the
 # client asks before every resend and before a held release is sent.
-has "$(body_of "$OWN" '    void sendAcquire(const LeaseAction &a)')" 'withdrawIdleReleases(a.profileId)' || bad "S1: sendAcquire must withdraw the pending releases of its profile"
+has "$(body_of "$OWN" '    void sendAcquire(const LeaseAction &a)')" 'withdrawReleasesOf(a.profileId)' || bad "S1: sendAcquire must withdraw the pending releases of its profile"
 has "$ctor" 'm_upOwner.releaseWanted(id,' || bad "S1: the adapter must give the client the owner's releaseWanted"
 [ "$(grep -c 'releaseWanted' "$CLI")" -ge 3 ] || bad "S1: the client must ask releaseWanted before a resend, a timer resend and a held send"
+
+# R1 + R6 (round 9): a session lease is NEVER released without the renew token of the grant being released - one place builds
+# the DELETE body (upstreamReleaseBody, field renew_token), the late grant carries ITS token and the request that was
+# answered, the iOS extension's own release carries the token of its lease; the pending releases are ONE structure keyed by
+# lease id. A probe lease has no token and no route here (the Scanner's batch release is another endpoint).
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::sendRelease(')" 'upstreamReleaseBody(meter, route.renewToken)' || bad "R1: sendRelease must put the grant's token into the DELETE body"
+! grep -v '^[[:space:]]*//' "$CLI" "$OWN" "$SE/UpstreamLeaseMachine.h" | grep -E 'upstreamReleaseBody\([^,()]*\)' | grep -q . \
+    || bad "R1: upstreamReleaseBody must never be called without a token"
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'LeaseRoute{reply.grant.renewToken, route.apiBase}, requestId' \
+    || bad "R1: a late grant must be reported with ITS token and the request id that was answered"
+IOSW="$SE/../../platforms/ios"
+has "$(cat "$IOSW/UpstreamLeaseRenewer.swift")" 'UpstreamLeaseWire.releaseBody(action.meter, renewToken: action.route.renewToken)' \
+    || bad "R1: the extension's release must carry the token of its lease"
+! grep -qF 'renew_token' "$SE/ScanApiClient.cpp" || bad "R1: the Scanner's probe-lease release has no token (a probe lease is released as before)"
+for gone in m_releasesOut m_withdrawn m_unsent m_deferredSeat; do
+    ! grep -qF "$gone" "$OWN" || bad "R6: $gone must not exist - the pending releases are one structure keyed by lease id (m_releases)"
+done
+has "$(grep -v '^[[:space:]]*//' "$OWN")" 'QHash<QString, PendingRelease> m_releases;' || bad "R6: m_releases (one pending release per lease id) is missing"
+
+# R3 (round 9): ANY answer of the API proves its route (only a transport failure does not): the owner flushes the unsent releases
+# on the route that answered - direct, or the tunnel's base for an answer through the tunnel - not only after a direct grant.
+has "$(grep -v '^[[:space:]]*//' "$OWN")" 'unsentCount() > 0 && !(r.kind == LeaseReplyKind::Failed && r.why == QLatin1String("transport"))' \
+    || bad "R3: an answer other than a transport failure must flush the unsent releases"
+! has "$(grep -v '^[[:space:]]*//' "$OWN")" 'r.kind == LeaseReplyKind::Granted && requestId == m_lastAcquireRequest && !m_lastAcquireStandby' \
+    || bad "R3: the flush must not wait for a grant of a direct acquire"
 
 # S3: evidence about a path only for something really sent - the engine asks the adapter before it records a provider
 # leg's no_handshake, and the adapter answers from the owner's own fact.
@@ -186,6 +216,11 @@ has "$(body_of "$CLI" 'void UpstreamLeaseClient::releaseVia(')" 'sendRelease(req
 # S4: a profile with a standby-pack entry waits only the hedge for the direct lease; the adapter tells the client which.
 has "$ctor" 'm_upOwner.hasStandbyFor(profile)' || bad "S4: the adapter must tell the client which profile has a standby entry (hasStandbyFor)"
 has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'upstreamAcquireHedgeMsTuned()' || bad "S4: acquire() must use the hedge for a profile with a standby entry"
+# R2 (round 9): the hedge is for the direct acquire only - decided by the request's own parameters (no standby sha, no tunnel
+# base), never by "the profile has a pack entry" alone: the seat confirmation through the tunnel keeps the full bound.
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'const bool directRequest = standbyConfigSha256.isEmpty() && route.apiBase.isEmpty();' \
+    && has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" '(directRequest && hasStandbyFor && hasStandbyFor(profileId))' \
+    || bad "R2: the hedge must apply to the direct acquire only, not to the confirmation through the tunnel"
 
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"

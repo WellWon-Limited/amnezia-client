@@ -205,9 +205,6 @@ public:
                        const LeaseRoute &route) = 0;
     virtual void release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
                          const LeaseRoute &route) = 0;
-    // A DELETE of this release is on the wire right now (its request has not ended). The only thing a start of the
-    // same profile may wait for (UpstreamLeaseOwner.h, ledger row S1): a request on the wire cannot be recalled.
-    virtual bool releaseInFlight(quint64 /*requestId*/) const { return false; }
     // A release over the route given (a working tunnel's API base), not forced to the direct path (row S2).
     virtual void releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route)
     {

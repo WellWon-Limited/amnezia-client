@@ -130,6 +130,28 @@ enum UpstreamLeaseWire {
         return "{\(epoch)\"meter_scope\":\"\(m.scope.rawValue)\",\"rx_bytes_delta\":\(rx),\"seq\":\(m.seq),\"tx_bytes_delta\":\(tx)}"
     }
 
+    // The release's body: the final report plus the renew token of the grant being released (round 9 R1). The server
+    // ends the lease only when that token is the lease's CURRENT one (a re-acquire rotates it) and drops the report
+    // otherwise, so a late release of an old session never ends the seat of a newer one. Mirror of the app's
+    // upstreamReleaseBody (UpstreamLeaseWire.h): the same field, "renew_token"; no token (an older server's grant) = the
+    // body as before. Keys stay in the order QJsonDocument writes them (renew_token sorts between meter_scope and
+    // rx_bytes_delta).
+    static let releaseTokenField = "renew_token"
+    static func releaseBody(_ m: UpstreamMeter, renewToken: String) -> String {
+        let plain = meterBody(m)
+        guard !renewToken.isEmpty else { return plain }
+        var escaped = ""
+        for ch in renewToken.unicodeScalars {
+            if ch == "\"" || ch == "\\" { escaped.append("\\") }
+            escaped.unicodeScalars.append(ch)
+        }
+        let marker = "\"rx_bytes_delta\""
+        guard let at = plain.range(of: marker) else { return plain }
+        var out = plain
+        out.insert(contentsOf: "\"\(releaseTokenField)\":\"\(escaped)\",", at: at.lowerBound)
+        return out
+    }
+
     static func parseRenewal(_ body: Data) -> (UpstreamRenewal?, String) {
         guard let o = jsonObject(body) else { return (nil, "not_object") }
         var r = UpstreamRenewal()

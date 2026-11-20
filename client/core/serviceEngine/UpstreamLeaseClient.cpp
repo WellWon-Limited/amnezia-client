@@ -99,7 +99,13 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
     // taken and the path was blamed. The attempt stops WAITING at the lease share of its leg (a transport failure
     // for the owner, never recorded against the path), but the request lives on for kUpstreamLateGrantGraceMs: a
     // grant that arrives after that point was a real seat and is released at once over the direct route.
-    const int waitMs = (hasStandbyFor && hasStandbyFor(profileId)) ? upstreamAcquireHedgeMsTuned() : upstreamAcquireTimeoutMsTuned();
+    // The hedge is a property of ONE request kind: the direct acquire that precedes a provisional start (round 9 R2). It is
+    // told by the request's own parameters - no standby confirmation sha, no tunnel base: that is the direct request - and
+    // by the owner's fact that this profile has a pack entry to start from. A seat confirmation through the tunnel (or the
+    // provisional re-acquire) has nothing to fall back to and keeps the full bound.
+    const bool directRequest = standbyConfigSha256.isEmpty() && route.apiBase.isEmpty();
+    const int waitMs = (directRequest && hasStandbyFor && hasStandbyFor(profileId)) ? upstreamAcquireHedgeMsTuned()
+                                                                                    : upstreamAcquireTimeoutMsTuned();
     QNetworkReply *r = base.isEmpty() ? nullptr
                                       : post(base + QStringLiteral("/v1/upstream/lease"),
                                              upstreamAcquireBody(profileId, kind, standbyConfigSha256), token,
@@ -134,7 +140,7 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         const AcquireReply reply = classifyAcquireReply(status, body, sig, m_pubKeyHex, fromTribeApi);
         if (*answered) {
             if (reply.kind == LeaseReplyKind::Granted && upstreamLeaseIdValid(reply.grant.leaseId))
-                reportLateGrant(profileId, reply.grant.leaseId, route);
+                reportLateGrant(profileId, reply.grant.leaseId, LeaseRoute{reply.grant.renewToken, route.apiBase}, requestId);
             else
                 reportAcquireEnded(profileId, QString());
             return;
@@ -157,10 +163,11 @@ bool UpstreamLeaseClient::acquireOutFor(const QString &profileId) const
 // What the client knows and the owner does not: the HTTP requests still alive. It reports the facts; the lease-id
 // ledger (UpstreamLeaseOwner.h, "Lease id ledger") decides and sends - the client never releases a late grant itself
 // (without an owner wired, as in a bare client, the old rule: give it back at once).
-void UpstreamLeaseClient::reportLateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route)
+void UpstreamLeaseClient::reportLateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route,
+                                          quint64 acquireId)
 {
     if (onLateGrant) {
-        onLateGrant(profileId, leaseId, route, acquireOutFor(profileId));
+        onLateGrant(profileId, leaseId, route, acquireOutFor(profileId), acquireId);
         return;
     }
     qWarning() << "avpn upstream: a late grant arrived after the attempt moved on - releasing it";
@@ -269,7 +276,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         QNetworkRequest req{QUrl(base + QStringLiteral("/v1/upstream/lease/%1").arg(leaseId))};
         // No report to give (a late grant, a seat the tunnel owner held): no body at all - a report with seq 0
         // is refused 422 by the server and the seat stayed until its TTL (upstreamReleaseBody).
-        const QByteArray body = upstreamReleaseBody(meter);
+        const QByteArray body = upstreamReleaseBody(meter, route.renewToken);
         if (!body.isEmpty())
             req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
         req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + bearer.toUtf8());
@@ -277,7 +284,6 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         // Contract §6: bounded to 1.5 s; on failure the server frees the seat at TTL.
         r = m_nam->sendCustomRequest(req, QByteArrayLiteral("DELETE"), body);
         armTimeout(r, kUpstreamReleaseTimeoutMs);
-        m_inFlight.insert(requestId);
     }
     if (!r) {
         QTimer::singleShot(0, this, [this, requestId]() {
@@ -288,7 +294,6 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
     }
     connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt, spacedMs, bgKey]() {
         r->deleteLater();
-        m_inFlight.remove(requestId); // the DELETE is off the wire: a start of the profile may go
         // The release goes out just before the tunnel transition it belongs to, and that transition aborts every
         // API request in flight (owner's iPhone 16.11: "net_error 5" within 40-80 ms); an API restart answers 502
         // (device round 19.11). seatReleaseNext - the one rule of every seat release: no answer or 5xx is sent again

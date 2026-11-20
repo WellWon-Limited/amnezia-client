@@ -55,16 +55,17 @@ public:
     // Facts for the lease-id ledger (UpstreamLeaseOwner.h): an acquire answered AFTER the attempt stopped waiting
     // (the grant it carries has no taker unless the owner says so), and the end of any acquire request.
     // newerOut / stillOut = another acquire of the same profile is still alive.
-    std::function<void(const QString &profileId, const QString &leaseId, const LeaseRoute &route, bool newerOut)> onLateGrant;
+    // route = the late grant's own token and the base it was asked on; acquireId = the request that was answered.
+    std::function<void(const QString &profileId, const QString &leaseId, const LeaseRoute &route, bool newerOut, quint64 acquireId)> onLateGrant;
     std::function<void(const QString &profileId, const QString &grantedLeaseId, bool stillOut)> onAcquireEnded;
     // Asked before every resend of a release and before a held one is sent: false = the owner took the release back
     // (a start of its profile - UpstreamLeaseOwner.h, row S1): it is dropped silently, no onReleaseDone.
     std::function<bool(quint64 requestId)> releaseWanted;
     // How long the attempt waits for the direct acquire of this profile (UpstreamLeaseOwner::hasStandbyFor decides:
-    // a profile with a standby-pack entry waits only the hedge, row S4). Unset = the full lease share.
+    // a profile with a standby-pack entry waits only the hedge, row S4 - and only for the DIRECT acquire, never for the
+    // seat confirmation through the tunnel, round 9 R2). Unset = the full lease share.
     std::function<bool(const QString &profileId)> hasStandbyFor;
     void releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route) override;
-    bool releaseInFlight(quint64 requestId) const override { return m_inFlight.contains(requestId); }
     bool acquireAlive(const QString &profileId) const override { return acquireOutFor(profileId); }
     // The spacing budget of a release's resends (UpstreamLeaseWire.h::seatReleaseNext; tests shorten it).
     qint64 releaseRetryBudgetMs = kSeatReleaseRetryBudgetMs;
@@ -129,7 +130,7 @@ private:
     QString baseFor(const LeaseRoute &route) const;
     void sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route,
                      int attempt, qint64 spacedMs = 0, quint64 bgKey = 0);
-    void reportLateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route);
+    void reportLateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route, quint64 acquireId);
     void reportAcquireEnded(const QString &profileId, const QString &grantedLeaseId);
     QNetworkReply *post(const QString &url, const QByteArray &body, const QString &bearer, int timeoutMs);
 
@@ -147,7 +148,6 @@ private:
     };
     QList<HeldRelease> m_held;
     QHash<quint64, QString> m_acquiresOut; // acquire request id -> profile, until its HTTP request ends
-    QSet<quint64> m_inFlight; // release request ids with a DELETE on the wire
     bool m_tunnelDown = true; // the last tunnel event was a confirmed stop (or none yet)
     bool m_stopPending = false;
     qint64 m_heldSinceMs = 0;

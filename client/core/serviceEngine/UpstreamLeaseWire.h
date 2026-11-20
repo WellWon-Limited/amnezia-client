@@ -331,12 +331,20 @@ inline QByteArray upstreamMeterBody(const UpstreamMeter &m)
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 
-// The release's body: the final report, or nothing when there is none to give (seq < 1: a late grant released
-// unused, a seat released again after its tunnel owner's own release). The server reads a release without a
-// body as "no report" and refuses a report with seq 0 (422) - such a release never freed the seat.
-inline QByteArray upstreamReleaseBody(const UpstreamMeter &m)
+// The release's body: the final report (none when there is none to give: seq < 1, a late grant released unused, a seat
+// released again after its tunnel owner's own release - the server reads a release without a report as "no report" and
+// refuses a report with seq 0, 422) plus the renew token of the grant being released. The server ends the lease only when
+// that token is the lease's CURRENT one (a re-acquire rotates it), so a late DELETE of an old session can never end the
+// seat of a newer one (round 9 R1). THE one place where the token goes onto the wire: a different field or a header is a
+// change of this function only (kUpstreamReleaseTokenField). No token (an older server's grant): the body as before.
+inline constexpr char kUpstreamReleaseTokenField[] = "renew_token";
+inline QByteArray upstreamReleaseBody(const UpstreamMeter &m, const QString &renewToken = QString())
 {
-    return m.seq < 1 ? QByteArray() : upstreamMeterBody(m);
+    if (renewToken.isEmpty())
+        return m.seq < 1 ? QByteArray() : upstreamMeterBody(m);
+    QJsonObject o = m.seq < 1 ? QJsonObject() : QJsonDocument::fromJson(upstreamMeterBody(m)).object();
+    o.insert(QLatin1String(kUpstreamReleaseTokenField), renewToken);
+    return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 
 // renew_token: an opaque header-safe token (visible ASCII, 1..1024 characters).
