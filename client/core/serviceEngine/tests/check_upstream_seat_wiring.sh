@@ -89,7 +89,7 @@ has "$(body_of "$ADP" 'bool VpnConnectionTunnelControl::invokeConnect(')" '++m_s
 # the shared spacing (seatReleaseNext, one rule with the probe-batch release); only an HTTP answer reports it
 # confirmed, everything else reports "not confirmed" (left to the server's TTL) - never a silent "done".
 rel="$(body_of "$CLI" 'void UpstreamLeaseClient::sendRelease(')"
-has "$rel" 'const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs);' \
+has "$rel" 'const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs, fromApi);' \
     && has "$rel" 'sendRelease(requestId, leaseId, meter, route, attempt + 1, spacedMs + next.delayMs, key);' \
     || bad "F3: a release with no answer or a 5xx must be sent again on the shared spacing (seatReleaseNext)"
 has "$rel" 'onReleaseDone(requestId, true);' && has "$rel" 'onReleaseDone(requestId, false);' \
@@ -173,9 +173,12 @@ sa="$(awk 'index($0, "    void sendAcquire(const LeaseAction &a)") == 1 { on = 1
 has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)')" 'm_leaseClient->tunnelStarted();' \
     || bad "G2: asking for the native start must mark the tunnel as running for the release hold"
 
-# S1 (device round 10): a start takes pending releases of its profile back instead of waiting for their retries; the
-# client asks before every resend and before a held release is sent.
-has "$(body_of "$OWN" '    void sendAcquire(const LeaseAction &a)')" 'withdrawReleasesOf(a.profileId)' || bad "S1: sendAcquire must withdraw the pending releases of its profile"
+# S1 (device round 10, contract 1.19.0): a start waits for no release and takes none back - the server gives the new start another
+# lease, so an old DELETE can only end the old start's own lease (and may still carry its final report). The client asks before
+# every resend and before a held release is sent (the owner answers false only for a chain that a newer request for the same
+# lease took over).
+! grep -v '^[[:space:]]*//' "$OWN" | grep -qiE 'withdraw|reinstate|reassert|startOrder|tokenNonce|takeOver|startTakingOver' \
+    || bad "S1: nothing is withdrawn, reinstated, re-asserted or adopted any more (tenure rule: one nonce, one lease, one token)"
 has "$ctor" 'm_upOwner.releaseWanted(id,' || bad "S1: the adapter must give the client the owner's releaseWanted"
 [ "$(grep -c 'releaseWanted' "$CLI")" -ge 3 ] || bad "S1: the client must ask releaseWanted before a resend, a timer resend and a held send"
 
@@ -202,8 +205,10 @@ has "$(grep -v '^[[:space:]]*//' "$OWN")" 'QHash<QString, PendingRelease> m_rele
 # grant, and it is decided in ONE place: the client calls onRouteProved for every acquire request that got an HTTP answer,
 # whichever path it took (in time, after the hedge, a grant or not); the adapter hands it to the owner's routeProved, and the
 # owner's answer handlers do not flush on their own.
-has "$(grep -v '^[[:space:]]*//' "$CLI")" 'if (!(reply.kind == LeaseReplyKind::Failed && reply.why == QLatin1String("transport")) && onRouteProved)' \
-    || bad "R4: the client must report every non-transport acquire answer as a proved route (onRouteProved), for in-time and late paths alike"
+has "$(grep -v '^[[:space:]]*//' "$CLI")" 'if (upstreamRouteProved(reply) && onRouteProved)' \
+    || bad "R4 + round 11 R3: the client must report every acquire answer of the API (it carries the API's mark) as a proved route (onRouteProved), for in-time and late paths alike"
+has "$(grep -v '^[[:space:]]*//' "$CLI")" 'seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs, fromApi)' \
+    || bad "round 11 R3: a release is finished only by an answer of the API (the mark), the same rule as the route proof"
 [ "$(grep -v '^[[:space:]]*//' "$CLI" | grep -c 'onRouteProved(requestId)')" = "1" ] || bad "R4: onRouteProved must be called from exactly one place in the client"
 has "$ctor" 'm_upOwner.routeProved(requestId, upstreamClockMs())' || bad "R4: the adapter must hand a proved route to the owner (routeProved)"
 oar="$(awk 'index($0, "    QVector<UpstreamOwnerEvent> onAcquireReply(") == 1 { on = 1 } on { print } on && /^    }/ { exit }' "$OWN" | grep -v '^[[:space:]]*//')"
@@ -218,7 +223,7 @@ has "$(grep 'upstreamRequestSent' "$ADH")" 'm_upOwner.requestSent()' || bad "S3:
 
 # S2: a release that gave up is not abandoned - the adapter tells the owner whether the server answered it.
 has "$ctor" 'm_upOwner.onReleaseDone(id, upstreamClockMs(), confirmed)' || bad "S2: the adapter must pass the release's outcome to the owner (onReleaseDone confirmed)"
-has "$(body_of "$CLI" 'void UpstreamLeaseClient::releaseVia(')" 'sendRelease(requestId, leaseId, UpstreamMeter{}, route' || bad "S2: releaseVia must send over the route it is given (no direct-path strip)"
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::releaseVia(')" 'sendRelease(requestId, leaseId, meter, route' || bad "S2: releaseVia must send over the route it is given (no direct-path strip)"
 
 # S4: a profile with a standby-pack entry waits only the hedge for the direct lease; the adapter tells the client which.
 has "$ctor" 'm_upOwner.hasStandbyFor(profile)' || bad "S4: the adapter must tell the client which profile has a standby entry (hasStandbyFor)"

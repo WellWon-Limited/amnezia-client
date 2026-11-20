@@ -944,19 +944,17 @@ static void routeAndScope()
     c.start(kProfileId, LeaseKind::Session, MeterScope::Tunnel, 100, T + 2);
     st = c.onAcquireReply(aid, granted(g1), T + 3);
     CHECK(must(st, LeaseActionKind::SendRelease).route == ra && must(st, LeaseActionKind::SendRelease).meter.scope == MeterScope::Proxy);
-    // Review N1 of 17.11: a new session of the same profile may take the cancelled request over instead - nothing is
-    // sent, and the late grant is that session's own answer (no release of the seat it is given).
+    // A new session of the same profile never adopts the cancelled request (contract 1.19.0: it has its own nonce and sends its
+    // own): the cancelled request stays remembered until its answer, and that grant is released.
     UpstreamLeaseMachine same;
     st = same.start(kProfileId, LeaseKind::Session, MeterScope::Proxy, 100, T);
     const quint64 sid = sentId(st, LeaseActionKind::SendAcquire);
     same.disconnect(T + 1);
-    CHECK(!same.startTakingOver(sid, QStringLiteral("0000000000000000"), LeaseKind::Session, MeterScope::Proxy, 100, T + 2));
-    CHECK(same.startTakingOver(sid, kProfileId, LeaseKind::Session, MeterScope::Proxy, 100, T + 2));
-    CHECK(same.acquireInFlight() == sid && same.requestSentMs() == T && same.cancelledAcquiresPending() == 0);
+    CHECK(same.cancelledAcquiresPending() == 1 && same.cancelledAcquireOf(kProfileId) && !same.cancelledAcquireOf(QStringLiteral("0000000000000000")));
+    same.start(kProfileId, LeaseKind::Session, MeterScope::Proxy, 100, T + 2);
+    CHECK(same.cancelledAcquiresPending() == 1);
     st = same.onAcquireReply(sid, granted(g1), T + 3);
-    CHECK(st.has(LeaseActionKind::LeaseReady) && !st.has(LeaseActionKind::SendRelease));
-    CHECK(same.phase() == LeasePhase::Active && same.leaseId() == kLeaseA);
-    CHECK(!same.startTakingOver(sid, kProfileId, LeaseKind::Session, MeterScope::Proxy, 100, T + 4)); // busy / used
+    CHECK(st.has(LeaseActionKind::SendRelease) && same.cancelledAcquiresPending() == 0 && same.phase() == LeasePhase::Acquiring);
 }
 
 
@@ -1101,7 +1099,7 @@ static void provisional()
 
 struct FakeIo : IUpstreamLeaseIo {
     QStringList calls;
-    void acquire(quint64 id, const QString &p, LeaseKind k, const QString &, const LeaseRoute &, const QString &) override
+    void acquire(quint64 id, const QString &p, LeaseKind k, const QString &, const LeaseRoute &, const QString &, qint64) override
     {
         calls << QStringLiteral("acquire %1 %2 %3").arg(id).arg(p, leaseKindName(k));
     }

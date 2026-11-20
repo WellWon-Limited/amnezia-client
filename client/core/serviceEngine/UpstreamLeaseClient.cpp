@@ -92,7 +92,7 @@ QNetworkReply *UpstreamLeaseClient::post(const QString &url, const QByteArray &b
 
 void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, LeaseKind kind,
                                   const QString &standbyConfigSha256, const LeaseRoute &route,
-                                  const QString &sessionNonce)
+                                  const QString &sessionNonce, qint64 sessionOrder)
 {
     const QString base = baseFor(route);
     const QString token = m_token ? m_token() : QString();
@@ -109,7 +109,7 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
                                                                                     : upstreamAcquireTimeoutMsTuned();
     QNetworkReply *r = base.isEmpty() ? nullptr
                                       : post(base + QStringLiteral("/v1/upstream/lease"),
-                                             upstreamAcquireBody(profileId, kind, standbyConfigSha256, sessionNonce), token,
+                                             upstreamAcquireBody(profileId, kind, standbyConfigSha256, sessionNonce, sessionOrder), token,
                                              waitMs + kUpstreamLateGrantGraceMs);
     if (!r) {
         // Not sendable (no base / no token): a transport failure, answered from the top of the loop.
@@ -150,9 +150,9 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
                 onAcquire(requestId, reply);
             reportAcquireEnded(profileId, reply.kind == LeaseReplyKind::Granted ? reply.grant.leaseId : QString());
         }
-        // THE one place where an answer proves its route (round 10 R4), for every path above: anything but a transport failure
-        // (no complete answer) says the API on this route works.
-        if (!(reply.kind == LeaseReplyKind::Failed && reply.why == QLatin1String("transport")) && onRouteProved)
+        // THE one place where an answer proves its route (round 10 R4), for every path above: an answer of the API (it carries the
+        // API's mark; round 11 R3) says the API on this route works - a foreign answer (a proxy's 403) or a transport failure does not.
+        if (upstreamRouteProved(reply) && onRouteProved)
             onRouteProved(requestId);
     });
 }
@@ -221,10 +221,11 @@ void UpstreamLeaseClient::release(quint64 requestId, const QString &leaseId, con
     sendRelease(requestId, leaseId, meter, direct, /*attempt=*/0);
 }
 
-void UpstreamLeaseClient::releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route)
+void UpstreamLeaseClient::releaseVia(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
+                                     const LeaseRoute &route)
 {
     m_lastReleaseId = requestId;
-    sendRelease(requestId, leaseId, UpstreamMeter{}, route, /*attempt=*/0); // a route that works: no hold, no strip
+    sendRelease(requestId, leaseId, meter, route, /*attempt=*/0); // a route that works: no hold, no strip; the ledger's report goes with it
 }
 
 void UpstreamLeaseClient::holdReleasesForStop()
@@ -305,7 +306,9 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         // on the shared growing spacing within its budget; any other HTTP answer is final.
         const QVariant code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute);
         const int status = code.isValid() ? code.toInt() : 0;
-        const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs);
+        // Round 11 R3: only the API's own answer (the mark) can finish a release; a foreign one is a transport-class failure.
+        const bool fromApi = upstreamFromTribeApi(r->rawHeader(QByteArray(kUpstreamTribeApiHeader)));
+        const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs, fromApi);
         switch (next.kind) {
         case UpstreamReleaseTry::Resend:
             if (releaseWanted && !releaseWanted(requestId)) { // taken back by a newer start of the profile

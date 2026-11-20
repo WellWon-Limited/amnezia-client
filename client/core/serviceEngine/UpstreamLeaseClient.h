@@ -68,14 +68,14 @@ public:
     // a profile with a standby-pack entry waits only the hedge, row S4 - and only for the DIRECT acquire, never for the
     // seat confirmation through the tunnel, round 9 R2). Unset = the full lease share.
     std::function<bool(const QString &profileId)> hasStandbyFor;
-    void releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route) override;
+    void releaseVia(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     bool acquireAlive(const QString &profileId) const override { return acquireOutFor(profileId); }
     // The spacing budget of a release's resends (UpstreamLeaseWire.h::seatReleaseNext; tests shorten it).
     qint64 releaseRetryBudgetMs = kSeatReleaseRetryBudgetMs;
 
     // IUpstreamLeaseIo
     void acquire(quint64 requestId, const QString &profileId, LeaseKind kind, const QString &standbyConfigSha256,
-                 const LeaseRoute &route, const QString &sessionNonce) override;
+                 const LeaseRoute &route, const QString &sessionNonce, qint64 sessionOrder) override;
     void renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     void release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     quint64 lastReleaseRequestId() const { return m_lastReleaseId; }

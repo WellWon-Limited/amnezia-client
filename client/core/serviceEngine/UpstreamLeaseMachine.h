@@ -68,9 +68,8 @@
 //    both equal CLOCK_UPTIME_RAW and stop during sleep (CACurrentMediaTime is mach_absolute_time too).
 //  - Android: SystemClock.elapsedRealtime(), not uptimeMillis().
 //  - A late answer to an older request (another request id) is ignored; a lease granted to an acquire
-//    that was cancelled by disconnect() is released at once - unless a new session of the same profile took
-//    that request over (startTakingOver). Ordering of acquires and releases is the owner's
-//    (UpstreamLeaseOwner.h: one acquisition in flight).
+//    that was cancelled by disconnect() is released at once (a new start never adopts a cancelled request: it has its own
+//    nonce and sends its own). Ordering of acquires and releases is the owner's (UpstreamLeaseOwner.h).
 //  - Release on disconnect carries the final deltas: an unanswered report is resent under its own seq
 //    with the newer bytes added (if the server had applied it, the duplicate applies nothing and the
 //    newer bytes are lost - the only case of under-counting, never double counting).
@@ -201,17 +200,19 @@ public:
     // route.apiBase; empty = the normal direct acquire (route empty).
     // sessionNonce: the nonce of the START this acquire belongs to (UpstreamLeaseWire.h::kUpstreamAcquireNonceField); the
     // owner decides it, the machine knows nothing of it.
+    // sessionOrder: the start's order, sent with the nonce (UpstreamLeaseWire.h::kUpstreamAcquireOrderField); -1 = none.
     virtual void acquire(quint64 requestId, const QString &profileId, LeaseKind kind,
                          const QString &standbyConfigSha256, const LeaseRoute &route,
-                         const QString &sessionNonce) = 0;
+                         const QString &sessionNonce, qint64 sessionOrder) = 0;
     virtual void renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
                        const LeaseRoute &route) = 0;
     virtual void release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
                          const LeaseRoute &route) = 0;
     // A release over the route given (a working tunnel's API base), not forced to the direct path (row S2).
-    virtual void releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route)
+    // The meter is the pending release's final report (the owner's ledger owns it; seq < 1 = none).
+    virtual void releaseVia(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route)
     {
-        release(requestId, leaseId, UpstreamMeter{}, route);
+        release(requestId, leaseId, meter, route);
     }
     // An acquire request of this profile is still alive (answered or not: its HTTP request has not ended).
     virtual bool acquireAlive(const QString & /*profileId*/) const { return false; }
@@ -224,7 +225,7 @@ inline QVector<LeaseAction> dispatchLeaseIo(const LeaseStep &step, IUpstreamLeas
     for (const LeaseAction &a : step.actions) {
         switch (a.kind) {
         case LeaseActionKind::SendAcquire:
-            io.acquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route, QString()); // the machine knows no nonce
+            io.acquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route, QString(), -1); // the machine knows no nonce
             break;
         case LeaseActionKind::SendRenew: io.renew(a.requestId, a.leaseId, a.meter, a.route); break;
         case LeaseActionKind::SendRelease: io.release(a.requestId, a.leaseId, a.meter, a.route); break;
@@ -256,32 +257,6 @@ public:
         m_phase = LeasePhase::Acquiring;
         sendAcquire(nowMs, s);
         return s;
-    }
-
-    // A new session whose acquire is ALREADY out: the acquire cancelled by the last disconnect(), for the same profile
-    // and kind (review N1 of 17.11). Nothing is sent - the server answers an acquire of a profile with the one lease
-    // it holds for the device, so a second acquire could only be answered with the same seat, and the cancelled one's
-    // answer would then release it. The cancelled request becomes this session's own: its answer is the session's
-    // answer, and the lease clock runs from its send time. false = no such cancelled request (start() instead).
-    bool startTakingOver(quint64 cancelledRequestId, const QString &profileId, LeaseKind kind, MeterScope scope,
-                         qint64 knownRevision, qint64 nowMs)
-    {
-        const auto it = m_cancelledAcquires.constFind(cancelledRequestId);
-        if (busy() || it == m_cancelledAcquires.constEnd() || it.value().profileId != profileId || it.value().kind != kind)
-            return false;
-        const qint64 sentMs = it.value().sentMs;
-        reset();
-        m_cancelledAcquires.remove(cancelledRequestId);
-        clock(nowMs);
-        m_profileId = profileId;
-        m_kind = kind;
-        m_scope = scope;
-        m_knownRevision = knownRevision;
-        m_phase = LeasePhase::Acquiring;
-        m_inflight = Inflight::Acquire;
-        m_inflightId = cancelledRequestId;
-        m_requestSentMs = sentMs;
-        return true;
     }
 
     // A session from a standby-pack entry (see the header). packConfigSha256 = the entry's sha;
@@ -546,6 +521,13 @@ public:
     qint64 unreportedTx() const { return m_unTx; }
     int renewRejectedInRow() const { return m_renewRejected; }
     int cancelledAcquiresPending() const { return int(m_cancelledAcquires.size()); }
+    bool cancelledAcquireOf(const QString &profileId) const
+    {
+        for (const CancelledAcquire &c : m_cancelledAcquires)
+            if (c.profileId == profileId)
+                return true;
+        return false;
+    }
     // The acquire this session has out (0 = none) - what disconnect() would cancel.
     quint64 acquireInFlight() const { return m_inflight == Inflight::Acquire ? m_inflightId : 0; }
     qint64 requestSentMs() const { return m_requestSentMs; }
@@ -774,9 +756,7 @@ private:
     QString m_profileId;
     LeaseKind m_kind = LeaseKind::Session;
     MeterScope m_scope = MeterScope::Tunnel;
-    // Cancelled acquires until their answer: a late grant is released, unless a new session of the same profile took
-    // the request over (startTakingOver). No cap: the owner keeps one acquisition in flight (UpstreamLeaseOwner.h,
-    // review round 2), so at most one entry exists - none is ever forgotten (review F2).
+    // Cancelled acquires until their answer: a late grant is released. No cap: none is ever forgotten (review F2).
     struct CancelledAcquire {
         MeterScope scope = MeterScope::Tunnel;
         QString profileId;
