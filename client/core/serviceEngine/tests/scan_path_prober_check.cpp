@@ -1344,14 +1344,14 @@ static void caseCosts()
     check(w.prober.costs().xray < c.xray, "one connection costs less than the burst");
 
     // Device round 19.11 + prod after gzip (PR #639): a one-profile batch answer with its config is 7.3-12.6 KB on the
-    // wire (the HTTP layer counts wire bytes). At 32 KiB per config a provider probe is 107 520 B: one own Xray probe
+    // wire (the HTTP layer counts wire bytes). At 32 KiB per config a provider probe is 117 760 B (two release sends, ScanBudget.h kScanSeatReleaseSends): one own Xray probe
     // (116 736 B) and one provider probe fit one cellular race (262 144 B) together; at the old 256 KiB price
-    // (336 896 B) a provider never took part on cellular.
+    // (347 136 B) a provider never took part on cellular.
     const path::PathRace::Costs d = ScanPathProber::raceCosts(ScanTunables(), kScanXrayBurstParts);
-    check(d.provider == 107520 && d.xray == 116736, "the compiled prices: provider 107 520 B, own Xray 116 736 B");
+    check(d.provider == 117760 && d.xray == 116736, "the compiled prices: provider 117 760 B, own Xray 116 736 B");
     check(d.xray + d.provider <= path::RaceTimings().cellularMaxBytes, "one own Xray and one provider probe fit one cellular race");
     const ScanTunables old = ScanTunables::fromNumbers({{QStringLiteral("scan_cost_config_bytes"), 262144}});
-    check(old.costConfigBytes == 262144 && ScanPathProber::raceCosts(old, kScanXrayBurstParts).provider == 336896,
+    check(old.costConfigBytes == 262144 && ScanPathProber::raceCosts(old, kScanXrayBurstParts).provider == 347136,
           "a server that still publishes 256 KiB is taken as published (inside the client's range)");
     check(ScanTunables::fromNumbers({{QStringLiteral("scan_cost_config_bytes"), 8192}}).costConfigBytes == 16384,
           "the floor: 16 KiB");

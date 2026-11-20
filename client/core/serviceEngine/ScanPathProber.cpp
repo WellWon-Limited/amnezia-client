@@ -56,7 +56,7 @@ path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayB
     // UPPER BOUNDS for admission only (PathRace: spent so far + what the probes in flight hold + its own bound <= cap);
     // nothing is charged by them. Each bound includes one access check (a scan's opening; the closing and a reopen come
     // later, as real bytes) - an over-estimate for every probe but the first of a scan, which is safe. Device 19.11:
-    // proven AmneziaWG probe 36 338 B (bound 54 572), proven provider probe 36 214 B (its host part; bound 107 520 with
+    // proven AmneziaWG probe 36 338 B (bound 54 572), proven provider probe 36 214 B (its host part; bound 117 760 with
     // the seat batch, config and release), a failed Xray burst part 2 048 B (part bound 21 504), own Xray with its burst
     // 92 723 B (bound 116 736).
     //
@@ -78,7 +78,7 @@ path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayB
     path::PathRace::Costs c;
     c.xray = data + qint64(qBound(1, xrayBurst, 6) - 1) * scanXrayBurstPartCostBytes(t) + access;
     c.awg = kScanAwgHandshakeBytes + qint64(t.awgPrimeEchoes) * kScanAwgEchoBytes + data + access;
-    c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + t.costApiBytes /* release */ + access;
+    c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + qint64(kScanSeatReleaseSends) * t.costApiBytes /* release */ + access;
     return c;
 }
 

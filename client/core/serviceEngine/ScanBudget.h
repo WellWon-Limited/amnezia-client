@@ -36,6 +36,11 @@
 namespace avpn {
 
 inline constexpr qint64 kScanTlsOverheadBytes = 8192;
+// A race probe's seat release has room for this many sends (review pass 13, R2: one byte budget for the whole chain). One
+// send already counts about one scan_cost_api_bytes (the TLS estimate), and the first send is often cancelled by the very
+// tunnel transition that follows a race - with room for one send only the probe seat would be left to its TTL after most
+// connects. The probe's reservation in the race cap (ScanPathProber.cpp, raceCostsOf) counts the same number.
+inline constexpr int kScanSeatReleaseSends = 2;
 inline constexpr qint64 kScanReachCostBytes = 512;
 inline constexpr qint64 kScanAwgHandshakeBytes = 2048; // AmneziaWG junk packets + handshake
 inline constexpr qint64 kScanAwgEchoBytes = 300;       // one prime ICMP echo both ways

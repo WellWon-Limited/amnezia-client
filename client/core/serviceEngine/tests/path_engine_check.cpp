@@ -536,7 +536,7 @@ static void testChoiceCountryAndLanes()
             o << c.id.id;
         CHECK(o == QStringList({ "11:xray", "up:pl1", "17", "12:xray", "up:de3", "15:xray" }));
         // with the cellular cap: our Xray (116,736) + a provider (107,520) + AmneziaWG (54,572) fit one race
-        CHECK(116736 + 107520 + 54572 <= RaceTimings().cellularMaxBytes);
+        CHECK(116736 + 117760 + 54572 <= RaceTimings().cellularMaxBytes);
     }
 }
 

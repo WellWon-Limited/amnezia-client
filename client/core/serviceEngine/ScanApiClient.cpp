@@ -875,7 +875,7 @@ std::unique_ptr<ScanSeatBatch> ScanApiClient::probeBatch(const QStringList &prof
     st->cost = costBytes;
     st->done = std::move(done);
     st->releaseBytes = std::move(releaseBytes);
-    st->releaseCost = ScanTunables().costApiBytes;
+    st->releaseCost = qint64(kScanSeatReleaseSends) * ScanTunables().costApiBytes; // the chain's one budget (ScanBudget.h)
     std::unique_ptr<ScanSeatBatch> owner(new ScanSeatBatch(st));
     QStringList ids;
     for (const QString &p : profileIds)
