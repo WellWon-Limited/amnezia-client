@@ -3230,6 +3230,8 @@ struct LedgerWorld {
     // token. Another nonce: it takes the seat over - the old lease ENDS (replaced), a NEW lease id with a new token is made. A nonce
     // whose lease ended as released (its own DELETE) or replaced is STALE: its acquire is denied and changes nothing. A lease that
     // expired (TTL) leaves its nonce fresh. A renewal never rotates the token; a DELETE ends the lease only with its current token.
+    qint64 liveSince = 0;
+    int activeFloorDenials = 0;
     QString live, liveToken, liveNonce;
     QSet<QString> staleNonces, reportOwed, reportTaken, endedPlain; // reportOwed: leases the owner issued a final report for; reportTaken: leases a DELETE ended carrying it
     QHash<QString, QString> leaseNonce;                 // lease id -> the nonce of the start it was made for (a lease id never has two)
@@ -3386,6 +3388,7 @@ struct LedgerWorld {
     QString serverToken(const QString &lease, const QString &nonce) { return QStringLiteral("tlr1.%1.%2").arg(lease, nonce); }
     void newLease(Acq &a)
     {
+        liveSince = now;
         live = QStringLiteral("LeaseLedger%1").arg(++serial, 28, 10, QLatin1Char('0'));
         liveNonce = a.nonce;
         leaseNonce.insert(live, a.nonce);
@@ -3452,6 +3455,8 @@ struct LedgerWorld {
         const bool currentFloorDenial = a.stale && a.floorOrder >= 0 && o.active() && o.machine().acquireInFlight() == a.id;
         const quint64 serial = o.prepareSerial();
         const int acquiresBefore = acqs.size();
+        if (currentFloorDenial && o.machine().phase() == LeasePhase::Active)
+            ++activeFloorDenials; // the re-acquire of an active session after its lease ran out (round 14 R1)
         apply(o.onAcquireReply(a.id, replyOf(a), now));
         if (older && sessionFingerprint() != before)
             violations << QStringLiteral("an answer of an older start changed a field of the current session");
@@ -3577,9 +3582,17 @@ struct LedgerWorld {
             (void)a;
         // round 9 R1: a start waits only for an acquire it takes over, never for a release
         const QString held = o.machine().leaseId();
-        if (!held.isEmpty() && o.holdsLease(held) && live != held)
+        if (!held.isEmpty() && o.holdsLease(held) && live != held && o.machine().deadlineMs() > now) // (past its deadline the server's TTL ended it too)
             violations << QStringLiteral("the live session's seat is not live on the server (") + QLatin1String(where) + QLatin1Char(')');
         checkToken();
+        // Round 14 R1: the acquire the machine waits for is a request whose answer has NOT come yet. A floor denial that was consumed with nothing
+        // following leaves the machine "in flight" for an answer that already arrived: no resend, no renewal, no Leave, for ever.
+        if (o.active()) {
+            const quint64 waiting = o.machine().acquireInFlight();
+            for (const Acq &a : acqs)
+                if (waiting != 0 && a.id == waiting && (a.delivered || a.timedOut))
+                    violations << QStringLiteral("the session waits for an acquire answer that already came (") + QLatin1String(where) + QLatin1Char(')');
+        }
         // Round 12 R1: a session that holds a lease (or waits for its confirmation through a tunnel that is up) has a wake time, as long as
         // it owns the renewals; without one the lease expires under a running tunnel
         if (o.active() && o.ownsRenewals() && !o.machine().requestInFlight()
@@ -3596,7 +3609,10 @@ struct LedgerWorld {
         if (held.isEmpty() || !o.holdsLease(held))
             return;
         const auto n = leaseNonce.constFind(held);
-        if (n == leaseNonce.constEnd() || n.value() != o.sessionNonce())
+        // (an active session whose lease ran out holds the OLD lease until a re-acquire is granted: the re-acquire may have been re-issued with
+        // a new nonce after an order-floor denial, round 14 R1)
+        const bool expiredReacquire = o.machine().deadlineMs() <= now; // the lease ran out: it is re-acquired (possibly more than once)
+        if (!expiredReacquire && (n == leaseNonce.constEnd() || n.value() != o.sessionNonce()))
             violations << QStringLiteral("the live session holds a lease that was made for another start");
         if (live == held && liveToken != o.machine().route().renewToken)
             violations << QStringLiteral("the token of the live session's lease is not the one the session holds");
@@ -3647,7 +3663,7 @@ struct LedgerWorld {
 
 static void ledgerModel()
 {
-    int sequences = 0, steps = 0, failedSeqs = 0, deletes = 0, unsentSeqs = 0, staleDenials = 0, expiries = 0, reports = 0;
+    int activeFloor = 0, sequences = 0, steps = 0, failedSeqs = 0, deletes = 0, unsentSeqs = 0, staleDenials = 0, expiries = 0, reports = 0;
     QMap<QString, int> kinds;
     for (int seed = 1; seed <= 6000; ++seed) {
         quint32 rng = quint32(seed) * 2654435761u + 12345u;
@@ -3657,6 +3673,13 @@ static void ledgerModel()
         UpstreamLeaseOwner::Options op;
         op.keepOwnership = seed % 4 == 0; // the macOS GUI owner releases itself; elsewhere the tunnel owner does
         w.o.setOptions(op);
+        if (op.keepOwnership && seed % 3 == 0) { // a session that already holds its seat (round 14 R1: the lease can run out and be re-acquired)
+            w.forceGrant = true;
+            w.begin(false);
+            w.acqProcess(0);
+            w.acqDeliver(0);
+            w.forceGrant = false;
+        }
         for (int step = 0; step < 36; ++step, ++steps) {
             w.now += 150;
             switch (rnd(19)) {
@@ -3693,8 +3716,29 @@ static void ledgerModel()
             case 9: if (w.nativeStarted) w.disconnected(); break; // Disconnected, asked or not
             case 10: w.stop(); break;
             case 11: w.apply(w.o.abortStart(w.now)); break; // a start that never reached the native service
-            case 12: w.now += 4000; w.apply(w.o.tick(w.now)); break;
+            case 12: w.trace << QStringLiteral("tick"); w.now += 4000; w.apply(w.o.tick(w.now)); break;
+            case 14: // a long gap (sleep, a dead path): an active session's lease runs past its TTL; the next tick re-acquires (round 14 R1)
+                if (w.o.active() && w.o.machine().phase() == LeasePhase::Active && w.o.machine().deadlineMs() > w.now) {
+                    w.now = w.o.machine().deadlineMs() + 60000; // (a minute past: the server counts its TTL from when it processed the request) the session's lease runs out (nothing renewed it); the server's TTL ends with it
+                    if (!w.live.isEmpty() && w.liveSince + 900000 <= w.now) {
+                        w.live.clear();
+                        w.liveToken.clear();
+                        w.liveNonce.clear();
+                        ++w.expiries;
+                    }
+                    if (rnd(2) == 0) // the server's order memory is back (or was lost by the client): it has seen a far higher order meanwhile
+                        w.highestOrderSeen = qMax(w.highestOrderSeen, w.highestOrderSent) + 1 + rnd(5000);
+                    w.trace << QStringLiteral("expiry-tick");
+                    const int sent = w.acqs.size();
+                    w.apply(w.o.tick(w.now));
+                    if (w.acqs.size() == sent + 1 && rnd(2) == 0) { // the re-acquire reaches the server and its answer comes back at once
+                        w.acqProcess(sent);
+                        w.acqDeliver(sent);
+                    }
+                }
+                break;
             case 13: // the server has seen a far higher order from this device (the counter was lost, the clock had been ahead)
+                w.trace << QStringLiteral("jump");
                 w.highestOrderSeen = qMax(w.highestOrderSeen, w.highestOrderSent) + 1 + rnd(5000);
                 break;
             case 17: // the server expires a lease nobody live holds (its TTL ran out); the start's nonce stays fresh
@@ -3736,6 +3780,7 @@ static void ledgerModel()
         unsentSeqs += w.unsentSeen ? 1 : 0;
         deletes += w.deletesSent;
         staleDenials += w.staleDenials;
+        activeFloor += w.activeFloorDenials;
         expiries += w.expiries;
         reports += w.reportTaken.size();
         if (!w.violations.isEmpty()) {
@@ -3749,6 +3794,8 @@ static void ledgerModel()
     std::printf("ledger model: %d sequences, %d steps, %d DELETEs sent, %d sequences kept an unsent release, %d sequences broke an invariant\n",
                 sequences, steps, deletes, unsentSeqs, failedSeqs);
     std::printf("ledger model server: %d stale_session denials, %d lease expiries, %d final reports taken\n", staleDenials, expiries, reports);
+    std::printf("ledger model: %d floor denials of an active session's re-acquire\n", activeFloor);
+    CHECK(activeFloor > 20);
     CHECK(failedSeqs == 0 && deletes > 1000 && unsentSeqs > 100 && staleDenials > 100 && expiries > 100 && reports > 100);
 }
 
@@ -4057,6 +4104,33 @@ static void floorDenialRetry()
         } else {
             ev = o.onAcquireReply(again.id, floorDenial(N + 9), T + 1700);
             CHECK(findEv(ev, UpstreamOwnerEventKind::Leave));
+        }
+    }
+    // round 14 R1: an ACTIVE session whose lease ran out re-acquires; a floor denial of that request is re-issued once (new nonce and order),
+    // the grant renews the service; a second denial is the ordinary refusal (Leave) - never a consumed request with nothing following
+    for (const bool second : {false, true}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = true;
+        o.setOptions(op);
+        o.begin(a, 1, std::nullopt, T, 1000);
+        o.onAcquireReply(io.last("acquire")->id, grantedAs(a, "LeaseOldXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"), T + 100);
+        o.tunnelUp(T + 200);
+        const qint64 late = T + 100 + 900000 + 5000;
+        o.tick(late); // the lease ran out: the re-acquire
+        const FakeIo::Call re = *io.last("acquire");
+        CHECK(re.id != 0 && o.machine().acquireInFlight() == re.id);
+        QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(re.id, floorDenial(N), late + 50);
+        CHECK(!findEv(ev, UpstreamOwnerEventKind::Leave));
+        const FakeIo::Call again = *io.last("acquire");
+        CHECK(again.id != re.id && again.nonce != re.nonce && again.order > N && o.machine().acquireInFlight() == again.id);
+        if (!second) {
+            ev = o.onAcquireReply(again.id, grantedAs(a, "LeaseNewXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"), late + 100);
+            CHECK(o.holdsLease(QLatin1String("LeaseNewXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")) && o.wakeAtMs() >= 0);
+        } else {
+            ev = o.onAcquireReply(again.id, floorDenial(N + 9), late + 100);
+            CHECK(findEv(ev, UpstreamOwnerEventKind::Leave) && o.machine().acquireInFlight() == 0);
         }
     }
     // loopback, the real client wired the way the adapter wires it: the first POST is answered 404 + min_session_order, the leg connects on the

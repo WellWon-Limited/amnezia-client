@@ -227,11 +227,17 @@ public:
             m_order.raiseFloor(floorOrder);
             if (m_active && !m_floorRetried && r.kind == LeaseReplyKind::Refused && r.error.code == UpstreamErrorCode::LeaseGone
                 && r.error.reason == QLatin1String("stale_session") && requestId != 0 && requestId == m_machine.acquireInFlight()) {
-                m_floorRetried = true;
-                m_nonce = upstreamNewSessionNonce();
-                m_sessionOrder = m_order.next(m_wallAtStart + qMax<qint64>(0, nowMs - m_monoAtStart));
-                apply(m_machine.reissueAcquire(requestId, nowMs), nowMs, ev);
-                return ev;
+                // The machine decides whether there is something to re-issue (Acquiring, Provisional, Active after expiry: yes). Only a
+                // re-issue that happened ends this call; when it is not possible the answer falls through to the ordinary refusal handling
+                // of the machine's state below - the request is never consumed with nothing following.
+                const LeaseStep again = m_machine.reissueAcquire(requestId, nowMs);
+                if (!again.inert) {
+                    m_floorRetried = true;
+                    m_nonce = upstreamNewSessionNonce();
+                    m_sessionOrder = m_order.next(m_wallAtStart + qMax<qint64>(0, nowMs - m_monoAtStart));
+                    apply(again, nowMs, ev);
+                    return ev;
+                }
             }
         }
         // A `stale_session` denial (HTTP 404 lease_gone, reason stale_session: the nonce's tenure ended, or its order is behind a newer
