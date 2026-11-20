@@ -239,6 +239,8 @@ struct FakeApi : IRaceScanApi {
     int sessions = 0;
     QStringList seatsAsked;
     QList<qint64> seatCosts;
+    QList<qint64> releaseAllowances;              // what each seat batch was allowed to spend on its release
+    int sessionApiBytes = 0;                      // > 0: the session carries scan_cost_api_bytes = this (a tuned manifest)
     QStringList released; // a seat whose owner went (production: released by its operation id, also unseen seats)
     bool seatOk = true;
     QString seatCode = QStringLiteral("no_seat"); // the refusal when !seatOk
@@ -283,6 +285,8 @@ struct FakeApi : IRaceScanApi {
         s.baseIps = {QStringLiteral("192.0.2.10")};
         s.awgNodes.insert(QStringLiteral("16"), QStringLiteral("10.8.1.1"));
         s.numbers.insert(QStringLiteral("scan_awg_concurrency"), 2);
+        if (sessionApiBytes > 0)
+            s.numbers.insert(QStringLiteral("scan_cost_api_bytes"), sessionApiBytes);
         s.bytes = 3000;
         if (holdSession) {
             heldSession = [done, s]() { done(s); };
@@ -290,10 +294,11 @@ struct FakeApi : IRaceScanApi {
         }
         QTimer::singleShot(0, [done, s]() { done(s); });
     }
-    std::shared_ptr<IRaceSeat> probeSeat(const QString &profileId, qint64 costBytes, std::function<void(const Seat &)> done,
+    std::shared_ptr<IRaceSeat> probeSeat(const QString &profileId, qint64 costBytes, qint64 releaseAllowance, std::function<void(const Seat &)> done,
                                          std::function<void(qint64)>) override
     {
         seatsAsked << profileId;
+        releaseAllowances << releaseAllowance;
         seatCosts << costBytes;
         Seat s;
         s.ok = seatOk;
@@ -1058,6 +1063,19 @@ static void caseAccounting()
         check(settled.isEmpty(), "the batch answered but its release is outstanding: not settled");
         w.api.finishRelease();
         check(settled == QList<quint64>{1}, "settled when the release is done");
+    }
+    { // round 17 R5: ONE number for the release chain - the allowance the seat batch gets and the room the race holds for it come from the
+      // same tunables the race was priced with (a tuned scan_cost_api_bytes of 5 120 is an admissible manifest value)
+        for (const int apiBytes : {0, 5120}) {
+            World w;
+            w.api.sessionApiBytes = apiBytes;
+            w.ready();
+            w.start(1, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
+            spin(30);
+            const qint64 want = qint64(kScanSeatReleaseSends) * (apiBytes > 0 ? apiBytes : 10240);
+            check(w.prober.costs().providerTail == want, "the race holds the tuned release budget (2 x scan_cost_api_bytes)");
+            check(w.api.releaseAllowances == QList<qint64>{want}, "the seat batch's release allowance is the same number");
+        }
     }
     { // round 16 F3: a provider probe that ENDS WITH A RESULT is settled when its seat release chain ended, not at the result
       // (the race holds the release budget on its cap until then); a result that leaves nothing outstanding is settled at once

@@ -41,6 +41,8 @@ inline constexpr qint64 kScanTlsOverheadBytes = 8192;
 // tunnel transition that follows a race - with room for one send only the probe seat would be left to its TTL after most
 // connects. The probe's reservation in the race cap (ScanPathProber.cpp, raceCostsOf) counts the same number.
 inline constexpr int kScanSeatReleaseSends = 2;
+// The ONE number for a seat release chain: what it may spend in all and what the race holds for it (PathRace::Costs::providerTail).
+inline constexpr long long scanSeatReleaseAllowance(int costApiBytes) { return static_cast<long long>(kScanSeatReleaseSends) * costApiBytes; }
 inline constexpr qint64 kScanReachCostBytes = 512;
 inline constexpr qint64 kScanAwgHandshakeBytes = 2048; // AmneziaWG junk packets + handshake
 inline constexpr qint64 kScanAwgEchoBytes = 300;       // one prime ICMP echo both ways

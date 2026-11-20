@@ -78,7 +78,7 @@ path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayB
     path::PathRace::Costs c;
     c.xray = data + qint64(qBound(1, xrayBurst, 6) - 1) * scanXrayBurstPartCostBytes(t) + access;
     c.awg = kScanAwgHandshakeBytes + qint64(t.awgPrimeEchoes) * kScanAwgEchoBytes + data + access;
-    c.providerTail = qint64(kScanSeatReleaseSends) * t.costApiBytes; // the release chain: what a finished provider probe can still spend
+    c.providerTail = scanSeatReleaseAllowance(t.costApiBytes); // the release chain: what a finished provider probe can still spend
     c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + c.providerTail + access;
     return c;
 }
@@ -252,7 +252,7 @@ void ScanPathProber::launch(quint64 key)
                 spend(race, bytes);
         };
         // The cut is the price the race paid for this probe (raceCosts: the batch with its config).
-        const std::shared_ptr<IRaceSeat> owner = m_api->probeSeat(profileId, qint64(t.costBatchBytes) + t.costConfigBytes,
+        const std::shared_ptr<IRaceSeat> owner = m_api->probeSeat(profileId, qint64(t.costBatchBytes) + t.costConfigBytes, scanSeatReleaseAllowance(t.costApiBytes),
                                                                   [this, alive, key, profileId, nodeId, charge](const IRaceScanApi::Seat &seat) {
             if (!alive.lock())
                 return;

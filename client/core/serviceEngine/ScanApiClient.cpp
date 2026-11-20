@@ -865,7 +865,7 @@ void ScanApiClient::fetchCandidates(const QString &networkKey, const QString &sc
 // with the SAME body - the server answers the same seats - and only an answer echoing the id is used. The seats
 // belong to the returned owner (ScanSeatBatch), released by the id whenever they may be held and unseen.
 std::unique_ptr<ScanSeatBatch> ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig, qint64 costBytes,
-                                                         std::function<void(const Batch &)> done,
+                                                         qint64 releaseAllowance, std::function<void(const Batch &)> done,
                                                          std::function<void(qint64)> releaseBytes)
 {
     auto st = std::make_shared<ScanSeatBatch::State>();
@@ -875,7 +875,7 @@ std::unique_ptr<ScanSeatBatch> ScanApiClient::probeBatch(const QStringList &prof
     st->cost = costBytes;
     st->done = std::move(done);
     st->releaseBytes = std::move(releaseBytes);
-    st->releaseCost = qint64(kScanSeatReleaseSends) * ScanTunables().costApiBytes; // the chain's one budget (ScanBudget.h)
+    st->releaseCost = releaseAllowance; // the chain's one budget (ScanBudget.h), the caller's tuned number
     std::unique_ptr<ScanSeatBatch> owner(new ScanSeatBatch(st));
     QStringList ids;
     for (const QString &p : profileIds)
