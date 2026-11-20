@@ -964,6 +964,16 @@ void VpnConnectionTunnelControl::retryUpstreamAdoption()
 #endif
 }
 
+// KNOWN LIMIT (round 10 R1, deliberately not fixed): on iOS the app can be relaunched while the extension keeps a provider
+// tunnel running (the extension holds that session's lease and renew token; the app has no owner for it - only macOS adopts a
+// record). When the same provider is chosen again, this seat-first prepare acquires the profile BEFORE the old tunnel stops. It
+// is a new start with a new session nonce, so the server rotates the token of the very same lease; the extension still holds
+// the old one, and its final report with the DELETE at the old tunnel's stop carries a token that is no longer current: the
+// server answers 204 and drops the report. Lost: the old session's traffic since the extension's last accepted renewal, at
+// most about 5 minutes (renew_after_s); no seat is harmed (the app's own release after the confirmed stop, and the new
+// session's, carry the current token). The extension's own renewals after the rotation carry the old token too (unverified
+// what the server does with them). A proper fix hands the extension the new token at prepare time (a prepared-token message to
+// the running provider that replaces the renewer's route) or makes the app adopt the running session on iOS as macOS does.
 quint64 VpnConnectionTunnelControl::prepareUpstream(const Subscription &sub, const SubscriptionNode &node)
 {
     if (!upstreamNodesEnabled() || !m_leaseClient || !m_leaseClient->configured() || m_upOwner.active()
