@@ -4011,13 +4011,43 @@ static void caseBatchOperation()
         }
     };
     const QStringList one{kPids.at(0)};
+    const qint64 kRel = scanSeatReleaseAllowance(ScanTunables().costApiBytes);
+    { // round 17 R5: the release chain is cut at the allowance its caller gives (the tuned 2 x scan_cost_api_bytes), never at a default
+        for (const int apiBytes : {5120, 10240}) {
+            World w;
+            w.start();
+            w.s->api()->releaseRetryBudgetMs = 600000;
+            w.server.foreignReleaseBodyBytes = 1000;
+            w.server.foreignReleaseStatuses = {200, 200, 200, 200, 200, 200, 200, 200, 200, 200};
+            bool done = false;
+            qint64 releaseBytes = -1;
+            int idle = 0;
+            std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, scanSeatReleaseAllowance(apiBytes),
+                                                                          [&](const ScanApiClient::Batch &) { done = true; },
+                                                                          [&](qint64 b) { releaseBytes = b; });
+            runUntil(w, [&]() { return done; }, 3000);
+            owner->retire([&]() { ++idle; });
+            owner.reset();
+            runUntil(w, [&]() { return idle != 0; }, 12000);
+            qint64 firstCut = -1, wire = 0;
+            for (const auto &sn : w.http.sent)
+                if (QUrl(sn.req.url).path() == QLatin1String("/v1/upstream/lease/probe-batch/release")) {
+                    if (firstCut < 0)
+                        firstCut = sn.req.maxBytes;
+                    wire += sn.resp.bytes;
+                }
+            CHECK(idle == 1);
+            CHECK(firstCut == scanSeatReleaseAllowance(apiBytes)); // 2 x 5 120 for the tuned number, 2 x 10 240 for the default
+            CHECK(releaseBytes >= 0 && releaseBytes <= scanSeatReleaseAllowance(apiBytes) && wire <= scanSeatReleaseAllowance(apiBytes));
+        }
+    }
     { // a cut send is resent with the same id; the answer gives the seat granted by the cut send
         World w;
         w.start();
         w.server.cancelBatches = 1;
         bool done = false;
         ScanApiClient::Batch got;
-        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &b) {
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, kRel, [&](const ScanApiClient::Batch &b) {
             got = b;
             done = true;
         });
@@ -4030,7 +4060,7 @@ static void caseBatchOperation()
         CHECK(got.ok && got.resends == 1 && got.items.size() == 1 && got.items.at(0).granted);
         CHECK(got.items.value(0).leaseId == w.server.opLeases.value(op).value(0)); // the seat of the first (cut) send
         CHECK(w.server.releasedOps.isEmpty());                                  // held while its owner holds it
-        std::unique_ptr<ScanSeatBatch> second = w.s->api()->probeBatch(one, false, 40000, [](const ScanApiClient::Batch &) {});
+        std::unique_ptr<ScanSeatBatch> second = w.s->api()->probeBatch(one, false, 40000, kRel, [](const ScanApiClient::Batch &) {});
         CHECK(second->operationId() != op); // a new batch = a new id
         owner.reset();                       // the owner goes: its seat is released by the id
         runUntil(w, [&]() { return w.server.releasedOps.contains(op); }, 3000);
@@ -4042,7 +4072,7 @@ static void caseBatchOperation()
         w.start();
         w.s->api()->configure([]() { return QStringLiteral("https://api.example"); }, []() { return QString(); }, []() { return QString(); });
         int order = 0, doneAt = 0, idleAt = 0;
-        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &) { doneAt = ++order; });
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, kRel, [&](const ScanApiClient::Batch &) { doneAt = ++order; });
         owner->retire([&]() { idleAt = ++order; });
         CHECK(idleAt == 0); // the refusal is still queued: the request is in flight
         runUntil(w, [&]() { return idleAt != 0; }, 2000);
@@ -4065,7 +4095,7 @@ static void caseBatchOperation()
             bool done = false;
             int order = 0, releaseAt = 0, idleAt = 0;
             qint64 releaseBytes = -1;
-            std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &) { done = true; },
+            std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, kRel, [&](const ScanApiClient::Batch &) { done = true; },
                                                                           [&](qint64 b) { releaseBytes = b; releaseAt = ++order; });
             runUntil(w, [&]() { return done; }, 3000);
             CHECK(done);
@@ -4084,7 +4114,7 @@ static void caseBatchOperation()
         w.server.foreignOp = QStringLiteral("ffffffffffffffffffffffffffffffff");
         bool done = false;
         ScanApiClient::Batch got;
-        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &b) {
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, kRel, [&](const ScanApiClient::Batch &b) {
             got = b;
             done = true;
         });
@@ -4100,7 +4130,7 @@ static void caseBatchOperation()
         w.server.cancelBatches = kScanCanceledRetries + 1;
         bool done = false;
         ScanApiClient::Batch got;
-        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 400000, [&](const ScanApiClient::Batch &b) {
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 400000, kRel, [&](const ScanApiClient::Batch &b) {
             got = b;
             done = true;
         });
@@ -4120,7 +4150,7 @@ static void caseBatchOperation()
         w.start();
         w.server.cancelBatches = 1;
         bool done = false;
-        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &) { done = true; });
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, kRel, [&](const ScanApiClient::Batch &) { done = true; });
         const QString op = owner->operationId();
         owner.reset();
         runUntil(w, [&]() { return done && w.server.releasedOps.contains(op); }, 3000);
@@ -4132,7 +4162,7 @@ static void caseBatchOperation()
         w.server.refuse.insert(kPids.at(1), QStringLiteral("lease_gone"));
         bool done = false;
         ScanApiClient::Batch got;
-        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch({kPids.at(0), kPids.at(1)}, false, 40000,
+        std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch({kPids.at(0), kPids.at(1)}, false, 40000, kRel,
                                                                       [&](const ScanApiClient::Batch &b) {
             got = b;
             done = true;
