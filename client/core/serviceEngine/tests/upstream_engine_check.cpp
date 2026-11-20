@@ -2882,6 +2882,46 @@ static void lateGrantOwnership()
     TuningStore::set({}, {}, {}, {});
 }
 
+// Round 16 F4: the fact "the direct API answered on this network" (ConfigService::directApiReach turning Reachable) proves the direct
+// route like an acquire's answer does: a release kept Unsent (the DELETE could not reach the API) goes out over the direct route at once,
+// with no session and no new acquire. Before, only an acquire's answer flushed: a person who disconnected on a blocked mobile network and
+// moved to a working Wi-Fi without connecting to a provider again kept the seat until the lease expired.
+static void unsentFlushOnDirectRouteProof()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const qint64 T = 12000000;
+    FakeIo io;
+    UpstreamLeaseOwner o(&io);
+    o.begin(a, 1, std::nullopt, T, 1);
+    o.onAcquireReply(io.calls.last().id, grantedAs(a, kLease), T + 100);
+    o.onBytes(4000, 400);
+    o.disconnect(T + 200); // the DELETE with the final report never reaches the API
+    const FakeIo::Call *first = io.last("release");
+    CHECK(first && first->meter.seq >= 1);
+    const quint64 relId = first->id;
+    const UpstreamMeter report = first->meter;
+    o.onReleaseDone(relId, T + 300, /*confirmed=*/false);
+    CHECK(o.unsentCount() == 1);
+    const auto releases = [&io]() {
+        int n = 0;
+        for (const FakeIo::Call &call : io.calls)
+            n += call.what == QLatin1String("release") ? 1 : 0;
+        return n;
+    };
+    const int before = releases();
+    o.directRouteProved(T + 5000); // the direct API answered, nobody is connected
+    CHECK(releases() == before + 1 && o.unsentCount() == 0);
+    const FakeIo::Call *rel = io.last("release");
+    CHECK(rel && rel->profileOrLease == QLatin1String(kLease) && rel->route.apiBase.isEmpty()
+          && rel->route.renewToken == QLatin1String("tlr1.secret")
+          && rel->meter.seq == report.seq && rel->meter.rxDelta == report.rxDelta && rel->meter.txDelta == report.txDelta);
+    o.directRouteProved(T + 6000); // a second proof: nothing new to send while that one is out
+    CHECK(releases() == before + 1);
+    o.onReleaseDone(rel->id, T + 6100, /*confirmed=*/true);
+    o.directRouteProved(T + 7000);
+    CHECK(releases() == before + 1 && o.pendingReleases() == 0);
+}
+
 // Round 9 R3: ANY answer of the API on a route proves that route - a grant, a refusal, an HTTP error status - and the releases
 // that could not be carried go out by it; only a transport failure proves nothing. Before, only a grant of a DIRECT acquire
 // flushed: after Stop of profile A (its DELETE could not reach the API, kept unsent) the acquire of profile B answered
@@ -4222,6 +4262,7 @@ int main(int argc, char **argv)
     reviewerSequenceR1();
     lateAnswerKeepsSession();
     unsentFlushOnAnyAnswer();
+    unsentFlushOnDirectRouteProof();
     sessionNonceCheck();
     lateOlderStart();
     sessionOrderCheck();

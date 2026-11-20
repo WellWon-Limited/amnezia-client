@@ -1266,6 +1266,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(m_configSvc, &avpn::ConfigService::directApiReachChanged, this, [this](avpn::ApiReach r) {
         reliabilityEvent(QStringLiteral("control_plane reach=%1 net_gen=%2")
                              .arg(QLatin1String(avpn::apiReachName(r))).arg(m_engine.network().generation));
+        if (r == avpn::ApiReach::Reachable)
+            m_tunnel.upstreamDirectRouteProved(); // proof of the direct route: kept seat releases are sent now
     });
 
     // AVPN server-driven АнтиВПН (Task 10): сервис серверных bypass-списков (/v1/bypass-lists —
