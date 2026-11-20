@@ -299,14 +299,17 @@ public:
     }
 
     // The acquire in flight was refused only because the start's order was too low (UpstreamLeaseOwner: an order-floor denial of the
-    // CURRENT start): the same session asks once more - a fresh request, same phase, same standby confirmation if it is one - and
-    // nothing is reported upward. Inert unless `requestId` is the acquire this session waits for.
+    // CURRENT start): the same session asks once more - a fresh request, nothing reported upward. Every state in which a session waits
+    // for an acquire answer can do it: Acquiring (the first acquire), Provisional (the confirmation through the tunnel; same standby
+    // entry) and Active (the re-acquire after the lease ran out; a direct acquire again). The step is INERT when there is nothing to
+    // re-issue (`requestId` is not the acquire this session waits for, or the phase is Idle / Released / Left / Failed): the caller then
+    // handles the answer as the ordinary refusal it is - the result of this call is part of its control flow.
     LeaseStep reissueAcquire(quint64 requestId, qint64 nowMs)
     {
         LeaseStep s;
         nowMs = clock(nowMs);
         if (m_inflight != Inflight::Acquire || requestId != m_inflightId
-            || (m_phase != LeasePhase::Acquiring && m_phase != LeasePhase::Provisional)) {
+            || (m_phase != LeasePhase::Acquiring && m_phase != LeasePhase::Provisional && m_phase != LeasePhase::Active)) {
             s.inert = true;
             return s;
         }
@@ -534,8 +537,11 @@ public:
                                     : UpstreamMeter{m_lastSeq + 1, m_unRx, m_unTx, m_scope, m_epoch};
             a.route = m_route;
             s.actions << a;
-        } else if ((m_phase == LeasePhase::Acquiring || m_phase == LeasePhase::Provisional)
-                   && m_inflight == Inflight::Acquire) {
+        }
+        // An acquire in flight is cancelled in EVERY phase that can wait for one - the first acquire, the provisional confirmation and the
+        // re-acquire of an Active session whose lease ran out (round 14: its late grant used to be dropped here, a seat nobody released).
+        if ((m_phase == LeasePhase::Acquiring || m_phase == LeasePhase::Provisional || m_phase == LeasePhase::Active)
+            && m_inflight == Inflight::Acquire) {
             m_cancelledAcquires.insert(m_inflightId, CancelledAcquire{m_scope, m_profileId, m_kind, m_requestSentMs});
         }
         if (busy())
