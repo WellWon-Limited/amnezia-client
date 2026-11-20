@@ -275,7 +275,9 @@ public:
     };
     // POST /v1/upstream/lease/probe-batch with a new operation id; costBytes cuts every send of it together. The
     // returned owner holds the seats (see ScanSeatBatch); releaseBytes gets what its own releases transferred.
-    std::unique_ptr<ScanSeatBatch> probeBatch(const QStringList &profileIds, bool includeConfig, qint64 costBytes,
+    // releaseAllowance: what the batch's release chain may spend in all - the caller's tuned kScanSeatReleaseSends x costApiBytes, the
+    // same number the race holds for it (PathRace::Costs::providerTail); this class never reads a default for it.
+    std::unique_ptr<ScanSeatBatch> probeBatch(const QStringList &profileIds, bool includeConfig, qint64 costBytes, qint64 releaseAllowance,
                                               std::function<void(const Batch &)> done,
                                               std::function<void(qint64 bytes)> releaseBytes = {});
     // POST .../probe-batch/release by lease ids and / or an operation id (at least one). A try with no HTTP answer or a

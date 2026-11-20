@@ -1828,7 +1828,7 @@ void TribeScanner::doProbeBatch(const ScanAction &a)
     auto op = std::make_shared<QString>();
     // A new batch = a new owner with a new operation id; an older batch's owner goes now (seats its scan did not
     // release one by one are released by its operation id). The owner's own releases are charged outside any scan.
-    m_seatBatch = m_api->probeBatch(pids, a.includeConfig, a.costBytes, [self, reqId, candOf, asked, op](const ScanApiClient::Batch &b) {
+    m_seatBatch = m_api->probeBatch(pids, a.includeConfig, a.costBytes, scanSeatReleaseAllowance(m_m.tunables().costApiBytes), [self, reqId, candOf, asked, op](const ScanApiClient::Batch &b) {
         if (!self)
             return;
         self->dispatch(self->m_m.appRequestDone(reqId, b.bytes, self->now())); // the bytes were spent either way

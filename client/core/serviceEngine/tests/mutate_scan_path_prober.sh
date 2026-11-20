@@ -155,5 +155,7 @@ mutate result_provider_never_settled F3 "    if (p.path.kind != path::PathKind::
 mutate result_settled_before_release_chain_ends F3 "    if (p.seat) {
         ++st.open;" "    if (false) {
         ++st.open;"
+mutate release_allowance_ignores_tuned_number R5 "qint64(t.costBatchBytes) + t.costConfigBytes, scanSeatReleaseAllowance(t.costApiBytes)," "qint64(t.costBatchBytes) + t.costConfigBytes, scanSeatReleaseAllowance(ScanTunables().costApiBytes),"
+mutate race_tail_ignores_tuned_number R5 "c.providerTail = scanSeatReleaseAllowance(t.costApiBytes);" "c.providerTail = scanSeatReleaseAllowance(ScanTunables().costApiBytes);"
 echo "work dir: $WORK"
 exit $failed

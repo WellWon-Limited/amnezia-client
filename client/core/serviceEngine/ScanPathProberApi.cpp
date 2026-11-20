@@ -89,11 +89,11 @@ struct ScanApiRaceSeat final : IRaceSeat {
 };
 } // namespace
 
-std::shared_ptr<IRaceSeat> ScanApiRaceApi::probeSeat(const QString &profileId, qint64 costBytes, std::function<void(const Seat &)> done,
+std::shared_ptr<IRaceSeat> ScanApiRaceApi::probeSeat(const QString &profileId, qint64 costBytes, qint64 releaseAllowance, std::function<void(const Seat &)> done,
                                                      std::function<void(qint64)> releaseBytes)
 {
     auto seat = std::make_shared<ScanApiRaceSeat>();
-    seat->batch = m_api->probeBatch({profileId}, true, costBytes, [done](const ScanApiClient::Batch &b) {
+    seat->batch = m_api->probeBatch({profileId}, true, costBytes, releaseAllowance, [done](const ScanApiClient::Batch &b) {
         Seat s;
         s.bytes = b.bytes;
         if (!b.ok || b.items.isEmpty()) {

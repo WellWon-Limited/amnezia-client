@@ -21,7 +21,7 @@ public:
     ScanApiRaceApi(ScanApiClient *api, IScanEngine *engine) : m_api(api), m_engine(engine) {}
     bool configured() const override { return m_api && m_api->configured(); }
     void session(const QString &networkKey, std::function<void(const RaceScanSession &)> done) override;
-    std::shared_ptr<IRaceSeat> probeSeat(const QString &profileId, qint64 costBytes, std::function<void(const Seat &)> done,
+    std::shared_ptr<IRaceSeat> probeSeat(const QString &profileId, qint64 costBytes, qint64 releaseAllowance, std::function<void(const Seat &)> done,
                                          std::function<void(qint64)> releaseBytes) override;
 
 private:

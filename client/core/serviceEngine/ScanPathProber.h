@@ -110,7 +110,7 @@ public:
     };
     // One seat with its config; costBytes cuts the request (resends included). `done` once, never from inside the
     // call; the returned owner releases the seat when it goes (releaseBytes: what that release transferred).
-    virtual std::shared_ptr<IRaceSeat> probeSeat(const QString &profileId, qint64 costBytes, std::function<void(const Seat &)> done,
+    virtual std::shared_ptr<IRaceSeat> probeSeat(const QString &profileId, qint64 costBytes, qint64 releaseAllowance, std::function<void(const Seat &)> done,
                                                  std::function<void(qint64)> releaseBytes) = 0;
 };
 
