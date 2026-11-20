@@ -58,6 +58,12 @@ struct AttemptTimings {
     // data check that was running is run again on the same tunnel (it did not happen - design R12).
     int clockJumpMs = 2500;
     int resumeGraceMs = 2000;
+    // The device's own tunnel construction (AttemptOwner.h "Local build"): a platform that reports "building the
+    // tunnel interface" / "built" stops the leg's start clock in between - that time is the device's, never evidence
+    // about the server. This bounds a build that never finishes: the leg ends with a LOCAL outcome (nothing recorded
+    // against the path) and the next candidate is tried. Emulator round 20.11 (Android, «Доступ к сайтам РФ» on:
+    // ~10 800 routes per VpnService.establish()): builds of 7-10 s.
+    int localBuildMs = 20000;
 };
 
 // The evidence store (PathLedger.h).

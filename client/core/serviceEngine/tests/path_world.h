@@ -163,6 +163,15 @@ public:
     World &world() { return m_world; }
     int checksRun = 0;   // RunDataCheck effects (rechecks included)
     int rechecks = 0;    // of them, runs again on the same tunnel
+    // The platform's own build of a leg's tunnel interface (AttemptOwner.h "Local build"; Android: the VPN service
+    // until VpnService.Builder.establish() returned). -1 (default): the platform does not report it - no event, the
+    // path's behaviour runs from the leg's start (iOS, desktop). >= 0: LocalBuild(building) at the leg's start and
+    // LocalBuild(built) this long after it; the path's behaviour (upMs, refusals) counts from "built".
+    // kBuildNever: the build never finishes (no "built", no callback of the path). Per path: buildMsFor.
+    static constexpr int kBuildNever = std::numeric_limits<int>::max();
+    int buildMs = -1;
+    QHash<QString, int> buildMsFor;
+    int localOverruns = 0; // LocalBuildOverrun effects
 
     // --- driving --------------------------------------------------------------------------------------------
     void deliver(const AttemptEvent &ev) { apply(owner.handle(ev, ctx())); }
@@ -326,18 +335,28 @@ private:
                 legs.append({ e.stamp, e.path.id.id, net, now });
                 const Behaviour b = m_world.at(net, e.path.id.id, now);
                 m_legBehaviour.insert(e.stamp.leg, b);
+                // the platform's own build (buildMs): the path's part starts when the interface is built
+                const int build = buildMsFor.value(e.path.id.id, buildMs);
+                qint64 base = now;
+                if (build >= 0) {
+                    schedule(now, AttemptEvent::localBuild(0, e.stamp, true));
+                    if (build == kBuildNever)
+                        break;
+                    base = now + build;
+                    schedule(base, AttemptEvent::localBuild(0, e.stamp, false));
+                }
                 switch (b.kind) {
                 case Behaviour::Kind::Works:
                 case Behaviour::Kind::NoData:
                 case Behaviour::Kind::Silent:
-                case Behaviour::Kind::ControlPlane: schedule(now + b.upMs, AttemptEvent::tunnelUp(0, e.stamp)); break;
+                case Behaviour::Kind::ControlPlane: schedule(base + b.upMs, AttemptEvent::tunnelUp(0, e.stamp)); break;
                 case Behaviour::Kind::NoHandshake: break; // the owner's start deadline judges it
                 case Behaviour::Kind::StartError:
-                    schedule(now + 50, AttemptEvent::pathFailed(0, e.stamp, b.attributable ? PathOutcome::Refused
-                                                                                           : PathOutcome::Inconclusive));
+                    schedule(base + 50, AttemptEvent::pathFailed(0, e.stamp, b.attributable ? PathOutcome::Refused
+                                                                                            : PathOutcome::Inconclusive));
                     break;
                 case Behaviour::Kind::NoSeat:
-                    schedule(now + 300, AttemptEvent::pathFailed(0, e.stamp, PathOutcome::NoSeat));
+                    schedule(base + 300, AttemptEvent::pathFailed(0, e.stamp, PathOutcome::NoSeat));
                     break;
                 }
                 break;
@@ -397,6 +416,7 @@ private:
                 break;
             case EffectType::Show: break;
             case EffectType::StopUnconfirmed: break;
+            case EffectType::LocalBuildOverrun: ++localOverruns; break;
             case EffectType::Yield:
                 ++yields;
                 raceLog << QStringLiteral("yield:%1").arg(e.path.id.id);

@@ -1596,6 +1596,21 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 QTimer::singleShot(0, this, [this]() { reconcile(); });
         }
     }, Qt::QueuedConnection);
+    // Local build (AttemptOwner.h "Local build", emulator round 20.11): with «Доступ к сайтам РФ» on, Android installs
+    // ~10 800 routes inside VpnService.Builder.establish() - 7-10 s on the emulator - before the tunnel interface
+    // exists. That time is the device's, not the server's: the service reports "building" when it takes the start
+    // and "built" when establish() returned and the backend runs (or the start ended without it); the owner's leg
+    // clock stands in between and a build that never ends is a local outcome. A "built" carries the number of its
+    // start: one of an older start (its stop was never confirmed) does not end the build of the leg in flight.
+    connect(AndroidController::instance(), &AndroidController::tunnelBuild, this, [this](int buildState, int seq) {
+        if (buildState == 0)
+            m_tunnelBuildSeq = seq;
+        else if (seq != m_tunnelBuildSeq)
+            return;
+        m_engine.onLocalBuild(buildState == 0);
+        if (syncAttempt())
+            QTimer::singleShot(0, this, [this]() { reconcile(); });
+    }, Qt::QueuedConnection);
     // Safety: a tunnel state past the dialog (the service is connecting or up) means the dialog is gone.
     connect(AndroidController::instance(), &AndroidController::connectionStateChanged, this,
             [this](Vpn::ConnectionState st) {
@@ -1801,7 +1816,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // AVPN (волна-3, 2026-09-28): физический аплинк. Вернулась сеть, а намерение ждёт её
     // (попытки старта без сети не считаются) — поднимаем туннель через 1,5 с (DHCP/DNS доседают).
     connect(avpn::UplinkMonitor::instance(), &avpn::UplinkMonitor::changed, this, [this](bool up) {
-        reliabilityEvent(QStringLiteral("uplink %1").arg(up ? QStringLiteral("up") : QStringLiteral("down")));
+        // D2: a loss is classified once, when it is reported - within the window of our own tunnel operation (the
+        // network-change rule, the attempt's legs included) it is our own tunnel going away, not the network's.
+#if defined(Q_OS_ANDROID)
+        constexpr bool kMonitorSeesOwnTunnel = true; // the default network of our UID is our VPN while it exists
+#else
+        constexpr bool kMonitorSeesOwnTunnel = false; // macOS: utun excluded by construction; iOS: not observed
+#endif
+        m_uplinkLossOwnTunnel = !up && avpn::uplinkLossIsOwnTunnel(kMonitorSeesOwnTunnel,
+                                                                   m_op != Op::None || m_engine.attemptRunning(),
+                                                                   m_lastOwnOpMs, QDateTime::currentMSecsSinceEpoch());
+        reliabilityEvent(QStringLiteral("uplink %1%2").arg(up ? QStringLiteral("up") : QStringLiteral("down"),
+                                                           m_uplinkLossOwnTunnel ? QStringLiteral(" own_tunnel") : QString()));
         if (!up || !m_wantConnected || !m_waitUplink)
             return;
         // F1: the pending look stays through the 1.5 s the network needs to settle: busy replaces "waiting", so the
@@ -3137,6 +3163,11 @@ bool AvpnEngineQml::uplinkUp()
     return avpn::UplinkMonitor::instance()->up();
 }
 
+bool AvpnEngineQml::uplinkUpForDecision() const
+{
+    return avpn::uplinkUpForDecision(uplinkUp(), m_uplinkLossOwnTunnel);
+}
+
 void AvpnEngineQml::beginStartPreparation()
 {
     if (m_preparingStart) return;
@@ -3512,7 +3543,7 @@ bool AvpnEngineQml::syncAttempt()
         } else if (r->reason != avpn::path::FailReason::StoppedByUser
                    && avpn::failedAttemptIntent(r->reason == avpn::path::FailReason::NoNetwork
                                                     || r->reason == avpn::path::FailReason::NothingProven,
-                                                uplinkUp(), m_engine.attemptAfterLiveLoss())
+                                                uplinkUpForDecision(), m_engine.attemptAfterLiveLoss())
                           == avpn::FailedAttemptIntent::Wait) {
             // No physical network under the attempt: nothing is said about the servers. The intent stays and the
             // start comes with the uplink (the same wait as a native loss without a network, wave 3).
@@ -3529,7 +3560,7 @@ bool AvpnEngineQml::syncAttempt()
                                  .arg(QLatin1String(avpn::path::failReasonName(r->reason))));
             if (avpn::failedAttemptIntent(r->reason == avpn::path::FailReason::NoNetwork
                                               || r->reason == avpn::path::FailReason::NothingProven,
-                                          uplinkUp(), m_engine.attemptAfterLiveLoss())
+                                          uplinkUpForDecision(), m_engine.attemptAfterLiveLoss())
                 == avpn::FailedAttemptIntent::DropAndResume) {
                 // a session lost by itself whose failover found nothing here: one new attempt on the next network
                 m_resumeOnNewNetwork = true;

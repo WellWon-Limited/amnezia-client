@@ -474,6 +474,11 @@ public:
     // The person refused the system's VPN permission dialog while the leg was starting (Android; the platform
     // reports the fact, the owner ends the ATTEMPT: nothing recorded, no other leg). true: the phase changed.
     bool onPermissionDenied();
+    // The platform builds the running leg's tunnel interface (`building`) or has built it (Android: the VPN service
+    // from the start command until VpnService.Builder.establish() returned and the backend runs). The leg's start
+    // clock stands in between - the device's own time is never evidence about the server (AttemptOwner.h "Local
+    // build"). Only a leg in Starting is affected. true: the phase changed.
+    bool onLocalBuild(bool building);
 
     // AVPN (Android-адопт): туннель ФАКТИЧЕСКИ жив (AndroidController::initConnectionState после
     // ре-байнда мессенджера/холодного старта), а движок — в терминале после фейкового Disconnected

@@ -473,6 +473,11 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                                      .arg(e.path.id.id, e.toPath));
             m_checkStarved = false;
             break;
+        case path::EffectType::LocalBuildOverrun:
+            attemptJournal(QStringLiteral("leg_local_build_overrun leg=%1 node=%2 build_ms=%3 (the device did not finish "
+                                          "building its tunnel - a local outcome, nothing recorded against the path)")
+                               .arg(e.stamp.leg).arg(e.path.id.id).arg(e.timeoutMs));
+            break;
         case path::EffectType::StopUnconfirmed:
             attemptJournal(QStringLiteral("attempt_stop_unconfirmed leg=%1 node=%2 (platform, not recorded)")
                                .arg(e.stamp.leg).arg(e.path.id.id));
@@ -1749,6 +1754,22 @@ bool ServiceEngine::onPermissionDenied()
     feedOwner(path::AttemptEvent::permissionDenied(nowMs(), m_owner.currentLeg()));
     if (m_tunnel)
         m_tunnel->startRefused(); // the attempt ends with no StopPath: the seat taken for it goes back here (review F9)
+    return m_state != before;
+}
+
+bool ServiceEngine::onLocalBuild(bool building)
+{
+    if (m_owner.phase() != path::AttemptPhase::Starting)
+        return false;
+    if (building == m_owner.legBuilding())
+        return false; // a repeated report changes nothing
+    const EngineState before = m_state;
+    attemptJournal(building ? QStringLiteral("leg_build begin leg=%1 node=%2 (the device builds its tunnel: the start clock stands)")
+                                  .arg(m_owner.currentLeg().leg).arg(m_owner.currentPath().id.id)
+                            : QStringLiteral("leg_build end leg=%1 node=%2 build_ms=%3 (the server's start deadline runs from now)")
+                                  .arg(m_owner.currentLeg().leg).arg(m_owner.currentPath().id.id)
+                                  .arg(m_owner.legLocalBuildMs()));
+    feedOwner(path::AttemptEvent::localBuild(nowMs(), m_owner.currentLeg(), building));
     return m_state != before;
 }
 

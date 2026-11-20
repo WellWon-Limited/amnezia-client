@@ -18,6 +18,17 @@
 // completed payload) is evidence and wins over a deadline that expired at the same moment (review E3/E4 18.11).
 // The platform tick (<= 1 s) drives deadlines.
 //
+// Local build: a leg's start deadline measures what the SERVER must do (answer the handshake / bring the session
+// up). Time the device spends on its own - a system permission dialog (the facade delivers no tick meanwhile, see
+// the Clock), building its own tunnel interface - is not part of it and is never evidence about the server. A
+// platform that knows when it builds the interface reports LocalBuild(building) and LocalBuild(built) with the leg's
+// stamp (Android: the VPN service from the start command until VpnService.Builder.establish() returned and the
+// backend runs - with «Доступ к сайтам РФ» Android installs ~10 800 routes there, 7-10 s on the emulator 20.11).
+// Between them the start deadline does not run; from "built" the leg has its full start deadline for the server's
+// part. A build that does not finish within localBuildMs ends the leg with a LOCAL outcome (LocalBuildOverrun,
+// Inconclusive: nothing recorded against the path), and the next candidate is tried. The local time is not part of
+// the leg's connect time either. A platform that does not report builds (iOS, desktop) behaves exactly as before.
+//
 // Course of an attempt (stage 1, design §4 "no probe host": candidates one at a time with a short deadline):
 //   UserStart -> select (PathSelect.h, ledger of the current network) -> StartPath(leg, start timeout)
 //     -> TunnelUp -> RunDataCheck(leg, check timeout) -> DataChecked ok -> Report(data ok) + Finish(Connected)
@@ -144,7 +155,10 @@ struct OutcomeReport {
 // StopUnconfirmed: the stop of `stamp` was not confirmed within stopConfirmMs - the attempt went on (journal it;
 // the platform layer keeps its own stop retries).
 // Yield: the leg in flight gives way to a proven path (ProofReady) - journal it; the StopPath follows.
-enum class EffectType { StartPath, StopPath, RunDataCheck, Report, Show, Finish, StopUnconfirmed, Yield };
+// LocalBuildOverrun: the device did not finish building the leg's tunnel within localBuildMs (`timeoutMs` = how
+// long it built) - a local outcome, nothing recorded against the path; journal it, the StopPath follows.
+enum class EffectType { StartPath, StopPath, RunDataCheck, Report, Show, Finish, StopUnconfirmed, Yield,
+                        LocalBuildOverrun };
 
 struct AttemptEffect {
     EffectType type = EffectType::Show;
@@ -176,6 +190,8 @@ enum class EventType {
     // tunnel never started: the attempt ends PermissionDenied at once - nothing recorded, no other leg. (While the
     // dialog is pending the host delivers no ticks, so no deadline runs; see "Clock" above.)
     PermissionDenied,
+    // The platform builds this leg's tunnel interface (`building`) or has built it (see "Local build" above).
+    LocalBuild,
 };
 
 struct AttemptEvent {
@@ -192,6 +208,7 @@ struct AttemptEvent {
     bool restart = false;                            // LiveLost
     bool starved = false;                            // ProofReady: the running data check has no first byte yet
     QString lead;                                    // UserStart, ProofReady: the path a proof named (see the header)
+    bool building = false;                           // LocalBuild: true = building, false = built
 
     static AttemptEvent userStart(qint64 now, const UserChoice &c, TransportMode m, const NetworkKey &net,
                                   const QString &lead = {})
@@ -224,6 +241,12 @@ struct AttemptEvent {
     }
     static AttemptEvent tick(qint64 now) { return at(EventType::Tick, now); }
     static AttemptEvent permissionDenied(qint64 now, const PathStamp &s) { return cb(EventType::PermissionDenied, now, s); }
+    static AttemptEvent localBuild(qint64 now, const PathStamp &s, bool building)
+    {
+        AttemptEvent e = cb(EventType::LocalBuild, now, s);
+        e.building = building;
+        return e;
+    }
     static AttemptEvent proofReady(qint64 now, bool starved, const QString &lead = {})
     {
         AttemptEvent e = at(EventType::ProofReady, now);
@@ -302,6 +325,7 @@ public:
             if (isLiveLeg(ev.stamp) && m_phase == AttemptPhase::Starting) {
                 m_phase = AttemptPhase::Checking;
                 m_checkSuspended = false;
+                endLocalBuild(); // up without "built" (the platform reports both at once): the build ends here
                 m_leg.upAt = m_awake;
                 m_leg.deadline = m_awake + checkDeadlineMs();
                 out << effect(EffectType::RunDataCheck, m_t.dataCheckMs) << show(AttemptPhase::Checking);
@@ -336,6 +360,7 @@ public:
                 finish(failure(FailReason::PermissionDenied), out);
             }
             break;
+        case EventType::LocalBuild: onLocalBuild(ev); break;
         }
         // A check that was running across a suspension and has not answered yet: void, run it again.
         if (m_checkSuspended && m_phase == AttemptPhase::Checking)
@@ -357,6 +382,9 @@ public:
     int progressDone() const { return m_pathsThisNet; }
     int progressTotal() const { return m_progressTotal; }
     qint64 awakeMs() const { return m_awake; }
+    // The running leg's own build ("Local build"): in progress, and the device's time spent on it so far.
+    bool legBuilding() const { return m_leg.buildSince >= 0; }
+    qint64 legLocalBuildMs() const { return m_leg.localMs + (m_leg.buildSince >= 0 ? m_awake - m_leg.buildSince : 0); }
     const AttemptTimings &timings() const { return m_t; }
     // New numbers (the server may tune them): they apply from the next deadline that is set.
     void setTimings(const AttemptTimings &t) { m_t = t; }
@@ -380,7 +408,33 @@ private:
         qint64 upAt = 0;
         qint64 deadline = 0;
         int rechecks = 0; // inconclusive checks run again on this leg
+        qint64 buildSince = -1; // awake time the platform began building the leg's tunnel interface (-1: not building)
+        qint64 localMs = 0;     // the device's own build time of this leg (not the server's; "Local build")
     };
+
+    // "Local build" (see the header). Building: the start deadline stops, the local bound runs instead. Built: the
+    // server's part begins - the leg has its full start deadline from now.
+    void onLocalBuild(const AttemptEvent &ev)
+    {
+        if (!m_running || !isLiveLeg(ev.stamp) || m_phase != AttemptPhase::Starting)
+            return;
+        if (ev.building) {
+            if (m_leg.buildSince < 0) {
+                m_leg.buildSince = m_awake;
+                m_leg.deadline = m_awake + m_t.localBuildMs;
+            }
+        } else if (m_leg.buildSince >= 0) {
+            endLocalBuild();
+            m_leg.deadline = m_awake + startTimeoutMs(m_leg.path.kind);
+        }
+    }
+    void endLocalBuild()
+    {
+        if (m_leg.buildSince < 0)
+            return;
+        m_leg.localMs += m_awake - m_leg.buildSince;
+        m_leg.buildSince = -1;
+    }
 
     // true: the gap since the last event was a suspension (none of it counts).
     bool advance(qint64 now)
@@ -501,7 +555,8 @@ private:
 
     void connected(int ttfbMs, QList<AttemptEffect> &out)
     {
-        report(PathOutcome::DataOk, int(m_leg.upAt - m_leg.startedAt), ttfbMs, out);
+        // the server's part only: the device's own build time is not the path's connect time
+        report(PathOutcome::DataOk, int(m_leg.upAt - m_leg.startedAt - m_leg.localMs), ttfbMs, out);
         m_phase = AttemptPhase::Connected;
         AttemptResult res;
         res.connected = true;
@@ -532,8 +587,16 @@ private:
                 finish(*m_pending, out);
             return;
         }
-        if (legActive() && m_awake >= m_leg.deadline)
+        if (legActive() && m_awake >= m_leg.deadline) {
+            if (m_phase == AttemptPhase::Starting && m_leg.buildSince >= 0) {
+                // the device never finished building its own tunnel: a local outcome, nothing about the server
+                AttemptEffect e = effect(EffectType::LocalBuildOverrun, int(legLocalBuildMs()));
+                out << e;
+                failLeg(PathOutcome::Inconclusive, out);
+                return;
+            }
             failLeg(m_phase == AttemptPhase::Starting ? PathOutcome::NoHandshake : PathOutcome::NoData, out);
+        }
     }
 
     void restartOnNetwork()

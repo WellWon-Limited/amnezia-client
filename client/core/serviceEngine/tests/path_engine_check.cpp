@@ -971,6 +971,117 @@ static void scenarioPermissionPrompt()
     }
 }
 
+// Local build (AttemptOwner.h "Local build"; Android emulator round 20.11): with «Доступ к сайтам РФ» on, Android
+// installs ~10 800 routes in VpnService.establish() - 7-10 s before the tunnel interface exists - while an AmneziaWG
+// leg had 4.5 s from its start to a handshake: every leg was judged dead before its tunnel existed, the timeouts went
+// into the ledger as failures of the servers. The platform reports "building" / "built"; the server's start deadline
+// runs only after "built"; a build that never finishes ends at the local bound with nothing recorded.
+static void scenarioLocalBuild()
+{
+    const NetworkObservation home = wifi("192.168.4.1");
+    const QString k = key(home);
+    const AttemptTimings t;
+
+    // The defect, for contrast: the platform does not report its build (no pause) - an 8 s build eats the 4.5 s
+    // start deadline, a working server is recorded "no handshake" and the walk goes on.
+    {
+        World w;
+        w.set(k, QStringLiteral("a1"), Behaviour::works(8000 + 700, 400, 100));
+        w.set(k, QStringLiteral("a2"), Behaviour::works(8000 + 700, 400, 100));
+        Sim s({ awg("a1", "EE"), awg("a2", "FI") }, w, home);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("local build 8 s, NOT reported (the defect)", s, r, 0);
+        CHECK(!r.connected && s.ledger.size() > 0);
+    }
+    // Reported 8 s build, then the server answers in 700 ms: the same leg connects, the only report is "data ok"
+    // and its connect time is the server's part (700 ms), not the device's 8.7 s.
+    {
+        World w;
+        w.set(k, QStringLiteral("a1"), Behaviour::works(700, 400, 100));
+        w.set(k, QStringLiteral("a2"), Behaviour::works(300, 400, 100));
+        Sim s({ awg("a1", "EE"), awg("a2", "FI") }, w, home);
+        s.buildMs = 8000;
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("local build 8 s reported, server 0.7 s", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("a1") && r.paths == 1 && s.legs.size() == 1);
+        CHECK(s.reports.size() == 1 && s.reports[0].outcome == PathOutcome::DataOk && s.reports[0].connectMs == 700);
+        CHECK(s.localOverruns == 0);
+    }
+    // After "built" the leg has its FULL start deadline for the server: an answer at 4.4 s after an 8 s build connects;
+    // one at 4.6 s is the server's own failure and is recorded as such (the rule still judges the server).
+    for (const int serverMs : { t.awgStartMs - 100, t.awgStartMs + 100 }) {
+        World w;
+        w.set(k, QStringLiteral("a1"), Behaviour::works(serverMs, 400, 100));
+        w.set(k, QStringLiteral("a2"), Behaviour::works(300, 400, 100));
+        Sim s({ awg("a1", "EE"), awg("a2", "FI") }, w, home);
+        s.buildMs = 8000;
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row(serverMs < t.awgStartMs ? "local build 8 s, server 4.4 s" : "local build 8 s, server 4.6 s (late)", s, r, 0);
+        CHECK(r.connected);
+        if (serverMs < t.awgStartMs) {
+            CHECK(r.path.id.id == QLatin1String("a1") && s.legs.size() == 1 && s.reports.size() == 1);
+        } else {
+            CHECK(r.path.id.id == QLatin1String("a2") && legPaths(s) == (QStringList{ "a1", "a2" }));
+            CHECK(stateOf(s, awg("a1", "EE")) == PathState::Suspect); // the server's own late answer: its evidence
+        }
+    }
+    // A build that never finishes: the leg ends at the local bound with a LOCAL outcome - no report, no ledger entry
+    // for that server - and the next candidate is tried and connects (its own build reported normally).
+    {
+        World w;
+        w.set(k, QStringLiteral("a1"), Behaviour::works(700, 400, 100));
+        w.set(k, QStringLiteral("a2"), Behaviour::works(700, 400, 100));
+        Sim s({ awg("a1", "EE"), awg("a2", "FI") }, w, home);
+        s.buildMs = 3000;
+        s.buildMsFor.insert(QStringLiteral("a1"), Sim::kBuildNever);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("local build never ends on a1", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("a2") && legPaths(s) == (QStringList{ "a1", "a2" }));
+        CHECK(s.localOverruns == 1);
+        CHECK(s.reports.size() == 1 && s.reports[0].path.id == QLatin1String("a2"));
+        CHECK(stateOf(s, awg("a1", "EE")) == PathState::Unknown && s.ledger.size() == 1);
+        CHECK(s.legs[1].startedMs >= t.localBuildMs); // a1 had the whole local bound, not the 4.5 s start deadline
+    }
+    // An exact server whose build never finishes: the attempt ends honestly (exact node failed), still nothing
+    // recorded against it.
+    {
+        World w;
+        w.set(k, QStringLiteral("a1"), Behaviour::works(700, 400, 100));
+        Sim s({ awg("a1", "EE"), awg("a2", "FI") }, w, home);
+        s.buildMs = Sim::kBuildNever;
+        const AttemptResult r = s.tap(UserChoice::exactPath(QStringLiteral("a1")));
+        row("local build never ends (exact server)", s, r, 0);
+        CHECK(!r.connected && r.reason == FailReason::ExactNodeFailed && s.reports.isEmpty() && s.ledger.size() == 0);
+    }
+    // A server that really does not answer is still judged after its build: the full deadline after "built", then
+    // "no handshake" recorded against it, the walk goes on.
+    {
+        World w;
+        w.set(k, QStringLiteral("a2"), Behaviour::works(700, 400, 100));
+        Sim s({ awg("a1", "EE"), awg("a2", "FI") }, w, home);
+        s.buildMs = 8000;
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("local build 8 s, a1 really dead", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("a2"));
+        CHECK(stateOf(s, awg("a1", "EE")) == PathState::Suspect);
+        CHECK(s.legs[1].startedMs >= 8000 + t.awgStartMs); // a1 was judged only after its build + the full deadline
+    }
+    // Reports that are not the running leg's change nothing: no attempt, an older leg, a leg already up.
+    {
+        World w;
+        w.set(k, QStringLiteral("b1"), Behaviour::works(1000, 400, 100));
+        Sim s({ awg("b1", "EE") }, w, home);
+        s.deliver(AttemptEvent::localBuild(s.now, PathStamp{ 9, 1, 1 }, true)); // no attempt yet
+        CHECK(s.results.isEmpty());
+        s.at(200, [&s] { s.deliver(AttemptEvent::localBuild(s.now, PathStamp{ 9, 1, 1 }, true)); }); // not this leg
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        CHECK(r.connected && s.legs.size() == 1 && s.localOverruns == 0);
+        s.deliver(AttemptEvent::localBuild(s.now, s.owner.currentLeg(), true)); // connected: not a leg in Starting
+        s.idle(t.localBuildMs + 1000);
+        CHECK(s.owner.phase() == AttemptPhase::Connected && s.results.size() == 1 && s.localOverruns == 0);
+    }
+}
+
 static void scenarioPreference()
 {
     const NetworkObservation home = wifi("192.168.7.1");
@@ -2324,6 +2435,7 @@ int main()
     scenarioNetworkChange();
     scenarioSuspended();
     scenarioPermissionPrompt();
+    scenarioLocalBuild();
     scenarioPreference();
     scenarioModeBeatsPreference();
     scenarioRevision();

@@ -861,6 +861,50 @@ int main(int argc, char **argv)
         CHECK(r.eng.failedInTunnelHere(QStringLiteral("17"))); // the probe does not lift it
         CHECK(!r.eng.failedInTunnelHere(QStringLiteral("16")));
     }
+
+    // Local build (Android emulator round 20.11, «Доступ к сайтам РФ» on): the platform reports that it builds the
+    // leg's tunnel interface (~10 800 routes, 8 s) and when it is built. The leg's start clock does not run in between;
+    // after "built" the server has the full 4.5 s; nothing is written against the server.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        CHECK(r.eng.onLocalBuild(true) == false); // the phase stays Connecting
+        r.pass(8000);
+        CHECK(r.tun.ups.size() == 1 && r.tun.downs == 0 && r.eng.attemptRunning()); // not judged while building
+        r.eng.onLocalBuild(false);
+        r.pass(4000); // 4 s of the server's 4.5 s
+        CHECK(r.tun.ups.size() == 1 && r.tun.downs == 0);
+        r.up();
+        CHECK(r.eng.verifySucceeded(300));
+        const path::AttemptResult res = r.result();
+        CHECK(res.connected && res.path.id.id == QLatin1String("17") && res.paths == 1);
+        CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("working"));
+        CHECK(journalHas(r.journal, "leg_build begin leg=") && journalHas(r.journal, "leg_build end leg=")
+              && journalHas(r.journal, "build_ms=8000"));
+        CHECK(!journalHas(r.journal, "no_handshake"));
+    }
+    // A build that never finishes ends at the local bound: a local outcome (journal), no ledger entry for 17, the next
+    // candidate is tried. The same rule without a report (iOS, desktop): 17 judged by its 4.5 s deadline as before.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        r.eng.onLocalBuild(true);
+        r.pass(19500);
+        CHECK(r.tun.downs == 0 && r.tun.ups.size() == 1);
+        r.pass(1000);
+        CHECK(r.tun.downs == 1 && journalHas(r.journal, "leg_local_build_overrun leg="));
+        r.confirmStop();
+        CHECK(r.last() == QLatin1String("16") && r.eng.attemptRunning());
+        CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+        CHECK(!journalHas(r.journal, "path_outcome"));
+
+        Rig plain(pool);
+        CHECK(plain.eng.connect(err) && plain.last() == QLatin1String("17"));
+        plain.pass(4500);
+        CHECK(plain.tun.downs == 1 && plain.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect"));
+    }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
 }
