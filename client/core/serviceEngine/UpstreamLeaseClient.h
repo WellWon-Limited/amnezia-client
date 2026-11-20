@@ -72,7 +72,7 @@ public:
 
     // IUpstreamLeaseIo
     void acquire(quint64 requestId, const QString &profileId, LeaseKind kind, const QString &standbyConfigSha256,
-                 const LeaseRoute &route) override;
+                 const LeaseRoute &route, const QString &sessionNonce) override;
     void renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     void release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     quint64 lastReleaseRequestId() const { return m_lastReleaseId; }

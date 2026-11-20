@@ -1101,7 +1101,7 @@ static void provisional()
 
 struct FakeIo : IUpstreamLeaseIo {
     QStringList calls;
-    void acquire(quint64 id, const QString &p, LeaseKind k, const QString &, const LeaseRoute &) override
+    void acquire(quint64 id, const QString &p, LeaseKind k, const QString &, const LeaseRoute &, const QString &) override
     {
         calls << QStringLiteral("acquire %1 %2 %3").arg(id).arg(p, leaseKindName(k));
     }

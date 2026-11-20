@@ -91,7 +91,8 @@ QNetworkReply *UpstreamLeaseClient::post(const QString &url, const QByteArray &b
 }
 
 void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, LeaseKind kind,
-                                  const QString &standbyConfigSha256, const LeaseRoute &route)
+                                  const QString &standbyConfigSha256, const LeaseRoute &route,
+                                  const QString &sessionNonce)
 {
     const QString base = baseFor(route);
     const QString token = m_token ? m_token() : QString();
@@ -108,7 +109,7 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
                                                                                     : upstreamAcquireTimeoutMsTuned();
     QNetworkReply *r = base.isEmpty() ? nullptr
                                       : post(base + QStringLiteral("/v1/upstream/lease"),
-                                             upstreamAcquireBody(profileId, kind, standbyConfigSha256), token,
+                                             upstreamAcquireBody(profileId, kind, standbyConfigSha256, sessionNonce), token,
                                              waitMs + kUpstreamLateGrantGraceMs);
     if (!r) {
         // Not sendable (no base / no token): a transport failure, answered from the top of the loop.

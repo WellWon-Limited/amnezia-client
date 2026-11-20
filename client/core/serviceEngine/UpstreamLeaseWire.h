@@ -25,6 +25,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QString>
 #include <QUrl>
@@ -308,16 +309,38 @@ inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 
     return n;
 }
 
+// The session nonce of an acquire (contract 1.18.0, round 10 R2 + R3): client-random, 16..64 characters of [A-Za-z0-9_-],
+// ONE per START of a provider session. Every acquire of that start (the direct request, the seat confirmation through the
+// tunnel, retries) carries the same one; the server derives the lease's renew token from (lease, device, nonce), so the
+// token of one start never depends on the order the server processed its requests in, and an acquire with ANOTHER nonce is
+// a new session taking the seat over (the token rotates, the previous one ends nothing). THE one place where the field is
+// named: a different name is a change of this constant only (like kUpstreamReleaseTokenField below). No nonce: the old
+// server rule (a random token, rotated by every acquire).
+inline constexpr char kUpstreamAcquireNonceField[] = "session_nonce";
+inline constexpr int kUpstreamSessionNonceChars = 32;
+inline QString upstreamNewSessionNonce()
+{
+    static const char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    QString n;
+    n.reserve(kUpstreamSessionNonceChars);
+    for (int i = 0; i < kUpstreamSessionNonceChars; ++i)
+        n.append(QLatin1Char(kAlphabet[QRandomGenerator::system()->bounded(64)])); // 64 symbols: no modulo bias
+    return n;
+}
+
 // standbyConfigSha256 non-empty = a standby acquire: the device already runs that profile from its
 // standby pack ("standby": true + the pack entry's config_sha256).
 inline QByteArray upstreamAcquireBody(const QString &profileId, LeaseKind kind,
-                                      const QString &standbyConfigSha256 = QString())
+                                      const QString &standbyConfigSha256 = QString(),
+                                      const QString &sessionNonce = QString())
 {
     QJsonObject o{{QStringLiteral("profile_id"), profileId}, {QStringLiteral("kind"), leaseKindName(kind)}};
     if (!standbyConfigSha256.isEmpty()) {
         o.insert(QStringLiteral("standby"), true);
         o.insert(QStringLiteral("config_sha256"), standbyConfigSha256);
     }
+    if (!sessionNonce.isEmpty() && kind == LeaseKind::Session) // the server ignores it for a probe: never sent there
+        o.insert(QLatin1String(kUpstreamAcquireNonceField), sessionNonce);
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 
