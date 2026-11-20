@@ -87,6 +87,7 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     m_leaseClient->onAcquireEnded = [this](const QString &profile, const QString &lease, bool stillOut) {
         applyUpstreamEvents(m_upOwner.acquireEnded(profile, lease, stillOut));
     };
+    m_leaseClient->onRouteProved = [this](quint64 requestId) { m_upOwner.routeProved(requestId, upstreamClockMs()); };
     {
         UpstreamLeaseOwner::Options o;
 #if AVPN_UPSTREAM_GUI_OWNER

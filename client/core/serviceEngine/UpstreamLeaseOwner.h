@@ -235,15 +235,28 @@ public:
             startQueuedIfFree(nowMs, ev);
         }
         reinstateWithdrawn();
-        // ANY answer of the API proves the route it came by (round 9 R3): a refusal or an HTTP error status is an answer
-        // like a grant; only a transport failure proves nothing. Releases that could not be carried go out by that route.
-        if (requestId == m_lastAcquireRequest && unsentCount() > 0 && !(r.kind == LeaseReplyKind::Failed && r.why == QLatin1String("transport"))) {
-            if (!m_lastAcquireStandby)
-                flushUnsent(LeaseRoute{}, nowMs);
-            else if (!tunnelBase().isEmpty())
-                flushUnsent(LeaseRoute{QString(), tunnelBase()}, nowMs);
-        }
         return ev;
+    }
+
+    // ANY answer of the API proves the route it came by (round 9 R3): a refusal or an HTTP error status is an answer like a
+    // grant; only a transport failure proves nothing. Releases that could not be carried go out by that route. THE one place
+    // that decides it (round 10 R4): UpstreamLeaseClient calls it for every acquire request that got an HTTP answer, whichever
+    // path the answer takes to the owner (in time, after the attempt stopped waiting, a grant or not), after the owner has
+    // seen the answer. Before, only the in-time path flushed: a refusal that landed after the hedge reached acquireEnded() alone.
+    void routeProved(quint64 requestId, qint64 nowMs)
+    {
+        const auto it = m_acquireViaTunnel.find(requestId);
+        if (it == m_acquireViaTunnel.end())
+            return;
+        const bool viaTunnel = it.value();
+        m_acquireViaTunnel.erase(it);
+        m_lastNowMs = nowMs;
+        if (unsentCount() == 0)
+            return;
+        if (!viaTunnel)
+            flushUnsent(LeaseRoute{}, nowMs);
+        else if (!tunnelBase().isEmpty())
+            flushUnsent(LeaseRoute{QString(), tunnelBase()}, nowMs);
     }
 
     QVector<UpstreamOwnerEvent> onRenewReply(quint64 requestId, const RenewReply &r, qint64 nowMs, qint64 nowWallMs = 0)
@@ -502,7 +515,6 @@ private:
             if (a.kind == LeaseActionKind::SendAcquire) {
                 m_lastAcquireRequest = a.requestId;
                 m_lastAcquireSentMs = nowMs;
-                m_lastAcquireStandby = a.standby;
             }
             if (a.kind == LeaseActionKind::SendRelease) {
                 m_releaseSent = true;
@@ -849,13 +861,12 @@ public:
         if (!m_io || m_nonce.isEmpty() || m_profileId.isEmpty())
             return;
         const quint64 id = (quint64(1) << 62) | ++m_ownSerial;
-        noteAcquireNonce(id, m_nonce);
         if (m_reasserts.size() > 16)
             m_reasserts.clear();
         m_reasserts.insert(id);
         const bool viaTunnel = m_standby.has_value() && !m_provisionalBase.isEmpty();
-        m_io->acquire(id, m_profileId, LeaseKind::Session, viaTunnel ? m_standby->configSha256 : QString(),
-                      viaTunnel ? LeaseRoute{QString(), m_provisionalBase} : LeaseRoute{}, m_nonce);
+        emitAcquire(id, m_profileId, LeaseKind::Session, viaTunnel ? m_standby->configSha256 : QString(),
+                    viaTunnel ? LeaseRoute{QString(), m_provisionalBase} : LeaseRoute{}, viaTunnel);
     }
 
     // The native tunnel of the running session is gone and the app did not ask for it (Disconnected from the
@@ -966,9 +977,17 @@ private:
     {
         withdrawReleasesOf(a.profileId);
         m_requestSent = true; // something really left for the server: evidence about the path may follow
-        noteAcquireNonce(a.requestId, m_nonce); // which START this request belongs to
+        emitAcquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route, a.standby);
+    }
+    // THE one call that puts an acquire on the wire: the session's nonce on it, and what its answer will be asked about (which
+    // START it belongs to, which route it proves).
+    void emitAcquire(quint64 requestId, const QString &profileId, LeaseKind kind, const QString &sha, const LeaseRoute &route,
+                     bool viaTunnel)
+    {
+        noteAcquireNonce(requestId, m_nonce);
+        noteAcquireRoute(requestId, viaTunnel);
         if (m_io)
-            m_io->acquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route, m_nonce);
+            m_io->acquire(requestId, profileId, kind, sha, route, m_nonce);
     }
     // Like dispatchLeaseIo (UpstreamLeaseMachine.h) but acquires go through sendAcquire; returns the other actions.
     QVector<LeaseAction> dispatchStep(const LeaseStep &step)
@@ -1055,6 +1074,12 @@ private:
     // several acquires for the same lease and the server may process them in any order - but with the session nonce they all
     // return the same token, so inside a start nothing needs ordering. Between starts the order is the client's own and
     // local: m_startOrder only grows. A late grant of an OLDER start must not replace the release of a newer start's grant.
+    void noteAcquireRoute(quint64 requestId, bool viaTunnel)
+    {
+        if (m_acquireViaTunnel.size() > 256)
+            m_acquireViaTunnel.clear();
+        m_acquireViaTunnel.insert(requestId, viaTunnel);
+    }
     void noteAcquireNonce(quint64 requestId, const QString &nonce)
     {
         if (m_acquireNonce.size() > 256)
@@ -1183,7 +1208,7 @@ private:
     QSet<quint64> m_reasserts;                 // our re-assert acquires (reassertSeat) not answered yet
     static constexpr int kUnsentMaxSends = 3;
     qint64 m_lastNowMs = 0;       // the owner's last clock reading (a deadline for a release made without one)
-    bool m_lastAcquireStandby = false;
+    QHash<quint64, bool> m_acquireViaTunnel;   // acquire request id -> sent through the tunnel (the route its answer proves)
     QString m_provisionalBase; // the standby pack entry's tunnel_api_base of the running provisional session
     bool m_startQueued = false;            // this session's acquire waits (startBlocked)
     qint64 m_queuedRevision = 0;

@@ -195,12 +195,19 @@ has "$(cat "$IOSW/UpstreamLeaseRenewer.swift")" 'UpstreamLeaseWire.releaseBody(a
 for gone in m_releasesOut m_withdrawn m_unsent m_deferredSeat; do
     ! grep -qF "$gone" "$OWN" || bad "R6: $gone must not exist - the pending releases are one structure keyed by lease id (m_releases)"
 done
-has "$(grep -v '^[[:space:]]*//' "$OWN")" 'QHash<QString, PendingRelease> m_releases;' || bad "R6: m_releases (one pending release per lease id) is missing"
+has "$(grep -v '^[[:space:]]*//' "$OWN")" 'QHash<QString, PendingRelease> m_releases;' || bad "R6: m_releases (one pending release per lease id and token) is missing"
 
-# R3 (round 9): ANY answer of the API proves its route (only a transport failure does not): the owner flushes the unsent releases
-# on the route that answered - direct, or the tunnel's base for an answer through the tunnel - not only after a direct grant.
-has "$(grep -v '^[[:space:]]*//' "$OWN")" 'unsentCount() > 0 && !(r.kind == LeaseReplyKind::Failed && r.why == QLatin1String("transport"))' \
-    || bad "R3: an answer other than a transport failure must flush the unsent releases"
+# R3 (round 9) + R4 (round 10): ANY answer of the API proves its route (only a transport failure does not): the unsent releases
+# go out on the route that answered - direct, or the tunnel's base for an answer through the tunnel - not only after a direct
+# grant, and it is decided in ONE place: the client calls onRouteProved for every acquire request that got an HTTP answer,
+# whichever path it took (in time, after the hedge, a grant or not); the adapter hands it to the owner's routeProved, and the
+# owner's answer handlers do not flush on their own.
+has "$(grep -v '^[[:space:]]*//' "$CLI")" 'if (!(reply.kind == LeaseReplyKind::Failed && reply.why == QLatin1String("transport")) && onRouteProved)' \
+    || bad "R4: the client must report every non-transport acquire answer as a proved route (onRouteProved), for in-time and late paths alike"
+[ "$(grep -v '^[[:space:]]*//' "$CLI" | grep -c 'onRouteProved(requestId)')" = "1" ] || bad "R4: onRouteProved must be called from exactly one place in the client"
+has "$ctor" 'm_upOwner.routeProved(requestId, upstreamClockMs())' || bad "R4: the adapter must hand a proved route to the owner (routeProved)"
+oar="$(awk 'index($0, "    QVector<UpstreamOwnerEvent> onAcquireReply(") == 1 { on = 1 } on { print } on && /^    }/ { exit }' "$OWN" | grep -v '^[[:space:]]*//')"
+! has "$oar" 'flushUnsent(' || bad "R4: onAcquireReply must not flush on its own (routeProved is the one place)"
 ! has "$(grep -v '^[[:space:]]*//' "$OWN")" 'r.kind == LeaseReplyKind::Granted && requestId == m_lastAcquireRequest && !m_lastAcquireStandby' \
     || bad "R3: the flush must not wait for a grant of a direct acquire"
 

@@ -58,6 +58,9 @@ public:
     // route = the late grant's own token and the base it was asked on; acquireId = the request that was answered.
     std::function<void(const QString &profileId, const QString &leaseId, const LeaseRoute &route, bool newerOut, quint64 acquireId)> onLateGrant;
     std::function<void(const QString &profileId, const QString &grantedLeaseId, bool stillOut)> onAcquireEnded;
+    // An acquire request got an HTTP answer of the API (any status, any body except a cut one): its route works. Fired once per
+    // request, in every path (in time or after the attempt stopped waiting), after the owner was told of the answer.
+    std::function<void(quint64 requestId)> onRouteProved;
     // Asked before every resend of a release and before a held one is sent: false = the owner took the release back
     // (a start of its profile - UpstreamLeaseOwner.h, row S1): it is dropped silently, no onReleaseDone.
     std::function<bool(quint64 requestId)> releaseWanted;

@@ -144,12 +144,16 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
                 reportLateGrant(profileId, reply.grant.leaseId, LeaseRoute{reply.grant.renewToken, route.apiBase}, requestId);
             else
                 reportAcquireEnded(profileId, QString());
-            return;
+        } else {
+            *answered = true;
+            if (onAcquire)
+                onAcquire(requestId, reply);
+            reportAcquireEnded(profileId, reply.kind == LeaseReplyKind::Granted ? reply.grant.leaseId : QString());
         }
-        *answered = true;
-        if (onAcquire)
-            onAcquire(requestId, reply);
-        reportAcquireEnded(profileId, reply.kind == LeaseReplyKind::Granted ? reply.grant.leaseId : QString());
+        // THE one place where an answer proves its route (round 10 R4), for every path above: anything but a transport failure
+        // (no complete answer) says the API on this route works.
+        if (!(reply.kind == LeaseReplyKind::Failed && reply.why == QLatin1String("transport")) && onRouteProved)
+            onRouteProved(requestId);
     });
 }
 

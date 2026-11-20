@@ -2200,6 +2200,7 @@ static void lateGrantOwnership()
                 apply(owner.lateGrant(p, l, r, newer, id));
             };
             client.onAcquireEnded = [this](const QString &p, const QString &l, bool out) { apply(owner.acquireEnded(p, l, out)); };
+            client.onRouteProved = [this](quint64 id) { owner.routeProved(id, now()); };
             client.hasStandbyFor = [this](const QString &p) { return owner.hasStandbyFor(p); };
             client.releaseWanted = [this](quint64 id) {
                 QVector<UpstreamOwnerEvent> ev;
@@ -2452,6 +2453,47 @@ static void lateGrantOwnership()
         while (r.edge2.deletes.isEmpty() && t.elapsed() < 3000)
             pump(10);
         CHECK(r.edge2.deletes == QStringList{ QLatin1String(kLease) } && r.owner.unsentCount() == 0);
+    }
+    // Round 10 R4: the release of profile A is kept (it could not reach the API). A start of profile B has a pack entry: its
+    // direct request passes the 1.2 s hedge (the provisional start begins) and THEN gets an HTTP answer of the API (no seat).
+    // That answer proves the direct route like any other; it reaches the owner only as the end of a request that the attempt
+    // stopped waiting for - and the kept release of A must go out over that route all the same (not stay to the lease's TTL
+    // because the provisional start never comes up).
+    {
+        Rig r;
+        r.owner.setOptions({});
+        r.client.releaseRetryBudgetMs = 900;
+        runningSession(r);
+        r.edge.dropDeletes = true;
+        r.client.holdReleasesForStop();
+        r.apply(r.owner.disconnect(r.now()));
+        r.client.tunnelStopped();
+        QElapsedTimer t;
+        t.start();
+        while (r.owner.unsentCount() == 0 && t.elapsed() < 6000)
+            pump(10);
+        CHECK(r.owner.unsentCount() == 1);
+        r.edge.dropDeletes = false; // the direct API answers again
+        const int deletesBefore = r.edge.deletes.size();
+        SubscriptionNode b = stubOf(QStringLiteral("bbbbbbbbbbbbbbb0"));
+        b.upstream->configSha256 = LeaseEdge::cfgSha();
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"inbounds\":[]}");
+        sc.configSha256 = LeaseEdge::cfgSha();
+        sc.tunnelApiBase = r.edge2.base();
+        sc.packRevision = 5;
+        r.apply(r.owner.begin(b, 1, sc, r.now(), 1));
+        t.start();
+        while (!r.owner.provisionalPending() && t.elapsed() < 4000)
+            pump(10);
+        CHECK(r.owner.provisionalPending() && r.edge.posts.size() == 2);
+        CHECK(r.owner.unsentCount() == 1 && r.edge.deletes.size() == deletesBefore); // nothing proved the route yet
+        r.edge.refuse(1); // HTTP 409 after the hedge: the API answered
+        t.start();
+        while (r.owner.unsentCount() > 0 && t.elapsed() < 3000)
+            pump(10);
+        CHECK(r.owner.unsentCount() == 0 && r.edge.deletes.size() > deletesBefore); // the kept release went out, direct
+        CHECK(r.edge2.deletes.isEmpty());
     }
     // Row S4 (device round 10): a profile WITH a standby-pack entry waits only the hedge for the direct lease, not the
     // lease share (here 5 s); the tunnel starts from the pack, the direct request lives on, and its grant that lands after
@@ -2727,6 +2769,8 @@ static void unsentFlushOnAnyAnswer()
                 id = io.last("acquire")->id;
             }
             o.onAcquireReply(id, c.reply, T + 700);
+            if (!(c.reply.kind == LeaseReplyKind::Failed && c.reply.why == QLatin1String("transport")))
+                o.routeProved(id, T + 700); // UpstreamLeaseClient: any HTTP answer proves its route (round 10 R4: one place)
             const bool flushed = releases() == before + 1;
             CHECK(flushed == c.flushes);
             if (flushed) {
@@ -3104,6 +3148,7 @@ struct LedgerWorld {
         a.delivered = true;
         apply(o.onAcquireReply(a.id, replyOf(a), now));
         apply(o.acquireEnded(profile(), a.grant ? a.lease : QString(), newerOut(i)));
+        o.routeProved(a.id, now); // UpstreamLeaseClient: an HTTP answer, whichever path it took
     }
     void acqTimeout(int i)
     {
@@ -3121,6 +3166,7 @@ struct LedgerWorld {
             apply(o.lateGrant(profile(), a.lease, LeaseRoute{a.token, QString()}, newerOut(i), a.id));
         else
             apply(o.acquireEnded(profile(), QString(), newerOut(i)));
+        o.routeProved(a.id, now); // the same single place, for the late path too (round 10 R4)
     }
     void relHit(int i)
     {
