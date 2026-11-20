@@ -105,7 +105,8 @@ final class UpstreamLeaseRenewer {
     private let log: (String) -> Void
     private var machine: UpstreamLeaseMachine
     private var timer: DispatchSourceTimer?
-    private var stopped = false
+    private var stopped = false // no more renewals (a stop, or a terminal answer)
+    private var released = false // the final release was taken (or the renewer was ended without one): at most once
     private var scope: UpstreamMeterScope = .tunnel
     private var meterTags: [String] = []
 
@@ -172,7 +173,7 @@ final class UpstreamLeaseRenewer {
     // The final report of a user disconnect (contract section 6), read while the core still counts. Review E5 of
     // 18.11: the DELETE itself goes AFTER the core stopped, over the extension's direct path (sendRelease) - a
     // release through the tunnel being abandoned hangs when that tunnel carries no data (owner's iPhone, rounds
-    // 1-2). nil: nothing to send (a terminal answer, no lease yet).
+    // 1-2). nil: nothing to send (no lease yet; after a terminal answer the report is still sent).
     struct PreparedRelease {
         let url: String
         let headers: [String: String]
@@ -181,7 +182,10 @@ final class UpstreamLeaseRenewer {
 
     func prepareRelease() -> PreparedRelease? {
         queue.sync {
-            guard !stopped else { return nil }
+            // A terminal answer ends RENEWING only (stopped); the final report of the lease is still owed at the stop, and
+            // the server meters it with the tenure's token even after the lease ended (replaced by the next start).
+            guard !released else { return nil }
+            released = true
             stopped = true
             cancelTimerLocked()
             feedBytesLocked()
@@ -225,6 +229,7 @@ final class UpstreamLeaseRenewer {
     func stop() {
         queue.sync {
             stopped = true
+            released = true
             cancelTimerLocked()
         }
     }

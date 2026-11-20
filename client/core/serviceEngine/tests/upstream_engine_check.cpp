@@ -510,7 +510,8 @@ static void ownerMacRenewals()
     o.tick(o.wakeAtMs());
     r = io.last("renew");
     CHECK(r && r->meter.seq == 3 && r->meter.rxDelta == 500 && r->meter.txDelta == 50 && r->meter.epoch == 5);
-    // Terminal answer -> Leave(code, detail) + ClearRecord; no release after a terminal answer.
+    // Terminal answer -> Leave(code, detail) + ClearRecord; the final report is still owed (round 17 R2): ONE release carries the
+    // in-doubt report (same seq) with the grant's token, sent at the Leave; the later disconnect sends nothing more.
     RenewReply gone;
     gone.kind = LeaseReplyKind::Refused;
     gone.error.code = UpstreamErrorCode::LeaseGone;
@@ -519,9 +520,14 @@ static void ownerMacRenewals()
     const UpstreamOwnerEvent *l = findEv(ev, UpstreamOwnerEventKind::Leave);
     CHECK(l && l->code == QLatin1String("lease_gone") && l->detail == QLatin1String("seat_taken"));
     CHECK(findEv(ev, UpstreamOwnerEventKind::ClearRecord));
+    {
+        const FakeIo::Call *fin = io.last("release");
+        CHECK(fin && fin->meter.seq == 3 && fin->meter.rxDelta == 500 && fin->meter.txDelta == 50
+              && fin->route.renewToken == QLatin1String("tlr1.secret") && o.releaseSent());
+    }
     const int before = io.calls.size();
     o.disconnect(T + 2000000);
-    CHECK(io.calls.size() == before && !o.releaseSent());
+    CHECK(io.calls.size() == before); // released once
     // A user disconnect of a live lease: the release carries the final deltas and the epoch.
     FakeIo io2;
     UpstreamLeaseOwner o2(&io2);

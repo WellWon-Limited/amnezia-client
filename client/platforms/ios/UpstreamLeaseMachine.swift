@@ -253,6 +253,10 @@ struct UpstreamLeaseMachine {
     private(set) var appliedBytesTotal: Int64 = 0
     private(set) var shadowBytesTotal: Int64 = 0
     private(set) var leaveReason = ""
+    // The session left the node (a terminal answer) while it held a lease: the final report of its bytes is still owed to the
+    // server (it meters a release carrying the tenure's token even after the lease ended). "No more renewals" (phase .left) is
+    // not "nothing left to release"; disconnect() pays it once.
+    private(set) var releaseOwed = false
 
     var reportInDoubt: Bool { frozenValid }
 
@@ -398,6 +402,7 @@ struct UpstreamLeaseMachine {
         inflight = .none
         noteRevision(r.kind == .granted ? r.renewal.upstreamRevision : r.error.upstreamRevision, &s)
         if r.kind == .refused && r.error.code.isTerminal {
+            releaseOwed = !leaseId.isEmpty
             leave(&s, r.error.code.rawValue)
             return s
         }
@@ -405,6 +410,7 @@ struct UpstreamLeaseMachine {
         if UpstreamLeaseWire.renewRejected(r) {
             renewRejectedInRow += 1
             if renewRejectedInRow >= Self.renewRejectedLimit {
+                releaseOwed = !leaseId.isEmpty
                 leave(&s, "renew_rejected")
                 return s
             }
@@ -453,7 +459,7 @@ struct UpstreamLeaseMachine {
     // Cumulative byte counters of the running tunnel (any moment, any rate). A counter that went back
     // is read as restarted from 0.
     mutating func onTunnelBytes(rxTotal: Int64, txTotal: Int64) {
-        if phase != .active && phase != .provisional { return }
+        if phase != .active && phase != .provisional && !(phase == .left && releaseOwed) { return }
         let rx = max(0, rxTotal)
         let tx = max(0, txTotal)
         unreportedRx = Self.saturatingAdd(unreportedRx, rx >= lastRx ? rx - lastRx : rx)
@@ -504,7 +510,8 @@ struct UpstreamLeaseMachine {
     mutating func disconnect(nowMs: Int64) -> UpstreamLeaseStep {
         var s = UpstreamLeaseStep()
         _ = clock(nowMs)
-        if phase == .active && !leaseId.isEmpty {
+        if (phase == .active || (phase == .left && releaseOwed)) && !leaseId.isEmpty {
+            releaseOwed = false
             nextId += 1
             var a = UpstreamLeaseAction(kind: .sendRelease)
             a.requestId = nextId

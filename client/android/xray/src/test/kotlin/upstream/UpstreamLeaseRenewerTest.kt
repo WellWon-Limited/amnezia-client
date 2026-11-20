@@ -161,7 +161,8 @@ class UpstreamLeaseRenewerTest {
         val released = CountDownLatch(1)
         r.renewer.release { released.countDown() }
         assertTrue(released.await(1, TimeUnit.SECONDS), "release completion after terminal")
-        assertEquals(3, r.transport.snapshot.size, "nothing sent after terminal (no renew, no release)")
+        assertEquals(4, r.transport.snapshot.size, "after a terminal answer: no renew, exactly one release (the final report)")
+        assertEquals("DELETE", r.transport.snapshot.last().method)
         assertEquals("terminal", r.renewer.status().state, "the terminal code stays readable after the end")
     }
 

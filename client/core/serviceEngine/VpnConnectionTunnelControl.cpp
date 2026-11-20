@@ -992,6 +992,18 @@ void VpnConnectionTunnelControl::retryUpstreamAdoption()
 // tunnel, up of the new one) takes seconds, so in the normal flow the app's own stop comes first; only a switch that never happens
 // (the new start fails after the seat was taken) leaves the old tunnel without its core until the person acts. No seat is harmed.
 // A proper fix makes the app adopt the running session on iOS as macOS does.
+// SECOND KNOWN LIMIT (round 17 R1, pre-existing, not introduced by the tenure rule): the same relaunch, then ANOTHER provider is chosen.
+// prepareUpstream() below only asks "is an owner of THIS process live" (m_upOwner.active(), the first condition of its guard): after a
+// relaunch it is not (the lease owner is not restored at adoption on iOS), so the seat of the new node is taken first and the server
+// ends the old lease as replaced. If that answer is lost, AvpnEngineQml::onUpstreamPrepared (case Stay, ~12127) treats it as "the working
+// tunnel was never touched": it restores the previous pin and leaves the old tunnel running - although its lease is gone. At its next
+// renewal the extension gets lease_gone and stops its provider core (upstreamLeaseTerminal) while the VPN interface stays up: the person
+// sees "connected" with no traffic. What brings it back: the app reads the extension's status reply (ios_controller.mm:1304 ->
+// emitUpstreamStatus -> upstreamLeaseEvent -> AvpnEngineQml::applyUpstreamTunnelStatus -> onUpstreamLeave -> ServiceEngine::
+// leaveUpstreamNode -> loseLiveSession(restart=true)), so the dead session is left and the engine walks to the next node by itself - but
+// only while the app runs and polls the status; with the app in the background nothing happens until it comes to the foreground (how
+// soon the first poll follows is not verified), or the person reconnects. The proper fix is the one named above: restore the lease
+// owner at adoption on iOS as the desktop does (then m_upOwner.active() is true and the switch takes the live-session path).
 quint64 VpnConnectionTunnelControl::prepareUpstream(const Subscription &sub, const SubscriptionNode &node)
 {
     if (!upstreamNodesEnabled() || !m_leaseClient || !m_leaseClient->configured() || m_upOwner.active()

@@ -500,7 +500,9 @@ static void terminalCodes()
         const LeaseAction *leave = s.find(LeaseActionKind::LeaveNode);
         CHECK(leave && leave->reason == QLatin1String(upstreamErrorCodeName(c)) && m.phase() == LeasePhase::Left);
         CHECK(m.tick(T + 10000000).actions.isEmpty() && m.tick(T + 10000000).wakeAtMs == -1);
-        CHECK(m.disconnect(T + 10000001).actions.isEmpty());
+        // Round 17 R2: no more renewals, but the final report is still owed: one release, then nothing.
+        CHECK(m.disconnect(T + 10000001).find(LeaseActionKind::SendRelease) != nullptr);
+        CHECK(m.disconnect(T + 10000002).actions.isEmpty());
         // The same code before bring-up: the node is not used (LeaveNode, not "try next").
         UpstreamLeaseMachine p = started(s);
         s = p.onAcquireReply(sentId(s, LeaseActionKind::SendAcquire), acquireRefused(c), T + 10);
@@ -554,7 +556,8 @@ static void renewRejectedInRow()
     answer(bad);
     const LeaseAction *leave = s.find(LeaseActionKind::LeaveNode);
     CHECK(leave && leave->reason == QLatin1String("renew_rejected") && m.phase() == LeasePhase::Left);
-    CHECK(m.disconnect(now + 1000).actions.isEmpty()); // a left lease sends nothing more
+    CHECK(m.disconnect(now + 1000).find(LeaseActionKind::SendRelease) != nullptr); // the report is still owed (R2) ...
+    CHECK(m.disconnect(now + 1001).actions.isEmpty());                              // ... once
     // A granted renewal resets the row.
     UpstreamLeaseMachine g = started(s);
     s = g.onAcquireReply(sentId(s, LeaseActionKind::SendAcquire), granted(leaseJson()), T);

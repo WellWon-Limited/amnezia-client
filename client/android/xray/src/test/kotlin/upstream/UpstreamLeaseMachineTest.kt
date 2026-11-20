@@ -76,7 +76,10 @@ class UpstreamLeaseMachineTest {
         assertTrue(m.phase == UpstreamLeasePhase.LEFT && m.leaveReason == "lease_gone", "phase left")
         s = m.tick(now + 1_000_000)
         assertTrue(s.actions.isEmpty() && s.wakeAtMs == -1L, "nothing after terminal")
-        assertNull(m.disconnect(now + 1_000_001).find(SEND_RELEASE), "no release after a terminal answer")
+        // Round 17 R2: no more renewals, but the final report is still owed: one release (the in-doubt report), once.
+        val fin = m.disconnect(now + 1_000_001).find(SEND_RELEASE)
+        assertTrue(fin != null && fin.meter.seq == 6L && fin.meter.rxDelta >= 10L, "the final report is still released after a terminal answer")
+        assertNull(m.disconnect(now + 1_000_002).find(SEND_RELEASE), "released once")
     }
 
     @Test

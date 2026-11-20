@@ -651,6 +651,16 @@ private:
                     c.kind = UpstreamOwnerEventKind::ClearRecord;
                     ev << c;
                 }
+                // A renewal's terminal answer (the lease was replaced, refused, or the renewals were rejected): the session is over, but the
+                // final report of its bytes is still owed - the server meters a release carrying the tenure's token even after the lease
+                // ended. Sent once, through the ledger (a later disconnect finds the owner inactive and sends nothing more).
+                if (ownsRenewals() && m_machine.releaseOwed()) {
+                    const LeaseStep rs = m_machine.disconnect(nowMs);
+                    m_releaseSent = true;
+                    const QSet<quint64> rmerged = registerReleasesOf(rs);
+                    if (m_io)
+                        dispatchStep(rs, rmerged);
+                }
                 m_active = false;
                 judgeDeferred(m_profileId);
                 break;

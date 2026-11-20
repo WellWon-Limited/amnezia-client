@@ -268,6 +268,8 @@ class UpstreamLeaseMachine(
         var appliedBytesTotal = 0L
         var shadowBytesTotal = 0L
         var leaveReason = ""
+        // A renewal's terminal answer ended the session while it held a lease: the final report is still owed (disconnect sends it once).
+        var releaseOwed = false
     }
 
     private var st = State()
@@ -472,6 +474,7 @@ class UpstreamLeaseMachine(
         st.inflight = Inflight.NONE
         noteRevision(if (reply.kind == UpstreamReplyKind.GRANTED) reply.renewal.upstreamRevision else reply.error.upstreamRevision, s)
         if (reply.kind == UpstreamReplyKind.REFUSED && reply.error.code.isTerminal) {
+            st.releaseOwed = st.leaseId.isNotEmpty()
             leave(s, reply.error.code.wire, reply.error.reason)
             return s
         }
@@ -479,6 +482,7 @@ class UpstreamLeaseMachine(
         if (UpstreamLeaseWire.renewRejected(reply)) {
             st.renewRejectedInRow += 1
             if (st.renewRejectedInRow >= RENEW_REJECTED_LIMIT) {
+                st.releaseOwed = st.leaseId.isNotEmpty()
                 leave(s, "renew_rejected")
                 return s
             }
@@ -526,7 +530,8 @@ class UpstreamLeaseMachine(
     // Cumulative byte counters of the running tunnel (any moment, any rate). A counter that went back is
     // read as restarted from 0.
     fun onTunnelBytes(rxTotal: Long, txTotal: Long) {
-        if (st.phase != UpstreamLeasePhase.ACTIVE && st.phase != UpstreamLeasePhase.PROVISIONAL) return
+        if (st.phase != UpstreamLeasePhase.ACTIVE && st.phase != UpstreamLeasePhase.PROVISIONAL &&
+            !(st.phase == UpstreamLeasePhase.LEFT && st.releaseOwed)) return
         val rx = maxOf(0L, rxTotal)
         val tx = maxOf(0L, txTotal)
         st.unreportedRx = saturatingAdd(st.unreportedRx, if (rx >= st.lastRx) rx - st.lastRx else rx)
@@ -584,7 +589,9 @@ class UpstreamLeaseMachine(
     fun disconnect(nowMs: Long): UpstreamLeaseStep {
         val s = UpstreamLeaseStep()
         clock(nowMs)
-        if (st.phase == UpstreamLeasePhase.ACTIVE && st.leaseId.isNotEmpty()) {
+        if ((st.phase == UpstreamLeasePhase.ACTIVE || (st.phase == UpstreamLeasePhase.LEFT && st.releaseOwed)) &&
+            st.leaseId.isNotEmpty()) {
+            st.releaseOwed = false
             nextId += 1
             val meter = if (st.frozenValid) {
                 UpstreamMeterReport(st.frozen.seq, saturatingAdd(st.frozen.rxDelta, st.unreportedRx),
