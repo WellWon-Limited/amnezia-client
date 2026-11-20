@@ -3777,7 +3777,7 @@
             "name": "terminal_on_renew_not_entitled",
             "rules": [
                 "terminal_leaves",
-                "no_release_after_terminal"
+                "release_owed_after_terminal"
             ],
             "steps": [
                 {
@@ -3981,6 +3981,20 @@
                     "event": "disconnect",
                     "expect": {
                         "actions": [
+                            {
+                                "api_base": "",
+                                "kind": "send_release",
+                                "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                "meter": {
+                                    "epoch": 1,
+                                    "rx": 0,
+                                    "scope": "tunnel",
+                                    "seq": 1,
+                                    "tx": 0
+                                },
+                                "renew_token": "",
+                                "request_id": 3
+                            }
                         ],
                         "state": {
                             "api_base": "",
@@ -4093,7 +4107,7 @@
             "name": "terminal_on_renew_over_quota",
             "rules": [
                 "terminal_leaves",
-                "no_release_after_terminal"
+                "release_owed_after_terminal"
             ],
             "steps": [
                 {
@@ -4297,6 +4311,20 @@
                     "event": "disconnect",
                     "expect": {
                         "actions": [
+                            {
+                                "api_base": "",
+                                "kind": "send_release",
+                                "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                "meter": {
+                                    "epoch": 1,
+                                    "rx": 0,
+                                    "scope": "tunnel",
+                                    "seq": 1,
+                                    "tx": 0
+                                },
+                                "renew_token": "",
+                                "request_id": 3
+                            }
                         ],
                         "state": {
                             "api_base": "",
@@ -4409,7 +4437,7 @@
             "name": "terminal_on_renew_disabled",
             "rules": [
                 "terminal_leaves",
-                "no_release_after_terminal"
+                "release_owed_after_terminal"
             ],
             "steps": [
                 {
@@ -4613,6 +4641,20 @@
                     "event": "disconnect",
                     "expect": {
                         "actions": [
+                            {
+                                "api_base": "",
+                                "kind": "send_release",
+                                "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                "meter": {
+                                    "epoch": 1,
+                                    "rx": 0,
+                                    "scope": "tunnel",
+                                    "seq": 1,
+                                    "tx": 0
+                                },
+                                "renew_token": "",
+                                "request_id": 3
+                            }
                         ],
                         "state": {
                             "api_base": "",
@@ -4725,7 +4767,7 @@
             "name": "terminal_on_renew_lease_gone",
             "rules": [
                 "terminal_leaves",
-                "no_release_after_terminal"
+                "release_owed_after_terminal"
             ],
             "steps": [
                 {
@@ -4929,6 +4971,20 @@
                     "event": "disconnect",
                     "expect": {
                         "actions": [
+                            {
+                                "api_base": "",
+                                "kind": "send_release",
+                                "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                "meter": {
+                                    "epoch": 1,
+                                    "rx": 0,
+                                    "scope": "tunnel",
+                                    "seq": 1,
+                                    "tx": 0
+                                },
+                                "renew_token": "",
+                                "request_id": 3
+                            }
                         ],
                         "state": {
                             "api_base": "",
@@ -15537,6 +15593,20 @@
                     "event": "disconnect",
                     "expect": {
                         "actions": [
+                            {
+                                "api_base": "",
+                                "kind": "send_release",
+                                "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                "meter": {
+                                    "epoch": 1,
+                                    "rx": 0,
+                                    "scope": "tunnel",
+                                    "seq": 1,
+                                    "tx": 0
+                                },
+                                "renew_token": "",
+                                "request_id": 6
+                            }
                         ],
                         "state": {
                             "api_base": "",

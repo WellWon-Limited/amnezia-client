@@ -572,7 +572,7 @@ static QJsonArray leaseScenarios()
             r.acquireId(cancelled, grantJ(kLA, 4, S0 + 9900000, "session", 300, /*epoch=*/11), r.now + 50);
         });
     for (const char *code : {"not_entitled", "over_quota", "disabled", "lease_gone"}) {
-        add(qPrintable(QStringLiteral("terminal_on_renew_%1").arg(QLatin1String(code))), {"terminal_leaves", "no_release_after_terminal"},
+        add(qPrintable(QStringLiteral("terminal_on_renew_%1").arg(QLatin1String(code))), {"terminal_leaves", "release_owed_after_terminal"},
             [code](Rec &r) {
                 r.start();
                 r.acquire(grantJ(), T);

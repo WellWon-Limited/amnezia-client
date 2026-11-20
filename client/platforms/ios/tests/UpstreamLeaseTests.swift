@@ -371,7 +371,11 @@ private func testRenewUntilGonePastDeadline() {
     s = m.tick(nowMs: now + 1_000_000)
     expect(s.actions.isEmpty && s.wakeAtMs == -1, "nothing after terminal")
     s = m.disconnect(nowMs: now + 1_000_001)
-    expect(s.find(.sendRelease) == nil, "no release after a terminal answer")
+    // Round 17 R2: no more renewals, but the final report is still owed: one release, the in-doubt report (same seq), once.
+    let fin = s.find(.sendRelease)
+    expect(fin != nil && fin?.meter.seq == 6 && (fin?.meter.rxDelta ?? 0) >= 10 && (fin?.meter.txDelta ?? 0) >= 5,
+           "the final report is still released after a terminal answer")
+    expect(m.disconnect(nowMs: now + 1_000_002).find(.sendRelease) == nil, "released once")
 }
 
 private func testImmediateResendAtDeadline() {
@@ -741,7 +745,9 @@ private func testRenewerFlow() {
     let released = DispatchSemaphore(value: 0)
     renewer.release { released.signal() }
     expect(released.wait(timeout: .now() + 1) == .success, "release completion after terminal")
-    expect(transport.snapshot.count == 3, "nothing sent after terminal (no renew, no release)")
+    expect(transport.snapshot.count == 4 && transport.snapshot.last?.method == "DELETE"
+           && transport.snapshot.last?.body.contains(#""renew_token":"tlr1.TOKEN""#) == true,
+           "after a terminal answer: no renew, exactly one release with the token")
 }
 
 // Review E5 of 18.11: the final report is read before the core stops, the DELETE goes later through the direct
@@ -969,6 +975,35 @@ private func testRenewerProxyScope() {
 
 // The status after the renewer object is gone: a terminal answer keeps its code for the rest of the tunnel
 // session (before: `state: terminal` with an empty code once the renewer was torn down).
+// R2 (round 17): a terminal renewal answer (the lease was replaced by the next start) ends renewing, not the final report: the ordinary
+// stop still prepares ONE release with the tenure's token and the bytes since the last accepted renewal; a second stop sends nothing.
+private func testReleaseAfterTerminalRenewal() {
+    let transport = FakeTransport(), clock = TestClock(), bytes = Bytes()
+    let terminalDone = DispatchSemaphore(value: 0)
+    let renewer = makeRenewer(transport, clock, bytes) { _ in terminalDone.signal() }
+    renewer.startActive(lease: lease(seq: 1, epoch: 3))
+    bytes.set(700, 70)
+    clock.advance(300_000)
+    transport.answer(404, #"{"code":"lease_gone"}"#)
+    renewer.fireForTest()
+    renewer.drainForTest()
+    expect(terminalDone.wait(timeout: .now() + 2) == .success && renewer.isTerminal, "terminal handler ran")
+    bytes.set(900, 90) // traffic after the answer, before the core stops
+    guard let prepared = renewer.prepareRelease() else {
+        expect(false, "a terminal renewal answer must not cancel the final release")
+        return
+    }
+    expect(prepared.body.contains(#""renew_token":"tlr1.TOKEN""#) && prepared.body.contains(#""rx_bytes_delta":900"#)
+           && prepared.body.contains(#""tx_bytes_delta":90"#),
+           "release carries the token and the bytes since the last accepted renewal \(prepared.body)")
+    expect(renewer.prepareRelease() == nil, "second stop sends nothing")
+    // An ended-without-release renewer (stop()) sends nothing.
+    let r2 = makeRenewer(FakeTransport(), clock, bytes)
+    r2.startActive(lease: lease(seq: 1, epoch: 3))
+    r2.stop()
+    expect(r2.prepareRelease() == nil, "stop() ends without a release")
+}
+
 private func testTerminalMemoAfterRenewerGone() {
     var memo = UpstreamTerminalMemo()
     expect(memo.status == nil, "no terminal answer -> no status object")
@@ -1028,6 +1063,7 @@ struct UpstreamLeaseTestsMain {
         testProxyAccumulator()
         testMeterTagsEnvelope()
         testRenewerProxyScope()
+        testReleaseAfterTerminalRenewal()
         testTerminalMemoAfterRenewerGone()
         if failures > 0 {
             fputs("Upstream lease tests: \(failures) of \(checks) checks FAILED\n", stderr)

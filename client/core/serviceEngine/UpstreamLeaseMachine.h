@@ -432,11 +432,13 @@ public:
         // (upstreamNoticeFor: lease_gone -> Unavailable). A short interruption, never a stuck "connected" state. On iOS / the macOS NE the extension renews: it
         // stops its core on the refusal and its status "terminal" reaches the same onUpstreamLeave (applyUpstreamTunnelStatus).
         if (r.kind == LeaseReplyKind::Refused && isTerminalUpstreamError(r.error.code)) {
+            m_releaseOwed = !m_leaseId.isEmpty();
             leave(s, QLatin1String(upstreamErrorCodeName(r.error.code)), r.error.reason);
             return s;
         }
         if (upstreamRenewRejected(r)) {
             if (++m_renewRejected >= kUpstreamRenewRejectedLimit) {
+                m_releaseOwed = !m_leaseId.isEmpty();
                 leave(s, QStringLiteral("renew_rejected"));
                 return s;
             }
@@ -474,7 +476,7 @@ public:
     // is read as restarted from 0.
     void onTunnelBytes(qint64 rxTotal, qint64 txTotal)
     {
-        if (m_phase != LeasePhase::Active && m_phase != LeasePhase::Provisional)
+        if (m_phase != LeasePhase::Active && m_phase != LeasePhase::Provisional && !(m_phase == LeasePhase::Left && m_releaseOwed))
             return;
         rxTotal = qMax<qint64>(0, rxTotal);
         txTotal = qMax<qint64>(0, txTotal);
@@ -523,11 +525,13 @@ public:
         return s;
     }
 
+    bool releaseOwed() const { return m_releaseOwed; }
     LeaseStep disconnect(qint64 nowMs)
     {
         LeaseStep s;
         clock(nowMs);
-        if (m_phase == LeasePhase::Active && !m_leaseId.isEmpty()) {
+        if ((m_phase == LeasePhase::Active || (m_phase == LeasePhase::Left && m_releaseOwed)) && !m_leaseId.isEmpty()) {
+            m_releaseOwed = false;
             LeaseAction a;
             a.kind = LeaseActionKind::SendRelease;
             a.requestId = ++m_nextId;
@@ -830,6 +834,8 @@ private:
     quint64 m_inflightId = 0, m_nextId = 0;
     qint64 m_requestSentMs = 0;
     bool m_ready = false;
+    // A renewal's terminal answer ended the session (Left) while it held a lease: its final report is still owed (disconnect() sends it once).
+    bool m_releaseOwed = false;
     bool m_configChangedNoted = false;
     bool m_expiryAttempted = false; // the one immediate re-acquire at the deadline was sent
     QString m_standbySha;           // provisional: the pack entry's config sha

@@ -116,7 +116,8 @@ class UpstreamLeaseRenewer(
         UpstreamTimerCancel { f.cancel(false) }
     }
     private var timer: UpstreamTimerCancel? = null
-    private var stopped = false
+    private var stopped = false // no more renewals (a stop, or a terminal answer)
+    private var released = false // the final release was taken (or the renewer ended without one): at most once
     private var lastEmitted: UpstreamLeaseStatus? = null
     private var scope = UpstreamMeterScope.TUNNEL
     private var meterTags: List<String> = emptyList()
@@ -168,9 +169,12 @@ class UpstreamLeaseRenewer(
     // the bound). Nothing is sent after a terminal answer or before a lease exists.
     fun release(completion: () -> Unit) {
         val request = synchronized(lock) {
-            if (stopped) {
+            // A terminal answer ends RENEWING only (stopped); the final report is still owed at the stop (the server meters a
+            // release with the tenure's token even after the lease ended), so only `released` blocks a second release.
+            if (released) {
                 null
             } else {
+                released = true
                 stopped = true
                 cancelTimerLocked()
                 feedBytesLocked()
@@ -209,11 +213,12 @@ class UpstreamLeaseRenewer(
         }
     }
 
-    // Ends the renewer without a release (after a terminal answer, a stop without a lease, the service
+    // Ends the renewer without a release (a stop without a lease, the service
     // going away). A status already queued (the terminal one) is still delivered.
     fun stop() {
         synchronized(lock) {
             stopped = true
+            released = true
             cancelTimerLocked()
         }
         shutdownWorkers()
