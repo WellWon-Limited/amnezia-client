@@ -2122,6 +2122,7 @@ static void lateGrantOwnership()
         QList<QTcpSocket *> pendingDeletes;
         QStringList deletes, log;    // lease ids of DELETEs; "POST" / "DELETE" in arrival order
         QStringList deleteTokens;    // the renew_token field of each DELETE's body ("" = none)
+        QList<QJsonObject> deleteBodies; // the whole JSON body of each DELETE (the final report, if any, is in it)
         QString token;               // the renew token its grants carry (empty = an older server: none)
         bool holdDeletes = false;
         bool dropDeletes = false; // the direct API is dead for a release: the connection is cut, no answer
@@ -2138,8 +2139,8 @@ static void lateGrantOwnership()
                         if (rq.startsWith("DELETE /v1/upstream/lease/")) {
                             deletes << QString::fromLatin1(rq.mid(26, rq.indexOf(' ', 26) - 26));
                             const int bodyAt = rq.indexOf("\r\n\r\n");
-                            deleteTokens << QJsonDocument::fromJson(bodyAt < 0 ? QByteArray() : rq.mid(bodyAt + 4))
-                                                .object().value(QLatin1String("renew_token")).toString();
+                            deleteBodies << QJsonDocument::fromJson(bodyAt < 0 ? QByteArray() : rq.mid(bodyAt + 4)).object();
+                            deleteTokens << deleteBodies.last().value(QLatin1String("renew_token")).toString();
                             log << QStringLiteral("DELETE");
                             deleteTimes << sinceStart.elapsed();
                             if (dropDeletes)
@@ -2653,6 +2654,60 @@ static void lateGrantOwnership()
         r.apply(r.owner.disconnect(r.now()));
         pump(400);
         CHECK(r.edge.deletes.size() == 1 && r.edge.deleteTokens == QStringList{ QStringLiteral("tlr1.own") } && r.owner.pendingReleases() == 0);
+    }
+    // Round 11 R2: Stop while a seat confirmation retry is still late. The session (macOS GUI owner: it reports itself) confirmed its
+    // seat with the retry C2; the first confirmation C1 is still unanswered; Stop holds the release that carries the FINAL meter
+    // report until the tunnel is confirmed down. C1's answer (the same start: the same lease and token) lands while the release is
+    // held. It must not replace that release with one that has no report: the DELETE that reaches the server is ONE and carries
+    // the report (rx 4096). Before, the late answer re-registered the lease, the held release was dropped as "not wanted any more"
+    // and the DELETE that went out had no body but the token - the session's accounting was lost.
+    {
+        Rig r;
+        TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {});
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = true;
+        r.owner.setOptions(op);
+        r.edge.token = QStringLiteral("tlr1.report");
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"inbounds\":[]}");
+        sc.configSha256 = LeaseEdge::cfgSha();
+        sc.tunnelApiBase = r.edge.base();
+        sc.packRevision = 5;
+        r.begin(sc); // the direct acquire is never answered: the hedge starts the pack tunnel
+        QElapsedTimer t;
+        t.start();
+        while (!r.owner.provisionalPending() && t.elapsed() < 4000)
+            pump(10);
+        CHECK(r.owner.provisionalPending());
+        r.client.tunnelStarted();
+        r.apply(r.owner.tunnelUp(r.now())); // Connected: the confirmation C1 (post 1) goes through the tunnel's API base
+        t.start();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 2000)
+            pump(10);
+        CHECK(r.edge.posts.size() == 2);
+        t.start();
+        while (r.edge.posts.size() < 3 && t.elapsed() < 15000) { // C1 times out; the retry C2 (post 2) is sent by the owner's tick
+            pump(50);
+            r.apply(r.owner.tick(r.now() + 8000));
+        }
+        CHECK(r.edge.posts.size() == 3);
+        r.edge.grant(2); // C2: the seat is confirmed
+        pump(300);
+        CHECK(r.owner.holdsLease(QLatin1String(kLease)) && !r.owner.provisionalPending());
+        r.owner.onBytes(0, 0);
+        r.owner.onBytes(4096, 512); // what the session carried
+        r.client.holdReleasesForStop();
+        r.apply(r.owner.disconnect(r.now())); // Stop: the release with the final report is held for the confirmed stop
+        CHECK(r.edge.deletes.isEmpty());
+        r.edge.grant(1); // C1's answer (the same lease, the same token) lands while the release is held
+        pump(300);
+        CHECK(r.edge.deletes.isEmpty() && r.owner.pendingReleases() == 1);
+        r.client.tunnelStopped(); // the confirmed stop
+        pump(500);
+        CHECK(r.edge.deletes == QStringList{ QLatin1String(kLease) } && r.edge.deleteTokens == QStringList{ QStringLiteral("tlr1.report") });
+        const QJsonObject body = r.edge.deleteBodies.value(0);
+        CHECK(body.value(QLatin1String("seq")).toInt() >= 1 && body.value(QLatin1String("rx_bytes_delta")).toInt() == 4096
+              && body.value(QLatin1String("tx_bytes_delta")).toInt() == 512); // the final report travelled with the one DELETE
     }
     // Round 9 R1: the release of a session carries the token of ITS grant on the wire (and a lease whose grant had no token,
     // an older server, is released without the field).
