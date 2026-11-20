@@ -67,10 +67,6 @@ public:
     // Asked before every resend of a release and before a held one is sent: false = the owner took the release back
     // (a start of its profile - UpstreamLeaseOwner.h, row S1): it is dropped silently, no onReleaseDone.
     std::function<bool(quint64 requestId)> releaseWanted;
-    // How long the attempt waits for the direct acquire of this profile (UpstreamLeaseOwner::hasStandbyFor decides:
-    // a profile with a standby-pack entry waits only the hedge, row S4 - and only for the DIRECT acquire, never for the
-    // seat confirmation through the tunnel, round 9 R2). Unset = the full lease share.
-    std::function<bool(const QString &profileId)> hasStandbyFor;
     void releaseVia(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     bool acquireAlive(const QString &profileId) const override { return acquireOutFor(profileId); }
     // The spacing budget of a release's resends (UpstreamLeaseWire.h::seatReleaseNext; tests shorten it).
@@ -78,7 +74,7 @@ public:
 
     // IUpstreamLeaseIo
     void acquire(quint64 requestId, const QString &profileId, LeaseKind kind, const QString &standbyConfigSha256,
-                 const LeaseRoute &route, const QString &sessionNonce, qint64 sessionOrder) override;
+                 const LeaseRoute &route, const QString &sessionNonce, qint64 sessionOrder, bool hedged) override;
     void renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     void release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     quint64 lastReleaseRequestId() const { return m_lastReleaseId; }

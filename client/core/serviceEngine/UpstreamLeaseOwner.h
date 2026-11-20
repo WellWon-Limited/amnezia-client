@@ -623,7 +623,7 @@ private:
             }
             case LeaseActionKind::TryNextCandidate: {
                 // Before bring-up. A transport failure with a usable standby entry: provisional start.
-                if (m_bringUp && m_standby && mayStartProvisional(m_lastAcquire)) {
+                if (provisionalFallback() && mayStartProvisional(m_lastAcquire)) {
                     const StandbyCandidate sc = *m_standby;
                     m_provisionalBase = sc.tunnelApiBase;
                     apply(m_machine.startProvisional(m_profileId, machineScope(), sc.configSha256, sc.tunnelApiBase,
@@ -885,11 +885,6 @@ public:
     {
         return m_active && !leaseId.isEmpty() && m_machine.phase() == LeasePhase::Active && m_machine.leaseId() == leaseId;
     }
-    // The live session of this profile can start from a standby-pack entry (so it does not wait the full lease share).
-    bool hasStandbyFor(const QString &profileId) const
-    {
-        return m_active && !m_prepareOnly && m_standby.has_value() && m_profileId == profileId;
-    }
     bool requestSent() const { return m_requestSent; }
     int unsentCount() const { return countIn(RelState::Unsent); }
     int requestsOutstanding() const { return m_machine.cancelledAcquiresPending() + countIn(RelState::Out); }
@@ -932,18 +927,25 @@ private:
     void sendAcquire(const LeaseAction &a)
     {
         m_requestSent = true; // something really left for the server: evidence about the path may follow
-        emitAcquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route, a.standby);
+        // The hedge (round 18 R1): the machine says which acquire precedes a possible provisional start, this owner knows whether the
+        // session has a pack entry to start from - together they decide; the client only applies the decided wait. An active session's
+        // re-acquire after its lease ran out and the seat confirmation through the tunnel wait the full lease share.
+        emitAcquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route, a.standby,
+                    a.beforeProvisionalStart && provisionalFallback());
     }
     // THE one call that puts an acquire on the wire: the session's nonce on it, and what its answer will be asked about (which
     // START it belongs to, which route it proves).
     void emitAcquire(quint64 requestId, const QString &profileId, LeaseKind kind, const QString &sha, const LeaseRoute &route,
-                     bool viaTunnel)
+                     bool viaTunnel, bool hedged)
     {
         noteAcquireNonce(requestId, m_nonce);
         noteAcquireRoute(requestId, viaTunnel);
         if (m_io)
-            m_io->acquire(requestId, profileId, kind, sha, route, m_nonce, m_sessionOrder);
+            m_io->acquire(requestId, profileId, kind, sha, route, m_nonce, m_sessionOrder, hedged);
     }
+    // A transport failure of the start's first acquire starts this session from its standby-pack entry (TryNextCandidate): a bring-up
+    // (not a seat held for a switch) that has an entry. The one fact behind the provisional start and the hedge of the acquire before it.
+    bool provisionalFallback() const { return m_bringUp && !m_prepareOnly && m_standby.has_value(); }
     // Like dispatchLeaseIo (UpstreamLeaseMachine.h) but acquires go through sendAcquire; returns the other actions.
     // `merged` = the releases of the step that were folded into a pending release of the same lease (registerReleasesOf): not sent.
     QVector<LeaseAction> dispatchStep(const LeaseStep &step, const QSet<quint64> &merged)

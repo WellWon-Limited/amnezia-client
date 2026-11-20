@@ -334,8 +334,8 @@ inline int upstreamAcquireTimeoutMsTuned()
     return attemptTimingsTuned().providerLeaseMs;
 }
 
-// How long the attempt waits for the direct lease of a profile that has a standby-pack entry (S4): the hedge, never
-// longer than the full wait.
+// How long the attempt waits for the acquire of a start that falls back to a provisional start from a standby-pack entry (S4;
+// UpstreamLeaseOwner decides which acquire that is - round 18 R1): the hedge, never longer than the full wait.
 inline int upstreamAcquireHedgeMsTuned()
 {
     const path::AttemptTimings t = attemptTimingsTuned();

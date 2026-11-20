@@ -225,14 +225,26 @@ has "$(grep 'upstreamRequestSent' "$ADH")" 'm_upOwner.requestSent()' || bad "S3:
 has "$ctor" 'm_upOwner.onReleaseDone(id, upstreamClockMs(), confirmed)' || bad "S2: the adapter must pass the release's outcome to the owner (onReleaseDone confirmed)"
 has "$(body_of "$CLI" 'void UpstreamLeaseClient::releaseVia(')" 'sendRelease(requestId, leaseId, meter, route' || bad "S2: releaseVia must send over the route it is given (no direct-path strip)"
 
-# S4: a profile with a standby-pack entry waits only the hedge for the direct lease; the adapter tells the client which.
-has "$ctor" 'm_upOwner.hasStandbyFor(profile)' || bad "S4: the adapter must tell the client which profile has a standby entry (hasStandbyFor)"
-has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'upstreamAcquireHedgeMsTuned()' || bad "S4: acquire() must use the hedge for a profile with a standby entry"
-# R2 (round 9): the hedge is for the direct acquire only - decided by the request's own parameters (no standby sha, no tunnel
-# base), never by "the profile has a pack entry" alone: the seat confirmation through the tunnel keeps the full bound.
-has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'const bool directRequest = standbyConfigSha256.isEmpty() && route.apiBase.isEmpty();' \
-    && has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" '(directRequest && hasStandbyFor && hasStandbyFor(profileId))' \
-    || bad "R2: the hedge must apply to the direct acquire only, not to the confirmation through the tunnel"
+# S4 + round 18 R1: the hedge is a property of ONE moment - the acquire of a start that can still fall back to a provisional start
+# (the lease machine is Acquiring). The machine SAYS it on the SendAcquire action (beforeProvisionalStart, set from its phase in
+# its one sendAcquire), the owner combines it with its pack entry and hands the client a decided `hedged`; the client applies it and
+# infers nothing from the request (before: "a direct request of a profile with a pack entry" also hedged an ACTIVE session's
+# re-acquire after its lease ran out - its in-time grant became a late one and the renewals never resumed).
+MCH="$SE/UpstreamLeaseMachine.h"
+acq="$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')"
+has "$acq" 'const int waitMs = hedged ? upstreamAcquireHedgeMsTuned() : upstreamAcquireTimeoutMsTuned();' \
+    || bad "S4: acquire() must wait the hedge exactly when the owner decided it (hedged), the full share otherwise"
+! has "$(grep -v '^[[:space:]]*//' "$CLI" "$SE/UpstreamLeaseClient.h" "$ADP")" 'hasStandbyFor' \
+    || bad "round 18 R1: the client must not infer the hedge from the profile's pack entry (hasStandbyFor)"
+! has "$acq" 'standbyConfigSha256.isEmpty() && route.apiBase.isEmpty()' \
+    || bad "round 18 R1: the client must not infer the hedge from the request's parameters (direct request)"
+[ "$(grep -v '^[[:space:]]*//' "$MCH" | grep -c 'a.beforeProvisionalStart = ')" = "1" ] \
+    && has "$(grep -v '^[[:space:]]*//' "$MCH")" 'a.beforeProvisionalStart = m_phase == LeasePhase::Acquiring;' \
+    || bad "round 18 R1: the machine must set beforeProvisionalStart in one place, from its phase (Acquiring)"
+has "$(grep -v '^[[:space:]]*//' "$OWN")" 'a.beforeProvisionalStart && provisionalFallback()' \
+    || bad "round 18 R1: the owner must hedge only the machine's acquire before a provisional start of a session with a pack entry"
+has "$(grep -v '^[[:space:]]*//' "$OWN")" 'if (provisionalFallback() && mayStartProvisional(m_lastAcquire)) {' \
+    || bad "round 18 R1: the hedge and the provisional start must rest on the same owner fact (provisionalFallback)"
 
 # Round 12 R2: the server's order floor (min_session_order) is taken from ANY acquire answer of the API in ONE place of the client,
 # reaches the owner's counter, and the counter's store is read again before every allocation (a second process may have moved it).

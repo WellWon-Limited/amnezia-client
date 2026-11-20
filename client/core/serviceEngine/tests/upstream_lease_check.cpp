@@ -1100,11 +1100,61 @@ static void provisional()
     CHECK(rel.leaseId == kLeaseA && rel.meter.seq == 8 && rel.meter.scope == MeterScope::Proxy);
 }
 
+// Round 18 R1: the machine SAYS which acquire precedes a possible provisional start - it alone knows its phase. Only an acquire sent while
+// Acquiring (the first one of a start and its re-issue after an order-floor denial) carries beforeProvisionalStart; the seat confirmation
+// of a provisional session (tunnelUp), its retry (tick) and re-issue, and an ACTIVE session's re-acquire after its lease ran out, its retry
+// and re-issue carry false - the last one is a direct request with no standby sha all the same, which is why nothing may infer it.
+static void hedgeMoment()
+{
+    const QString packSha = QString::fromLatin1(QCryptographicHash::hash(kConfig, QCryptographicHash::Sha256).toHex());
+    const QString base = QStringLiteral("https://t.example.net");
+    // Acquiring -> Active (lease ran out)
+    LeaseStep s;
+    UpstreamLeaseMachine m = started(s);
+    LeaseAction a = must(s, LeaseActionKind::SendAcquire);
+    CHECK(m.phase() == LeasePhase::Acquiring && a.beforeProvisionalStart && !a.standby);
+    s = m.reissueAcquire(a.requestId, T + 10);
+    const LeaseAction again = must(s, LeaseActionKind::SendAcquire);
+    CHECK(!s.inert && again.requestId != a.requestId && again.beforeProvisionalStart);
+    s = m.onAcquireReply(again.requestId, granted(leaseJson()), T + 20);
+    CHECK(m.phase() == LeasePhase::Active);
+    const qint64 dead = m.deadlineMs();
+    s = m.tick(dead);
+    a = must(s, LeaseActionKind::SendAcquire);
+    CHECK(!a.beforeProvisionalStart && !a.standby && a.configSha256.isEmpty() && a.route.apiBase.isEmpty()); // direct, yet not before a start
+    s = m.reissueAcquire(a.requestId, dead + 10);
+    a = must(s, LeaseActionKind::SendAcquire);
+    CHECK(!s.inert && !a.beforeProvisionalStart);
+    s = m.onAcquireReply(a.requestId, acquireFailed(), dead + 20); // retried on the backoff
+    s = m.tick(s.wakeAtMs);
+    a = must(s, LeaseActionKind::SendAcquire);
+    CHECK(m.phase() == LeasePhase::Active && !a.beforeProvisionalStart);
+    // Provisional: nothing is sent before the tunnel; the confirmation, its re-issue and its retry are not before a start
+    UpstreamLeaseMachine p;
+    s = p.startProvisional(kProfileId, MeterScope::Tunnel, packSha, base, 100, 12000, T);
+    CHECK(!s.has(LeaseActionKind::SendAcquire));
+    s = p.tunnelUp(T + 1);
+    a = must(s, LeaseActionKind::SendAcquire);
+    CHECK(a.standby && !a.beforeProvisionalStart);
+    s = p.reissueAcquire(a.requestId, T + 2);
+    a = must(s, LeaseActionKind::SendAcquire);
+    CHECK(!s.inert && a.standby && !a.beforeProvisionalStart);
+    s = p.onAcquireReply(a.requestId, acquireFailed(), T + 3);
+    s = p.tick(s.wakeAtMs);
+    a = must(s, LeaseActionKind::SendAcquire);
+    CHECK(p.phase() == LeasePhase::Provisional && a.standby && !a.beforeProvisionalStart);
+    // Failed (the first acquire did not succeed): nothing to re-issue
+    UpstreamLeaseMachine f = started(s);
+    const quint64 fid = sentId(s, LeaseActionKind::SendAcquire);
+    f.onAcquireReply(fid, acquireFailed(), T + 1);
+    CHECK(f.phase() == LeasePhase::Failed && f.reissueAcquire(fid, T + 2).inert);
+}
+
 struct FakeIo : IUpstreamLeaseIo {
     QStringList calls;
-    void acquire(quint64 id, const QString &p, LeaseKind k, const QString &, const LeaseRoute &, const QString &, qint64) override
+    void acquire(quint64 id, const QString &p, LeaseKind k, const QString &, const LeaseRoute &, const QString &, qint64, bool hedged) override
     {
-        calls << QStringLiteral("acquire %1 %2 %3").arg(id).arg(p, leaseKindName(k));
+        calls << QStringLiteral("acquire %1 %2 %3%4").arg(id).arg(p, leaseKindName(k), hedged ? QStringLiteral(" hedged") : QString());
     }
     void renew(quint64 id, const QString &l, const UpstreamMeter &m, const LeaseRoute &) override
     {
@@ -1122,6 +1172,7 @@ static void dispatch()
     LeaseStep s;
     UpstreamLeaseMachine m = started(s);
     CHECK(dispatchLeaseIo(s, io).isEmpty() && io.calls.size() == 1 && io.calls[0].startsWith("acquire"));
+    CHECK(!io.calls[0].endsWith(QStringLiteral(" hedged"))); // the machine alone knows no pack entry: never hedged
     s = m.onAcquireReply(sentId(s, LeaseActionKind::SendAcquire), granted(leaseJson()), T);
     const QVector<LeaseAction> rest = dispatchLeaseIo(s, io);
     CHECK(rest.size() == 2 && io.calls.size() == 1);
@@ -1209,6 +1260,7 @@ int main(int argc, char **argv)
     revisions();
     renewSchedule();
     dispatch();
+    hedgeMoment();
     routeAndScope();
     provisional();
     releaseResend();

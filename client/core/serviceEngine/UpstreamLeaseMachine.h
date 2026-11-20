@@ -160,6 +160,11 @@ struct LeaseAction {
     bool provisional = false;    // LeaseReady of a provisional start
     bool standby = false;        // SendAcquire through the tunnel for a provisional session
     QString configSha256;        // SendAcquire with standby: the pack entry's sha
+    // SendAcquire: sent while the session is Acquiring - no tunnel of it exists yet, so a transport failure of THIS request may still
+    // start the session from a standby-pack entry (whether one exists is the owner's fact). False for every other acquire: the seat
+    // confirmation of a provisional session and an active session's re-acquire after its lease ran out (also when re-issued after an
+    // order-floor denial) have nothing to fall back to (round 18 R1).
+    bool beforeProvisionalStart = false;
     QString reason;
     QString detail;              // LeaveNode: the server's optional reason (switch log only; never decides)
     qint64 upstreamRevision = 0;
@@ -207,9 +212,12 @@ public:
     // sessionNonce: the nonce of the START this acquire belongs to (UpstreamLeaseWire.h::kUpstreamAcquireNonceField); the
     // owner decides it, the machine knows nothing of it.
     // sessionOrder: the start's order, sent with the nonce (UpstreamLeaseWire.h::kUpstreamAcquireOrderField); -1 = none.
+    // hedged: the owner's decision that the attempt waits for this request only the hedge (attempt_provider_lease_hedge_ms) - it is
+    // the acquire of a start that falls back to a provisional start from a pack entry if it is slow (LeaseAction::
+    // beforeProvisionalStart + the owner's pack entry); false = the full lease share. The implementation never infers it.
     virtual void acquire(quint64 requestId, const QString &profileId, LeaseKind kind,
                          const QString &standbyConfigSha256, const LeaseRoute &route,
-                         const QString &sessionNonce, qint64 sessionOrder) = 0;
+                         const QString &sessionNonce, qint64 sessionOrder, bool hedged) = 0;
     virtual void renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
                        const LeaseRoute &route) = 0;
     virtual void release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
@@ -231,7 +239,8 @@ inline QVector<LeaseAction> dispatchLeaseIo(const LeaseStep &step, IUpstreamLeas
     for (const LeaseAction &a : step.actions) {
         switch (a.kind) {
         case LeaseActionKind::SendAcquire:
-            io.acquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route, QString(), -1); // the machine knows no nonce
+            // the machine knows no nonce and no pack entry (nothing to fall back to: never hedged)
+            io.acquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route, QString(), -1, false);
             break;
         case LeaseActionKind::SendRenew: io.renew(a.requestId, a.leaseId, a.meter, a.route); break;
         case LeaseActionKind::SendRelease: io.release(a.requestId, a.leaseId, a.meter, a.route); break;
@@ -705,6 +714,7 @@ private:
         a.requestId = m_inflightId;
         a.profileId = m_profileId;
         a.leaseKind = m_kind;
+        a.beforeProvisionalStart = m_phase == LeasePhase::Acquiring; // only the machine knows its phase: it says it, nobody infers it
         if (m_phase == LeasePhase::Provisional) {
             a.standby = true;
             a.configSha256 = m_standbySha;

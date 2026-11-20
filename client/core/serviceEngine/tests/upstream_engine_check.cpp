@@ -44,6 +44,7 @@
 
 #include <openssl/evp.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 
@@ -232,12 +233,12 @@ static void identityAndReseed()
 
 // --- 5) the lease owner -------------------------------------------------------------------------------
 struct FakeIo : IUpstreamLeaseIo {
-    struct Call { QString what; quint64 id; QString profileOrLease; QString sha; LeaseRoute route; UpstreamMeter meter; QString nonce; qint64 order = -1; };
+    struct Call { QString what; quint64 id; QString profileOrLease; QString sha; LeaseRoute route; UpstreamMeter meter; QString nonce; qint64 order = -1; bool hedged = false; };
     QVector<Call> calls;
     void acquire(quint64 id, const QString &profileId, LeaseKind, const QString &sha, const LeaseRoute &route,
-                 const QString &nonce, qint64 order) override
+                 const QString &nonce, qint64 order, bool hedged) override
     {
-        calls << Call{QStringLiteral("acquire"), id, profileId, sha, route, {}, nonce, order};
+        calls << Call{QStringLiteral("acquire"), id, profileId, sha, route, {}, nonce, order, hedged};
     }
     void renew(quint64 id, const QString &leaseId, const UpstreamMeter &m, const LeaseRoute &route) override
     {
@@ -2150,6 +2151,7 @@ static void lateGrantOwnership()
         QList<QTcpSocket *> posts;   // acquire requests, in arrival order
         QList<QTcpSocket *> pendingDeletes;
         QStringList deletes, log;    // lease ids of DELETEs; "POST" / "DELETE" in arrival order
+        QStringList renews;          // lease ids of renewals (never answered here)
         QStringList deleteTokens;    // the renew_token field of each DELETE's body ("" = none)
         QList<QJsonObject> deleteBodies; // the whole JSON body of each DELETE (the final report, if any, is in it)
         QString token;               // the renew token its grants carry (empty = an older server: none)
@@ -2182,6 +2184,9 @@ static void lateGrantOwnership()
                                 pendingDeletes << s;
                             else
                                 finishDelete(s);
+                        } else if (rq.startsWith("POST /v1/upstream/lease/")) {
+                            const int idEnd = rq.indexOf('/', 24);
+                            renews << QString::fromLatin1(rq.mid(24, idEnd - 24));
                         } else if (rq.startsWith("POST /v1/upstream/lease ")) {
                             posts << s;
                             log << QStringLiteral("POST");
@@ -2261,7 +2266,6 @@ static void lateGrantOwnership()
             };
             client.onAcquireEnded = [this](const QString &p, const QString &l, bool out) { apply(owner.acquireEnded(p, l, out)); };
             client.onRouteProved = [this](quint64 id) { owner.routeProved(id, now()); };
-            client.hasStandbyFor = [this](const QString &p) { return owner.hasStandbyFor(p); };
             client.releaseWanted = [this](quint64 id) {
                 QVector<UpstreamOwnerEvent> ev;
                 const bool wanted = owner.releaseWanted(id, now(), ev);
@@ -2269,7 +2273,8 @@ static void lateGrantOwnership()
                 return wanted;
             };
         }
-        qint64 now() const { return clock.elapsed(); }
+        qint64 skewMs = 0; // time the clock jumps (a sleep of the Mac): the owner's clock is the sleep-proof one
+        qint64 now() const { return clock.elapsed() + skewMs; }
         void apply(const QVector<UpstreamOwnerEvent> &ev)
         {
             for (const UpstreamOwnerEvent &e : ev)
@@ -2704,6 +2709,60 @@ static void lateGrantOwnership()
         r.apply(r.owner.disconnect(r.now()));
         pump(500);
         CHECK(r.edge.deletes.size() == 1 && r.edge.deleteTokens == QStringList{ QStringLiteral("tlr1.conf") });
+    }
+    // Round 18 R1: the hedge belongs to ONE moment - the acquire of a start that can still fall back to a provisional start (the lease
+    // machine is Acquiring, no tunnel of the session exists). An ACTIVE session's re-acquire after its lease ran out (the Mac slept
+    // longer than the lease, woke with the tunnel alive) is a direct request too, and the profile has a pack entry - but nothing falls
+    // back: it keeps the full wait. Here the API answers it in 2 s (slower than the 1.2 s hedge, inside the 5 s wait) with a NEW lease
+    // id (the old one expired on the server): the session holds the new lease, the next renewal goes out for it on schedule, nothing is
+    // kept Deferred. Before: the attempt failed at the hedge, the grant went to the late path (kept Deferred as the start's own) and the
+    // session kept renewing nothing - every retry cut the same way.
+    {
+        Rig r;
+        TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 5000}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {});
+        UpstreamLeaseOwner::Options keep;
+        keep.keepOwnership = true; // the macOS GUI owner (AVPN_UPSTREAM_GUI_OWNER): renewals stay in the app
+        r.owner.setOptions(keep);
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"inbounds\":[]}");
+        sc.configSha256 = LeaseEdge::cfgSha();
+        sc.tunnelApiBase = r.edge.base();
+        sc.packRevision = 5;
+        r.begin(sc);
+        QElapsedTimer t;
+        t.start();
+        while (r.edge.posts.size() < 1 && t.elapsed() < 2000)
+            pump(10);
+        r.edge.grant(0); // the direct grant in time: the session runs on its lease
+        t.start();
+        while (!r.owner.holdsLease(QLatin1String(kLease)) && t.elapsed() < 2000)
+            pump(10);
+        CHECK(r.owner.holdsLease(QLatin1String(kLease)) && !r.owner.provisionalPending());
+        r.client.tunnelStarted();
+        r.apply(r.owner.tunnelUp(r.now()));
+        r.skewMs += 901000; // the Mac slept past the lease's TTL; the tunnel is alive after the wake
+        r.apply(r.owner.tick(r.now()));
+        t.start();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 2000)
+            pump(10);
+        CHECK(r.edge.posts.size() == 2); // the re-acquire
+        const QString renewed = QStringLiteral("LeaseAfterExpiryCCCCCCCCCCCCCCCCCCCCCCCCCC");
+        r.edge.leaseId = renewed; // the server's new lease id for the same start (the old one expired)
+        pump(2000);              // slower than the hedge, inside the full wait
+        r.edge.grant(1);
+        t.start();
+        while (!r.owner.holdsLease(renewed) && t.elapsed() < 1500)
+            pump(10);
+        CHECK(r.owner.holdsLease(renewed) && r.owner.leaseId() == renewed);
+        CHECK(r.owner.pendingReleases() == 0 && r.edge.deletes.isEmpty()); // nothing Deferred, nothing released
+        r.skewMs += 301000; // renew_after_s 300: the next renewal is due
+        r.apply(r.owner.tick(r.now()));
+        t.start();
+        while (r.edge.renews.isEmpty() && t.elapsed() < 1500)
+            pump(10);
+        CHECK(r.edge.renews == QStringList{ renewed });
+        r.apply(r.owner.disconnect(r.now()));
+        pump(300);
     }
     // Row G1: the direct acquire exceeds its wait, the tunnel starts from the STANDBY pack (provisional); the original
     // request then returns L late: it is the session's OWN start (same nonce, hence the very token the confirmation will get),
@@ -3260,11 +3319,11 @@ static void lateOlderStart()
 // everything is answered and the session stopped no lease is left live on the server, (4) nothing waits for ever
 // (no start queued, no gated acquire, no release pending or held).
 struct LedgerWorld {
-    struct Acq { quint64 id; bool processed = false, delivered = false, timedOut = false, lateDone = false; QString lease, token, nonce; qint64 order = -1; bool grant = false, stale = false; qint64 floorOrder = -1; };
+    struct Acq { quint64 id; bool processed = false, delivered = false, timedOut = false, lateDone = false; QString lease, token, nonce; qint64 order = -1; bool grant = false, stale = false; qint64 floorOrder = -1; bool hedged = false; };
     struct Rel { quint64 id; QString lease, token; int unprocessed = 0, unanswered = 0, tries = 0; bool done = false, held = false, report = false; };
     struct Io : IUpstreamLeaseIo {
         LedgerWorld *w = nullptr;
-        void acquire(quint64 id, const QString &, LeaseKind, const QString &, const LeaseRoute &, const QString &nonce, qint64 order) override { w->onAcquireSent(id, nonce, order); }
+        void acquire(quint64 id, const QString &, LeaseKind, const QString &, const LeaseRoute &, const QString &nonce, qint64 order, bool hedged) override { w->onAcquireSent(id, nonce, order, hedged); }
         void renew(quint64, const QString &, const UpstreamMeter &, const LeaseRoute &) override {}
         void release(quint64 id, const QString &lease, const UpstreamMeter &meter, const LeaseRoute &route) override { w->clientRelease(id, lease, route.renewToken, meter.seq >= 1); }
         bool acquireAlive(const QString &) const override { return w->acquireOut(); }
@@ -3302,7 +3361,7 @@ struct LedgerWorld {
                 return true;
         return false;
     }
-    void onAcquireSent(quint64 id, const QString &nonce, qint64 order)
+    void onAcquireSent(quint64 id, const QString &nonce, qint64 order, bool hedged)
     {
         // A start waits for nothing: no release, no older request. The client's own rules, checked on every acquire it sends:
         if (nonce.isEmpty() || order < 0)
@@ -3323,6 +3382,7 @@ struct LedgerWorld {
         a.id = id;
         a.nonce = nonce;
         a.order = order;
+        a.hedged = hedged; // the client waits only the hedge for it (the owner's decision)
         acqs << a;
     }
     // UpstreamLeaseClient::release / sendRelease
@@ -3542,6 +3602,27 @@ struct LedgerWorld {
             apply(o.acquireEnded(profile(), QString(), newerOut(i)));
         o.routeProved(a.id, now); // the same single place, for the late path too (round 10 R4)
     }
+    // Round 18 R1: the server answers an ACTIVE session's re-acquire later than the hedge but inside the full wait (2 s against 1.2 s and
+    // 6 s). The client stops waiting only for an acquire the owner hedged (the HTTP request lives on). At quiescence a granted re-acquire
+    // is the session's lease, live on the server - never a Deferred grant of the session's own start beside an expired lease.
+    int afterHedge = 0, afterHedgeGrants = 0;
+    void answerAfterHedge(int i)
+    {
+        trace << QStringLiteral("afterHedge%1").arg(i);
+        ++afterHedge;
+        if (acqs[i].hedged)
+            acqTimeout(i); // the client's wait (the hedge) ends before the answer
+        acqProcess(i);
+        if (acqs[i].timedOut)
+            acqLate(i);
+        else
+            acqDeliver(i);
+        if (!acqs[i].grant || !o.active())
+            return;
+        ++afterHedgeGrants;
+        if (!(o.holdsLease(live) && o.machine().leaseId() == live && o.machine().deadlineMs() > now && !o.machine().requestInFlight()))
+            violations << QStringLiteral("an active session's re-acquire answered after the hedge did not become the session's lease");
+    }
     void relHit(int i)
     {
         trace << QStringLiteral("%1").arg(QLatin1String("relHit")) + (QLatin1String("") + QString::number(i));
@@ -3709,7 +3790,7 @@ struct LedgerWorld {
 
 static void ledgerModel()
 {
-    int activeFloor = 0, sequences = 0, steps = 0, failedSeqs = 0, deletes = 0, unsentSeqs = 0, staleDenials = 0, expiries = 0, reports = 0;
+    int afterHedge = 0, afterHedgeGrants = 0, activeFloor = 0, sequences = 0, steps = 0, failedSeqs = 0, deletes = 0, unsentSeqs = 0, staleDenials = 0, expiries = 0, reports = 0;
     QMap<QString, int> kinds;
     for (int seed = 1; seed <= 6000; ++seed) {
         quint32 rng = quint32(seed) * 2654435761u + 12345u;
@@ -3721,9 +3802,22 @@ static void ledgerModel()
         w.o.setOptions(op);
         if (op.keepOwnership && seed % 3 == 0) { // a session that already holds its seat (round 14 R1: the lease can run out and be re-acquired)
             w.forceGrant = true;
-            w.begin(false);
+            w.begin((seed / 12) % 2 == 0); // half of them with a pack entry (round 18 R1: the profile could start provisionally)
             w.acqProcess(0);
             w.acqDeliver(0);
+            if ((seed / 24) % 2 == 0) { // the Mac slept past the lease and woke with the tunnel alive (round 18 R1): the re-acquire is slow
+                w.now = w.o.machine().deadlineMs() + 60000;
+                if (!w.live.isEmpty() && w.liveSince + 900000 <= w.now) {
+                    w.live.clear();
+                    w.liveToken.clear();
+                    w.liveNonce.clear();
+                    ++w.expiries;
+                }
+                const int sent = w.acqs.size();
+                w.apply(w.o.tick(w.now));
+                if (w.acqs.size() == sent + 1)
+                    w.answerAfterHedge(sent);
+            }
             w.forceGrant = false;
         }
         for (int step = 0; step < 36; ++step, ++steps) {
@@ -3777,9 +3871,14 @@ static void ledgerModel()
                     w.trace << QStringLiteral("expiry-tick");
                     const int sent = w.acqs.size();
                     w.apply(w.o.tick(w.now));
-                    if (w.acqs.size() == sent + 1 && rnd(2) == 0) { // the re-acquire reaches the server and its answer comes back at once
-                        w.acqProcess(sent);
-                        w.acqDeliver(sent);
+                    if (w.acqs.size() == sent + 1) {
+                        const int when = rnd(4);
+                        if (when == 0) { // the re-acquire reaches the server and its answer comes back at once
+                            w.acqProcess(sent);
+                            w.acqDeliver(sent);
+                        } else if (when != 3) { // ... later than the hedge, inside the full wait (round 18 R1)
+                            w.answerAfterHedge(sent);
+                        }
                     }
                 }
                 break;
@@ -3827,6 +3926,8 @@ static void ledgerModel()
         deletes += w.deletesSent;
         staleDenials += w.staleDenials;
         activeFloor += w.activeFloorDenials;
+        afterHedge += w.afterHedge;
+        afterHedgeGrants += w.afterHedgeGrants;
         expiries += w.expiries;
         reports += w.reportTaken.size();
         if (!w.violations.isEmpty()) {
@@ -3841,7 +3942,9 @@ static void ledgerModel()
                 sequences, steps, deletes, unsentSeqs, failedSeqs);
     std::printf("ledger model server: %d stale_session denials, %d lease expiries, %d final reports taken\n", staleDenials, expiries, reports);
     std::printf("ledger model: %d floor denials of an active session's re-acquire\n", activeFloor);
+    std::printf("ledger model: %d active re-acquires answered after the hedge, %d of them granted\n", afterHedge, afterHedgeGrants);
     CHECK(activeFloor > 20);
+    CHECK(afterHedgeGrants > 200);
     CHECK(failedSeqs == 0 && deletes > 1000 && unsentSeqs > 100 && staleDenials > 100 && expiries > 100 && reports > 100);
 }
 
@@ -4071,7 +4174,7 @@ static void orderFloorCheck()
         int answers = 0;
         client.onSessionOrderFloor = [&floors](qint64 v) { floors << v; };
         client.onAcquire = [&answers](quint64, const AcquireReply &) { ++answers; };
-        client.acquire(7, QStringLiteral("aaaaaaaaaaaaaaa0"), LeaseKind::Session, QString(), LeaseRoute{}, QStringLiteral("NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"), 5);
+        client.acquire(7, QStringLiteral("aaaaaaaaaaaaaaa0"), LeaseKind::Session, QString(), LeaseRoute{}, QStringLiteral("NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"), 5, false);
         pump(variant == 1 ? 3200 : 700);
         CHECK(answers >= 1);
         if (variant == 0 || variant == 1)
@@ -4089,6 +4192,84 @@ static AcquireReply floorDenial(qint64 floorOrder)
     r.error.minSessionOrder = floorOrder;
     r.fromTribeApi = true;
     return r;
+}
+// Round 18 R1: the owner hands the client the hedge for exactly the acquire the machine sends before a possible provisional start
+// (LeaseAction::beforeProvisionalStart) of a session that has a pack entry to start from (provisionalFallback). Every other acquire waits
+// the full lease share - above all an ACTIVE session's re-acquire after its lease ran out (a direct request of a profile WITH a pack
+// entry: the old inference hedged it, and its grant answered in 2 s never became the session's lease).
+static void hedgeDecision()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const qint64 T = 19000000, N = 525252;
+    // a start with a pack entry: the first acquire and its re-issue after a floor denial (still before the provisional start) are hedged;
+    // the confirmation through the tunnel, its re-issue and its retry are not
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, packFor(a), T, 1000);
+        const FakeIo::Call first = *io.last("acquire");
+        CHECK(first.hedged && first.sha.isEmpty() && first.route.apiBase.isEmpty());
+        o.onAcquireReply(first.id, floorDenial(N), T + 100);
+        const FakeIo::Call again = *io.last("acquire");
+        CHECK(again.id != first.id && again.hedged);
+        o.onAcquireReply(again.id, failed("transport"), T + 1300); // the hedge: the pack tunnel starts
+        CHECK(o.provisionalPending());
+        o.tunnelUp(T + 1500);
+        const FakeIo::Call conf = *io.last("acquire");
+        CHECK(conf.id != again.id && !conf.sha.isEmpty() && !conf.hedged);
+        o.onAcquireReply(conf.id, failed("transport"), T + 1600);
+        o.tick(o.wakeAtMs());
+        const FakeIo::Call retry = *io.last("acquire");
+        CHECK(retry.id != conf.id && !retry.sha.isEmpty() && !retry.hedged);
+    }
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, packFor(a), T, 1000);
+        o.onAcquireReply(io.last("acquire")->id, failed("transport"), T + 1200);
+        o.tunnelUp(T + 1500);
+        o.onAcquireReply(io.last("acquire")->id, floorDenial(N), T + 1600); // the confirmation's re-issue (another start)
+        CHECK(o.provisionalPending() && io.calls.size() == 3 && !io.last("acquire")->hedged);
+    }
+    // the mirror: a start WITHOUT a pack entry, and a seat held for a switch (prepare), wait the full share for their first acquire
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, std::nullopt, T, 1000);
+        CHECK(!io.last("acquire")->hedged);
+        FakeIo io2;
+        UpstreamLeaseOwner o2(&io2);
+        o2.prepare(a, 1, T, 1000);
+        CHECK(io2.calls.size() == 1 && !io2.last("acquire")->hedged);
+    }
+    // an ACTIVE session of a profile WITH a pack entry (macOS GUI owner): the re-acquire after its lease ran out, its re-issue after a floor
+    // denial and its retry on the backoff all wait the full share; the grant of the re-acquire (a new lease id) becomes the session's lease
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = true;
+        o.setOptions(op);
+        o.begin(a, 1, packFor(a), T, 1000);
+        CHECK(io.last("acquire")->hedged);
+        o.onAcquireReply(io.last("acquire")->id, grantedAs(a, "LeaseOldXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"), T + 100);
+        o.tunnelUp(T + 200);
+        const qint64 late = T + 100 + 900000 + 5000;
+        o.tick(late);
+        const FakeIo::Call re = *io.last("acquire");
+        CHECK(o.machine().acquireInFlight() == re.id && re.sha.isEmpty() && re.route.apiBase.isEmpty() && !re.hedged);
+        o.onAcquireReply(re.id, floorDenial(N), late + 50);
+        const FakeIo::Call again = *io.last("acquire");
+        CHECK(again.id != re.id && !again.hedged);
+        o.onAcquireReply(again.id, failed("transport"), late + 100);
+        o.tick(o.wakeAtMs());
+        const FakeIo::Call retry = *io.last("acquire");
+        CHECK(retry.id != again.id && !retry.hedged);
+        const int releases = int(std::count_if(io.calls.cbegin(), io.calls.cend(), [](const FakeIo::Call &c) { return c.what == QLatin1String("release"); }));
+        o.onAcquireReply(retry.id, grantedAs(a, "LeaseNewXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"), late + 400000);
+        CHECK(o.holdsLease(QLatin1String("LeaseNewXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")) && o.wakeAtMs() >= 0 && o.pendingReleases() == 0);
+        CHECK(std::count_if(io.calls.cbegin(), io.calls.cend(), [](const FakeIo::Call &c) { return c.what == QLatin1String("release"); }) == releases);
+    }
 }
 static void floorDenialRetry()
 {
@@ -4274,6 +4455,7 @@ int main(int argc, char **argv)
     sessionOrderCheck();
     orderFloorCheck();
     floorDenialRetry();
+    hedgeDecision();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();
