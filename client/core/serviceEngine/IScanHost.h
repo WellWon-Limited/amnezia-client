@@ -49,6 +49,24 @@ enum class ScanHostAvailability {
     Unavailable, // no host at all on this device / build (service missing, kill switch, unsupported tunnel)
 };
 
+// The one capability fact behind every Scanner entry point (home «Сканер» and its round button, the server list's
+// «Запустить сканер», the Support check, the coordinator's own opening): this build has a probe host the Scanner can
+// scan with. iOS: the tunnel extension / in-app host; macOS (service build), Windows, Linux: the root service's host.
+// Android: no - the in-tunnel host of release 140 probes only inside an Xray tunnel, and the owner decided (16.11) that
+// Android shows the Scanner only with its own probe process (scanner_android_probe_process, plan «процесс проб
+// Android»), which this build does not have; Android keeps the Doctor, as the public build. The macOS NE build: no host.
+// Without a host the Scanner does not exist on this build, whatever the server's switch says (scannerSwitchOn).
+inline constexpr bool kScanHostOnThisBuild =
+#if defined(Q_OS_ANDROID) || defined(MACOS_NE)
+    false;
+#else
+    true;
+#endif
+
+// The `scanner` switch as every reader takes it (the engine's scannerEnabled for QML, the coordinator's enabled): the
+// server's switch AND a probe host on this build.
+inline constexpr bool scannerSwitchOn(bool serverSwitch, bool hostOnBuild) { return serverSwitch && hostOnBuild; }
+
 inline const char *scanHostAvailabilityName(ScanHostAvailability a)
 {
     switch (a) {

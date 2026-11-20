@@ -197,7 +197,7 @@ TribeScanner::TribeScanner(const Deps &d, QObject *parent)
             self->timerFired();
     };
     m_m.restoreBudget(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetStoreKey))).array());
-    m_enabled = TuningStore::flag(QLatin1String(kScannerFlag), false);
+    m_enabled = scannerSwitchOn(TuningStore::flag(QLatin1String(kScannerFlag), false), kScanHostOnThisBuild);
     m_doctorLegacy = TuningStore::flag(QLatin1String(kDoctorLegacyFlag), false);
     m_connectOnOpen = scanConnectOnOpenFlag();
     m_returnHome = TuningStore::flag(QLatin1String(kScannerReturnHomeFlag), false);
@@ -2339,7 +2339,8 @@ void TribeScanner::reportQueueChanged() { dispatch(m_m.reportQueueState(m_engine
 
 void TribeScanner::refreshSwitches()
 {
-    const bool en = TuningStore::flag(QLatin1String(kScannerFlag), false);
+    // no probe host on this build (Android in this branch): the Scanner does not exist, as for the engine
+    const bool en = scannerSwitchOn(TuningStore::flag(QLatin1String(kScannerFlag), false), kScanHostOnThisBuild);
     const bool legacy = TuningStore::flag(QLatin1String(kDoctorLegacyFlag), false);
     const bool coo = scanConnectOnOpenFlag();
     const bool home = TuningStore::flag(QLatin1String(kScannerReturnHomeFlag), false);

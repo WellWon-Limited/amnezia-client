@@ -593,7 +593,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_processEpoch = QRandomGenerator::global()->generate64() | 1;
     m_scanAdapter = std::make_unique<ScanEngineAdapter>(this);
     m_scanHost = std::make_unique<GatedScanHost>();
-    m_scanSwitches = scannerSwitchesFrom([](const QString &k, bool d) { return avpn::TuningStore::flag(k, d); });
+    m_scanSwitches = scannerSwitchesFrom([](const QString &k, bool d) { return avpn::TuningStore::flag(k, d); },
+                                         kScanHostOnThisBuild);
 
     // dev/E2E: переопределение control plane (напр. http://127.0.0.1:48480 — локальный бэкенд)
     const QByteArray envUrl = qgetenv("AVPN_API_URL");
@@ -7724,7 +7725,8 @@ void AvpnEngineQml::shadeTapped()
 
 void AvpnEngineQml::scanApplySwitches(const char *why)
 {
-    const ScannerSwitches next = scannerSwitchesFrom([](const QString &k, bool d) { return avpn::TuningStore::flag(k, d); });
+    const ScannerSwitches next = scannerSwitchesFrom([](const QString &k, bool d) { return avpn::TuningStore::flag(k, d); },
+                                                     kScanHostOnThisBuild);
     const bool changedSwitches = next != m_scanSwitches;
     const bool wasOn = m_scanSwitches.scanner;
     m_scanSwitches = next;

@@ -752,7 +752,7 @@ static void scannerRowTapMovesLiveTunnel()
 static void scannerSwitchesAbsentIsToday()
 {
     const auto from = [](const QMap<QString, bool> &m) {
-        return scannerSwitchesFrom([&m](const QString &k, bool d) { return m.contains(k) ? m.value(k) : d; });
+        return scannerSwitchesFrom([&m](const QString &k, bool d) { return m.contains(k) ? m.value(k) : d; }, true);
     };
     const ScannerSwitches none = from({});
     CHECK(!none.scanner);
@@ -780,6 +780,27 @@ static void scannerSwitchesAbsentIsToday()
                                       {QStringLiteral("doctor_legacy"), true}, {QStringLiteral("scanner_connect_on_open"), false},
                                       {QStringLiteral("scanner_awg_mini"), true}});
     CHECK(all.returnHome && all.doctorLegacy && !all.connectOnOpen && all.awgMini && all.doctorSheet);
+}
+
+// The Scanner exists only where this build has a probe host (IScanHost.h kScanHostOnThisBuild; android1 D5, owner
+// 16.11: Android shows no Scanner until its probe process ships). Without one every switch the server publishes reads
+// off - no entry point, the Doctor sheet reachable, as with the server switch off.
+static void scannerNeedsProbeHost()
+{
+    const QMap<QString, bool> all{{QStringLiteral("scanner"), true}, {QStringLiteral("scanner_return_home"), true},
+                                  {QStringLiteral("doctor_legacy"), true}, {QStringLiteral("scanner_connect_on_open"), true},
+                                  {QStringLiteral("scanner_awg_mini"), true}};
+    const auto flag = [&all](const QString &k, bool d) { return all.contains(k) ? all.value(k) : d; };
+    const ScannerSwitches noHost = scannerSwitchesFrom(flag, /*hostOnBuild=*/false);
+    CHECK(noHost == ScannerSwitches());
+    CHECK(!noHost.scanner && noHost.doctorSheet);
+    CHECK(scannerSwitchesFrom(flag, true).scanner);
+    CHECK(!scannerSwitchOn(true, false) && !scannerSwitchOn(false, true) && scannerSwitchOn(true, true));
+#if defined(Q_OS_ANDROID) || defined(MACOS_NE)
+    CHECK(!kScanHostOnThisBuild);
+#else
+    CHECK(kScanHostOnThisBuild); // iOS, macOS service build, Windows, Linux: unchanged
+#endif
 }
 
 // Path (b): the ordinary start() only from VPN off, only where probes need the tunnel process.
@@ -1276,7 +1297,8 @@ static void scannerKillSwitchImmediate()
 {
     FakeConfigService cfg;
     auto switches = [&cfg]() {
-        return scannerSwitchesFrom([&cfg](const QString &k, bool d) { return cfg.features.contains(k) ? cfg.features.value(k) : d; });
+        return scannerSwitchesFrom([&cfg](const QString &k, bool d) { return cfg.features.contains(k) ? cfg.features.value(k) : d; },
+                                   true);
     };
     CHECK(switches().scanner);
     qint64 last = 0;
@@ -1463,6 +1485,7 @@ int main()
     scannerRowTapConnectsWithVpnOff();
     scannerRowTapMovesLiveTunnel();
     scannerSwitchesAbsentIsToday();
+    scannerNeedsProbeHost();
     scannerConnectOnOpen();
     scannerCancelPendingConnect();
     scannerCancelAfterShownConnectedWithoutData();
