@@ -61,6 +61,9 @@ public:
     // An acquire request got an HTTP answer of the API (any status, any body except a cut one): its route works. Fired once per
     // request, in every path (in time or after the attempt stopped waiting), after the owner was told of the answer.
     std::function<void(quint64 requestId)> onRouteProved;
+    // An acquire answer of the API carries `min_session_order` (contract 1.21.0, upstreamOrderFloorOf): the counter of the start
+    // orders is raised to at least that value. Fired for every such answer, whichever start it belongs to, before the owner sees it.
+    std::function<void(qint64 floorOrder)> onSessionOrderFloor;
     // Asked before every resend of a release and before a held one is sent: false = the owner took the release back
     // (a start of its profile - UpstreamLeaseOwner.h, row S1): it is dropped silently, no onReleaseDone.
     std::function<bool(quint64 requestId)> releaseWanted;

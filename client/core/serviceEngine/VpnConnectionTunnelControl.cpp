@@ -74,7 +74,12 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     m_leaseClient = new UpstreamLeaseClient(this);
     m_upOwner.setIo(m_leaseClient);
     m_upOwner.setOrderStore(
-        []() { return QSettings().value(QLatin1String(kUpstreamSessionOrderKey), qint64(0)).toLongLong(); },
+        []() {
+            // read before every allocation: another process of this installation may have moved the counter on
+            QSettings st;
+            st.sync();
+            return st.value(QLatin1String(kUpstreamSessionOrderKey), qint64(0)).toLongLong();
+        },
         [](qint64 v) {
             QSettings st;
             st.setValue(QLatin1String(kUpstreamSessionOrderKey), v);
@@ -95,6 +100,7 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
         applyUpstreamEvents(m_upOwner.acquireEnded(profile, lease, stillOut));
     };
     m_leaseClient->onRouteProved = [this](quint64 requestId) { m_upOwner.routeProved(requestId, upstreamClockMs()); };
+    m_leaseClient->onSessionOrderFloor = [this](qint64 floorOrder) { m_upOwner.raiseOrderFloor(floorOrder); };
     {
         UpstreamLeaseOwner::Options o;
 #if AVPN_UPSTREAM_GUI_OWNER

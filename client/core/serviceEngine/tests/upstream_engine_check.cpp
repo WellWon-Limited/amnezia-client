@@ -3831,6 +3831,113 @@ static void lateAnswerKeepsSession()
     }
 }
 
+// Round 12 R2: an acquire answer of the API that names the highest order the server has seen (`min_session_order`, contract 1.21.0)
+// raises the installation's counter - persisted at once, for ANY such answer (also a late one) - so the next start passes. Nothing else.
+static void orderFloorCheck()
+{
+    const QByteArray stale = QByteArrayLiteral("{\"code\":\"lease_gone\",\"reason\":\"stale_session\",\"min_session_order\":");
+    const auto replyWith = [&stale](const QByteArray &value, bool api = true) {
+        return classifyAcquireReply(404, stale + value + "}", {}, QString(), api);
+    };
+    // the wire: the field is read in one place, bounded to 0..2^53-1, integer only
+    CHECK(replyWith("1763120000999").error.minSessionOrder == 1763120000999LL && upstreamOrderFloorOf(replyWith("1763120000999")) == 1763120000999LL);
+    CHECK(replyWith("0").error.minSessionOrder == 0 && replyWith("9007199254740991").error.minSessionOrder == kUpstreamSessionOrderMax);
+    for (const char *bad : {"-1", "9007199254740992", "1e30", "1.5", "\"77\"", "null", "true", "[5]"}) {
+        CHECK(replyWith(bad).error.minSessionOrder == -1 && upstreamOrderFloorOf(replyWith(bad)) == -1);
+        CHECK(replyWith(bad).kind == LeaseReplyKind::Refused && replyWith(bad).error.reason == QLatin1String("stale_session")); // still the same denial
+    }
+    // the nonce-tenure denial has no field; a foreign answer (no API mark) never moves the counter
+    const AcquireReply tenure = classifyAcquireReply(404, QByteArrayLiteral("{\"code\":\"lease_gone\",\"reason\":\"stale_session\"}"), {}, QString(), true);
+    CHECK(tenure.kind == LeaseReplyKind::Refused && upstreamOrderFloorOf(tenure) == -1);
+    CHECK(replyWith("5000", /*api=*/false).error.minSessionOrder == 5000 && upstreamOrderFloorOf(replyWith("5000", false)) == -1);
+    // the counter: raised monotonically, persisted at once, the next start is above it
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const qint64 T = 17000000;
+    qint64 stored = 0;
+    int saves = 0;
+    FakeIo io;
+    UpstreamLeaseOwner o(&io);
+    o.setOrderStore([&stored]() { return stored; }, [&stored, &saves](qint64 v) { stored = v; ++saves; });
+    o.begin(a, 1, std::nullopt, T, 1000); // the clock is far behind what the server has seen (a reinstall after a clock ahead)
+    CHECK(io.last("acquire")->order == 1000 && stored == 1000);
+    const qint64 N = 1763200000000LL; // the server's highest
+    o.onAcquireReply(io.last("acquire")->id, refused(UpstreamErrorCode::LeaseGone, QStringLiteral("stale_session")), T + 100);
+    o.raiseOrderFloor(upstreamOrderFloorOf(replyWith(QByteArray::number(N)))); // what the client does for that very answer
+    CHECK(stored == N && !o.active());
+    o.begin(a, 1, std::nullopt, T + 200, 2000);
+    CHECK(io.last("acquire")->order > N && io.last("acquire")->order == N + 1);
+    // a floor that is not above the counter, an invalid one and "none" change nothing and write nothing
+    const qint64 before = stored;
+    const int savesBefore = saves;
+    for (const qint64 v : {qint64(-1), qint64(0), N - 5, N + 1, kUpstreamSessionOrderMax + 1, qint64(-12345)})
+        o.raiseOrderFloor(v);
+    CHECK(stored == before && saves == savesBefore);
+    // monotonic across a second writer of the store: the counter is read again, never moved backwards
+    stored = N + 500; // another process advanced it
+    o.disconnect(T + 300);
+    o.begin(a, 1, std::nullopt, T + 400, 1);
+    CHECK(io.last("acquire")->order == N + 501);
+    // a floor above a clock that is ahead: the next start is max(last + 1, wall) - above the floor either way
+    o.raiseOrderFloor(N + 10000);
+    o.disconnect(T + 500);
+    o.begin(a, 1, std::nullopt, T + 600, N + 50000);
+    CHECK(io.last("acquire")->order == N + 50000);
+
+    // the client: ANY acquire answer of the API that carries the field reaches the counter - in time, late (the attempt stopped
+    // waiting), and with the foreign/field-less answers left out
+    TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {}, {}, {});
+    struct Edge {
+        QTcpServer server;
+        QByteArray body = QByteArrayLiteral("{\"code\":\"lease_gone\",\"reason\":\"stale_session\",\"min_session_order\":424242}");
+        bool mark = true;
+        int delayMs = 0;
+        Edge()
+        {
+            server.listen(QHostAddress::LocalHost);
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [this]() {
+                while (QTcpSocket *s = server.nextPendingConnection())
+                    QObject::connect(s, &QTcpSocket::readyRead, s, [this, s]() {
+                        s->readAll();
+                        QTimer::singleShot(delayMs, s, [this, s]() {
+                            s->write("HTTP/1.1 404 X\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n"
+                                     + (mark ? QByteArray("X-Tribe-Api: 1\r\n") : QByteArray()) + "Connection: close\r\n\r\n" + body);
+                            s->disconnectFromHost();
+                        });
+                    });
+            });
+        }
+        QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()); }
+    };
+    const auto pump = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    };
+    for (int variant = 0; variant < 4; ++variant) { // 0 in time, 1 late (after the attempt moved on), 2 foreign answer, 3 no field
+        Edge edge;
+        edge.delayMs = variant == 1 ? 2200 : 50;
+        edge.mark = variant != 2;
+        if (variant == 3)
+            edge.body = QByteArrayLiteral("{\"code\":\"lease_gone\",\"reason\":\"stale_session\"}");
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        const QString base = edge.base();
+        client.configure(&nam, [base] { return base; }, QStringLiteral("00"), [] { return QStringLiteral("token"); });
+        QVector<qint64> floors;
+        int answers = 0;
+        client.onSessionOrderFloor = [&floors](qint64 v) { floors << v; };
+        client.onAcquire = [&answers](quint64, const AcquireReply &) { ++answers; };
+        client.acquire(7, QStringLiteral("aaaaaaaaaaaaaaa0"), LeaseKind::Session, QString(), LeaseRoute{}, QStringLiteral("NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"), 5);
+        pump(variant == 1 ? 3200 : 700);
+        CHECK(answers >= 1);
+        if (variant == 0 || variant == 1)
+            CHECK(floors.size() == 1 && floors[0] == 424242);
+        else
+            CHECK(floors.isEmpty());
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -3847,6 +3954,7 @@ int main(int argc, char **argv)
     sessionNonceCheck();
     lateOlderStart();
     sessionOrderCheck();
+    orderFloorCheck();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();

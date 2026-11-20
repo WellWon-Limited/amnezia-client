@@ -109,6 +109,9 @@ public:
     void setOptions(const Options &o) { m_opt = o; }
     // Where the last start order is kept (the app's settings): load / save of one number; survives a relaunch.
     void setOrderStore(std::function<qint64()> load, std::function<void(qint64)> save) { m_order.setStore(std::move(load), std::move(save)); }
+    // The server's floor for the start orders (an acquire answer of the API that carries min_session_order): the counter is raised
+    // to at least it; the running start keeps its own order (the denied start fails as any terminal refusal does).
+    void raiseOrderFloor(qint64 floorOrder) { m_order.raiseFloor(floorOrder); }
     const Options &options() const { return m_opt; }
 
     // A bring-up of an upstream stub (VpnConnectionTunnelControl::up). standby = the pack entry to start
