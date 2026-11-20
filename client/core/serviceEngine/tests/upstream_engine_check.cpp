@@ -2035,7 +2035,7 @@ static void sessionReleaseRetry()
                             return;
                         ++deletes;
                         const int st = statuses.isEmpty() ? 204 : statuses.takeFirst();
-                        s->write("HTTP/1.1 " + QByteArray::number(st) + " X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        s->write("HTTP/1.1 " + QByteArray::number(st) + " X\r\nX-Tribe-Api: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); // the API's own answer: it carries the mark
                         s->disconnectFromHost();
                     });
                 }
@@ -2112,6 +2112,29 @@ static void localRefusalRecordsNothing()
 // Lease id ledger (UpstreamLeaseOwner.h; reviews R4, R5 of 19.11, F3, F4, F9 of round 2): the REAL
 // UpstreamLeaseClient and UpstreamLeaseOwner against a loopback server that holds its answers until the test lets them
 // go. The server hands the same lease id back to the same device and profile and any DELETE ends it, as the real one.
+// Round 11 R3: ONE rule decides what is an answer of the API - the mark X-Tribe-Api: 1 - for acquire answers (a route is proved by
+// an API answer only) and for release answers (a release is finished by an API answer only).
+static void apiMarkRules()
+{
+    CHECK(upstreamFromTribeApi(QByteArrayLiteral("1")) && !upstreamFromTribeApi(QByteArray()) && !upstreamFromTribeApi(QByteArrayLiteral("0")));
+    // acquire: the classification carries the mark; the route is proved by an API answer, whatever its status or body
+    const AcquireReply foreign403 = classifyAcquireReply(403, QByteArrayLiteral("<html>blocked</html>"), {}, QString(), false);
+    const AcquireReply api409 = classifyAcquireReply(409, QByteArrayLiteral("{\"code\":\"no_seat\"}"), {}, QString(), true);
+    const AcquireReply api503 = classifyAcquireReply(503, QByteArrayLiteral("<html></html>"), {}, QString(), true);
+    const AcquireReply transport = classifyAcquireReply(0, {}, {}, QString(), false);
+    CHECK(foreign403.kind == LeaseReplyKind::Failed && foreign403.why == QLatin1String("http_403") && !upstreamRouteProved(foreign403));
+    CHECK(upstreamRouteProved(api409) && upstreamRouteProved(api503) && !upstreamRouteProved(transport));
+    // release: 2xx / 4xx of the API are final, a 5xx and anything without the mark are resent, then not confirmed
+    const qint64 budget = kSeatReleaseRetryBudgetMs;
+    CHECK(seatReleaseNext(204, 0, 0, budget, true).kind == UpstreamReleaseTry::Answered);
+    CHECK(seatReleaseNext(404, 0, 0, budget, true).kind == UpstreamReleaseTry::Answered);
+    CHECK(seatReleaseNext(204, 0, 0, budget, false).kind == UpstreamReleaseTry::Resend);  // a foreign "204" proves nothing
+    CHECK(seatReleaseNext(403, 0, 0, budget, false).kind == UpstreamReleaseTry::Resend);  // a proxy's 403: not final
+    CHECK(seatReleaseNext(403, 99, budget, budget, false).kind == UpstreamReleaseTry::NotConfirmed); // past the budget: kept, not final
+    CHECK(seatReleaseNext(502, 0, 0, budget, true).kind == UpstreamReleaseTry::Resend);
+    CHECK(seatReleaseNext(0, 0, 0, budget, true).kind == UpstreamReleaseTry::Resend);
+}
+
 static void lateGrantOwnership()
 {
     TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {}, {}, {}); // the floor: the wait ends fast
@@ -2126,6 +2149,10 @@ static void lateGrantOwnership()
         QString token;               // the renew token its grants carry (empty = an older server: none)
         bool holdDeletes = false;
         bool dropDeletes = false; // the direct API is dead for a release: the connection is cut, no answer
+        // The answers carry the API's mark (X-Tribe-Api: 1) like the real server's. A blocking proxy in front of the API answers
+        // without it: `foreignAnswers` = the POST answers carry no mark; `foreignDeletes` = every DELETE gets `foreignStatus`, no mark.
+        bool foreignAnswers = false, foreignDeletes = false;
+        int foreignStatus = 403;
         QList<qint64> deleteTimes;
         QElapsedTimer sinceStart;
         LeaseEdge()
@@ -2157,9 +2184,12 @@ static void lateGrantOwnership()
                 }
             });
         }
-        static void finishDelete(QTcpSocket *s)
+        void finishDelete(QTcpSocket *s)
         {
-            s->write("HTTP/1.1 204 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            if (foreignDeletes)
+                s->write("HTTP/1.1 " + QByteArray::number(foreignStatus) + " X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            else
+                s->write("HTTP/1.1 204 X\r\nX-Tribe-Api: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             s->disconnectFromHost();
         }
         void releaseDeletes()
@@ -2195,6 +2225,7 @@ static void lateGrantOwnership()
                 return;
             s->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: "
                      + QByteArray::number(body.size()) + "\r\n" + (sig.isEmpty() ? QByteArray() : "X-Tribe-Sig: " + sig + "\r\n")
+                     + (foreignAnswers ? QByteArray() : QByteArray("X-Tribe-Api: 1\r\n"))
                      + "Connection: close\r\n\r\n" + body);
             s->disconnectFromHost();
         }
@@ -2508,6 +2539,73 @@ static void lateGrantOwnership()
         CHECK(r.owner.unsentCount() == 0 && r.edge.deletes.size() > deletesBefore); // the kept release went out, direct
         CHECK(r.edge2.deletes.isEmpty());
     }
+    // Round 11 R3, the route half: an answer is the API's only if it carries the API's mark. The kept release of A must NOT be sent
+    // when B's direct acquire gets an HTTP 403 from a blocking proxy (no mark): that is no proof the API is reachable by this route.
+    {
+        Rig r;
+        r.owner.setOptions({});
+        r.client.releaseRetryBudgetMs = 900;
+        runningSession(r);
+        r.edge.dropDeletes = true;
+        r.client.holdReleasesForStop();
+        r.apply(r.owner.disconnect(r.now()));
+        r.client.tunnelStopped();
+        QElapsedTimer t;
+        t.start();
+        while (r.owner.unsentCount() == 0 && t.elapsed() < 6000)
+            pump(10);
+        CHECK(r.owner.unsentCount() == 1);
+        r.edge.dropDeletes = false;
+        const int deletesBefore = r.edge.deletes.size();
+        SubscriptionNode b = stubOf(QStringLiteral("bbbbbbbbbbbbbbb0"));
+        b.upstream->configSha256 = LeaseEdge::cfgSha();
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"inbounds\":[]}");
+        sc.configSha256 = LeaseEdge::cfgSha();
+        sc.tunnelApiBase = r.edge2.base();
+        sc.packRevision = 5;
+        r.apply(r.owner.begin(b, 1, sc, r.now(), 1));
+        t.start();
+        while (!r.owner.provisionalPending() && t.elapsed() < 4000)
+            pump(10);
+        CHECK(r.owner.provisionalPending() && r.edge.posts.size() == 2);
+        r.edge.foreignAnswers = true;
+        r.edge.answer(1, "403 X", "<html>blocked</html>", {}); // a proxy's page: HTTP 403, no mark
+        pump(800);
+        CHECK(r.owner.unsentCount() == 1 && r.edge.deletes.size() == deletesBefore); // nothing proved the route: nothing was sent
+    }
+    // ... the release half: a foreign answer to a DELETE is not an answer of the API. It is a transport-class failure: resent on the
+    // shared spacing, then KEPT (unsent) for the next route that works - never taken as final and forgotten.
+    {
+        Rig r;
+        r.owner.setOptions({});
+        r.client.releaseRetryBudgetMs = 2500;
+        runningSession(r);
+        r.edge.foreignDeletes = true; // HTTP 403 of a blocking proxy to every DELETE
+        r.client.holdReleasesForStop();
+        r.apply(r.owner.disconnect(r.now()));
+        r.client.tunnelStopped();
+        QElapsedTimer t;
+        t.start();
+        while (r.owner.unsentCount() == 0 && t.elapsed() < 6000)
+            pump(10);
+        CHECK(r.owner.unsentCount() == 1 && r.owner.pendingReleases() == 1); // kept, not removed
+        CHECK(r.edge.deletes.size() == 3);                                   // resent by the existing rule
+        // the API itself answers (the mark): the very same release finishes at once
+        r.edge.foreignDeletes = false;
+        r.begin();
+        t.start();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 2000)
+            pump(10);
+        r.edge.leaseId = QStringLiteral("LeaseNewStartBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"); // the new start's own lease
+        const int deletesBefore = r.edge.deletes.size();
+        r.edge.grant(1); // an answer of the API proves the direct route: the kept release goes out and is answered 204 + mark
+        t.start();
+        while (r.owner.pendingReleases() > 0 && t.elapsed() < 3000)
+            pump(10);
+        CHECK(r.owner.unsentCount() == 0 && r.owner.pendingReleases() == 0 && r.edge.deletes.size() == deletesBefore + 1
+              && r.edge.deletes.last() == QLatin1String(kLease));
+    }
     // Row S4 (device round 10): a profile WITH a standby-pack entry waits only the hedge for the direct lease, not the
     // lease share (here 5 s); the tunnel starts from the pack, the direct request lives on, and its grant that lands after
     // the provisional start is the SESSION's own seat (round 10: same start, same nonce, same token) - kept, not released; the
@@ -2794,12 +2892,14 @@ static void unsentFlushOnAnyAnswer()
     const char *kA = "LeaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const qint64 T = 12000000;
     struct Case { const char *name; AcquireReply reply; bool flushes; };
+    const auto marked = [](AcquireReply r) { r.fromTribeApi = true; return r; }; // the answer carried X-Tribe-Api: 1
     const Case cases[] = {
-        {"granted", grantedAs(b, "LeaseBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"), true},
-        {"no_seat", refused(UpstreamErrorCode::NoSeat), true},
-        {"not_entitled", refused(UpstreamErrorCode::NotEntitled), true},
-        {"http_503", failed("http_503"), true},
-        {"signature", failed("signature"), true},
+        {"granted", marked(grantedAs(b, "LeaseBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")), true},
+        {"no_seat", marked(refused(UpstreamErrorCode::NoSeat)), true},
+        {"not_entitled", marked(refused(UpstreamErrorCode::NotEntitled)), true},
+        {"http_503", marked(failed("http_503")), true},     // the API's own 503 (it carries the mark)
+        {"foreign_403", failed("http_403"), false},         // a blocking proxy's page: no mark, no proof (round 11 R3)
+        {"signature", failed("signature"), false},          // not our server's answer
         {"transport", failed("transport"), false},
     };
     for (const Case &c : cases) {
@@ -2839,7 +2939,7 @@ static void unsentFlushOnAnyAnswer()
                 id = io.last("acquire")->id;
             }
             o.onAcquireReply(id, c.reply, T + 700);
-            if (!(c.reply.kind == LeaseReplyKind::Failed && c.reply.why == QLatin1String("transport")))
+            if (upstreamRouteProved(c.reply))
                 o.routeProved(id, T + 700); // UpstreamLeaseClient: any HTTP answer proves its route (round 10 R4: one place)
             const bool flushed = releases() == before + 1;
             CHECK(flushed == c.flushes);
@@ -3654,6 +3754,7 @@ int main(int argc, char **argv)
     providerLegStarvedCheck();
     sessionReleaseRetry();
     localRefusalRecordsNothing();
+    apiMarkRules();
     lateGrantOwnership();
     ledgerModel();
     reviewerSequenceR1();

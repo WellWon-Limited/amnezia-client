@@ -297,11 +297,15 @@ struct SeatReleaseNext {
     qint64 delayMs = 0; // Resend: wait this long first
 };
 // httpStatus 0 = no HTTP answer; retriesSoFar / spacedMs = resends already made and the spacing they waited.
+// fromTribeApi: the answer carried the API's mark (upstreamFromTribeApi - THE one rule of what is an answer of the API). An answer
+// without it (a blocking proxy's 403, a captive portal's 200) is not the API's: it is a transport-class failure like no answer, so
+// the release is resent and, past the budget, kept for the next route that works - never taken as final. Default true: the Scanner's
+// probe release (ScanApiClient) does not read the mark.
 inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 spacedMs,
-                                       qint64 budgetMs = kSeatReleaseRetryBudgetMs)
+                                       qint64 budgetMs = kSeatReleaseRetryBudgetMs, bool fromTribeApi = true)
 {
     SeatReleaseNext n;
-    if (httpStatus > 0 && httpStatus < 500) {
+    if (httpStatus > 0 && httpStatus < 500 && fromTribeApi) {
         n.kind = UpstreamReleaseTry::Answered;
         return n;
     }
@@ -699,6 +703,14 @@ inline AcquireReply classifyAcquireReply(int httpStatus, const QByteArray &body,
         return r;
     r.kind = LeaseReplyKind::Granted;
     return r;
+}
+
+// A route is proved only by an answer of the API: an acquire answer that carries the API's mark (whatever its status or body - a 409
+// no_seat or a 429 proves the route like a grant does). A transport failure, a cut answer and a foreign answer (a proxy's 403 page)
+// prove nothing. THE one place that decides it, for every path an acquire answer takes (UpstreamLeaseClient::acquire).
+inline bool upstreamRouteProved(const AcquireReply &r)
+{
+    return r.fromTribeApi;
 }
 
 // May the engine bring the tunnel up from a standby pack entry after this DIRECT acquire answer?

@@ -89,7 +89,7 @@ has "$(body_of "$ADP" 'bool VpnConnectionTunnelControl::invokeConnect(')" '++m_s
 # the shared spacing (seatReleaseNext, one rule with the probe-batch release); only an HTTP answer reports it
 # confirmed, everything else reports "not confirmed" (left to the server's TTL) - never a silent "done".
 rel="$(body_of "$CLI" 'void UpstreamLeaseClient::sendRelease(')"
-has "$rel" 'const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs);' \
+has "$rel" 'const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs, fromApi);' \
     && has "$rel" 'sendRelease(requestId, leaseId, meter, route, attempt + 1, spacedMs + next.delayMs, key);' \
     || bad "F3: a release with no answer or a 5xx must be sent again on the shared spacing (seatReleaseNext)"
 has "$rel" 'onReleaseDone(requestId, true);' && has "$rel" 'onReleaseDone(requestId, false);' \
@@ -205,8 +205,10 @@ has "$(grep -v '^[[:space:]]*//' "$OWN")" 'QHash<QString, PendingRelease> m_rele
 # grant, and it is decided in ONE place: the client calls onRouteProved for every acquire request that got an HTTP answer,
 # whichever path it took (in time, after the hedge, a grant or not); the adapter hands it to the owner's routeProved, and the
 # owner's answer handlers do not flush on their own.
-has "$(grep -v '^[[:space:]]*//' "$CLI")" 'if (!(reply.kind == LeaseReplyKind::Failed && reply.why == QLatin1String("transport")) && onRouteProved)' \
-    || bad "R4: the client must report every non-transport acquire answer as a proved route (onRouteProved), for in-time and late paths alike"
+has "$(grep -v '^[[:space:]]*//' "$CLI")" 'if (upstreamRouteProved(reply) && onRouteProved)' \
+    || bad "R4 + round 11 R3: the client must report every acquire answer of the API (it carries the API's mark) as a proved route (onRouteProved), for in-time and late paths alike"
+has "$(grep -v '^[[:space:]]*//' "$CLI")" 'seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs, fromApi)' \
+    || bad "round 11 R3: a release is finished only by an answer of the API (the mark), the same rule as the route proof"
 [ "$(grep -v '^[[:space:]]*//' "$CLI" | grep -c 'onRouteProved(requestId)')" = "1" ] || bad "R4: onRouteProved must be called from exactly one place in the client"
 has "$ctor" 'm_upOwner.routeProved(requestId, upstreamClockMs())' || bad "R4: the adapter must hand a proved route to the owner (routeProved)"
 oar="$(awk 'index($0, "    QVector<UpstreamOwnerEvent> onAcquireReply(") == 1 { on = 1 } on { print } on && /^    }/ { exit }' "$OWN" | grep -v '^[[:space:]]*//')"
