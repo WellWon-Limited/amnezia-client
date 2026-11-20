@@ -130,6 +130,8 @@ public:
     void upstreamTick();
     qint64 upstreamWakeAtMs() const { return m_upOwner.wakeAtMs(); }
     bool upstreamActive() const { return m_upOwner.active(); }
+    // The direct control plane answered (ConfigService reach became Reachable): kept seat releases go out on the direct route.
+    void upstreamDirectRouteProved() { m_upOwner.directRouteProved(upstreamClockMs()); }
     bool upstreamProvisionalPending() const { return m_upOwner.provisionalPending(); }
     QString upstreamNodeId() const { return m_upOwner.active() ? m_upOwner.nodeId() : QString(); }
     QString upstreamProfileId() const { return m_upOwner.active() ? m_upOwner.profileId() : QString(); }

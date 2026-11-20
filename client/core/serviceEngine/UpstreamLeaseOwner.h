@@ -274,6 +274,17 @@ public:
             flushUnsent(LeaseRoute{QString(), tunnelBase()}, nowMs);
     }
 
+    // The direct control plane answered a direct request sent with no tunnel of ours up (ConfigService::directApiReach turned
+    // Reachable - the fact itself refuses to become Reachable through a tunnel): that proves the direct route like an acquire's
+    // answer does, so the kept releases go out on it. Needs no session and no clock of the owner: it runs while disconnected.
+    void directRouteProved(qint64 nowMs)
+    {
+        m_lastNowMs = nowMs;
+        if (unsentCount() == 0)
+            return;
+        flushUnsent(LeaseRoute{}, nowMs);
+    }
+
     QVector<UpstreamOwnerEvent> onRenewReply(quint64 requestId, const RenewReply &r, qint64 nowMs, qint64 nowWallMs = 0)
     {
         QVector<UpstreamOwnerEvent> ev;

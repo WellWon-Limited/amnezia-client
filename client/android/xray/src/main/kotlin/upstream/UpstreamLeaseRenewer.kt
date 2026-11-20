@@ -176,6 +176,15 @@ class UpstreamLeaseRenewer(
                 feedBytesLocked()
                 machine.disconnect(nowMs()).find(UpstreamLeaseActionKind.SEND_RELEASE)?.let { action ->
                     log("Tribe upstream: release seq=${action.meter.seq}")
+                    // DELIBERATE: the body is the plain meter report, WITHOUT the `renew_token` field (the token travels only in the
+                    // Authorization header). A DELETE without the field keeps the old server behaviour: it ends the lease named by
+                    // its id and applies the final report. That is safe: every start has its own lease id, so a token-less DELETE
+                    // can only end this renewer's own lease. The C++ app owner then sends its own DELETE after the confirmed stop,
+                    // WITH the token and WITHOUT a report (UpstreamLeaseOwner ReleaseAfterStop): the lease is already ended, nothing
+                    // applies twice (the server meters per seq; a report at or below the last seq applies nothing).
+                    // IF the token is ever added here, change together: the server drops the final report of a release whose token
+                    // is not the lease's current one, so this body must carry exactly the token this renewer was granted
+                    // (as UpstreamLeaseWire.swift releaseBody does) and the wire test must cover it.
                     Triple(leaseUrl(action), headers(action), UpstreamLeaseWire.meterBody(action.meter))
                 }
             }

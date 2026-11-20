@@ -244,6 +244,13 @@ has "$(grep -v '^[[:space:]]*//' "$ADP")" 'm_leaseClient->onSessionOrderFloor = 
 has "$(body_of "$ADP" 'VpnConnectionTunnelControl::VpnConnectionTunnelControl(')" 'st.sync();' \
     || bad "round 12 R2: the order store must be re-read (sync) before every allocation"
 
+# Round 16 F4: the direct control plane turning Reachable (the ONE fact, ConfigService) flushes the kept seat releases on the direct route
+reach_handler="$(grep -A6 -F 'ConfigService::directApiReachChanged' "$FAC" | grep -v '^[[:space:]]*//' || true)"
+has "$reach_handler" 'ApiReach::Reachable' && has "$reach_handler" 'm_tunnel.upstreamDirectRouteProved();' \
+    || bad "F4: the Reachable handler must call m_tunnel.upstreamDirectRouteProved() (kept seat releases would wait for an acquire)"
+has "$(grep -v '^[[:space:]]*//' "$ADH")" 'm_upOwner.directRouteProved(upstreamClockMs());' \
+    || bad "F4: the adapter must hand the proof to the owner (directRouteProved)"
+
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"
     exit 1
