@@ -3865,8 +3865,8 @@ static void orderFloorCheck()
     };
     // the wire: the field is read in one place, bounded to 0..2^53-1, integer only
     CHECK(replyWith("1763120000999").error.minSessionOrder == 1763120000999LL && upstreamOrderFloorOf(replyWith("1763120000999")) == 1763120000999LL);
-    CHECK(replyWith("0").error.minSessionOrder == 0 && replyWith("9007199254740991").error.minSessionOrder == kUpstreamSessionOrderMax);
-    for (const char *bad : {"-1", "9007199254740992", "1e30", "1.5", "\"77\"", "null", "true", "[5]"}) {
+    CHECK(replyWith("0").error.minSessionOrder == 0 && replyWith("4503599627370496").error.minSessionOrder == kUpstreamOrderFloorMax);
+    for (const char *bad : {"-1", "4503599627370497", "9007199254740991", "9007199254740992", "1e30", "1.5", "\"77\"", "null", "true", "[5]"}) {
         CHECK(replyWith(bad).error.minSessionOrder == -1 && upstreamOrderFloorOf(replyWith(bad)) == -1);
         CHECK(replyWith(bad).kind == LeaseReplyKind::Refused && replyWith(bad).error.reason == QLatin1String("stale_session")); // still the same denial
     }
@@ -3893,7 +3893,7 @@ static void orderFloorCheck()
     // a floor that is not above the counter, an invalid one and "none" change nothing and write nothing
     const qint64 before = stored;
     const int savesBefore = saves;
-    for (const qint64 v : {qint64(-1), qint64(0), N - 5, N + 1, kUpstreamSessionOrderMax + 1, qint64(-12345)})
+    for (const qint64 v : {qint64(-1), qint64(0), N - 5, N + 1, kUpstreamOrderFloorMax + 1, kUpstreamSessionOrderMax, qint64(-12345)})
         o.raiseOrderFloor(v);
     CHECK(stored == before && saves == savesBefore);
     // monotonic across a second writer of the store: the counter is read again, never moved backwards
@@ -3906,6 +3906,32 @@ static void orderFloorCheck()
     o.disconnect(T + 500);
     o.begin(a, 1, std::nullopt, T + 600, N + 50000);
     CHECK(io.last("acquire")->order == N + 50000);
+
+    // Round 13 R3: orders keep headroom below 2^53. The top of the accepted floor range gives two consecutive orders that differ ON THE WIRE; a
+    // stored counter beyond the exact range is clamped (saturates, unreachable in practice) and never sent as an inexact number.
+    {
+        qint64 st = 0;
+        FakeIo io3;
+        UpstreamLeaseOwner o3(&io3);
+        o3.setOrderStore([&st]() { return st; }, [&st](qint64 v) { st = v; });
+        o3.raiseOrderFloor(kUpstreamOrderFloorMax);
+        o3.begin(a, 1, std::nullopt, T, 1);
+        const qint64 first = io3.last("acquire")->order;
+        o3.disconnect(T + 10);
+        o3.begin(a, 1, std::nullopt, T + 20, 1);
+        const qint64 second = io3.last("acquire")->order;
+        CHECK(first == kUpstreamOrderFloorMax + 1 && second == first + 1);
+        CHECK(upstreamAcquireBody(QStringLiteral("p"), LeaseKind::Session, QString(), QStringLiteral("N"), first)
+              != upstreamAcquireBody(QStringLiteral("p"), LeaseKind::Session, QString(), QStringLiteral("N"), second));
+        CHECK(QJsonDocument::fromJson(upstreamAcquireBody(QStringLiteral("p"), LeaseKind::Session, QString(), QStringLiteral("N"), second))
+                  .object().value(QLatin1String(kUpstreamAcquireOrderField)).toInteger() == second);
+        for (const qint64 hostile : {kUpstreamSessionOrderMax, kUpstreamSessionOrderMax + 5, qint64(1) << 60}) { // a corrupted store
+            st = hostile;
+            o3.disconnect(T + 30);
+            o3.begin(a, 1, std::nullopt, T + 40, 1);
+            CHECK(io3.last("acquire")->order == kUpstreamSessionOrderMax);
+        }
+    }
 
     // the client: ANY acquire answer of the API that carries the field reaches the counter - in time, late (the attempt stopped
     // waiting), and with the foreign/field-less answers left out

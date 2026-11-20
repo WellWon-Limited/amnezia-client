@@ -109,7 +109,7 @@ struct UpstreamErrorReply {
     // the switch log only - it never changes a decision. Empty = not given or not a valid code.
     QString reason;
     // Contract 1.21.0: a stale_session denial caused by the ORDER check carries the highest order the server has seen from this
-    // device (kUpstreamMinSessionOrderField); -1 = not given, or not a valid value (an integer in 0..kUpstreamSessionOrderMax). The
+    // device (kUpstreamMinSessionOrderField); -1 = not given, or not a valid value (an integer in 0..kUpstreamOrderFloorMax). The
     // nonce-tenure denial has none.
     qint64 minSessionOrder = -1;
 };
@@ -338,7 +338,10 @@ inline constexpr char kUpstreamAcquireOrderField[] = "session_order";
 // (UpstreamSessionOrder::raiseFloor), so the next start passes; the denied start itself fails as before. THE one place where the field
 // is named. An order is an integer in 0..2^53-1 (exact in a JSON double): anything else is ignored.
 inline constexpr char kUpstreamMinSessionOrderField[] = "min_session_order";
-inline constexpr qint64 kUpstreamSessionOrderMax = 9007199254740991LL;
+inline constexpr qint64 kUpstreamSessionOrderMax = 9007199254740991LL; // 2^53 - 1: the largest order ever allocated or sent (exact in a double)
+// A floor from the server is accepted only up to 2^52 (round 13 R3): orders are wall-clock milliseconds (about 2^41), so anything near the
+// top of the exact range is malformed, and accepting it would leave the next orders no headroom (2^53 and 2^53 + 1 are the same double).
+inline constexpr qint64 kUpstreamOrderFloorMax = 4503599627370496LL; // 2^52
 inline constexpr int kUpstreamSessionNonceChars = 32;
 inline QString upstreamNewSessionNonce()
 {
@@ -371,17 +374,19 @@ public:
     qint64 next(qint64 wallMs)
     {
         const qint64 last = qMax(m_last, m_load ? m_load() : qint64(0));
-        m_last = qMax(last + 1, wallMs);
+        // Never above 2^53 - 1, where a JSON number stops being exact: saturates there (the same order again). Unreachable in practice - orders
+        // are wall-clock milliseconds (about 2^41) and a floor is accepted only up to 2^52 - and a stored value beyond it is clamped, not trusted.
+        m_last = qMin(kUpstreamSessionOrderMax, qMax(last + 1, wallMs));
         if (m_save)
             m_save(m_last);
         return m_last;
     }
     // The server told the highest order it has seen from this device (kUpstreamMinSessionOrderField): the counter is raised to at
-    // least that value - monotonic, persisted at once - so the next start allocates above it. A value outside 0..2^53-1 is ignored; a
+    // least that value - monotonic, persisted at once - so the next start allocates above it. A value outside 0..2^52 is ignored; a
     // value not above the counter changes nothing (and writes nothing).
     void raiseFloor(qint64 floorOrder)
     {
-        if (floorOrder < 0 || floorOrder > kUpstreamSessionOrderMax)
+        if (floorOrder < 0 || floorOrder > kUpstreamOrderFloorMax)
             return;
         const qint64 stored = m_load ? m_load() : qint64(0);
         const qint64 last = qMax(m_last, stored);
@@ -414,7 +419,7 @@ inline QByteArray upstreamAcquireBody(const QString &profileId, LeaseKind kind,
     if (!sessionNonce.isEmpty() && kind == LeaseKind::Session) { // the server ignores them for a probe: never sent there
         o.insert(QLatin1String(kUpstreamAcquireNonceField), sessionNonce);
         if (sessionOrder >= 0)
-            o.insert(QLatin1String(kUpstreamAcquireOrderField), double(sessionOrder)); // epoch milliseconds: exact in a double
+            o.insert(QLatin1String(kUpstreamAcquireOrderField), QJsonValue(qint64(sessionOrder))); // an integer on the wire, never through a double
     }
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
@@ -670,7 +675,7 @@ inline UpstreamErrorReply parseUpstreamError(const QByteArray &body)
         e.retryAfterS = int(n);
     if (upstreamJsonInt(o.value(QLatin1String("upstream_revision")), 1, kUpstreamMaxRevision, n))
         e.upstreamRevision = n;
-    if (upstreamJsonInt(o.value(QLatin1String(kUpstreamMinSessionOrderField)), 0, kUpstreamSessionOrderMax, n))
+    if (upstreamJsonInt(o.value(QLatin1String(kUpstreamMinSessionOrderField)), 0, kUpstreamOrderFloorMax, n))
         e.minSessionOrder = n;
     static const QRegularExpression reasonRe(QStringLiteral("^[a-z][a-z0-9_.-]{0,63}$"));
     const QJsonValue reason = o.value(QLatin1String("reason"));
