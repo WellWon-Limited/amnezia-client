@@ -20,6 +20,8 @@
 //      never arrived (the host replaced it, or its final never came): counted and printed (MODEL_STATS)
 //   I8 settling: a cancelled probe is settled (its hold on the race's cap may end) at most once, and - once no scan is followed
 //      any more - every probe cancelled by the race has been settled (never earlier than its cancel)
+//      (round 16 F3: a provider probe that ENDS WITH A RESULT is settled by the release-chain count too. The model drives own probes only - it has
+//      no provider seat, batch or release - so that invariant is checked by scan_path_prober_check, scanner_facade_check and path_engine_check.)
 //   I7 liveness: a probe whose parts all succeed at the host ends proven (when the host refused nothing)
 //
 // Host contract the model follows (quoted from the real host, recipes/amnezia-libxray/patches/0012-tribe-scan-engine.patch,

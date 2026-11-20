@@ -78,7 +78,8 @@ path::PathRace::Costs ScanPathProber::raceCosts(const ScanTunables &t, int xrayB
     path::PathRace::Costs c;
     c.xray = data + qint64(qBound(1, xrayBurst, 6) - 1) * scanXrayBurstPartCostBytes(t) + access;
     c.awg = kScanAwgHandshakeBytes + qint64(t.awgPrimeEchoes) * kScanAwgEchoBytes + data + access;
-    c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + qint64(kScanSeatReleaseSends) * t.costApiBytes /* release */ + access;
+    c.providerTail = qint64(kScanSeatReleaseSends) * t.costApiBytes; // the release chain: what a finished provider probe can still spend
+    c.provider = data + qint64(t.costBatchBytes) + t.costConfigBytes + c.providerTail + access;
     return c;
 }
 
@@ -745,6 +746,25 @@ void ScanPathProber::finish(quint64 key, path::PathOutcome outcome, const char *
             .arg(p.bytes).arg(QLatin1String(why)));
     if (onResult)
         onResult(p.stamp, outcome, p.bytes);
+    // A provider probe's seat release starts when its owner is given up (below) and its bytes are counted when the chain ends: the
+    // race holds the release budget on its cap until then (PathRace::probeDone), so the probe is settled by the same count as a
+    // cancelled one - the seat (request, release) is the one spender left, the count's own 1 covers a seat that is idle at once. Own
+    // probes spend nothing more: their bytes are in the host's counter shown with the result (no hold, nothing to settle).
+    if (p.path.kind != path::PathKind::Provider)
+        return;
+    const quint64 settleKey = p.stamp.probe;
+    Settling &st = m_settling[settleKey];
+    st.stamp = p.stamp;
+    st.open = 1;
+    if (p.seat) {
+        ++st.open;
+        const std::weak_ptr<bool> alive = m_alive;
+        p.seat->retire([this, alive, settleKey]() {
+            if (alive.lock())
+                settleOne(settleKey);
+        });
+    }
+    settleOne(settleKey);
 }
 
 quint64 ScanPathProber::keyOfHostId(const QString &hostId) const

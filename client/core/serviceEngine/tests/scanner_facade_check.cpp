@@ -4048,6 +4048,36 @@ static void caseBatchOperation()
         runUntil(w, [&]() { return idleAt != 0; }, 2000);
         CHECK(doneAt == 1 && idleAt == 2 && w.server.batchOps.isEmpty()); // nothing was sent; done, then idle, once
     }
+    { // round 16 F3: a provider probe that ended with a result is settled (retire's idle) only when its release chain ENDED - after the
+      // release's bytes were counted: the API's answer, the byte budget used up, the retry count used up
+        enum Ending { ApiAnswer, BudgetUsed, TriesUsed };
+        for (const Ending ending : {ApiAnswer, BudgetUsed, TriesUsed}) {
+            World w;
+            w.start();
+            if (ending == BudgetUsed) {
+                w.s->api()->releaseRetryBudgetMs = 600000;
+                w.server.foreignReleaseBodyBytes = 1000;
+                w.server.foreignReleaseStatuses = {200, 200, 200, 200, 200, 200, 200, 200, 200, 200};
+            } else if (ending == TriesUsed) {
+                w.s->api()->releaseRetryBudgetMs = 2500;
+                w.server.foreignReleaseStatuses = {200, 200, 200, 200, 200, 200};
+            }
+            bool done = false;
+            int order = 0, releaseAt = 0, idleAt = 0;
+            qint64 releaseBytes = -1;
+            std::unique_ptr<ScanSeatBatch> owner = w.s->api()->probeBatch(one, false, 40000, [&](const ScanApiClient::Batch &) { done = true; },
+                                                                          [&](qint64 b) { releaseBytes = b; releaseAt = ++order; });
+            runUntil(w, [&]() { return done; }, 3000);
+            CHECK(done);
+            CHECK(idleAt == 0);
+            owner->retire([&]() { idleAt = ++order; }); // the result handler returned: the release starts now
+            owner.reset();
+            CHECK(idleAt == 0); // the release is on its way: nothing is settled yet
+            runUntil(w, [&]() { return idleAt != 0; }, 12000);
+            CHECK(idleAt != 0 && releaseAt == 1 && idleAt == 2); // its bytes were counted first, then the idle callback, once
+            CHECK(releaseBytes >= 0 && releaseBytes <= qint64(kScanSeatReleaseSends) * ScanTunables().costApiBytes); // inside the budget the race holds
+        }
+    }
     { // an answer with another operation's id grants nothing; the seats are released by OUR id at once
         World w;
         w.start();

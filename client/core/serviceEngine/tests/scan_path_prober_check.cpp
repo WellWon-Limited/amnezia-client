@@ -1059,6 +1059,61 @@ static void caseAccounting()
         w.api.finishRelease();
         check(settled == QList<quint64>{1}, "settled when the release is done");
     }
+    { // round 16 F3: a provider probe that ENDS WITH A RESULT is settled when its seat release chain ended, not at the result
+      // (the race holds the release budget on its cap until then); a result that leaves nothing outstanding is settled at once
+        World w;
+        QList<quint64> settled;
+        QStringList order;
+        w.api.holdRelease = true;
+        w.ready();
+        w.prober.onSettled = [&settled, &order](const path::ProbeStamp &s) {
+            settled << s.probe;
+            order << QStringLiteral("settled");
+        };
+        w.prober.onResult = [&w, &order](const path::ProbeStamp &s, path::PathOutcome o, qint64 b) {
+            order << QStringLiteral("result");
+            w.results << World::Result{s, o, b};
+        };
+        w.start(1, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
+        spin(30);
+        w.host.item(1, true);
+        spin(30);
+        check(w.resultOf(1) && w.resultOf(1)->outcome == path::PathOutcome::ProbeOk, "the provider probe is proven (a result at once)");
+        check(settled.isEmpty(), "its release chain is outstanding: a finished provider probe is NOT settled at its result");
+        w.api.finishRelease();
+        check(settled == QList<quint64>{1} && order == QStringList({"result", "settled"}),
+              "settled when the release chain ended (the API's answer, the byte budget or the retry count used up), after the result");
+        w.api.finishRelease();
+        check(settled == QList<quint64>{1}, "settled once");
+    }
+    { // nothing outstanding at the result (the seat's request is over, no release owed): settled right after the result
+        World w;
+        QList<quint64> settled;
+        w.ready();
+        w.prober.onSettled = [&settled](const path::ProbeStamp &s) { settled << s.probe; };
+        w.start(1, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
+        spin(30);
+        w.host.item(1, true);
+        spin(30);
+        check(w.resultOf(1) && settled == QList<quint64>{1}, "no release outstanding: settled with the result");
+        World x; // a provider probe refused before any seat was asked (no session): it holds nothing, settled at once
+        QList<quint64> sx;
+        x.prober.onSettled = [&sx](const path::ProbeStamp &s) { sx << s.probe; };
+        x.start(1, 1, QStringLiteral("up:abcdef0123456789"), path::PathKind::Provider);
+        spin(30);
+        check(sx.size() <= 1, "settled at most once");
+    }
+    { // an own probe that ends with a result holds nothing after it: never settled by the prober (the race holds no tail for it)
+        World w;
+        QList<quint64> settled;
+        w.ready();
+        w.prober.onSettled = [&settled](const path::ProbeStamp &s) { settled << s.probe; };
+        w.start(1, 1, QStringLiteral("11:xray"), path::PathKind::OwnXray);
+        spin(30);
+        w.host.item(1, true);
+        spin(30);
+        check(w.resultOf(1) && settled.isEmpty(), "an own probe's result leaves nothing outstanding and nothing to settle");
+    }
     { // waiting for the session: the fetch the probe asked for is a spender
         World w;
         QList<quint64> settled;
@@ -1350,6 +1405,9 @@ static void caseCosts()
     const path::PathRace::Costs d = ScanPathProber::raceCosts(ScanTunables(), kScanXrayBurstParts);
     check(d.provider == 117760 && d.xray == 116736, "the compiled prices: provider 117 760 B, own Xray 116 736 B");
     check(d.xray + d.provider <= path::RaceTimings().cellularMaxBytes, "one own Xray and one provider probe fit one cellular race");
+    check(d.providerTail == qint64(kScanSeatReleaseSends) * ScanTunables().costApiBytes && d.providerTail < d.provider,
+          "round 16 F3: a finished provider probe holds its release budget (two sends) - the part of its bound still to spend");
+    check(d.xray + d.provider + d.awg <= path::RaceTimings().cellularMaxBytes, "cellular: Xray + provider + AmneziaWG fit the first tick");
     const ScanTunables old = ScanTunables::fromNumbers({{QStringLiteral("scan_cost_config_bytes"), 262144}});
     check(old.costConfigBytes == 262144 && ScanPathProber::raceCosts(old, kScanXrayBurstParts).provider == 347136,
           "a server that still publishes 256 KiB is taken as published (inside the client's range)");

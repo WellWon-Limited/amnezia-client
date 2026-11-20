@@ -109,16 +109,14 @@ mutate final_ack_ignored I6 "    if (r.kind == ScanHostReplyKind::Ack && r.bytes
 mutate size_bound_on_table J6 "    m_books.insert(m_scan.id, book); // its host counter" "    while (m_books.size() >= 16)
         m_books.erase(m_books.begin());
     m_books.insert(m_scan.id, book); // its host counter"
-mutate idle_scan_cancelled J4 "    if (onResult)
-        onResult(p.stamp, outcome, p.bytes);
-}" "    if (onResult)
-        onResult(p.stamp, outcome, p.bytes);
+mutate idle_scan_cancelled J4 "        onResult(p.stamp, outcome, p.bytes);
+" "        onResult(p.stamp, outcome, p.bytes);
     bool bound = false;
     for (const Probe &q : m_probes)
         bound = bound || q.scanId == m_scan.id;
     if (!bound && !m_scan.closed)
         endHostScan();
-}"
+"
 mutate local_failure_charged J5 "            finish(key, path::PathOutcome::Inconclusive, m_caps.maxAwgConcurrent <= 0 ? \"awg_no_host\"" "            spend(0, 1000);
             finish(key, path::PathOutcome::Inconclusive, m_caps.maxAwgConcurrent <= 0 ? \"awg_no_host\""
 
@@ -126,7 +124,9 @@ mutate local_failure_charged J5 "            finish(key, path::PathOutcome::Inco
 mutate_race reservation_kept_at_timeout cap "                m_held.insert(it.key(), costOf(it.value().path)); // it is no longer a candidate, its bytes are not settled yet
                 it = m_inFlight.erase(it);" "                it.value().deadline = std::numeric_limits<qint64>::max(); // mutant: the flight stays
                 ++it;"
-mutate_race reservation_kept_at_result cap "        m_inFlight.erase(it); // its hold on the cap ends with it" "        it.value().deadline = std::numeric_limits<qint64>::max(); // mutant: the flight stays"
+mutate_race reservation_kept_at_result cap "        m_inFlight.erase(it);
+        if (path.kind == PathKind::Provider" "        it.value().deadline = std::numeric_limits<qint64>::max(); // mutant: the flight stays
+        if (path.kind == PathKind::Provider"
 mutate_race reservation_kept_when_leg_raised cap "                m_held.insert(it.key(), costOf(it.value().path));
                 it = m_inFlight.erase(it);" "                it.value().path.id.id = QStringLiteral(\"-\");
                 ++it;"
@@ -136,7 +136,11 @@ mutate_race reservation_released_at_timeout cap "                m_held.insert(i
 " ""
 mutate_race reservation_released_when_leg_raised cap "                m_held.insert(it.key(), costOf(it.value().path));
                 it = m_inFlight.erase(it);" "                it = m_inFlight.erase(it);"
-mutate_race race_ends_while_hold_waits cap "m_inFlight.isEmpty() && m_held.isEmpty() && m_next" "m_inFlight.isEmpty() && m_next"
+mutate_race race_ends_while_hold_waits cap "m_inFlight.isEmpty() && m_held.isEmpty() && (m_tail" "m_inFlight.isEmpty() && (m_tail"
+mutate_race result_releases_whole_hold_at_once F3 "        if (path.kind == PathKind::Provider && m_costs.providerTail > 0)
+            m_tail.insert(s.probe, std::min(m_costs.providerTail, m_costs.provider));" ""
+mutate_race result_remainder_never_released F3 "            m_tail.remove(s.probe);" ""
+mutate_race result_tail_keeps_race_alive_without_waiters F3 "(m_tail.isEmpty() || m_deferred.isEmpty())" "m_tail.isEmpty()"
 mutate_engine late_spend_charged_to_current_race finding3 "        if (race != 0 && race == m_race.raceNumber())" "        if (race != 0)"
 mutate_engine hour_ledger_skips_other_race finding3 "        if (m_chargeProbeBytes)
             m_chargeProbeBytes(bytes);
@@ -146,5 +150,10 @@ mutate_engine hour_ledger_skips_other_race finding3 "        if (m_chargeProbeBy
 mutate settled_at_cancel_not_at_final I8 "    if (!it->sent.isEmpty() && m_books.contains(it->scanId)) { // the host scan" "    if (false) { // the host scan"
 mutate settle_at_cancel_while_api_request_in_flight R1 "    if (seat) { // the seat: the batch request still runs" "    if (false) { // the seat: the batch request still runs"
 mutate settle_at_cancel_while_session_fetch_runs R1 "    if (it->waitingSession && m_sessionFetching) {" "    if (false) {"
+mutate result_provider_never_settled F3 "    if (p.path.kind != path::PathKind::Provider)
+        return;" "    return;"
+mutate result_settled_before_release_chain_ends F3 "    if (p.seat) {
+        ++st.open;" "    if (false) {
+        ++st.open;"
 echo "work dir: $WORK"
 exit $failed
