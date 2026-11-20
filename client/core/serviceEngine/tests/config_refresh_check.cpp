@@ -541,6 +541,29 @@ private slots:
         QTest::qWait(600);                                        // B's quick timeout has fired too
         QVERIFY(service.directApiReach() != avpn::ApiReach::Unreachable);
     }
+    // Final review, F5: the network changes while a request of the previous network is in flight. Its answer cannot speak
+    // for the new network; the ask the new network is owed must still be sent (it was marked done with nothing sent).
+    void askOwedWhileOldRequestInFlight()
+    {
+        quint64 generation = 1;
+        avpn::ConfigService *svc = nullptr;
+        ConfigServer edge([&](int n) {
+            if (n == 1 && svc) { // request 1 has reached the server: the network changes before its answer is read
+                generation = 2;
+                svc->noteNetworkChanged();
+            }
+            return httpAnswer("200 OK", R"({"features":{}})");
+        });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, edge.base(), "fixture-key", {edge.base()});
+        svc = &service;
+        service.setNetworkGenerationSource([&generation] { return generation; });
+        service.setEdgeWalkTimingForTest(2000, 5000, 5000);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(edge.configRequests, 1, 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 4000); // asked and answered on generation 2
+        QVERIFY(edge.configRequests >= 2);
+    }
     // Round 10, R5: edge A was silent on its quick try; while B is being tried another direct request is answered
     // (reportNetworkSuccess(true)). That answer refutes A's silence: B's timeout must not complete the set.
     void directAnswerRefutesEarlierSilence()

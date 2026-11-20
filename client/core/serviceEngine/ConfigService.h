@@ -145,6 +145,7 @@ private:
     void askDirectOnce();
     // At most one direct ask per network generation and per kAskSpacingMs (flapping LTE: a few asks a minute at most).
     static constexpr qint64 kAskSpacingMs = 30000;
+    static constexpr int kAskBusyRetryMs = 1000;     // an ask that found a request in flight comes back after this
     std::function<bool()> m_tunnelUpFn;
     quint64        m_askedGen = 0;
     bool           m_askedAny = false;

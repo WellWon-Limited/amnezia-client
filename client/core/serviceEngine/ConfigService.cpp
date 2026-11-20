@@ -517,12 +517,22 @@ void ConfigService::askDirectOnce()
             m_askLater.start(int(kAskSpacingMs - (now - m_lastAskMs)));
         return;
     }
+    if (m_configInFlight) {
+        // A request sent before this ask is still in flight. If it was sent on the previous network its answer cannot
+        // speak for this one (the stamp at send), so the ask is still owed: come back shortly and do NOT mark this
+        // generation as asked (final review, F5: the ask was marked done although nothing was sent, and the fact stayed
+        // Unknown on the new network). If it was sent on this network its answer sets the fact and the deferred ask ends
+        // at the "known" check above.
+        if (!m_askLater.isActive())
+            m_askLater.start(kAskBusyRetryMs);
+        return;
+    }
     m_askedAny = true;
     m_askedGen = gen;
     m_lastAskMs = now;
     m_edgeAnswered = false;
     m_walkSilent = 0;
-    if (!leaveWalkPause() && !m_configInFlight)
+    if (!leaveWalkPause())
         fetchConfig();
 }
 
