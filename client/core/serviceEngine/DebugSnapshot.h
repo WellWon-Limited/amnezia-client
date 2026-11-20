@@ -7,6 +7,7 @@
 #include "ConfigCachePolicy.h" // kConfigRefreshThrottleMs - the one throttle of the config refresh
 #include "TransportModeGate.h"  // ModeTunnel - what the transport-mode gate is told about the tunnel
 #include "WhoamiVerdict.h" // timerFiredLate - the one "late timer = frozen process" rule (§29 п.5)
+#include "IScanHost.h" // kScanHostOnThisBuild / scannerSwitchOn - the Scanner exists only with a probe host on this build
 #include <QHash>
 #include <QPair>
 #include <QRegularExpression>
@@ -998,12 +999,13 @@ struct ScannerSwitches {
     }
     bool operator!=(const ScannerSwitches &o) const { return !(*this == o); }
 };
-// flag(key, compiledDefault) -> bool: TuningStore::flag in the app, a map in the tests.
+// flag(key, compiledDefault) -> bool: TuningStore::flag in the app, a map in the tests. hostOnBuild: the app passes
+// kScanHostOnThisBuild (IScanHost.h) - without a probe host every switch reads off and the Doctor stays, as today.
 template <typename Flag>
-inline ScannerSwitches scannerSwitchesFrom(Flag flag)
+inline ScannerSwitches scannerSwitchesFrom(Flag flag, bool hostOnBuild)
 {
     ScannerSwitches s;
-    s.scanner = flag(QLatin1String(kScannerSwitchKey), false);
+    s.scanner = scannerSwitchOn(flag(QLatin1String(kScannerSwitchKey), false), hostOnBuild);
     if (!s.scanner)
         return s;
     s.returnHome = flag(QLatin1String(kScannerReturnHomeKey), false);

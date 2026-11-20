@@ -1109,13 +1109,17 @@ PageType {
                         // выбрал движок, тем же кеглем/цветом, что мс; без узла — статус подбора.
                         Row {
                             id: subRow
+                            // The badge's own condition, read by the badge and by this row: a child's `visible` is its
+                            // EFFECTIVE visibility (it includes this row's), so the row reading it was a binding loop
+                            // that also kept the row hidden when the protocol came after it (android1 D3, shot 29)
+                            readonly property bool hasProto: root.shownProto.length > 0
                             width: parent.width
-                            visible: protoBadge.visible || subText.text.length > 0
+                            visible: hasProto || subText.text.length > 0
                             spacing: Theme.space.sm
                             TribeLabelBadge {
                                 id: protoBadge
                                 anchors.verticalCenter: parent.verticalCenter
-                                visible: root.shownProto.length > 0
+                                visible: subRow.hasProto
                                 readonly property bool xray: root.shownProto === "xray"
                                 // AVPN upstream nodes: a provider profile is Xray, not necessarily Reality -
                                 // the same word as its badge in the server list
@@ -1129,7 +1133,7 @@ PageType {
                             Text {
                                 id: subText
                                 anchors.verticalCenter: parent.verticalCenter
-                                width: subRow.width - (protoBadge.visible ? protoBadge.width + subRow.spacing : 0)
+                                width: subRow.width - (subRow.hasProto ? protoBadge.width + subRow.spacing : 0)
                                 visible: text.length > 0
                                 elide: Text.ElideRight
                                 text: root.curNode.hasNode ? (root.curNode.auto === true && !root.choiceElsewhere ? qsTr("Авто") : "")
@@ -1154,12 +1158,17 @@ PageType {
                             font.family: Theme.font.mono; font.pixelSize: Theme.font.micro
                         }
                         // The person's chosen server did not work on this network and the card names the node CONNECTED now
-                        // (currentNode.choiceNodeId / choiceName / choiceIsShown from the engine): one yellow line
+                        // (currentNode.choiceNodeId / choiceName / choiceIsShown from the engine): one yellow line.
+                        // The cluster's two rows stand beside the name and the badge row. Below the badge row this line
+                        // runs under the cluster on one line; without a badge row it is the second line, the ms row, so it
+                        // keeps the text column and wraps to two lines (android1 D4: it ran under «184 ms», shot 29)
                         Text {
-                            width: infoCol.width   // runs under the signal cluster: the whole sentence stays readable
+                            width: subRow.visible ? infoCol.width : parent.width
                             visible: root.choiceElsewhere
                             text: qsTr("%1 в этой сети не отвечает").arg(String(root.curNode.choiceName || ""))
                             textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            maximumLineCount: subRow.visible ? 1 : 2
                             elide: Text.ElideRight
                             color: Theme.color.warning
                             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
