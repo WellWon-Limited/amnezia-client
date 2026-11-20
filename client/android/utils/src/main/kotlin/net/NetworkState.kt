@@ -116,19 +116,85 @@ class NetworkState(
     }
 }
 
+// AVPN (Android uplink, review round 20 R1): "is there a physical network" as the C++ UplinkMonitor asks it. The
+// fact is the set of PHYSICAL networks with internet (the NOT_VPN set of ScanAppNetwork below): our own tunnel is
+// not in it, so its teardown is never "no network" (the default network of our UID is our VPN while it exists -
+// the QNetworkInformation fallback read that as a loss for 0.2-18 s after every teardown). up = the set is not
+// empty. The initial value is the synchronous snapshot taken when the monitor starts watching (the same request:
+// INTERNET + NOT_VPN), unless a callback already told the set; null = nothing known yet (C++ keeps its "until the
+// first event - up"). Pure: unit tested in PhysicalUplinkTest.
+class PhysicalUplink {
+    var up: Boolean? = null
+        private set
+    private var fromCallback = false
+
+    // The callback's set changed: true when `up` moved (the change is told to C++).
+    fun onSet(physicalNetworks: Int): Boolean {
+        fromCallback = true
+        return set(physicalNetworks > 0)
+    }
+
+    // The snapshot at the start of the watch: the initial value, never over what a callback already told.
+    fun onSnapshot(physicalNetworks: Int): Boolean = if (fromCallback) false else set(physicalNetworks > 0)
+
+    private fun set(value: Boolean): Boolean {
+        val moved = up != value
+        up = value
+        return moved
+    }
+}
+
 // AVPN (Scanner, lane A3; plan scanner-client-plan.md v2.2 §2.11a): the app process's element of the strict
 // network generation tuple (source "app": a random 64-bit epoch per process, a counter bumped when the set of
 // UNDERLYING networks changes - the VPN network itself is excluded, NET_CAPABILITY_NOT_VPN) and the physical kind of
 // that network (ethernet > wifi > cellular when several are up). Read by C++ through JNI
 // (AndroidScanHost::appGeneration -> ScanEngineAdapter::network()). The monitor starts on the first read and lives
 // as long as the process. The signature stays in memory, never sent or logged.
+// The same set is the Android source of the physical uplink (PhysicalUplink above): UplinkMonitor.cpp registers
+// onPhysicalUplink and calls watchUplink; every change of "the set is empty" is then told as it happens (on the
+// ConnectivityManager callback thread; C++ moves it to its own thread).
 object ScanAppNetwork {
     private val lock = Any()
     private val epoch = java.security.SecureRandom().nextLong()
     private var counter = 0L
     private var last: String? = null
     private var started = false
+    private var registered = false
+    private var uplinkWatched = false
+    private val uplink = PhysicalUplink()
     private val networks = HashMap<Network, Pair<String, String>>() // transport, "iface|addresses"
+
+    // Registered by UplinkMonitor.cpp (Android) before watchUplink: the physical uplink moved.
+    external fun onPhysicalUplink(up: Boolean)
+
+    // UplinkMonitor.cpp (Android): start watching. 1 = a physical network exists, 0 = none, -1 = not known yet,
+    // -2 = no source (the callback could not be registered: the C++ side keeps its QNetworkInformation fallback).
+    @JvmStatic
+    fun watchUplink(context: Context): Int {
+        start(context)
+        val cm = context.applicationContext.getSystemService<ConnectivityManager>() ?: return -2
+        synchronized(lock) {
+            if (!registered) return -2
+        }
+        // After the registration: a network lost before it is not in the snapshot, one lost after it is told by onLost.
+        @Suppress("DEPRECATION")
+        val snapshot = runCatching {
+            cm.allNetworks.count { n ->
+                cm.getNetworkCapabilities(n)?.let {
+                    it.hasCapability(NET_CAPABILITY_INTERNET) && it.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                } == true
+            }
+        }.getOrNull()
+        synchronized(lock) {
+            if (snapshot != null) uplink.onSnapshot(snapshot)
+            uplinkWatched = true
+            return when (uplink.up) {
+                true -> 1
+                false -> 0
+                null -> -1
+            }
+        }
+    }
 
     // {"source":"app","epoch":"<16 hex>","counter":n,"kind":"wifi|cellular|ethernet|"}; "" before the first network.
     @JvmStatic
@@ -151,7 +217,7 @@ object ScanAppNetwork {
             .addCapability(NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             .build()
-        runCatching {
+        val ok = runCatching {
             cm.registerNetworkCallback(request, object : NetworkCallback() {
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                     val transport = when {
@@ -174,7 +240,8 @@ object ScanAppNetwork {
                     }
                 }
             })
-        }.onFailure { Log.w(TAG, "Scan app network monitor not started: ${it.javaClass.simpleName}") }
+        }.onFailure { Log.w(TAG, "Scan app network monitor not started: ${it.javaClass.simpleName}") }.isSuccess
+        synchronized(lock) { registered = ok }
     }
 
     private fun update(network: Network, change: (Pair<String, String>?) -> Pair<String, String>) {
@@ -189,6 +256,13 @@ object ScanAppNetwork {
         val previous = last
         last = signature
         if (previous != null && previous != signature) counter++
+        // Told under the lock: C++ gets the changes in the order the set saw them, after watchUplink's initial value.
+        if (uplink.onSet(networks.size) && uplinkWatched) {
+            val up = uplink.up == true
+            Log.i(TAG, "Physical uplink ${if (up) "up" else "down"}")
+            runCatching { onPhysicalUplink(up) }
+                .onFailure { Log.w(TAG, "Physical uplink not told: ${it.javaClass.simpleName}") }
+        }
     }
 
     private fun kindLocked(): String {

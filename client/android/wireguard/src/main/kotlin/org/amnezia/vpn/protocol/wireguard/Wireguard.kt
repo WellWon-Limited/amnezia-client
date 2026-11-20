@@ -24,6 +24,13 @@ import org.amnezia.vpn.util.optStringOrNull
 import org.json.JSONObject
 
 private const val TAG = "Wireguard"
+private const val START_POLL_MS = 125L // a start in flight (iOS: kStartStatusPollMs)
+private const val START_POLL_WINDOW_MS = 10_000L
+private const val STEADY_POLL_MS = 1000L // upstream cadence
+
+// The wait between two handshake reads, by the time since the tunnel was built.
+internal fun handshakePollDelayMs(sinceBuiltMs: Long): Long =
+    if (sinceBuiltMs < START_POLL_WINDOW_MS) START_POLL_MS else STEADY_POLL_MS
 
 open class Wireguard : Protocol() {
 
@@ -194,14 +201,20 @@ open class Wireguard : Protocol() {
         launchStatusJob()
     }
 
+    // AVPN (item 2, as iOS IosNativePolicy.h kStartStatusPollMs): this job runs only while the tunnel is starting
+    // (it ends with the first handshake or an error), so it is the start's observer. A handshake 4.1 s after the
+    // tunnel was built must be seen before the attempt's 4.5 s leg limit, not up to 1 s later: poll every 125 ms
+    // for the first 10 s (awgGetConfig is a cheap local read), then at the upstream 1 s for a tunnel that stays
+    // without a handshake. Connected = the job is gone: the slow cadence is the statistics job's, not this one's.
     private fun launchStatusJob() {
         Log.d(TAG, "Launch status job")
         statusJob = scope.launch {
+            val startedAt = System.nanoTime()
             while (true) {
                 val lastHandshake = getLastHandshake()
                 Log.v(TAG, "lastHandshake=$lastHandshake")
                 if (lastHandshake == 0L) {
-                    delay(1000)
+                    delay(handshakePollDelayMs((System.nanoTime() - startedAt) / 1_000_000))
                     continue
                 }
                 if (lastHandshake == -2L || lastHandshake > 0L) state.value = CONNECTED

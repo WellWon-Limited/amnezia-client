@@ -366,9 +366,6 @@ public:
     // им же пользуется TribeSupportChat для опроса бейджа.
     static bool uiForeground();
     static bool uplinkUp();          // волна-3: физический аплинк (UplinkMonitor)
-    // D2: the uplink a decision acts on - a loss the monitor reported for our own tunnel does not count
-    // (DebugSnapshot.h uplinkLossIsOwnTunnel / uplinkUpForDecision; Android only, see m_uplinkLossOwnTunnel).
-    bool uplinkUpForDecision() const;
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
 
@@ -1440,7 +1437,6 @@ private:
     // Ревью CL-A r2 (K3/C4): системный диалог «Разрешить VPN» в пути — сторож старта не рвёт коннект.
     bool                        m_permissionPromptPending = false;
     int                         m_tunnelBuildSeq = -1; // Android local build: the service's start being built (seq)
-    bool                        m_uplinkLossOwnTunnel = false; // D2: the monitor's current "down" came with our own tunnel op
     // K3: после liveSessionFound ждём реальный статус профиля ограниченно (без вечного m_busy);
     // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
     bool                        m_liveSessionPending = false;

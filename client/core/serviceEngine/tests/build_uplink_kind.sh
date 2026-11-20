@@ -1,6 +1,7 @@
 #!/bin/bash
 # AVPN Scanner: build + run tests/uplink_kind_check.cpp - the physical uplink's kind under the Mac's own VPN
-# (UplinkMonitor.h, pure helpers; QtCore only, no SystemConfiguration, no network).
+# (UplinkMonitor.h, pure helpers; QtCore only, no SystemConfiguration, no network) and the Android physical
+# source's initial value (physicalSourceStart, review round 20 R1).
 #   --mutate : each rule in MUTATIONS is broken in a copy of UplinkMonitor.h; the check must fail for each.
 set -euo pipefail
 QT="${QT_ROOT:-$HOME/Qt/6.11.1/macos}"
@@ -19,6 +20,9 @@ if [ "${1:-}" = "--mutate" ]; then
     "wifi-wins-over-wired@@        if (i.medium == UplinkIfaceMedium::Ethernet)\n            return i.name;\n    for (const UplinkRouteIface &i : ifaces)\n        if (i.medium == UplinkIfaceMedium::Wifi)@@        if (i.medium == UplinkIfaceMedium::Wifi)\n            return i.name;\n    for (const UplinkRouteIface &i : ifaces)\n        if (i.medium == UplinkIfaceMedium::Ethernet)"
     "unknown-medium-taken@@        if (i.medium == UplinkIfaceMedium::Wifi)\n            return i.name;\n    return QString();@@        if (i.medium == UplinkIfaceMedium::Wifi)\n            return i.name;\n    return ifaces.isEmpty() ? QString() : ifaces.first().name;"
     "kind-always-wifi@@QStringLiteral(\"ethernet\") : QStringLiteral(\"wifi\")@@QStringLiteral(\"wifi\") : QStringLiteral(\"wifi\")"
+    "start-unknown-down@@    return told == 0 ? PhysicalSourceStart::Down : PhysicalSourceStart::Up;@@    return told == 1 ? PhysicalSourceStart::Up : PhysicalSourceStart::Down;"
+    "start-none-up@@    return told == 0 ? PhysicalSourceStart::Down : PhysicalSourceStart::Up;@@    return PhysicalSourceStart::Up;"
+    "start-no-source-kept@@    if (told < -1)\n        return PhysicalSourceStart::NoSource;@@    if (told < -2)\n        return PhysicalSourceStart::NoSource;"
     "first-route-only@@    for (const UplinkRouteIface &i : ifaces)\n        if (i.medium == UplinkIfaceMedium::Ethernet)\n            return i.name;@@    if (!ifaces.isEmpty() && ifaces.first().medium == UplinkIfaceMedium::Ethernet)\n        return ifaces.first().name;"
   )
   caught=0; missed=0; broken=0

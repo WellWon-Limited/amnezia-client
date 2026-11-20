@@ -1069,33 +1069,27 @@ static void stopNothingNative()
     CHECK(avpn::failedAttemptIntent(false, false, true) == FailedAttemptIntent::Drop);  // exact server, permission...
 }
 
-// D2 (Android emulator round 20.11): after a failed attempt the app said «Нет сети — подключимся, когда она
-// появится» with Wi-Fi up: Android's monitor reports "no network" each time our own tunnel closes. A loss reported
-// within the window of our own tunnel operation (the networkChangeIsOwnTunnel rule) says nothing about the physical
-// network - where the monitor sees our own tunnel (Android). Elsewhere and outside the window nothing changes.
-static void d2UplinkLossOfOwnTunnel()
+// Review round 20 R1 (Android): a person taps Connect, the physical network really goes away while the app connects
+// (out of coverage, Wi-Fi off) and the attempt ends. The decision reads the physical uplink - on Android now the set
+// of NOT_VPN networks (UplinkMonitor.cpp), which our own tunnel's teardown cannot empty - so the request is kept
+// (Wait: m_waitUplink, «Нет сети — подключимся, когда она появится») and the start comes with the network. With a
+// physical network up the same failure is the ordinary one. The defect read a loss "during our own operation" as
+// up (a coincidence in time): Drop, the VPN stayed off after the network came back. The wiring - the decision reads
+// UplinkMonitor directly, the Android source is the physical set - is check_android_uplink_wiring.sh.
+static void r20PhysicalLossDuringConnect()
 {
     using avpn::FailedAttemptIntent;
-    const qint64 now = 1'800'000'000'000LL;
-    const auto intentAfterFailure = [](bool monitorUp, bool lossOwn) {
-        return avpn::failedAttemptIntent(true, avpn::uplinkUpForDecision(monitorUp, lossOwn), false);
+    // judged = the attempt ended NothingProven / NoNetwork (syncAttempt's first argument)
+    const auto afterFailure = [](bool judged, bool physicalUp, bool afterLiveLoss) {
+        return avpn::failedAttemptIntent(judged, physicalUp, afterLiveLoss);
     };
-    // Android: the loss came while the attempt raised and closed its legs (an operation in flight)
-    const bool duringAttempt = avpn::uplinkLossIsOwnTunnel(true, /*ownOpInFlight=*/true, -1, now);
-    CHECK(duringAttempt);
-    CHECK(intentAfterFailure(false, duringAttempt) == FailedAttemptIntent::Drop); // the defect read Wait here
-    // ... or within the window after our own stop (2 s), not after it (6 s)
-    CHECK(avpn::uplinkLossIsOwnTunnel(true, false, now - 2000, now));
-    CHECK(!avpn::uplinkLossIsOwnTunnel(true, false, now - 6000, now));
-    // airplane mode while connected (device round 19.11): no operation of ours near the loss - still Wait
-    const bool airplane = avpn::uplinkLossIsOwnTunnel(true, false, now - 600000, now);
-    CHECK(!airplane && intentAfterFailure(false, airplane) == FailedAttemptIntent::Wait);
-    // a monitor that does not see our own tunnel (macOS by construction, iOS not observed): unchanged - Wait
-    const bool other = avpn::uplinkLossIsOwnTunnel(false, true, now - 1000, now);
-    CHECK(!other && intentAfterFailure(false, other) == FailedAttemptIntent::Wait);
-    // an uplink that is up is up
-    CHECK(avpn::uplinkUpForDecision(true, false) && avpn::uplinkUpForDecision(true, true));
-    CHECK(!avpn::uplinkUpForDecision(false, false));
+    // the attempt's budget ran out (nothing proven) with the physical set empty: the request is kept
+    CHECK(afterFailure(true, /*physicalUp=*/false, false) == FailedAttemptIntent::Wait);
+    // physical network up (our own tunnel went up and down meanwhile - not in the set): the ordinary failure
+    CHECK(afterFailure(true, true, false) == FailedAttemptIntent::Drop);
+    CHECK(afterFailure(true, true, true) == FailedAttemptIntent::DropAndResume);
+    // a failure that judged no server (the exact server, permission) is not about the network either way
+    CHECK(afterFailure(false, false, false) == FailedAttemptIntent::Drop);
 }
 
 static void checkBlameRule()
@@ -1491,7 +1485,7 @@ static void nodeFigureOneRule()
 
 int main()
 {
-    d2UplinkLossOfOwnTunnel();
+    r20PhysicalLossDuringConnect();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

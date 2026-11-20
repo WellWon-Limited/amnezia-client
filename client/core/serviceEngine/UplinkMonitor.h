@@ -6,8 +6,13 @@
 // вернулся только через 43 с (журнал Mac 26.09 12:43). Все решения «есть ли сеть» (учёт попыток
 // старта, пауза health-loop, повтор после сна) на этом сигнале врали. Здесь — nw_path_monitor с
 // запретом интерфейсов типа other (utun/ipsec/ppp): виден только реальный uplink (Wi-Fi/Ethernet/
-// сотовая). На остальных платформах — QNetworkInformation (там своя логика; iOS/Android не
-// используют этот монитор для решений о намерении).
+// сотовая). На остальных платформах — QNetworkInformation (там своя логика; iOS не
+// использует этот монитор для решений о намерении).
+//
+// Android (review round 20 R1): the same fact from the platform's own physical-network set - networks with
+// NET_CAPABILITY_INTERNET and NET_CAPABILITY_NOT_VPN, kept by NetworkState.kt ScanAppNetwork and told on every
+// change (UplinkMonitor.cpp). The QNetworkInformation fallback there watched the default network of our own UID,
+// which IS our VPN while it exists: every teardown of our own tunnel read as "no network" for 0.2-18 s.
 //
 // 5.1.108 (audit of 137): iOS also asks "is there a physical network" for the §25 stop of a dead
 // adopted session (IosController::setUplinkProbe). The authoritative .mm cannot build on iOS - its
@@ -34,6 +39,18 @@ inline bool fallbackPhysicalUp(UplinkReach reach, UplinkMedium medium)
     if (reach == UplinkReach::Unknown || reach == UplinkReach::Disconnected)
         return false;
     return medium == UplinkMedium::Ethernet || medium == UplinkMedium::WiFi || medium == UplinkMedium::Cellular;
+}
+
+// Android (review round 20 R1): the physical source's answer when its watch starts (NetworkState.kt
+// ScanAppNetwork.watchUplink): 1 = a physical network exists, 0 = none, -1 = nothing known yet, below -1 = no
+// source (its callback could not be registered: the QNetworkInformation fallback stays). Nothing known is up - the
+// monitor's contract "until the first event - true"; none is down: an app started without a network waits for one.
+enum class PhysicalSourceStart { Up, Down, NoSource };
+inline PhysicalSourceStart physicalSourceStart(int told)
+{
+    if (told < -1)
+        return PhysicalSourceStart::NoSource;
+    return told == 0 ? PhysicalSourceStart::Down : PhysicalSourceStart::Up;
 }
 
 // AVPN Scanner (plan §2.11a): the physical uplink's kind when nw_path names no interface - under the Mac's
@@ -77,7 +94,8 @@ public:
     // true — есть физический путь в сеть (без учёта VPN-интерфейсов). До первого события — true
     // (не блокировать старт при неизвестном состоянии).
     bool up() const { return m_up; }
-    // Есть ли достоверный источник (nw_path_monitor). false — фолбэк на QNetworkInformation.
+    // Есть ли достоверный источник (nw_path_monitor на macOS, набор физических сетей NOT_VPN на Android).
+    // false — фолбэк на QNetworkInformation.
     bool authoritative() const { return m_authoritative; }
     // 5.1.108: a physical path is KNOWN to exist (unknown = false). Authoritative source - up();
     // fallback - fallbackPhysicalUp(). For decisions that must not act on an unknown state (§25 stop).
@@ -94,6 +112,12 @@ public:
     QString pathKind() const { return m_pathKind; }
     QString pathGatewayHash() const { return m_pathGatewayHash; }
 
+#if defined(Q_OS_ANDROID)
+    // Android: the physical set became empty / non-empty (ScanAppNetwork.onPhysicalUplink, any thread); applied
+    // on the monitor's thread in the order told.
+    static void postPhysicalUp(bool up);
+#endif
+
 signals:
     void changed(bool up);
     void pathChanged(); // AVPN Scanner: pathCounter() or the path facts moved
@@ -103,6 +127,9 @@ private:
     ~UplinkMonitor() override;
     void start();
     void setUp(bool up, int reason = -1);
+#if defined(Q_OS_ANDROID)
+    bool startPhysical();
+#endif
 
     bool m_up = true;
     bool m_authoritative = false;
