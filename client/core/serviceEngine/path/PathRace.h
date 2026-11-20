@@ -215,6 +215,10 @@ public:
             return out; // stale: an older race, an older network, a cancelled or unknown probe
         const PathCandidate path = it.value().path;
         const int tookMs = int(std::max<qint64>(0, m_awake - it.value().startedAt));
+        // A probe that ended with a RESULT releases its hold here, at once - by design (reviewed, do not reopen): its seat release
+        // (a provider probe) is inside the probe's own upper bound and reaches the cap as spend of the same race (the spend stream
+        // is tagged with the race), so nothing is lost. Only a probe the RACE cancels (tick timeout, legStarted) is no candidate
+        // any more while its spend is unsettled: it keeps its hold in m_held until settled().
         m_inFlight.erase(it); // its hold on the cap ends with it (reservedInFlight() is derived from m_inFlight)
         if (outcome == PathOutcome::ProbeOk) {
             RaceEffect r;

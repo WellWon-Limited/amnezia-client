@@ -74,6 +74,7 @@ if [ "${1:-}" = "--mutate" ]; then
     "stored-token-after-304@@ScanApiClient.cpp@@        run->result.scanToken = token;\n        run->result.tokenExpiresAtMs@@        run->result.scanToken = run->stored.obj.value(QLatin1String(\"scan_token\")).toObject().value(QLatin1String(\"token\")).toString();\n        run->result.tokenExpiresAtMs"
     "manifest-signature-not-checked@@ScanApiClient.cpp@@    if (!verifyDetachedWithContext(key, QLatin1String(kScanManifestSigContext), body, sig))\n        return false;@@"
     "batch-signature-not-checked@@ScanApiClient.cpp@@        if (!sigOk || o.value@@        if (o.value"
+    "local-refusal-no-idle@@ScanApiClient.cpp@@            ScanSeatBatch::State::deliver(st, r);@@            if (st->done)\n                st->done(r);"
     "batch-cut-missing@@ScanApiClient.cpp@@    rq.maxBytes = st->cost < 0 ? -1 : qMax<qint64>(0, st->cost - st->spent);@@    rq.maxBytes = -1;"
     "batch-not-resent@@ScanApiClient.cpp@@        const bool again = st->owned && scanRetryCanceledRequest(@@        const bool again = false && scanRetryCanceledRequest("
     "batch-without-operation-id@@ScanApiClient.cpp@@,\n                                        {QStringLiteral(\"operation_id\"), st->op}})@@})"
