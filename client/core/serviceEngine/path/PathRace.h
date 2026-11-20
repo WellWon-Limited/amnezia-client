@@ -19,8 +19,9 @@
 //   Byte cap (device round 19.11: two of three LTE races spent 0.28 MB against 256 KB): the cap is spent by REAL bytes,
 //   as the prober reports them (spent(): the host's own counter as deltas, the API calls' bytes - the same stream that
 //   goes to the Scanner's hour ledger). A probe in flight additionally HOLDS its upper bound (IPathProber::costs) for
-//   admission only: it starts only if `spent so far + what is held + its own bound <= cap`. A probe's hold ends with its
-//   result; a probe cancelled by the race (timeout, the owner raising its path) is no candidate any more but keeps its hold
+//   admission only: it starts only if `spent so far + what is held + its own bound <= cap`. A probe's hold ends when
+//   nothing that can still spend for it is outstanding (settled()): a result keeps only what can still be spent (a provider probe's
+//   seat release), a probe cancelled by the race (timeout, the owner raising its path) is no candidate any more but keeps its hold
 //   until its spend is FINAL (settled(): the host's final total, or the bound of the prober's polling) - the host may still
 //   be spending its bytes. The race's end drops every hold with the race. A probe that never left the app holds its bound while it is "in flight" and costs
 //   nothing by itself. A candidate that does not fit waits (deferred) for the cap to free; the next, cheaper ones
@@ -153,6 +154,9 @@ public:
         qint64 awg = 90 * 1024;
         qint64 xray = 160 * 1024;
         qint64 provider = 160 * 1024; // upper bounds, for admission only (nothing is charged by them)
+        // What a provider probe can still spend after its RESULT: its seat release (kScanSeatReleaseSends x costApiBytes). A
+        // finished probe holds this on the cap until the prober settles it (the release chain ended). 0: nothing is held.
+        qint64 providerTail = 0;
     };
 
     // A new race (an older one ends first, its probes cancelled). bytesLeft < 0 = no byte cap (Wi-Fi without a
@@ -179,6 +183,7 @@ public:
         m_providersQueued = 0;
         m_inFlight.clear();
         m_held.clear();
+        m_tail.clear();
         m_winner.clear();
         m_providersStarted = 0;
         m_unpaid = false;
@@ -215,11 +220,15 @@ public:
             return out; // stale: an older race, an older network, a cancelled or unknown probe
         const PathCandidate path = it.value().path;
         const int tookMs = int(std::max<qint64>(0, m_awake - it.value().startedAt));
-        // A probe that ended with a RESULT releases its hold here, at once - by design (reviewed, do not reopen): its seat release
-        // (a provider probe) is inside the probe's own upper bound and reaches the cap as spend of the same race (the spend stream
-        // is tagged with the race), so nothing is lost. Only a probe the RACE cancels (tick timeout, legStarted) is no candidate
-        // any more while its spend is unsettled: it keeps its hold in m_held until settled().
-        m_inFlight.erase(it); // its hold on the cap ends with it (reservedInFlight() is derived from m_inFlight)
+        // ONE rule for every way a probe ends: its hold on the cap ends when nothing that can still spend for it is outstanding,
+        // and until then the hold is what can STILL be spent for it. A result is a result at once (the candidate bookkeeping below
+        // and the engine's connect decisions do not wait), but the cap room is held: a provider probe's seat release starts after
+        // its result and its bytes are counted when the release chain ends, so it keeps the release budget (providerTail) in
+        // m_held until settled(); the host's bytes of own AmneziaWG / Xray probes are already in the counter shown with the result
+        // and nothing else of theirs can spend, so their hold is zero. A cancelled probe (timeout, legStarted) keeps its whole bound.
+        m_inFlight.erase(it);
+        if (path.kind == PathKind::Provider && m_costs.providerTail > 0)
+            m_tail.insert(s.probe, std::min(m_costs.providerTail, m_costs.provider));
         if (outcome == PathOutcome::ProbeOk) {
             RaceEffect r;
             r.type = RaceEffectType::Report;
@@ -257,8 +266,10 @@ public:
     // because the host may still be spending its bytes. No pump here: the next tick admits what now fits.
     void settled(const ProbeStamp &s)
     {
-        if (s.race == m_race)
+        if (s.race == m_race) {
             m_held.remove(s.probe);
+            m_tail.remove(s.probe);
+        }
     }
 
     // Real bytes of this race, as the prober reports them (the host's counter as deltas, API calls as they are spent).
@@ -401,6 +412,8 @@ private:
             n += costOf(f.path);
         for (auto it = m_held.constBegin(); it != m_held.constEnd(); ++it)
             n += it.value();
+        for (auto it = m_tail.constBegin(); it != m_tail.constEnd(); ++it)
+            n += it.value();
         return n;
     }
 
@@ -512,7 +525,9 @@ private:
             }
         }
         // (a cancelled probe whose spend is not final yet still holds cap room: the candidates it keeps waiting may fit after it)
-        if (m_pending.isEmpty() && m_inFlight.isEmpty() && m_held.isEmpty() && m_next >= int(m_order.size()))
+        // (a finished probe's release tail does not keep a race alive when no candidate waits for cap room: the race's end drops it)
+        if (m_pending.isEmpty() && m_inFlight.isEmpty() && m_held.isEmpty() && (m_tail.isEmpty() || m_deferred.isEmpty())
+            && m_next >= int(m_order.size()))
             finish(m_unpaid && m_proven == 0 ? RaceDoneReason::Bytes : RaceDoneReason::Exhausted, out);
     }
 
@@ -522,6 +537,7 @@ private:
             out << cancelEffect(it.key(), it.value().path);
         m_inFlight.clear();
         m_held.clear(); // the race is over: its cap goes with it
+        m_tail.clear();
         m_pending.clear();
         m_deferred.clear();
         m_running = false;
@@ -538,6 +554,7 @@ private:
     NetworkKey m_net;
     QList<PathCandidate> m_order;
     QHash<quint64, Flight> m_inFlight;
+    QHash<quint64, qint64> m_tail; // probes that ended with a result: probe -> what can still be spent for it (the seat release)
     QHash<quint64, qint64> m_held; // cancelled probes whose spend is not final yet: probe -> the bound it still holds
     QString m_winner;
     quint64 m_race = 0;

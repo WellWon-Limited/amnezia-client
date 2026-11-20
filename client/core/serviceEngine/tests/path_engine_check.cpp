@@ -1955,6 +1955,131 @@ static void scenarioRace()
         CHECK(race.reservedBytes() == 0 && !race.running());
     }
 
+    // Round 16, F3: a probe that ended with a RESULT keeps holding what can still be spent for it - the seat release of a provider probe
+    // (providerTail) - until the prober settles it. Cap 120 000; the provider probe's host part is counted (60 000); an AmneziaWG probe
+    // (bound 54 572) fits next to that only if the release is forgotten. Before: the result released the whole hold, the AmneziaWG probe
+    // was admitted and the late release took the race past its cap.
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.awg = 54572;
+        costs.provider = 90000;
+        costs.providerTail = 20480; // kScanSeatReleaseSends x costApiBytes
+        RaceTimings rt;
+        rt.hedgeMs = 20000;
+        rt.probeTimeoutMs = 5000;
+        const auto run = [&](qint64 lateRelease, bool &admittedAfterResult, bool &admittedAfterSettle, qint64 &worstSum) {
+            PathRace race(rt);
+            QStringList started;
+            ProbeStamp p1;
+            const auto take = [&](const QList<RaceEffect> &fx) {
+                for (const RaceEffect &e : fx)
+                    if (e.type == RaceEffectType::StartProbe) {
+                        started << e.path.id.id;
+                        if (e.path.id.id == QLatin1String("up:p1"))
+                            p1 = e.stamp;
+                    }
+            };
+            const auto watch = [&]() { worstSum = std::max(worstSum, race.spentBytes() + race.reservedBytes()); };
+            take(race.begin(0, { prov("up:p1", UpstreamKind::Country, "PL", 1), awg("a1", "EE") }, tr.current(), hostCaps(), 120000, costs));
+            CHECK(started == QStringList({ "up:p1" })); // 90 000 + 54 572 > 120 000: the AmneziaWG probe waits
+            race.spent(60000);                           // the provider probe's host part, counted
+            take(race.probeDone(300, p1, PathOutcome::ProbeOk));
+            watch();
+            take(race.tick(550));
+            admittedAfterResult = started.contains(QStringLiteral("a1"));
+            CHECK(race.reservedBytes() == (admittedAfterResult ? 54572 : 20480)); // the release is what the finished probe still holds
+            race.spent(lateRelease);                                              // the release chain ended: its bytes, then the settle
+            race.settled(p1);
+            watch();
+            take(race.tick(800));
+            admittedAfterSettle = started.contains(QStringLiteral("a1"));
+            watch();
+            race.spent(50000); // what the AmneziaWG probe really spends
+            CHECK(!admittedAfterSettle || race.spentBytes() <= 120000);
+            return race.spentBytes();
+        };
+        bool afterResult = true, afterSettle = false;
+        qint64 worst = 0;
+        run(5000, afterResult, afterSettle, worst); // a one-send release (5 000): 65 000 + 54 572 fit once it is settled
+        CHECK(!afterResult);                         // not admitted while the release is outstanding
+        CHECK(afterSettle);                          // admitted after the settle
+        CHECK(worst <= 120000);                      // counted + held never passed the cap
+        afterResult = afterSettle = true;
+        worst = 0;
+        run(19000, afterResult, afterSettle, worst); // the reviewer's numbers: 79 000 + 54 572 do not fit: never admitted
+        CHECK(!afterResult && !afterSettle && worst <= 120000);
+    }
+    // F3, mirror: the hold of a finished probe is its release budget, kept whole until the release's bytes arrive in one lump with the
+    // settle (the chain's bytes are counted once, when it ends): counted + held never exceeds spent-before + the probe's bound and
+    // never goes below the bytes really counted; the race still ends (nothing stays held) when the settle comes.
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.provider = 90000;
+        costs.providerTail = 20480;
+        costs.awg = 100000; // a candidate that waits for cap room keeps the race alive while the release is outstanding
+        RaceTimings rt;
+        rt.hedgeMs = 20000;
+        PathRace race(rt);
+        ProbeStamp p1;
+        for (const RaceEffect &e : race.begin(0, { prov("up:p1", UpstreamKind::Country, "PL", 1), awg("a1", "EE") }, tr.current(), hostCaps(), 150000, costs))
+            if (e.type == RaceEffectType::StartProbe)
+                p1 = e.stamp;
+        race.spent(40000);
+        CHECK(race.spentBytes() + race.reservedBytes() == 40000 + 90000);
+        race.probeDone(300, p1, PathOutcome::ProbeOk);
+        CHECK(race.reservedBytes() == 20480 && race.running()); // a result at once: the winner is not delayed; only the cap room is held
+        CHECK(race.spentBytes() + race.reservedBytes() <= 40000 + 90000 && race.spentBytes() + race.reservedBytes() >= race.spentBytes());
+        race.spent(12000);
+        race.settled(p1);
+        CHECK(race.reservedBytes() == 0 && race.spentBytes() == 52000 && race.spentBytes() <= 40000 + 90000); // held once, counted once
+        race.settled(p1); // a repeat changes nothing
+        CHECK(race.reservedBytes() == 0 && race.spentBytes() == 52000);
+        // the race ends once the settle came (an exhausted race with a hold outstanding but nothing waiting does not wait for it)
+        bool done = false;
+        for (qint64 t = 550; t <= 1500; t += 250)
+            for (const RaceEffect &e : race.tick(t))
+                done = done || e.type == RaceEffectType::Done;
+        CHECK(done && !race.running());
+    }
+    // F3: nothing waits for the cap -> the race ends at the last result even with the release outstanding (the owner starts at once);
+    // a candidate waiting for cap room keeps the race alive until the settle. The cellular first tick still admits Xray + provider +
+    // AmneziaWG (116 736 + 117 760 + 54 572 <= 393 216).
+    {
+        NetworkTracker tr;
+        tr.observe(cell("", "lte"));
+        PathRace::Costs costs;
+        costs.xray = 116736;
+        costs.provider = 117760;
+        costs.providerTail = 20480;
+        costs.awg = 54572;
+        RaceTimings rt;
+        PathRace race(rt);
+        QStringList started;
+        QList<ProbeStamp> stamps;
+        for (const RaceEffect &e : race.begin(0, { xray("x1", "FI"), prov("up:p1", UpstreamKind::Country, "PL", 1), awg("a1", "EE") },
+                                              tr.current(), hostCaps(), RaceTimings().cellularMaxBytes, costs))
+            if (e.type == RaceEffectType::StartProbe) {
+                started << e.path.id.id;
+                stamps << e.stamp;
+            }
+        for (qint64 t = 250; t <= 1000 && started.size() < 3; t += 250) // one probe starts per stagger
+            for (const RaceEffect &e : race.tick(t))
+                if (e.type == RaceEffectType::StartProbe) {
+                    started << e.path.id.id;
+                    stamps << e.stamp;
+                }
+        CHECK(started.size() == 3);
+        bool done = false;
+        for (const ProbeStamp &s : stamps)
+            for (const RaceEffect &e : race.probeDone(400, s, PathOutcome::Inconclusive))
+                done = done || e.type == RaceEffectType::Done;
+        CHECK(done && !race.running() && race.reservedBytes() == 0); // exhausted at the last result: no wait for the release
+    }
+
     // B3a: the first candidate works. With no evidence the race goes first: the first leg waits for the first proof
     // (here that candidate's own probe) and costs at most that probe over no race - never a dropped leg. A known path
     // (the second tap) starts at once: never slower than no race.
