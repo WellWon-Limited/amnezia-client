@@ -977,22 +977,21 @@ void VpnConnectionTunnelControl::retryUpstreamAdoption()
 #endif
 }
 
-// KNOWN LIMIT (round 10 R1, deliberately not fixed; rewritten for the tenure rule, contract 1.19.0): on iOS the app can be relaunched
-// while the extension keeps a provider tunnel running (the extension holds that session's lease and renew token; the app has no owner
-// for it - only macOS adopts a record). When the same provider is chosen again, this seat-first prepare acquires the profile BEFORE the
-// old tunnel stops. It is a new start with its own nonce and order, so the server takes the seat over: the old lease is ENDED (replaced)
-// at that moment and a NEW lease with a new token is made - the extension's lease is not rotated, it is gone. What follows for the old
-// session: the extension's renewals carry the old token and are refused (expected: HTTP 404 lease_gone, a terminal answer - not
-// verified against a replaced lease), and its final report with the DELETE at the old tunnel's stop is dropped (the lease already
-// ended: 204, nothing applied). Lost: the old session's traffic since its last accepted renewal, at most about 5 minutes
-// (renew_after_s). No seat is harmed: the new session holds its own lease, the old DELETEs only name the ended one. What the extension
-// does with the refusal on its own: the renewer applies the terminal answer (UpstreamLeaseRenewer.swift:300, via the machine's
-// terminal check, UpstreamLeaseMachine.swift:400) and upstreamLeaseTerminal (PacketTunnelProvider+Upstream.swift:296-316) stops the
-// provider core and keeps the tunnel interface - traffic stops, the tunnel is NOT torn down by the extension. It happens only at its
-// next renewal, minutes after the new start's acquire, while the app's switch (stop of the old tunnel, up of the new one) takes
-// seconds - so in the normal flow the app's own stop comes first; only a switch that never happens (the new start fails after the
-// seat was taken) leaves the old tunnel without its core until the person acts. A proper fix hands the extension the final report
-// before the new start replaces the lease, or makes the app adopt the running session on iOS as macOS does.
+// KNOWN LIMIT (round 10 R1, narrowed by the tenure rule, contract 1.19.0 and the server's rule that a release with the tenure's own
+// token is metered even after the lease ended): on iOS the app can be relaunched while the extension keeps a provider tunnel running (the
+// extension holds that session's lease and renew token; the app has no owner for it - only macOS adopts a record). When the same
+// provider is chosen again, this seat-first prepare acquires the profile BEFORE the old tunnel stops. It is a new start with its own
+// nonce and order, so the server takes the seat over: the old lease is ENDED (replaced) and a NEW lease with a new token is made.
+// What follows for the old session: the extension's renewals carry the old token and are refused (expected: HTTP 404 lease_gone, a
+// terminal answer - not verified against a replaced lease), but its final report with the DELETE at the old tunnel's stop carries that
+// tenure's own token (UpstreamLeaseWire.swift releaseBody, from UpstreamLeaseRenewer.swift prepareRelease), so the server still
+// applies it: the report is NOT lost. What remains: (1) only if that DELETE never comes (the extension is killed
+// before its stop) the traffic since the last accepted renewal, at most about 5 minutes (renew_after_s), is lost; (2) the extension stops its provider core at its next renewal's terminal refusal (UpstreamLeaseRenewer.swift:300,
+// UpstreamLeaseMachine.swift:400, PacketTunnelProvider+Upstream.swift:296-316) and keeps the tunnel interface - traffic stops, the
+// tunnel is NOT torn down by the extension. That comes minutes after the new start's acquire, while the app's switch (stop of the old
+// tunnel, up of the new one) takes seconds, so in the normal flow the app's own stop comes first; only a switch that never happens
+// (the new start fails after the seat was taken) leaves the old tunnel without its core until the person acts. No seat is harmed.
+// A proper fix makes the app adopt the running session on iOS as macOS does.
 quint64 VpnConnectionTunnelControl::prepareUpstream(const Subscription &sub, const SubscriptionNode &node)
 {
     if (!upstreamNodesEnabled() || !m_leaseClient || !m_leaseClient->configured() || m_upOwner.active()
