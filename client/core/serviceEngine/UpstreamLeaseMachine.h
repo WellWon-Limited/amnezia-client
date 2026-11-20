@@ -298,6 +298,22 @@ public:
         return s;
     }
 
+    // The acquire in flight was refused only because the start's order was too low (UpstreamLeaseOwner: an order-floor denial of the
+    // CURRENT start): the same session asks once more - a fresh request, same phase, same standby confirmation if it is one - and
+    // nothing is reported upward. Inert unless `requestId` is the acquire this session waits for.
+    LeaseStep reissueAcquire(quint64 requestId, qint64 nowMs)
+    {
+        LeaseStep s;
+        nowMs = clock(nowMs);
+        if (m_inflight != Inflight::Acquire || requestId != m_inflightId
+            || (m_phase != LeasePhase::Acquiring && m_phase != LeasePhase::Provisional)) {
+            s.inert = true;
+            return s;
+        }
+        sendAcquire(nowMs, s);
+        return s;
+    }
+
     // The provisional tunnel is up: confirm the seat through it.
     LeaseStep tunnelUp(qint64 nowMs)
     {
