@@ -33,7 +33,12 @@ enum class ServiceEvent : IpcMessage {
     SCAN_REPLY,
     // AVPN (Scanner, lane A3): the Xray service's probe host {"open":bool,"gen":{...}} in MSG_SCAN_STATE; on every
     // change and after STATUS; Xray sessions only.
-    SCAN_HOST_STATE
+    SCAN_HOST_STATE,
+    // AVPN (local build, emulator round 20.11): the service builds the tunnel interface of a start (MSG_TUNNEL_BUILD_STATE
+    // TUNNEL_BUILDING, from the start command) or has built it (TUNNEL_BUILT: establish() returned and the backend runs,
+    // or the start ended without it); MSG_TUNNEL_BUILD_SEQ numbers the starts. To every client; a client that registers
+    // during a build gets TUNNEL_BUILDING at once.
+    TUNNEL_BUILD
 }
 
 enum class Action : IpcMessage {
@@ -62,6 +67,12 @@ const val MSG_SCAN_ID = "SCAN_ID"
 const val MSG_SCAN_REQUEST = "SCAN_REQUEST"
 const val MSG_SCAN_REPLY = "SCAN_REPLY"
 const val MSG_SCAN_STATE = "SCAN_STATE"
+
+// AVPN (local build): Bundle keys and states of TUNNEL_BUILD (the states are QtAndroidController.onTunnelBuild's).
+const val MSG_TUNNEL_BUILD_STATE = "TUNNEL_BUILD_STATE"
+const val MSG_TUNNEL_BUILD_SEQ = "TUNNEL_BUILD_SEQ"
+const val TUNNEL_BUILDING = 0
+const val TUNNEL_BUILT = 1
 
 fun <T> T.packToMessage(): Message
     where T : Enum<T>, T : IpcMessage = Message.obtain().also { it.what = ordinal }

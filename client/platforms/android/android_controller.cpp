@@ -143,6 +143,17 @@ bool AndroidController::initialize()
             qWarning() << "AndroidController: no onVpnPermissionPrompt in the Kotlin half - no pause for the VPN dialog";
         }
     }
+    // AVPN (local build): the service's own build of the tunnel interface, optional the same way (without it the
+    // engine's leg clock runs through the build, as before).
+    {
+        const JNINativeMethod buildMethods[] = {
+            {"onTunnelBuild", "(II)V", reinterpret_cast<void *>(onTunnelBuild)},
+        };
+        if (!env.registerNativeMethods(QT_ANDROID_CONTROLLER_CLASS, buildMethods, 1)) {
+            env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent);
+            qWarning() << "AndroidController: no onTunnelBuild in the Kotlin half - the leg clock runs through the build";
+        }
+    }
     // AVPN (Scanner, lane A3): the probe host's reply and state, optional the same way (without them the Scanner's
     // host stays NeedsVpn on Android: every scan ends «Не проверено» / NoScan host_no_vpn).
     {
@@ -646,6 +657,15 @@ void AndroidController::onVpnPermissionPrompt(JNIEnv *env, jobject thiz, jint st
     Q_UNUSED(thiz);
 
     emit AndroidController::instance()->vpnPermissionPrompt(int(state));
+}
+
+// static
+void AndroidController::onTunnelBuild(JNIEnv *env, jobject thiz, jint state, jint seq)
+{
+    Q_UNUSED(env);
+    Q_UNUSED(thiz);
+
+    emit AndroidController::instance()->tunnelBuild(int(state), int(seq));
 }
 
 // static

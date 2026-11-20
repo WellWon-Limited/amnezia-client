@@ -18,6 +18,7 @@ import android.os.Message
 import android.os.Messenger
 import android.os.PowerManager
 import android.os.Process
+import android.os.SystemClock
 import androidx.annotation.MainThread
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -158,6 +159,9 @@ open class AmneziaVpnService : VpnService() {
                         val messenger = IpcMessenger(msg.replyTo, clientName)
                         clientMessengers[msg.replyTo] = messenger
                         Log.d(TAG, "Messenger client '$clientName' was registered")
+                        // AVPN (local build): the first start comes with the service's start command, before the
+                        // activity registered - it learns the build in progress now
+                        if (buildingSeq != 0) messenger.send { tunnelBuildMessage(TUNNEL_BUILDING, buildingSeq) }
                         if (clientName == ACTIVITY_MESSENGER_NAME && isConnected) launchSendingStatistics()
                     }
 
@@ -584,19 +588,50 @@ open class AmneziaVpnService : VpnService() {
         trafficStatsUpdateJob = null
     }
 
-    @MainThread
-    private fun connect(vpnConfig: String? = null) {
-        if (vpnConfig == null) {
-            connectToVpn(Prefs.load(PREFS_CONFIG_KEY))
-        } else {
-            Prefs.save(PREFS_CONFIG_KEY, vpnConfig)
-            connectToVpn(vpnConfig)
+    // AVPN (local build, emulator round 20.11): with «Доступ к сайтам РФ» on Android installs ~10 800 routes inside
+    // VpnService.Builder.establish() - 7-10 s on the emulator - before the tunnel interface exists. That is the device's
+    // time, not the server's: every start is numbered and reported "building" from the start command (config file,
+    // prefs, parse, builder, establish) until the protocol's start returned - the interface is established and the
+    // backend runs - or the start ended without it ("built"). The engine stops the leg's start clock in between
+    // (AttemptOwner.h "Local build"). Main thread only.
+    private var buildSeq = 0
+    private var buildingSeq = 0 // the start being built now (0: none)
+
+    private fun tunnelBuildMessage(state: Int, seq: Int) =
+        ServiceEvent.TUNNEL_BUILD.packToMessage {
+            putInt(MSG_TUNNEL_BUILD_STATE, state)
+            putInt(MSG_TUNNEL_BUILD_SEQ, seq)
         }
+
+    @MainThread
+    private fun reportTunnelBuild(state: Int, seq: Int) {
+        if (state == TUNNEL_BUILDING) buildingSeq = seq
+        else if (buildingSeq == seq) buildingSeq = 0
+        clientMessengers.send { tunnelBuildMessage(state, seq) }
     }
 
     @MainThread
-    private fun connectToVpn(vpnConfig: String) {
-        if (isConnected || protocolState.value == CONNECTING) return
+    private fun connect(vpnConfig: String? = null) {
+        val seq = ++buildSeq
+        val begin = SystemClock.elapsedRealtime()
+        reportTunnelBuild(TUNNEL_BUILDING, seq)
+        Log.i(TAG, "Tunnel build $seq: begin")
+        val launched = if (vpnConfig == null) {
+            connectToVpn(Prefs.load(PREFS_CONFIG_KEY), seq, begin)
+        } else {
+            Prefs.save(PREFS_CONFIG_KEY, vpnConfig)
+            connectToVpn(vpnConfig, seq, begin)
+        }
+        if (!launched) {
+            Log.i(TAG, "Tunnel build $seq: end, not started")
+            reportTunnelBuild(TUNNEL_BUILT, seq)
+        }
+    }
+
+    // true: the start job was launched (it reports the end of the build itself)
+    @MainThread
+    private fun connectToVpn(vpnConfig: String, seq: Int, begin: Long): Boolean {
+        if (isConnected || protocolState.value == CONNECTING) return false
 
         Log.d(TAG, "Start VPN connection")
 
@@ -605,7 +640,7 @@ open class AmneziaVpnService : VpnService() {
         if (config == null) {
             onError("Invalid VPN config")
             protocolState.value = DISCONNECTED
-            return
+            return false
         }
 
         try {
@@ -613,7 +648,7 @@ open class AmneziaVpnService : VpnService() {
         } catch (e: Exception) {
             onError("Invalid VPN config: ${e.message}")
             protocolState.value = DISCONNECTED
-            return
+            return false
         }
 
         protocolState.value = CONNECTING
@@ -627,18 +662,31 @@ open class AmneziaVpnService : VpnService() {
 
         if (!checkPermission()) {
             protocolState.value = DISCONNECTED
-            return
+            return false
         }
 
+        val prepared = SystemClock.elapsedRealtime()
         connectionJob = connectionScope.launch {
-            disconnectionJob?.join()
-            disconnectionJob = null
+            var started = false
+            var startAt = prepared
+            try {
+                disconnectionJob?.join()
+                disconnectionJob = null
+                startAt = SystemClock.elapsedRealtime()
 
-            vpnProto?.protocol?.let { protocol ->
-                protocol.initialize(applicationContext, protocolState, ::onError)
-                protocol.startVpn(config, Builder(), ::protect)
+                vpnProto?.protocol?.let { protocol ->
+                    protocol.initialize(applicationContext, protocolState, ::onError)
+                    protocol.startVpn(config, Builder(), ::protect)
+                    started = true
+                }
+            } finally {
+                val end = SystemClock.elapsedRealtime()
+                Log.i(TAG, "Tunnel build $seq: end, started=$started prepare_ms=${prepared - begin} " +
+                    "wait_stop_ms=${startAt - prepared} start_ms=${end - startAt} total_ms=${end - begin}")
+                mainScope.launch { reportTunnelBuild(TUNNEL_BUILT, seq) }
             }
         }
+        return true
     }
 
     @MainThread

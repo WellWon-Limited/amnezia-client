@@ -152,6 +152,18 @@ class AmneziaActivity : QtActivity() {
                         msg.data?.getString(MSG_SCAN_STATE)?.let { QtAndroidController.onScanHostState(it) }
                     }
 
+                    ServiceEvent.TUNNEL_BUILD -> {
+                        // AVPN (local build): the engine stops the leg's start clock while the service builds the
+                        // tunnel interface. Guarded like the permission prompt: without the native the clock just runs.
+                        msg.data?.let { d ->
+                            try {
+                                QtAndroidController.onTunnelBuild(d.getInt(MSG_TUNNEL_BUILD_STATE), d.getInt(MSG_TUNNEL_BUILD_SEQ))
+                            } catch (e: UnsatisfiedLinkError) {
+                                Log.w(TAG, "No native onTunnelBuild: $e")
+                            }
+                        }
+                    }
+
                     ServiceEvent.UPSTREAM_STATUS -> {
                         // AVPN (upstream nodes, android-ipc-contract.md section 3): forwarded to C++ unchanged
                         // (UpstreamStatusWire.h decodes it); never logged.

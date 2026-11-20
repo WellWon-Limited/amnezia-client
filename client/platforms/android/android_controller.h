@@ -85,6 +85,11 @@ signals:
     // 1 = closed, granted, 2 = closed, denied or cancelled. The engine pauses its clock while 0 (the same rule as
     // IosController::permissionPromptPending) and ends the attempt on 2. Optional native: see initialize().
     void vpnPermissionPrompt(int state);
+    // AVPN (local build, emulator round 20.11): the VPN service builds the tunnel interface of a start (state 0, from
+    // the start command) or has built it (state 1: VpnService.Builder.establish() returned and the backend runs, or
+    // the start ended without it). `seq` numbers the service's starts: a "built" belongs to the "building" with the
+    // same number. The engine stops the leg's start clock in between (AttemptOwner.h "Local build"). Optional native.
+    void tunnelBuild(int state, int seq);
     void notificationStateChanged();
     void vpnStateChanged(ConnectionState state);
     void statisticsUpdated(quint64 rxBytes, quint64 txBytes);
@@ -134,6 +139,7 @@ private:
     static void onServiceError(JNIEnv *env, jobject thiz);
     static void onVpnPermissionRejected(JNIEnv *env, jobject thiz);
     static void onVpnPermissionPrompt(JNIEnv *env, jobject thiz, jint state); // AVPN, optional native
+    static void onTunnelBuild(JNIEnv *env, jobject thiz, jint state, jint seq); // AVPN, optional native
     static void onNotificationStateChanged(JNIEnv *env, jobject thiz);
     static void onVpnStateChanged(JNIEnv *env, jobject thiz, jint stateCode);
     static void onStatisticsUpdate(JNIEnv *env, jobject thiz, jlong rxBytes, jlong txBytes,

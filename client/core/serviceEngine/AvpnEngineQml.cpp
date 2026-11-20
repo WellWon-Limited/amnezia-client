@@ -1595,6 +1595,21 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 QTimer::singleShot(0, this, [this]() { reconcile(); });
         }
     }, Qt::QueuedConnection);
+    // Local build (AttemptOwner.h "Local build", emulator round 20.11): with «Доступ к сайтам РФ» on, Android installs
+    // ~10 800 routes inside VpnService.Builder.establish() - 7-10 s on the emulator - before the tunnel interface
+    // exists. That time is the device's, not the server's: the service reports "building" when it takes the start
+    // and "built" when establish() returned and the backend runs (or the start ended without it); the owner's leg
+    // clock stands in between and a build that never ends is a local outcome. A "built" carries the number of its
+    // start: one of an older start (its stop was never confirmed) does not end the build of the leg in flight.
+    connect(AndroidController::instance(), &AndroidController::tunnelBuild, this, [this](int buildState, int seq) {
+        if (buildState == 0)
+            m_tunnelBuildSeq = seq;
+        else if (seq != m_tunnelBuildSeq)
+            return;
+        m_engine.onLocalBuild(buildState == 0);
+        if (syncAttempt())
+            QTimer::singleShot(0, this, [this]() { reconcile(); });
+    }, Qt::QueuedConnection);
     // Safety: a tunnel state past the dialog (the service is connecting or up) means the dialog is gone.
     connect(AndroidController::instance(), &AndroidController::connectionStateChanged, this,
             [this](Vpn::ConnectionState st) {
