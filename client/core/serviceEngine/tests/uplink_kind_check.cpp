@@ -39,6 +39,20 @@ int main()
     CHECK_EQ(uplinkPhysicalIfname({other}), QString());
     // another medium next to Wi-Fi does not hide it
     CHECK_EQ(uplinkPhysicalKind({other, wifi}), QStringLiteral("wifi"));
+
+    // Android (review round 20 R1): the physical source's answer at the start of its watch
+#define CHECK_START(told, want)                                                                            \
+    do {                                                                                                   \
+        ++g_checks;                                                                                        \
+        if (physicalSourceStart(told) != (want)) {                                                         \
+            ++g_fail;                                                                                      \
+            std::fprintf(stderr, "FAIL %s:%d physicalSourceStart(%d)\n", __FILE__, __LINE__, told);       \
+        }                                                                                                  \
+    } while (0)
+    CHECK_START(1, PhysicalSourceStart::Up);        // a physical network exists
+    CHECK_START(0, PhysicalSourceStart::Down);      // the app started with no physical network: it waits for one
+    CHECK_START(-1, PhysicalSourceStart::Up);       // nothing known yet: "until the first event - up"
+    CHECK_START(-2, PhysicalSourceStart::NoSource); // no callback: the QNetworkInformation fallback stays
     if (g_fail) {
         std::fprintf(stderr, "uplink_kind_check: %d of %d checks FAILED\n", g_fail, g_checks);
         return 1;

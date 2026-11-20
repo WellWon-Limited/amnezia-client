@@ -20,4 +20,6 @@ dependencies {
     implementation(libs.androidx.core)
     implementation(libs.kotlinx.coroutines)
     implementation(libs.androidx.security.crypto)
+    // AVPN (Android uplink): JVM unit tests of the physical uplink's pure state (src/test)
+    testImplementation(kotlin("test-junit"))
 }

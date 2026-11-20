@@ -881,25 +881,6 @@ inline bool networkChangeIsOwnTunnel(bool ownOpInFlight, qint64 lastOwnOpMs, qin
     return ownOpInFlight || (lastOwnOpMs > 0 && nowMs - lastOwnOpMs < kApiTransitionWindowMs);
 }
 
-// D2 (Android emulator round 20.11): after a failed attempt the app said «Нет сети — подключимся, когда она появится»
-// with Wi-Fi up. Android's network monitor (QNetworkInformation: the default network of our own UID, which is our
-// VPN while it exists) reports "no network" each time OUR OWN tunnel goes away, and the failed attempt read that as
-// "no uplink" (failedAttemptIntent -> Wait). The rule of network CHANGE events above holds for the uplink read too: a
-// loss reported within the window of our own tunnel operation is ours and says nothing about the physical network.
-// The loss is classified once, when it is reported (`lossAtMs`; the same inputs as the change rule), and only where
-// the monitor sees our own tunnel (`sourceSeesOwnTunnel`: Android; the macOS monitor excludes utun by construction,
-// on iOS it was not observed - both unchanged). A loss reported outside the window (airplane mode while connected,
-// device round 19.11) is the network's and keeps its meaning.
-inline bool uplinkLossIsOwnTunnel(bool sourceSeesOwnTunnel, bool ownOpInFlight, qint64 lastOwnOpMs, qint64 lossAtMs)
-{
-    return sourceSeesOwnTunnel && networkChangeIsOwnTunnel(ownOpInFlight, lastOwnOpMs, lossAtMs);
-}
-// The uplink a decision may act on: the monitor's answer, unless its "down" is a loss of our own tunnel.
-inline bool uplinkUpForDecision(bool monitorUp, bool lossIsOwnTunnel)
-{
-    return monitorUp || lossIsOwnTunnel;
-}
-
 // AVPN Scanner (coordinator 18.11 (c), device round air9 19.11 10:08): a settled network notice reaches the Scanner
 // when the path engine's network generation moved (one rule with the attempt owner) OR the network's key as the
 // Scanner reads it moved (kind, reporting key, gateway hash: its cached results are stored under them). The key
