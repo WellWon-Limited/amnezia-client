@@ -233,7 +233,8 @@ struct Server {
     int leaseSerial = 0;
     QStringList releasedLeases;
     int cancelReleases = 0; // the next N probe-seat releases are cut by our own tunnel transition (canceled, no answer)
-    QList<int> releaseStatuses; // the next probe-seat releases are answered with these statuses (nothing released)
+    QList<int> releaseStatuses; // the next probe-seat releases are answered with these statuses (nothing released); the API's answers: they carry its mark
+    QList<int> foreignReleaseStatuses; // ... answered by a blocking proxy instead: no X-Tribe-Api mark, nothing released (round 12 R5)
     int releaseTries = 0;
     // Contract 1.15.0: a batch's operation id. The server's side of an operation: its answer items (a resend gets
     // the same seats), the lease ids it granted (released by the id).
@@ -368,6 +369,11 @@ struct Server {
         }
         if (path == QLatin1String("/v1/upstream/lease/probe-batch/release")) {
             ++releaseTries;
+            if (!foreignReleaseStatuses.isEmpty()) {
+                out.status = foreignReleaseStatuses.takeFirst(); // a proxy's short 200 / 403: no mark, the API got nothing
+                return out;
+            }
+            out.headers.insert("x-tribe-api", "1"); // every other answer is the API's own
             if (!releaseStatuses.isEmpty()) {
                 out.status = releaseStatuses.takeFirst(); // e.g. 502 of an API restart: nothing released
                 return out;
@@ -3933,6 +3939,26 @@ static void caseReleaseSurvivesTransition()
         release(w);
         CHECK_EQ(w.server.releaseTries, 3);
         CHECK(w.server.releasedLeases.isEmpty());
+    }
+    { // round 12 R5: a foreign answer (a blocking proxy's 200 / 403, no API mark) is not final: resent by the rule, finished by the API's 204
+        for (const int status : {200, 403}) {
+            World w;
+            w.start();
+            w.server.foreignReleaseStatuses = {status, status};
+            release(w);
+            CHECK_EQ(w.server.releaseTries, 3);
+            CHECK_EQ(w.server.releasedLeases, ids); // the API's 204 on the third try finished it
+            CHECK(logged(w, "resend="));
+        }
+        { // the proxy never lets go: resent within the budget, then given up and journalled - never taken as done
+            World w;
+            w.start();
+            w.s->api()->releaseRetryBudgetMs = 2500;
+            w.server.foreignReleaseStatuses = {200, 200, 200, 200, 200, 200};
+            release(w);
+            CHECK_EQ(w.server.releaseTries, 3);
+            CHECK(w.server.releasedLeases.isEmpty() && logged(w, "gave_up=1"));
+        }
     }
     { // 404 / 409: final, no resend
         for (const int status : {404, 409}) {

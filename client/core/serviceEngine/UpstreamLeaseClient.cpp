@@ -139,6 +139,9 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         // Lab 14.11 D1: an answer of our server (any status, any body) never starts from the standby pack.
         const bool fromTribeApi = upstreamFromTribeApi(r->rawHeader(QByteArray(kUpstreamTribeApiHeader)));
         const AcquireReply reply = classifyAcquireReply(status, body, sig, m_pubKeyHex, fromTribeApi);
+        // Round 12 R2: the server's floor for the start orders, from ANY answer that carries it (also a late one of an older start).
+        if (const qint64 floorOrder = upstreamOrderFloorOf(reply); floorOrder >= 0 && onSessionOrderFloor)
+            onSessionOrderFloor(floorOrder);
         if (*answered) {
             if (reply.kind == LeaseReplyKind::Granted && upstreamLeaseIdValid(reply.grant.leaseId))
                 reportLateGrant(profileId, reply.grant.leaseId, LeaseRoute{reply.grant.renewToken, route.apiBase}, requestId);

@@ -168,6 +168,12 @@ struct LeaseAction {
 struct LeaseStep {
     QVector<LeaseAction> actions;
     qint64 wakeAtMs = -1; // call tick() at or after this moment; -1 = nothing scheduled
+    // The step belongs to no state of the session: the answer of a request the session does not wait for (a cancelled older start's
+    // acquire, a renewal of an ended session) or a call that was ignored (tunnelUp twice, start while a session runs). It may carry
+    // release actions for the lease IT names and nothing else; wakeAtMs is meaningless in it (-1 does not mean "nothing scheduled" for
+    // the session). The owner never lets an inert step write the session's state (round 12 R1: it did, and the -1 cancelled the
+    // renewals of the current start).
+    bool inert = false;
 
     const LeaseAction *find(LeaseActionKind k) const
     {
@@ -246,8 +252,10 @@ public:
     LeaseStep start(const QString &profileId, LeaseKind kind, MeterScope scope, qint64 knownRevision, qint64 nowMs)
     {
         LeaseStep s;
-        if (busy())
+        if (busy()) {
+            s.inert = true;
             return s;
+        }
         reset();
         nowMs = clock(nowMs);
         m_profileId = profileId;
@@ -267,8 +275,10 @@ public:
                                qint64 nowMs)
     {
         LeaseStep s;
-        if (busy())
+        if (busy()) {
+            s.inert = true;
             return s;
+        }
         reset();
         clock(nowMs);
         m_profileId = profileId;
@@ -293,8 +303,10 @@ public:
     {
         LeaseStep s;
         nowMs = clock(nowMs);
-        if (m_phase != LeasePhase::Provisional || m_tunnelUp)
+        if (m_phase != LeasePhase::Provisional || m_tunnelUp) {
+            s.inert = true;
             return s;
+        }
         m_tunnelUp = true;
         m_confirmDeadlineMs = nowMs + m_confirmBudgetMs;
         sendAcquire(nowMs, s);
@@ -306,6 +318,7 @@ public:
         LeaseStep s;
         nowMs = clock(nowMs);
         if (m_inflight != Inflight::Acquire || requestId != m_inflightId) {
+            s.inert = true;
             // A lease granted to an acquire cancelled by disconnect(): give the seat back at once. EVERY cancelled
             // acquire is remembered until its own answer (review F2 of 17.11: one remembered id let a quick
             // B -> C -> D lose B's late grant - a paid seat held to its expiry).
@@ -384,10 +397,21 @@ public:
     {
         LeaseStep s;
         nowMs = clock(nowMs);
-        if (m_inflight != Inflight::Renew || requestId != m_inflightId)
+        if (m_inflight != Inflight::Renew || requestId != m_inflightId) {
+            s.inert = true;
             return s;
+        }
         m_inflight = Inflight::None;
         noteRevision(r.kind == LeaseReplyKind::Granted ? r.renewal.upstreamRevision : r.error.upstreamRevision, s);
+        // lease_gone here is final for this session. ACCEPTED LIMIT (round 12 R4): when the server's order memory is unavailable the
+        // order check is skipped by contract, so an older start's delayed acquire that never held a lease (a request of a start the person
+        // cancelled, processed late) can take the seat: the server ends this session's lease as replaced and the next renewal gets
+        // lease_gone. The client cannot know it before that renewal, and does not try to. What the person sees (verified): this answer
+        // becomes LeaveNode -> Leave event -> AvpnEngineQml::onUpstreamLeave -> ServiceEngine::leaveUpstreamNode -> loseLiveSession(restart =
+        // true): the dead-session path, the same as any lost seat. The tunnel goes down, the engine walks on to the next node by itself
+        // (a failover attempt, no tap needed) and the notice "this server is unavailable - connecting another" is shown
+        // (upstreamNoticeFor: lease_gone -> Unavailable). A short interruption, never a stuck "connected" state. On iOS / the macOS NE the extension renews: it
+        // stops its core on the refusal and its status "terminal" reaches the same onUpstreamLeave (applyUpstreamTunnelStatus).
         if (r.kind == LeaseReplyKind::Refused && isTerminalUpstreamError(r.error.code)) {
             leave(s, QLatin1String(upstreamErrorCodeName(r.error.code)), r.error.reason);
             return s;
@@ -530,6 +554,9 @@ public:
     }
     // The acquire this session has out (0 = none) - what disconnect() would cancel.
     quint64 acquireInFlight() const { return m_inflight == Inflight::Acquire ? m_inflightId : 0; }
+    // Any request (acquire or renewal) is out: the session's wake time is then unset by design - the answer reschedules it.
+    bool requestInFlight() const { return m_inflight != Inflight::None; }
+    bool provisionalTunnelUp() const { return m_phase == LeasePhase::Provisional && m_tunnelUp; }
     qint64 requestSentMs() const { return m_requestSentMs; }
 
 private:

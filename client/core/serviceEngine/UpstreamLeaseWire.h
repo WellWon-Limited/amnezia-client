@@ -108,6 +108,10 @@ struct UpstreamErrorReply {
     // expiry, or the source over capacity after the seat count was lowered). A stable lower-case code for
     // the switch log only - it never changes a decision. Empty = not given or not a valid code.
     QString reason;
+    // Contract 1.21.0: a stale_session denial caused by the ORDER check carries the highest order the server has seen from this
+    // device (kUpstreamMinSessionOrderField); -1 = not given, or not a valid value (an integer in 0..kUpstreamSessionOrderMax). The
+    // nonce-tenure denial has none.
+    qint64 minSessionOrder = -1;
 };
 
 // Tags of the outbounds whose per-outbound counters are the provider-carried bytes (meter_scope proxy):
@@ -299,10 +303,10 @@ struct SeatReleaseNext {
 // httpStatus 0 = no HTTP answer; retriesSoFar / spacedMs = resends already made and the spacing they waited.
 // fromTribeApi: the answer carried the API's mark (upstreamFromTribeApi - THE one rule of what is an answer of the API). An answer
 // without it (a blocking proxy's 403, a captive portal's 200) is not the API's: it is a transport-class failure like no answer, so
-// the release is resent and, past the budget, kept for the next route that works - never taken as final. Default true: the Scanner's
-// probe release (ScanApiClient) does not read the mark.
-inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 spacedMs,
-                                       qint64 budgetMs = kSeatReleaseRetryBudgetMs, bool fromTribeApi = true)
+// the release is resent and, past the budget, kept for the next route that works - never taken as final. NO default: every caller
+// (the session DELETE, the Scanner's probe release) says where the answer came from (round 12 R5: a default let the probe release
+// finish on a blocking proxy's short 200/403 although the API got nothing).
+inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 spacedMs, qint64 budgetMs, bool fromTribeApi)
 {
     SeatReleaseNext n;
     if (httpStatus > 0 && httpStatus < 500 && fromTribeApi) {
@@ -329,6 +333,12 @@ inline constexpr char kUpstreamAcquireNonceField[] = "session_nonce";
 // than the highest it has seen from this device, so a late request of an older start that never got a lease can no longer take the
 // seat from a newer start. THE one place where the field is named.
 inline constexpr char kUpstreamAcquireOrderField[] = "session_order";
+// The answer's side of the order (contract 1.21.0): the 404 stale_session denial that the ORDER check caused names the highest order
+// the server has seen from this device, as `min_session_order`. The client raises its counter to at least that value
+// (UpstreamSessionOrder::raiseFloor), so the next start passes; the denied start itself fails as before. THE one place where the field
+// is named. An order is an integer in 0..2^53-1 (exact in a JSON double): anything else is ignored.
+inline constexpr char kUpstreamMinSessionOrderField[] = "min_session_order";
+inline constexpr qint64 kUpstreamSessionOrderMax = 9007199254740991LL;
 inline constexpr int kUpstreamSessionNonceChars = 32;
 inline QString upstreamNewSessionNonce()
 {
@@ -342,7 +352,14 @@ inline QString upstreamNewSessionNonce()
 
 // The order of the next start: max(last + 1, wall clock in ms), the last value kept by the store (the app persists it, so it survives
 // a relaunch and a clock that went backwards). Pure: the store is injected (load / save of one number). Without a store it only
-// counts within the process.
+// counts within the process. THE one owner of the counter: the store is read again before EVERY allocation (and floor), so a second
+// writer of the store is never moved backwards by this one.
+//
+// ACCEPTED LIMIT (round 12 R3): two app processes with ONE identity (the macOS network-extension build excludes the single-instance
+// check, main.cpp) read and write the counter without a shared lock. After a backwards clock jump both can allocate the same order, and
+// a delayed start of one can then replace the other's seat once (the server only refuses an order LOWER than the highest it has
+// seen). Two concurrent instances of the app are not a supported mode; re-reading the store before every allocation (below) only
+// keeps two processes from moving each other backwards, it does not make an allocation atomic.
 class UpstreamSessionOrder
 {
 public:
@@ -359,6 +376,24 @@ public:
             m_save(m_last);
         return m_last;
     }
+    // The server told the highest order it has seen from this device (kUpstreamMinSessionOrderField): the counter is raised to at
+    // least that value - monotonic, persisted at once - so the next start allocates above it. A value outside 0..2^53-1 is ignored; a
+    // value not above the counter changes nothing (and writes nothing).
+    void raiseFloor(qint64 floorOrder)
+    {
+        if (floorOrder < 0 || floorOrder > kUpstreamSessionOrderMax)
+            return;
+        const qint64 stored = m_load ? m_load() : qint64(0);
+        const qint64 last = qMax(m_last, stored);
+        if (floorOrder <= last) {
+            m_last = last;
+            return;
+        }
+        m_last = floorOrder;
+        if (m_save)
+            m_save(m_last);
+    }
+    qint64 last() const { return m_last; }
 private:
     qint64 m_last = 0;
     std::function<qint64()> m_load;
@@ -635,6 +670,8 @@ inline UpstreamErrorReply parseUpstreamError(const QByteArray &body)
         e.retryAfterS = int(n);
     if (upstreamJsonInt(o.value(QLatin1String("upstream_revision")), 1, kUpstreamMaxRevision, n))
         e.upstreamRevision = n;
+    if (upstreamJsonInt(o.value(QLatin1String(kUpstreamMinSessionOrderField)), 0, kUpstreamSessionOrderMax, n))
+        e.minSessionOrder = n;
     static const QRegularExpression reasonRe(QStringLiteral("^[a-z][a-z0-9_.-]{0,63}$"));
     const QJsonValue reason = o.value(QLatin1String("reason"));
     if (reason.isString() && reasonRe.match(reason.toString()).hasMatch())
@@ -711,6 +748,14 @@ inline AcquireReply classifyAcquireReply(int httpStatus, const QByteArray &body,
 inline bool upstreamRouteProved(const AcquireReply &r)
 {
     return r.fromTribeApi;
+}
+
+// The order floor an acquire answer carries (round 12 R2), -1 = none: only an answer of the API counts (it carries the API's mark - a
+// foreign page must never move the counter), whatever its status or body, in time or late, of the current start or of an older one.
+// THE one place that decides it; UpstreamLeaseClient calls it for every acquire answer.
+inline qint64 upstreamOrderFloorOf(const AcquireReply &r)
+{
+    return (r.fromTribeApi && r.kind != LeaseReplyKind::Granted) ? r.error.minSessionOrder : qint64(-1);
 }
 
 // May the engine bring the tunnel up from a standby pack entry after this DIRECT acquire answer?

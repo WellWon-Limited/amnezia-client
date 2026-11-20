@@ -3424,6 +3424,15 @@ struct LedgerWorld {
         if (a.grant)
             newLease(a);
     }
+    // Round 12 R1: an answer of an OLDER start (a cancelled start's request) changes no field of the current session.
+    QString sessionFingerprint() const
+    {
+        return QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9").arg(o.wakeAtMs()).arg(int(o.phase())).arg(o.leaseId()).arg(o.releaseSent())
+            .arg(o.active()).arg(o.provisionalPending()).arg(o.sessionNonce()).arg(o.sessionOrder())
+            .arg(QString::fromUtf8(QJsonDocument(o.statusJson(0)).toJson(QJsonDocument::Compact)))
+            + QString::fromUtf8(QJsonDocument(o.leaseJson(0)).toJson(QJsonDocument::Compact));
+    }
+    bool olderStart(const Acq &a) const { return a.nonce != o.sessionNonce(); }
     void acqDeliver(int i)
     {
         trace << QStringLiteral("%1").arg(QLatin1String("acqDeliver")) + (QLatin1String("") + QString::number(i));
@@ -3431,7 +3440,11 @@ struct LedgerWorld {
         a.delivered = true;
         if (a.stale && o.machine().acquireInFlight() == a.id)
             violations << QStringLiteral("a stale_session denial reached the start that waits for its answer (a nonce was reused)");
+        const QString before = sessionFingerprint();
+        const bool older = olderStart(a);
         apply(o.onAcquireReply(a.id, replyOf(a), now));
+        if (older && sessionFingerprint() != before)
+            violations << QStringLiteral("an answer of an older start changed a field of the current session");
         apply(o.acquireEnded(profile(), a.grant ? a.lease : QString(), newerOut(i)));
         o.routeProved(a.id, now); // UpstreamLeaseClient: an HTTP answer, whichever path it took
     }
@@ -3439,7 +3452,11 @@ struct LedgerWorld {
     {
         trace << QStringLiteral("%1").arg(QLatin1String("acqTimeout")) + (QLatin1String("") + QString::number(i));
         acqs[i].timedOut = true;
+        const QString before = sessionFingerprint();
+        const bool older = olderStart(acqs[i]);
         apply(o.onAcquireReply(acqs[i].id, failed("transport"), now));
+        if (older && sessionFingerprint() != before)
+            violations << QStringLiteral("the timeout of an older start changed a field of the current session");
     }
     void acqLate(int i)
     {
@@ -3542,6 +3559,12 @@ struct LedgerWorld {
         if (!held.isEmpty() && o.holdsLease(held) && live != held)
             violations << QStringLiteral("the live session's seat is not live on the server (") + QLatin1String(where) + QLatin1Char(')');
         checkToken();
+        // Round 12 R1: a session that holds a lease (or waits for its confirmation through a tunnel that is up) has a wake time, as long as
+        // it owns the renewals; without one the lease expires under a running tunnel
+        if (o.active() && o.ownsRenewals() && !o.machine().requestInFlight()
+            && (o.phase() == LeasePhase::Active || o.machine().provisionalTunnelUp()))
+            if (o.wakeAtMs() < 0)
+                violations << QStringLiteral("a session that holds a lease or is provisional has no wake time scheduled (") + QLatin1String(where) + QLatin1Char(')');
     }
     // Contract 1.19.0: within ONE start every answer names the same lease and the same token (unless the lease expired in between,
     // then it is a new id); two different starts never share a lease id. So a lease the live session holds is the server's lease of
@@ -3747,6 +3770,174 @@ static void reviewerSequenceR1()
     CHECK(w.violations.isEmpty() && w.staleDenials == 1);
 }
 
+// Round 12 R1: the answer (or the timeout) of a CANCELLED older start must change nothing of the current session - above all not its
+// schedule: Connect A -> Stop -> Connect B, B gets its lease and a renewal is scheduled, then A's answer lands.
+static void lateAnswerKeepsSession()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const qint64 T = 16000000;
+    const char *kB = "LeaseBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    const char *kOldLease = "LeaseOldOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO";
+    for (int what = 0; what < 4; ++what) { // 0 timeout, 1 refusal, 2 late grant, 3 stale renew reply of the older session
+        for (const bool provisional : {false, true}) {
+            if (provisional && what == 3)
+                continue;
+            FakeIo io;
+            UpstreamLeaseOwner o(&io);
+            UpstreamLeaseOwner::Options op;
+            op.keepOwnership = true;
+            o.setOptions(op);
+            quint64 idA = 0, renewA = 0;
+            o.begin(a, 1, packFor(a), T, 1700000000000LL); // start A
+            idA = io.last("acquire")->id;
+            if (what == 3) {
+                o.onAcquireReply(idA, grantedAs(a, kOldLease), T + 100);
+                o.tick(o.wakeAtMs());
+                renewA = io.last("renew")->id; // a renewal of A's lease is in flight when the person stops
+            }
+            o.disconnect(T + 400000);
+            o.begin(a, 1, provisional ? std::optional<StandbyCandidate>(packFor(a)) : std::nullopt, T + 400100, 1700000400100LL); // start B
+            const quint64 idB = io.last("acquire")->id;
+            if (provisional) {
+                o.onAcquireReply(idB, failed("transport"), T + 401200); // B starts from the pack
+                CHECK(o.provisionalPending());
+                o.tunnelUp(T + 401300); // the confirmation through the tunnel goes out and fails: its retry is scheduled
+                o.onAcquireReply(io.last("acquire")->id, failed("transport"), T + 401400);
+            } else {
+                o.onAcquireReply(idB, grantedAs(a, kB), T + 400300);
+                CHECK(o.holdsLease(QLatin1String(kB)));
+            }
+            const qint64 wake = o.wakeAtMs();
+            const LeasePhase phase = o.phase();
+            const QString lease = o.leaseId();
+            const bool releaseSent = o.releaseSent();
+            CHECK(wake >= 0);
+            if (what == 0)
+                o.onAcquireReply(idA, failed("transport"), T + 401500);
+            else if (what == 1)
+                o.onAcquireReply(idA, refused(UpstreamErrorCode::NoSeat), T + 401500);
+            else if (what == 2)
+                o.onAcquireReply(idA, grantedAs(a, kOldLease), T + 401500);
+            else
+                o.onRenewReply(renewA, renewedOk(1, kServerT0 + 1200000), T + 401500, 1700000401500LL);
+            CHECK(o.wakeAtMs() == wake && o.phase() == phase && o.leaseId() == lease && o.releaseSent() == releaseSent && o.active());
+            // the schedule still works: the renewal (or the provisional confirmation attempt) goes out when due
+            const int calls = io.calls.size();
+            o.tick(wake);
+            CHECK(io.calls.size() > calls);
+            if (!provisional)
+                CHECK(io.last("renew") && io.last("renew")->profileOrLease == QLatin1String(kB));
+        }
+    }
+}
+
+// Round 12 R2: an acquire answer of the API that names the highest order the server has seen (`min_session_order`, contract 1.21.0)
+// raises the installation's counter - persisted at once, for ANY such answer (also a late one) - so the next start passes. Nothing else.
+static void orderFloorCheck()
+{
+    const QByteArray stale = QByteArrayLiteral("{\"code\":\"lease_gone\",\"reason\":\"stale_session\",\"min_session_order\":");
+    const auto replyWith = [&stale](const QByteArray &value, bool api = true) {
+        return classifyAcquireReply(404, stale + value + "}", {}, QString(), api);
+    };
+    // the wire: the field is read in one place, bounded to 0..2^53-1, integer only
+    CHECK(replyWith("1763120000999").error.minSessionOrder == 1763120000999LL && upstreamOrderFloorOf(replyWith("1763120000999")) == 1763120000999LL);
+    CHECK(replyWith("0").error.minSessionOrder == 0 && replyWith("9007199254740991").error.minSessionOrder == kUpstreamSessionOrderMax);
+    for (const char *bad : {"-1", "9007199254740992", "1e30", "1.5", "\"77\"", "null", "true", "[5]"}) {
+        CHECK(replyWith(bad).error.minSessionOrder == -1 && upstreamOrderFloorOf(replyWith(bad)) == -1);
+        CHECK(replyWith(bad).kind == LeaseReplyKind::Refused && replyWith(bad).error.reason == QLatin1String("stale_session")); // still the same denial
+    }
+    // the nonce-tenure denial has no field; a foreign answer (no API mark) never moves the counter
+    const AcquireReply tenure = classifyAcquireReply(404, QByteArrayLiteral("{\"code\":\"lease_gone\",\"reason\":\"stale_session\"}"), {}, QString(), true);
+    CHECK(tenure.kind == LeaseReplyKind::Refused && upstreamOrderFloorOf(tenure) == -1);
+    CHECK(replyWith("5000", /*api=*/false).error.minSessionOrder == 5000 && upstreamOrderFloorOf(replyWith("5000", false)) == -1);
+    // the counter: raised monotonically, persisted at once, the next start is above it
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const qint64 T = 17000000;
+    qint64 stored = 0;
+    int saves = 0;
+    FakeIo io;
+    UpstreamLeaseOwner o(&io);
+    o.setOrderStore([&stored]() { return stored; }, [&stored, &saves](qint64 v) { stored = v; ++saves; });
+    o.begin(a, 1, std::nullopt, T, 1000); // the clock is far behind what the server has seen (a reinstall after a clock ahead)
+    CHECK(io.last("acquire")->order == 1000 && stored == 1000);
+    const qint64 N = 1763200000000LL; // the server's highest
+    o.onAcquireReply(io.last("acquire")->id, refused(UpstreamErrorCode::LeaseGone, QStringLiteral("stale_session")), T + 100);
+    o.raiseOrderFloor(upstreamOrderFloorOf(replyWith(QByteArray::number(N)))); // what the client does for that very answer
+    CHECK(stored == N && !o.active());
+    o.begin(a, 1, std::nullopt, T + 200, 2000);
+    CHECK(io.last("acquire")->order > N && io.last("acquire")->order == N + 1);
+    // a floor that is not above the counter, an invalid one and "none" change nothing and write nothing
+    const qint64 before = stored;
+    const int savesBefore = saves;
+    for (const qint64 v : {qint64(-1), qint64(0), N - 5, N + 1, kUpstreamSessionOrderMax + 1, qint64(-12345)})
+        o.raiseOrderFloor(v);
+    CHECK(stored == before && saves == savesBefore);
+    // monotonic across a second writer of the store: the counter is read again, never moved backwards
+    stored = N + 500; // another process advanced it
+    o.disconnect(T + 300);
+    o.begin(a, 1, std::nullopt, T + 400, 1);
+    CHECK(io.last("acquire")->order == N + 501);
+    // a floor above a clock that is ahead: the next start is max(last + 1, wall) - above the floor either way
+    o.raiseOrderFloor(N + 10000);
+    o.disconnect(T + 500);
+    o.begin(a, 1, std::nullopt, T + 600, N + 50000);
+    CHECK(io.last("acquire")->order == N + 50000);
+
+    // the client: ANY acquire answer of the API that carries the field reaches the counter - in time, late (the attempt stopped
+    // waiting), and with the foreign/field-less answers left out
+    TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {}, {}, {});
+    struct Edge {
+        QTcpServer server;
+        QByteArray body = QByteArrayLiteral("{\"code\":\"lease_gone\",\"reason\":\"stale_session\",\"min_session_order\":424242}");
+        bool mark = true;
+        int delayMs = 0;
+        Edge()
+        {
+            server.listen(QHostAddress::LocalHost);
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [this]() {
+                while (QTcpSocket *s = server.nextPendingConnection())
+                    QObject::connect(s, &QTcpSocket::readyRead, s, [this, s]() {
+                        s->readAll();
+                        QTimer::singleShot(delayMs, s, [this, s]() {
+                            s->write("HTTP/1.1 404 X\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n"
+                                     + (mark ? QByteArray("X-Tribe-Api: 1\r\n") : QByteArray()) + "Connection: close\r\n\r\n" + body);
+                            s->disconnectFromHost();
+                        });
+                    });
+            });
+        }
+        QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()); }
+    };
+    const auto pump = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    };
+    for (int variant = 0; variant < 4; ++variant) { // 0 in time, 1 late (after the attempt moved on), 2 foreign answer, 3 no field
+        Edge edge;
+        edge.delayMs = variant == 1 ? 2200 : 50;
+        edge.mark = variant != 2;
+        if (variant == 3)
+            edge.body = QByteArrayLiteral("{\"code\":\"lease_gone\",\"reason\":\"stale_session\"}");
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        const QString base = edge.base();
+        client.configure(&nam, [base] { return base; }, QStringLiteral("00"), [] { return QStringLiteral("token"); });
+        QVector<qint64> floors;
+        int answers = 0;
+        client.onSessionOrderFloor = [&floors](qint64 v) { floors << v; };
+        client.onAcquire = [&answers](quint64, const AcquireReply &) { ++answers; };
+        client.acquire(7, QStringLiteral("aaaaaaaaaaaaaaa0"), LeaseKind::Session, QString(), LeaseRoute{}, QStringLiteral("NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"), 5);
+        pump(variant == 1 ? 3200 : 700);
+        CHECK(answers >= 1);
+        if (variant == 0 || variant == 1)
+            CHECK(floors.size() == 1 && floors[0] == 424242);
+        else
+            CHECK(floors.isEmpty());
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -3758,10 +3949,12 @@ int main(int argc, char **argv)
     lateGrantOwnership();
     ledgerModel();
     reviewerSequenceR1();
+    lateAnswerKeepsSession();
     unsentFlushOnAnyAnswer();
     sessionNonceCheck();
     lateOlderStart();
     sessionOrderCheck();
+    orderFloorCheck();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();

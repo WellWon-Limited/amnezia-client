@@ -234,6 +234,16 @@ has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'const bool directR
     && has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" '(directRequest && hasStandbyFor && hasStandbyFor(profileId))' \
     || bad "R2: the hedge must apply to the direct acquire only, not to the confirmation through the tunnel"
 
+# Round 12 R2: the server's order floor (min_session_order) is taken from ANY acquire answer of the API in ONE place of the client,
+# reaches the owner's counter, and the counter's store is read again before every allocation (a second process may have moved it).
+[ "$(grep -v '^[[:space:]]*//' "$CLI" | grep -c 'onSessionOrderFloor(floorOrder)')" = "1" ] \
+    && has "$(grep -v '^[[:space:]]*//' "$CLI")" 'upstreamOrderFloorOf(reply)' \
+    || bad "round 12 R2: the client must report the order floor of every acquire answer in exactly one place"
+has "$(grep -v '^[[:space:]]*//' "$ADP")" 'm_leaseClient->onSessionOrderFloor = [this](qint64 floorOrder) { m_upOwner.raiseOrderFloor(floorOrder); };' \
+    || bad "round 12 R2: the order floor must reach the owner's counter (raiseOrderFloor)"
+has "$(body_of "$ADP" 'VpnConnectionTunnelControl::VpnConnectionTunnelControl(')" 'st.sync();' \
+    || bad "round 12 R2: the order store must be re-read (sync) before every allocation"
+
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"
     exit 1

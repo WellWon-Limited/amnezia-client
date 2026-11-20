@@ -1138,19 +1138,19 @@ static void dispatch()
 static void releaseResend()
 {
     using T = UpstreamReleaseTry;
-    CHECK(seatReleaseNext(204, 0, 0).kind == T::Answered);
-    CHECK(seatReleaseNext(200, 3, 2100).kind == T::Answered);
-    CHECK(seatReleaseNext(404, 0, 0).kind == T::Answered && seatReleaseNext(409, 0, 0).kind == T::Answered
-          && seatReleaseNext(422, 0, 0).kind == T::Answered); // 4xx: final, no resend
-    const SeatReleaseNext a = seatReleaseNext(502, 0, 0);
+    CHECK(seatReleaseNext(204, 0, 0, kSeatReleaseRetryBudgetMs, true).kind == T::Answered);
+    CHECK(seatReleaseNext(200, 3, 2100, kSeatReleaseRetryBudgetMs, true).kind == T::Answered);
+    CHECK(seatReleaseNext(404, 0, 0, kSeatReleaseRetryBudgetMs, true).kind == T::Answered && seatReleaseNext(409, 0, 0, kSeatReleaseRetryBudgetMs, true).kind == T::Answered
+          && seatReleaseNext(422, 0, 0, kSeatReleaseRetryBudgetMs, true).kind == T::Answered); // 4xx: final, no resend
+    const SeatReleaseNext a = seatReleaseNext(502, 0, 0, kSeatReleaseRetryBudgetMs, true);
     CHECK(a.kind == T::Resend && a.delayMs == dataCheckRetryDelayMs(1)); // 502 -> resend after 300 ms
-    CHECK(seatReleaseNext(0, 0, 0).kind == T::Resend);   // no HTTP answer (network error, timeout, our own reset)
-    CHECK(seatReleaseNext(503, 0, 0).kind == T::Resend);
+    CHECK(seatReleaseNext(0, 0, 0, kSeatReleaseRetryBudgetMs, true).kind == T::Resend);   // no HTTP answer (network error, timeout, our own reset)
+    CHECK(seatReleaseNext(503, 0, 0, kSeatReleaseRetryBudgetMs, true).kind == T::Resend);
     // 502 x N: resent on the growing spacing until the budget is used, then NotConfirmed (journalled by the caller)
     int resends = 0;
     qint64 spaced = 0;
     for (;;) {
-        const SeatReleaseNext n = seatReleaseNext(502, resends, spaced);
+        const SeatReleaseNext n = seatReleaseNext(502, resends, spaced, kSeatReleaseRetryBudgetMs, true);
         if (n.kind != T::Resend)
             break;
         CHECK(n.delayMs == dataCheckRetryDelayMs(resends + 1));
@@ -1159,8 +1159,8 @@ static void releaseResend()
         CHECK(resends < 64);
     }
     CHECK(resends >= 8 && spaced <= kSeatReleaseRetryBudgetMs && spaced >= 15000); // a deploy restart of a few seconds is covered
-    CHECK(seatReleaseNext(502, resends, spaced).kind == T::NotConfirmed);
-    CHECK(seatReleaseNext(204, resends, spaced).kind == T::Answered); // an answer after the last resend is still final
+    CHECK(seatReleaseNext(502, resends, spaced, kSeatReleaseRetryBudgetMs, true).kind == T::NotConfirmed);
+    CHECK(seatReleaseNext(204, resends, spaced, kSeatReleaseRetryBudgetMs, true).kind == T::Answered); // an answer after the last resend is still final
 }
 
 // Decision of 18.11 (owner's iPhone, rounds 1-2): a failed provider leg's seat release never rides the tunnel being
