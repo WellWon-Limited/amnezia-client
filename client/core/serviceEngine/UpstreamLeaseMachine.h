@@ -403,6 +403,15 @@ public:
         }
         m_inflight = Inflight::None;
         noteRevision(r.kind == LeaseReplyKind::Granted ? r.renewal.upstreamRevision : r.error.upstreamRevision, s);
+        // lease_gone here is final for this session. ACCEPTED LIMIT (round 12 R4): when the server's order memory is unavailable the
+        // order check is skipped by contract, so an older start's delayed acquire that never held a lease (a request of a start the person
+        // cancelled, processed late) can take the seat: the server ends this session's lease as replaced and the next renewal gets
+        // lease_gone. The client cannot know it before that renewal, and does not try to. What the person sees (verified): this answer
+        // becomes LeaveNode -> Leave event -> AvpnEngineQml::onUpstreamLeave -> ServiceEngine::leaveUpstreamNode -> loseLiveSession(restart =
+        // true): the dead-session path, the same as any lost seat. The tunnel goes down, the engine walks on to the next node by itself
+        // (a failover attempt, no tap needed) and the notice "this server is unavailable - connecting another" is shown
+        // (upstreamNoticeFor: lease_gone -> Unavailable). A short interruption, never a stuck "connected" state. On iOS / the macOS NE the extension renews: it
+        // stops its core on the refusal and its status "terminal" reaches the same onUpstreamLeave (applyUpstreamTunnelStatus).
         if (r.kind == LeaseReplyKind::Refused && isTerminalUpstreamError(r.error.code)) {
             leave(s, QLatin1String(upstreamErrorCodeName(r.error.code)), r.error.reason);
             return s;

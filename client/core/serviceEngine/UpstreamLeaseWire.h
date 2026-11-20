@@ -354,6 +354,12 @@ inline QString upstreamNewSessionNonce()
 // a relaunch and a clock that went backwards). Pure: the store is injected (load / save of one number). Without a store it only
 // counts within the process. THE one owner of the counter: the store is read again before EVERY allocation (and floor), so a second
 // writer of the store is never moved backwards by this one.
+//
+// ACCEPTED LIMIT (round 12 R3): two app processes with ONE identity (the macOS network-extension build excludes the single-instance
+// check, main.cpp) read and write the counter without a shared lock. After a backwards clock jump both can allocate the same order, and
+// a delayed start of one can then replace the other's seat once (the server only refuses an order LOWER than the highest it has
+// seen). Two concurrent instances of the app are not a supported mode; re-reading the store before every allocation (below) only
+// keeps two processes from moving each other backwards, it does not make an allocation atomic.
 class UpstreamSessionOrder
 {
 public:
