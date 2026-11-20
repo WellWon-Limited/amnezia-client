@@ -92,7 +92,7 @@ QNetworkReply *UpstreamLeaseClient::post(const QString &url, const QByteArray &b
 
 void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, LeaseKind kind,
                                   const QString &standbyConfigSha256, const LeaseRoute &route,
-                                  const QString &sessionNonce)
+                                  const QString &sessionNonce, qint64 sessionOrder)
 {
     const QString base = baseFor(route);
     const QString token = m_token ? m_token() : QString();
@@ -109,7 +109,7 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
                                                                                     : upstreamAcquireTimeoutMsTuned();
     QNetworkReply *r = base.isEmpty() ? nullptr
                                       : post(base + QStringLiteral("/v1/upstream/lease"),
-                                             upstreamAcquireBody(profileId, kind, standbyConfigSha256, sessionNonce), token,
+                                             upstreamAcquireBody(profileId, kind, standbyConfigSha256, sessionNonce, sessionOrder), token,
                                              waitMs + kUpstreamLateGrantGraceMs);
     if (!r) {
         // Not sendable (no base / no token): a transport failure, answered from the top of the loop.
@@ -221,10 +221,11 @@ void UpstreamLeaseClient::release(quint64 requestId, const QString &leaseId, con
     sendRelease(requestId, leaseId, meter, direct, /*attempt=*/0);
 }
 
-void UpstreamLeaseClient::releaseVia(quint64 requestId, const QString &leaseId, const LeaseRoute &route)
+void UpstreamLeaseClient::releaseVia(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
+                                     const LeaseRoute &route)
 {
     m_lastReleaseId = requestId;
-    sendRelease(requestId, leaseId, UpstreamMeter{}, route, /*attempt=*/0); // a route that works: no hold, no strip
+    sendRelease(requestId, leaseId, meter, route, /*attempt=*/0); // a route that works: no hold, no strip; the ledger's report goes with it
 }
 
 void UpstreamLeaseClient::holdReleasesForStop()

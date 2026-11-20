@@ -30,6 +30,8 @@
 #include <QString>
 #include <QUrl>
 
+#include <functional>
+
 namespace avpn {
 
 enum class LeaseKind { Session, Probe };
@@ -309,14 +311,20 @@ inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 
     return n;
 }
 
-// The session nonce of an acquire (contract 1.18.0, round 10 R2 + R3): client-random, 16..64 characters of [A-Za-z0-9_-],
-// ONE per START of a provider session. Every acquire of that start (the direct request, the seat confirmation through the
-// tunnel, retries) carries the same one; the server derives the lease's renew token from (lease, device, nonce), so the
-// token of one start never depends on the order the server processed its requests in, and an acquire with ANOTHER nonce is
-// a new session taking the seat over (the token rotates, the previous one ends nothing). THE one place where the field is
-// named: a different name is a change of this constant only (like kUpstreamReleaseTokenField below). No nonce: the old
-// server rule (a random token, rotated by every acquire).
+// The session nonce of an acquire (contract 1.19.0): client-random, 16..64 characters of [A-Za-z0-9_-], ONE per START of a
+// provider session and never reused by a later start. A nonce names ONE tenure of a seat: every acquire of that start (the direct
+// request, the seat confirmation through the tunnel, retries) carries the same one and gets the same lease id and renew token
+// (any order, any number of requests); an acquire with ANOTHER nonce is a new start taking the seat over (the old lease ends as
+// replaced, a NEW lease id is made); a nonce whose lease ended as released or replaced is stale: its acquire is refused (HTTP 404
+// `lease_gone` + reason `stale_session`) and changes nothing. A start that has released its lease therefore never acquires again
+// under the same nonce: the next acquire belongs to a new start. THE one place where the field is named: a different name is a
+// change of this constant only (like kUpstreamReleaseTokenField below). No nonce: the field is simply absent.
 inline constexpr char kUpstreamAcquireNonceField[] = "session_nonce";
+// The start's order (contract 1.20.0): a non-negative integer sent with the nonce, the SAME value on every acquire of one start and
+// STRICTLY INCREASING across the starts of this installation. The server refuses (stale_session) an acquire whose order is lower
+// than the highest it has seen from this device, so a late request of an older start that never got a lease can no longer take the
+// seat from a newer start. THE one place where the field is named.
+inline constexpr char kUpstreamAcquireOrderField[] = "session_order";
 inline constexpr int kUpstreamSessionNonceChars = 32;
 inline QString upstreamNewSessionNonce()
 {
@@ -328,19 +336,47 @@ inline QString upstreamNewSessionNonce()
     return n;
 }
 
+// The order of the next start: max(last + 1, wall clock in ms), the last value kept by the store (the app persists it, so it survives
+// a relaunch and a clock that went backwards). Pure: the store is injected (load / save of one number). Without a store it only
+// counts within the process.
+class UpstreamSessionOrder
+{
+public:
+    void setStore(std::function<qint64()> load, std::function<void(qint64)> save)
+    {
+        m_load = std::move(load);
+        m_save = std::move(save);
+    }
+    qint64 next(qint64 wallMs)
+    {
+        const qint64 last = qMax(m_last, m_load ? m_load() : qint64(0));
+        m_last = qMax(last + 1, wallMs);
+        if (m_save)
+            m_save(m_last);
+        return m_last;
+    }
+private:
+    qint64 m_last = 0;
+    std::function<qint64()> m_load;
+    std::function<void(qint64)> m_save;
+};
+
 // standbyConfigSha256 non-empty = a standby acquire: the device already runs that profile from its
 // standby pack ("standby": true + the pack entry's config_sha256).
 inline QByteArray upstreamAcquireBody(const QString &profileId, LeaseKind kind,
                                       const QString &standbyConfigSha256 = QString(),
-                                      const QString &sessionNonce = QString())
+                                      const QString &sessionNonce = QString(), qint64 sessionOrder = -1)
 {
     QJsonObject o{{QStringLiteral("profile_id"), profileId}, {QStringLiteral("kind"), leaseKindName(kind)}};
     if (!standbyConfigSha256.isEmpty()) {
         o.insert(QStringLiteral("standby"), true);
         o.insert(QStringLiteral("config_sha256"), standbyConfigSha256);
     }
-    if (!sessionNonce.isEmpty() && kind == LeaseKind::Session) // the server ignores it for a probe: never sent there
+    if (!sessionNonce.isEmpty() && kind == LeaseKind::Session) { // the server ignores them for a probe: never sent there
         o.insert(QLatin1String(kUpstreamAcquireNonceField), sessionNonce);
+        if (sessionOrder >= 0)
+            o.insert(QLatin1String(kUpstreamAcquireOrderField), double(sessionOrder)); // epoch milliseconds: exact in a double
+    }
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 

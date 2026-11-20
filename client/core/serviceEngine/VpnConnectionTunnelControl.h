@@ -143,6 +143,9 @@ public:
     static qint64 upstreamClockMs();
     // macOS lease record for adoption after a GUI restart (QSettings avpn/upstreamLease; no token).
     static constexpr const char *kUpstreamLeaseRecordKey = "avpn/upstreamLease";
+    // The last start order (UpstreamLeaseWire.h::UpstreamSessionOrder): persisted so it only ever grows, across relaunches and
+    // clock jumps backwards (contract 1.20.0: the server refuses an acquire whose order is behind the highest it has seen).
+    static constexpr const char *kUpstreamSessionOrderKey = "avpn/upstreamSessionOrder";
 
 signals:
     // The running upstream session must leave its node (lease terminal / no seat on re-acquire / seat

@@ -73,6 +73,13 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     // renewals (the root daemon has no TLS backend and no token); on iOS / macOS NE the extension does.
     m_leaseClient = new UpstreamLeaseClient(this);
     m_upOwner.setIo(m_leaseClient);
+    m_upOwner.setOrderStore(
+        []() { return QSettings().value(QLatin1String(kUpstreamSessionOrderKey), qint64(0)).toLongLong(); },
+        [](qint64 v) {
+            QSettings st;
+            st.setValue(QLatin1String(kUpstreamSessionOrderKey), v);
+            st.sync(); // a start's order must not be lost with the process: the next start would repeat it
+        });
     m_leaseClient->onLateGrant = [this](const QString &profile, const QString &lease, const LeaseRoute &route, bool newerOut,
                                        quint64 acquireId) {
         applyUpstreamEvents(m_upOwner.lateGrant(profile, lease, route, newerOut, acquireId));

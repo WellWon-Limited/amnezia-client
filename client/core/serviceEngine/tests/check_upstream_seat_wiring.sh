@@ -173,9 +173,12 @@ sa="$(awk 'index($0, "    void sendAcquire(const LeaseAction &a)") == 1 { on = 1
 has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)')" 'm_leaseClient->tunnelStarted();' \
     || bad "G2: asking for the native start must mark the tunnel as running for the release hold"
 
-# S1 (device round 10): a start takes pending releases of its profile back instead of waiting for their retries; the
-# client asks before every resend and before a held release is sent.
-has "$(body_of "$OWN" '    void sendAcquire(const LeaseAction &a)')" 'withdrawReleasesOf(a.profileId)' || bad "S1: sendAcquire must withdraw the pending releases of its profile"
+# S1 (device round 10, contract 1.19.0): a start waits for no release and takes none back - the server gives the new start another
+# lease, so an old DELETE can only end the old start's own lease (and may still carry its final report). The client asks before
+# every resend and before a held release is sent (the owner answers false only for a chain that a newer request for the same
+# lease took over).
+! grep -v '^[[:space:]]*//' "$OWN" | grep -qiE 'withdraw|reinstate|reassert|startOrder|tokenNonce|takeOver|startTakingOver' \
+    || bad "S1: nothing is withdrawn, reinstated, re-asserted or adopted any more (tenure rule: one nonce, one lease, one token)"
 has "$ctor" 'm_upOwner.releaseWanted(id,' || bad "S1: the adapter must give the client the owner's releaseWanted"
 [ "$(grep -c 'releaseWanted' "$CLI")" -ge 3 ] || bad "S1: the client must ask releaseWanted before a resend, a timer resend and a held send"
 
@@ -218,7 +221,7 @@ has "$(grep 'upstreamRequestSent' "$ADH")" 'm_upOwner.requestSent()' || bad "S3:
 
 # S2: a release that gave up is not abandoned - the adapter tells the owner whether the server answered it.
 has "$ctor" 'm_upOwner.onReleaseDone(id, upstreamClockMs(), confirmed)' || bad "S2: the adapter must pass the release's outcome to the owner (onReleaseDone confirmed)"
-has "$(body_of "$CLI" 'void UpstreamLeaseClient::releaseVia(')" 'sendRelease(requestId, leaseId, UpstreamMeter{}, route' || bad "S2: releaseVia must send over the route it is given (no direct-path strip)"
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::releaseVia(')" 'sendRelease(requestId, leaseId, meter, route' || bad "S2: releaseVia must send over the route it is given (no direct-path strip)"
 
 # S4: a profile with a standby-pack entry waits only the hedge for the direct lease; the adapter tells the client which.
 has "$ctor" 'm_upOwner.hasStandbyFor(profile)' || bad "S4: the adapter must tell the client which profile has a standby entry (hasStandbyFor)"
