@@ -226,9 +226,14 @@ public:
             startQueuedIfFree(nowMs, ev);
         }
         reinstateWithdrawn();
-        // a DIRECT acquire that was answered: the direct API works again - releases it could not carry go now
-        if (r.kind == LeaseReplyKind::Granted && requestId == m_lastAcquireRequest && !m_lastAcquireStandby)
-            flushUnsent(LeaseRoute{}, nowMs);
+        // ANY answer of the API proves the route it came by (round 9 R3): a refusal or an HTTP error status is an answer
+        // like a grant; only a transport failure proves nothing. Releases that could not be carried go out by that route.
+        if (requestId == m_lastAcquireRequest && unsentCount() > 0 && !(r.kind == LeaseReplyKind::Failed && r.why == QLatin1String("transport"))) {
+            if (!m_lastAcquireStandby)
+                flushUnsent(LeaseRoute{}, nowMs);
+            else if (!tunnelBase().isEmpty())
+                flushUnsent(LeaseRoute{QString(), tunnelBase()}, nowMs);
+        }
         return ev;
     }
 

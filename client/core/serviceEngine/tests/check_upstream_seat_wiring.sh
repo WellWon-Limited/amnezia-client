@@ -197,6 +197,13 @@ for gone in m_releasesOut m_withdrawn m_unsent m_deferredSeat; do
 done
 has "$(grep -v '^[[:space:]]*//' "$OWN")" 'QHash<QString, PendingRelease> m_releases;' || bad "R6: m_releases (one pending release per lease id) is missing"
 
+# R3 (round 9): ANY answer of the API proves its route (only a transport failure does not): the owner flushes the unsent releases
+# on the route that answered - direct, or the tunnel's base for an answer through the tunnel - not only after a direct grant.
+has "$(grep -v '^[[:space:]]*//' "$OWN")" 'unsentCount() > 0 && !(r.kind == LeaseReplyKind::Failed && r.why == QLatin1String("transport"))' \
+    || bad "R3: an answer other than a transport failure must flush the unsent releases"
+! has "$(grep -v '^[[:space:]]*//' "$OWN")" 'r.kind == LeaseReplyKind::Granted && requestId == m_lastAcquireRequest && !m_lastAcquireStandby' \
+    || bad "R3: the flush must not wait for a grant of a direct acquire"
+
 # S3: evidence about a path only for something really sent - the engine asks the adapter before it records a provider
 # leg's no_handshake, and the adapter answers from the owner's own fact.
 has "$(grep -n 'upstreamRequestSent' "$SE/ServiceEngine.cpp")" 'upstreamRequestSent' || bad "S3: the Report effect must check that the provider leg sent something"

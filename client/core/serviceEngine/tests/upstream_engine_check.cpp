@@ -2636,6 +2636,74 @@ static void lateGrantOwnership()
     TuningStore::set({}, {}, {}, {});
 }
 
+// Round 9 R3: ANY answer of the API on a route proves that route - a grant, a refusal, an HTTP error status - and the releases
+// that could not be carried go out by it; only a transport failure proves nothing. Before, only a grant of a DIRECT acquire
+// flushed: after Stop of profile A (its DELETE could not reach the API, kept unsent) the acquire of profile B answered
+// "no_seat" - the route works, the seat of A stayed taken until its lease expired.
+static void unsentFlushOnAnyAnswer()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0")), b = stubOf(QStringLiteral("bbbbbbbbbbbbbbb0"));
+    const char *kA = "LeaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const qint64 T = 12000000;
+    struct Case { const char *name; AcquireReply reply; bool flushes; };
+    const Case cases[] = {
+        {"granted", grantedAs(b, "LeaseBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"), true},
+        {"no_seat", refused(UpstreamErrorCode::NoSeat), true},
+        {"not_entitled", refused(UpstreamErrorCode::NotEntitled), true},
+        {"http_503", failed("http_503"), true},
+        {"signature", failed("signature"), true},
+        {"transport", failed("transport"), false},
+    };
+    for (const Case &c : cases) {
+        for (const bool viaTunnel : {false, true}) {
+            FakeIo io;
+            UpstreamLeaseOwner o(&io);
+            o.begin(a, 1, std::nullopt, T, 1);
+            o.onAcquireReply(io.calls.last().id, grantedAs(a, kA), T + 100);
+            o.disconnect(T + 200); // the release of A: its DELETE never reaches the API
+            const quint64 relId = io.last("release")->id;
+            o.onReleaseDone(relId, T + 300, /*confirmed=*/false);
+            CHECK(o.unsentCount() == 1);
+            const auto releases = [&io]() {
+                int n = 0;
+                for (const FakeIo::Call &call : io.calls)
+                    n += call.what == QLatin1String("release") ? 1 : 0;
+                return n;
+            };
+            const int before = releases();
+            std::optional<StandbyCandidate> sc;
+            if (viaTunnel) {
+                StandbyCandidate s;
+                s.config = QByteArrayLiteral("{\"pack\":1}");
+                s.configSha256 = b.upstream->configSha256;
+                s.tunnelApiBase = QStringLiteral("https://pack.example.net");
+                s.packRevision = 5;
+                sc = s;
+            }
+            o.begin(b, 1, sc, T + 400, 1);
+            quint64 id = io.last("acquire")->id;
+            if (viaTunnel) {
+                // the direct acquire fails by transport: the provisional start; the confirmation goes through the tunnel
+                o.onAcquireReply(id, failed("transport"), T + 500);
+                CHECK(o.provisionalPending() && o.unsentCount() == 1); // transport proved nothing
+                o.tunnelUp(T + 600);
+                CHECK(o.unsentCount() == 1 && releases() == before); // the confirmation is in flight: the release waits for it
+                id = io.last("acquire")->id;
+            }
+            o.onAcquireReply(id, c.reply, T + 700);
+            const bool flushed = releases() == before + 1;
+            CHECK(flushed == c.flushes);
+            if (flushed) {
+                const FakeIo::Call *rel = io.last("release");
+                CHECK(rel && rel->profileOrLease == QLatin1String(kA) && o.unsentCount() == 0);
+                CHECK(viaTunnel ? !rel->route.apiBase.isEmpty() : rel->route.apiBase.isEmpty()); // the route that answered
+            } else {
+                CHECK(o.unsentCount() == 1);
+            }
+        }
+    }
+}
+
 // --- the lease id ledger as a random model (rounds 2 and 3 each found a table cell nobody had walked) --------------
 // The real UpstreamLeaseOwner against a model of the server (one device, one profile: an acquire of the profile it
 // holds is answered with THAT lease, DELETE ends it) and a model of the client's I/O (UpstreamLeaseClient: the late
@@ -3037,6 +3105,7 @@ int main(int argc, char **argv)
     localRefusalRecordsNothing();
     lateGrantOwnership();
     ledgerModel();
+    unsentFlushOnAnyAnswer();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();
