@@ -71,7 +71,9 @@ struct MScan {
     int pollsSinceCancel = 0;
     bool cancelAsked = false;
     bool finalDelivered = false; // a reply with final=true was delivered to the app (a poll or a cancel ack)
-    qint64 lastDelivered = 0;    // the largest bytes_spent any delivered reply of this scan showed
+    qint64 lastDelivered = 0;    // the largest bytes_spent any delivered reply of this scan showed TO A PROBER THAT STILL FOLLOWED IT
+    bool appDropped = false;     // the app let go of the scan (unknown_scan, final total, or its 3 s bound: the prober's journal says
+                                 // so); a reply that arrives afterwards (an older poll, resent after kPollStaleMs) shows it nothing
     static constexpr qint64 kOpening = 2048; // the host's opening /netinfo, in the total from the start
     static constexpr qint64 kClosing = 2048; // the closing /netinfo, in the total at the final
     qint64 total() const
@@ -93,6 +95,7 @@ struct Outbox {
     QByteArray bytes;
     QString scanId;
     bool isCancelAck = false;
+    bool isPoll = false;
     bool final = false;
 };
 
@@ -240,6 +243,7 @@ struct ModelHost : IScanHost {
                 accept(*s, o.value("candidates").toArray());
             r = QJsonObject{{"type", "scan_ack"}, {"scan_id", id}, {"accepted", ok ? o.value("candidates").toArray().size() : 0}, {"mem_mb", 40}};
         } else if (a == "scan_poll") {
+            ob.isPoll = true;
             MScan *s = scanById(id);
             if (!s || s->replaced) {
                 r = QJsonObject{{"error", "unknown_scan"}, {"scan_id", id}};
@@ -302,7 +306,9 @@ struct ModelHost : IScanHost {
             outbox.removeAt(i);
         const QJsonObject o = QJsonDocument::fromJson(ob.bytes).object();
         if (MScan *s = scanById(ob.scanId)) { // what this reply shows the app of the scan's cumulative counter
-            if (o.value("type").toString() == "scan_progress") {
+            if (s->appDropped) {
+                // a late reply of a scan the app already dropped: the host showed it, the app cannot count it
+            } else if (o.value("type").toString() == "scan_progress") {
                 s->lastDelivered = qMax(s->lastDelivered, qint64(o.value("bytes_spent").toDouble()));
                 s->finalDelivered = s->finalDelivered || o.value("final").toBool();
             } else if (ob.isCancelAck && ob.final) {
@@ -372,15 +378,38 @@ static int runModel(unsigned seed, QStringList &broke)
     api.providerConfig = providerProfile();
     ScanPathProber prober(&host, &engine, &api);
     prober.pollIntervalMs = 0;
+    // Time is the test's, not the machine's: the prober's bounds (the poll resend, the 3 s bound after which a cancelled scan is
+    // forgotten) read this clock, and one model step moves it by a fixed amount, so a loaded machine cannot change which timer
+    // "fires" between two steps. The event loop is drained completely at every step (no wall-clock budget): the poll timer is
+    // 0 ms, so every pending timer and posted event runs in the step it belongs to. 1 ms per 16 pumps: a sequence (at most a few
+    // thousand pumps) stays far below the 3 s bound, as it did on an idle machine.
+    qint64 fakeTicks = 0;
+    int clockJumps = 0;
+    prober.monoNow = [&fakeTicks]() { return fakeTicks / 16; };
+    const auto pump = [&fakeTicks](int ms = 0) {
+        fakeTicks += 1 + qint64(ms) * 16;
+        QCoreApplication::processEvents(QEventLoop::AllEvents);
+    };
     QStringList trace; // the prober's own journal of this sequence, shown for the first broken ones (MODEL_VERBOSE)
-    prober.log = [&trace](const QString &l) { trace << l; };
+    // The prober's own journal tells the model when it let go of a scan (unknown_scan, the final total, the bound): a reply of that
+    // scan that is delivered afterwards shows the app nothing (see MScan::appDropped).
+    prober.log = [&trace, &host](const QString &l) {
+        trace << l;
+        for (const char *event : {"race_prober scan_unknown ", "race_prober scan_final ", "race_prober scan_forgot "})
+            if (l.startsWith(QLatin1String(event))) {
+                const int at = l.indexOf(QLatin1String("scan="));
+                if (at >= 0)
+                    if (MScan *s = host.scanById(l.mid(at + 5).section(QLatin1Char(' '), 0, 0)))
+                        s->appDropped = true;
+            }
+    };
     QList<MResult> results;
     qint64 charged = 0; // the ledger charges (everything but the session fetch)
     prober.warmUp();
     for (int i = 0; i < 8; ++i) {
         host.processOne();
         host.deliverOne();
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+        pump();
     }
     QSet<quint64> cancelledByCall, settledProbes;
     prober.onSpent = [&charged](quint64 race, qint64 b) { charged += (race == 1 ? b : 0); }; // one race: any other tag is a leak
@@ -450,8 +479,14 @@ static int runModel(unsigned seed, QStringList &broke)
                 cancelledByCall.insert(k);
                 prober.cancel(stamps.value(k));
             }
+        } else if (clockJumps < 2 && rng() % 6 == 0) {
+            // a poll left unanswered for kPollStaleMs (a slow host) is asked again: the resent poll's answer can overtake the older
+            // one's. Time moves by the test, never by the machine; two jumps stay below the 3 s bound of a cancelled scan
+            ++clockJumps;
+            fakeTicks += 1100 * 16;
+            pump();
         } else {
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+            pump();
         }
         record();
         checkResults();
@@ -465,12 +500,12 @@ static int runModel(unsigned seed, QStringList &broke)
     const bool endByRace = seed % 2 == 0;
     QSet<quint64> stuck;
     int idle = 0;
-    for (int i = 0; i < 4000 && idle < 40; ++i) {
+    for (int i = 0; i < 600 && idle < 40; ++i) { // (an open scan is polled for ever: the cap ends the wait)
         bool did = false;
         did = host.processOne() || did;
         host.finishSome();
         did = host.deliverOne() || did;
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+        pump(40);
         record();
         idle = did ? 0 : idle + 1;
         if (idle == 20 && !endByRace)
@@ -488,11 +523,17 @@ static int runModel(unsigned seed, QStringList &broke)
         if (!ended.contains(it.key()) && !cancelled.contains(it.key()))
             cancelled.insert(it.key()); // dropped by the race's end: never a result afterwards
     prober.raceEnded(1);
-    for (int i = 0; i < 600; ++i) { // the host settles: the cancel, the closing /netinfo, the finals
-        host.processOne();
-        host.deliverOne();
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+    int quiet = 0;
+    for (int i = 0; i < 600 && quiet < 4; ++i) { // the host settles: the cancel, the closing /netinfo, the finals
+        const bool did = host.processOne() | host.deliverOne();
+        pump(40);
+        quiet = did ? 0 : quiet + 1;
     }
+    // Nothing is in flight now, so no reply can be lost to the bound. The scans whose final never comes are followed until the
+    // prober's own bound (kScanFinalWaitMs, 3 s after the close): the test moves its clock past it, instead of waiting.
+    fakeTicks += 3100 * 16;
+    for (int i = 0; i < 4; ++i)
+        pump();
     record();
     checkResults();
     if (endByRace)
@@ -593,6 +634,9 @@ static int runModel(unsigned seed, QStringList &broke)
 
 int main(int argc, char **argv)
 {
+    // Qt seeds its hash tables per process, so the iteration order of the prober's QHash tables (scans, probes) would differ from
+    // run to run for the same sequence: the seed is fixed (0 is the only value Qt accepts), every run gives the same result.
+    qSetGlobalQHashSeed(0);
     QCoreApplication app(argc, argv);
     if (qEnvironmentVariableIntValue("MODEL_SEED") > 0) {
         const int n = qMax(1, qEnvironmentVariableIntValue("MODEL_COUNT"));

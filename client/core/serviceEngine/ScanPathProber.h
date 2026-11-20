@@ -170,6 +170,9 @@ public:
     void setSettleSink(std::function<void(const path::ProbeStamp &)> sink) override { onSettled = std::move(sink); }
     void raceEnded(quint64 race) override;
     std::function<qint64()> wallNow;
+    // Monotonic milliseconds of the prober's own bounds (the poll resend, the post-cancel bound of kScanFinalWaitMs). Unset: the
+    // real clock. A test sets it, so its outcome does not depend on how fast the machine runs.
+    std::function<qint64()> monoNow;
     std::function<void(const QString &)> log; // ids, kinds, codes, counts only
 
     path::ProberCaps caps() const override;
@@ -279,7 +282,7 @@ private:
     void fetchSession(quint64 race);
     quint64 m_fetchRace = 0;
     bool pollable(const QString &id, const ScanBook &b) const;
-    qint64 mono() const { return m_clock.elapsed(); }
+    qint64 mono() const { return monoNow ? monoNow() : m_clock.elapsed(); }
     static constexpr qint64 kPollStaleMs = 1000; // an unanswered poll is asked again after this
     QHash<QString, ScanBook> m_books;
     int m_withoutFinal = 0;
