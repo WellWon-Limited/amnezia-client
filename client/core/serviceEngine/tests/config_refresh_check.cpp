@@ -541,6 +541,24 @@ private slots:
         QTest::qWait(600);                                        // B's quick timeout has fired too
         QVERIFY(service.directApiReach() != avpn::ApiReach::Unreachable);
     }
+    // Round 10, R5: edge A was silent on its quick try; while B is being tried another direct request is answered
+    // (reportNetworkSuccess(true)). That answer refutes A's silence: B's timeout must not complete the set.
+    void directAnswerRefutesEarlierSilence()
+    {
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int) { return QByteArray(); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNetworkGenerationSource([] { return quint64(1); });
+        service.setEdgeWalkTimingForTest(300, 5000, 5000);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(edgeB.configRequests, 1, 2000); // A stayed silent, B is being tried
+        service.reportNetworkSuccess(true);                       // another direct request got an answer meanwhile
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Reachable);
+        QTest::qWait(400);                                        // B's quick timeout has fired; A's next try has not ended
+        QVERIFY(service.directApiReach() != avpn::ApiReach::Unreachable); // B alone does not cover {A, B} any more
+    }
     // Round 9, R5a: a negative fact learned before a tunnel of ours was up is stale when it goes down: Unknown at once
     // and the direct route is asked again (the walk had stopped on an answer through the tunnel).
     void negativeFactBeforeTunnelIsForgottenWhenItGoesDown()

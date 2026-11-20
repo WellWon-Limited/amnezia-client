@@ -195,10 +195,8 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
         const bool learnsDirect = directAtSend && genAtSend == generationNow();
         if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()) {
             m_edgeAnswered = true;
-            if (learnsDirect) {
-                m_silentEdges.clear();
+            if (learnsDirect)
                 setReach(ApiReach::Reachable); // a direct request, sent on this network, was answered
-            }
             leaveWalkPause(); // an answer: the network reaches the API, the walk's back-off is over
         }
         if (reply->property("avpn_fast_edge").toBool() && seq == m_configSeq) {
@@ -550,6 +548,8 @@ void ConfigService::clearReach()
 void ConfigService::setReach(ApiReach r)
 {
     const ApiReach before = directApiReach();
+    if (r == ApiReach::Reachable)
+        m_silentEdges.clear(); // a direct answer refutes every earlier silence, whichever request brought it (round 10, R5)
     m_reach = r;
     m_reachGen = m_generationFn ? m_generationFn() : 0;
     if (before != r)
