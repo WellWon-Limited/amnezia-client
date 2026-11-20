@@ -189,7 +189,7 @@ final class UpstreamLeaseRenewer {
             guard let action = step.find(.sendRelease) else { return nil }
             log("Tribe upstream: release seq=\(action.meter.seq)")
             return PreparedRelease(url: leaseURL(action), headers: headers(action),
-                                   body: UpstreamLeaseWire.meterBody(action.meter))
+                                   body: UpstreamLeaseWire.releaseBody(action.meter, renewToken: action.route.renewToken))
         }
     }
 

@@ -531,6 +531,14 @@ private func testWire() {
            == #"{"epoch":7,"meter_scope":"tunnel","rx_bytes_delta":10,"seq":6,"tx_bytes_delta":2}"#, "meter body")
     expect(UpstreamLeaseWire.meterBody(UpstreamMeter(seq: 1, rxDelta: -5, txDelta: Int64.max, scope: .proxy, epoch: 0))
            == #"{"epoch":0,"meter_scope":"proxy","rx_bytes_delta":0,"seq":1,"tx_bytes_delta":1099511627776}"#, "meter body clamps, epoch always sent (lab D2)")
+    // Round 9 R1: the release carries the renew token of the grant it undoes (the server ends the lease only for the
+    // current one); no token = the body as before; a quote or backslash in a token is escaped.
+    expect(UpstreamLeaseWire.releaseBody(UpstreamMeter(seq: 6, rxDelta: 10, txDelta: 2, scope: .tunnel, epoch: 7), renewToken: "tlr1.abc")
+           == #"{"epoch":7,"meter_scope":"tunnel","renew_token":"tlr1.abc","rx_bytes_delta":10,"seq":6,"tx_bytes_delta":2}"#, "release body with token")
+    expect(UpstreamLeaseWire.releaseBody(UpstreamMeter(seq: 6, rxDelta: 10, txDelta: 2, scope: .tunnel, epoch: 7), renewToken: "")
+           == UpstreamLeaseWire.meterBody(UpstreamMeter(seq: 6, rxDelta: 10, txDelta: 2, scope: .tunnel, epoch: 7)), "release body without token")
+    expect(UpstreamLeaseWire.releaseBody(UpstreamMeter(seq: 1, rxDelta: 0, txDelta: 0, scope: .tunnel, epoch: 0), renewToken: "a\"b\\c")
+           .contains(#""renew_token":"a\"b\\c","#), "release body escapes the token")
     // Lab 14.11 D2: 422 invalid_request is its own code; a 422 without one is "rejected" too.
     let bad = UpstreamLeaseWire.classifyRenewReply(httpStatus: 422, body: Data(#"{"code":"invalid_request"}"#.utf8))
     expect(bad.kind == .refused && bad.error.code == .invalidRequest && !bad.error.code.isTerminal, "422 invalid_request")
@@ -755,8 +763,8 @@ private func testRenewerReleaseAfterStopDirect() {
     expect(done.wait(timeout: .now() + 3) == .success, "direct release completes")
     expect(tunnel.snapshot.count == sentBefore, "nothing through the tunnel transport")
     let r = direct.snapshot.last
-    expect(r?.method == "DELETE" && r?.body == #"{"epoch":3,"meter_scope":"tunnel","rx_bytes_delta":900,"seq":2,"tx_bytes_delta":90}"#,
-           "direct release carries the report read before the stop \(r?.body ?? "")")
+    expect(r?.method == "DELETE" && r?.body == #"{"epoch":3,"meter_scope":"tunnel","renew_token":"tlr1.TOKEN","rx_bytes_delta":900,"seq":2,"tx_bytes_delta":90}"#,
+           "direct release carries the report read before the stop and the grant's own token \(r?.body ?? "")")
     expect(renewer.prepareRelease() == nil, "one release only")
 }
 
@@ -771,7 +779,7 @@ private func testRenewerRelease() {
     expect(done.wait(timeout: .now() + 3) == .success, "release completes")
     let r = transport.snapshot.last
     expect(r?.method == "DELETE" && r?.url == "https://t.example.net/v1/upstream/lease/\(kLease)", "release url")
-    expect(r?.body == #"{"epoch":3,"meter_scope":"tunnel","rx_bytes_delta":900,"seq":2,"tx_bytes_delta":90}"#, "final report \(r?.body ?? "")")
+    expect(r?.body == #"{"epoch":3,"meter_scope":"tunnel","renew_token":"tlr1.TOKEN","rx_bytes_delta":900,"seq":2,"tx_bytes_delta":90}"#, "final report \(r?.body ?? "")")
     expect(r?.timeoutMs == 1500, "release bounded to 1.5 s")
     // A hanging network: the completion still runs at the bound.
     let slow = FakeTransport(); slow.delaySeconds = 5
