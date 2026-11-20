@@ -303,10 +303,10 @@ struct SeatReleaseNext {
 // httpStatus 0 = no HTTP answer; retriesSoFar / spacedMs = resends already made and the spacing they waited.
 // fromTribeApi: the answer carried the API's mark (upstreamFromTribeApi - THE one rule of what is an answer of the API). An answer
 // without it (a blocking proxy's 403, a captive portal's 200) is not the API's: it is a transport-class failure like no answer, so
-// the release is resent and, past the budget, kept for the next route that works - never taken as final. Default true: the Scanner's
-// probe release (ScanApiClient) does not read the mark.
-inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 spacedMs,
-                                       qint64 budgetMs = kSeatReleaseRetryBudgetMs, bool fromTribeApi = true)
+// the release is resent and, past the budget, kept for the next route that works - never taken as final. NO default: every caller
+// (the session DELETE, the Scanner's probe release) says where the answer came from (round 12 R5: a default let the probe release
+// finish on a blocking proxy's short 200/403 although the API got nothing).
+inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 spacedMs, qint64 budgetMs, bool fromTribeApi)
 {
     SeatReleaseNext n;
     if (httpStatus > 0 && httpStatus < 500 && fromTribeApi) {

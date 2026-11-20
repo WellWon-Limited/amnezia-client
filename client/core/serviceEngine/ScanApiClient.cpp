@@ -1065,8 +1065,9 @@ void ScanApiClient::releaseLeases(const QStringList &leaseIds, qint64 costBytes,
 // Device round of 19.11 (iPhone Air, 06:31:22 and 06:32:04): the race's release went out as its winner's tunnel came
 // up, that transition aborted it (net_error 5, status 0) and nothing sent it again - both probe seats stayed until
 // the server's probe TTL; at 08:18:42 a prod API restart answered a seat release 502. The one rule of every seat
-// release (UpstreamLeaseWire.h::seatReleaseNext, shared with the session seat's DELETE): no HTTP answer or a 5xx is
-// sent again on the shared growing spacing within its budget; any other answer is final.
+// release (UpstreamLeaseWire.h::seatReleaseNext, shared with the session seat's DELETE): no HTTP answer, a 5xx or an answer
+// without the API's mark is sent again on the shared growing spacing within its budget; any other answer is final. Every probe
+// release - the batch's own (releaseBatch) and the explicit one (releaseLeases) - ends here, the only caller of the rule.
 void ScanApiClient::sendRelease(const IScanHttp::Request &rq, int leases, int attempt, qint64 spent, qint64 spacedMs,
                                 std::function<void(qint64)> done, quint64 bgKey)
 {
@@ -1081,7 +1082,10 @@ void ScanApiClient::sendRelease(const IScanHttp::Request &rq, int leases, int at
             return;
         }
         // A try cut at its own byte allowance is final: the same allowance would cut it again.
-        const SeatReleaseNext next = r.cut ? SeatReleaseNext{} : seatReleaseNext(r.status, attempt, spacedMs, self->releaseRetryBudgetMs);
+        // Round 12 R5: only the API's own answer (it carries the mark, like the session DELETE's) can finish a release; a blocking
+        // proxy's short 200/403 is a transport-class failure: resent on the spacing, then given up.
+        const bool fromApi = upstreamFromTribeApi(r.header(kUpstreamTribeApiHeader));
+        const SeatReleaseNext next = r.cut ? SeatReleaseNext{} : seatReleaseNext(r.status, attempt, spacedMs, self->releaseRetryBudgetMs, fromApi);
         const bool again = next.kind == UpstreamReleaseTry::Resend;
         self->emitLog(QStringLiteral("probe_release status=%1 leases=%2 by_op=%3 bytes=%4%5")
                           .arg(r.status).arg(leases).arg(rq.body.contains("\"operation_id\"") ? 1 : 0).arg(r.bytes)
