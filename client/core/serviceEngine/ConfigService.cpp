@@ -193,10 +193,24 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     connect(reply, &QNetworkReply::finished, this, [this, reply, seq, order, startedByApiSuccess, directAtSend, genAtSend, edgeAtSend]() {
         reply->deleteLater();
         const bool learnsDirect = directAtSend && genAtSend == generationNow();
+        // The body and its signature are read once here: the fact below needs to know whose answer this is.
+        const int answeredCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool is2xx = answeredCode >= 200 && answeredCode < 300;
+        const QByteArray answerBody = is2xx ? reply->readAll() : QByteArray();
+        const QByteArray answerSig = is2xx ? reply->rawHeader(QByteArrayLiteral("X-Tribe-Sig")) : QByteArray();
         if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()) {
             m_edgeAnswered = true;
-            if (learnsDirect)
-                setReach(ApiReach::Reachable); // a direct request, sent on this network, was answered
+            // Second consolidated review, R4: an HTTP answer is not yet OUR answer - a blocking middlebox answers
+            // /v1/config with its own 403 page. The FACT becomes Reachable only on an answer that is provably the
+            // API's: the signed config body. Any other answer (a block page, a captive portal, our own 5xx) proves no
+            // route: the edge joins the same "did not answer as the API" set as a silent one. The edge walk's own
+            // rules below are untouched (they are about leaving an edge, not about the fact).
+            if (learnsDirect) {
+                if (is2xx && verifyDetached(m_pubKeyHex, answerBody, answerSig))
+                    setReach(ApiReach::Reachable); // a direct request, sent on this network, answered by the API
+                else
+                    noteEdgeNotTheApi(edgeAtSend, genAtSend);
+            }
             leaveWalkPause(); // an answer: the network reaches the API, the walk's back-off is over
         }
         if (reply->property("avpn_fast_edge").toBool() && seq == m_configSeq) {
@@ -215,19 +229,8 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             const bool allSilent = edges >= 1 && ++m_walkSilent >= edges;
             // R4 (round 9): the FACT is not a counter any stale timeout can advance - it is the set of edges that were
             // tried and stayed silent under the CURRENT generation with no tunnel up, covering every edge candidate.
-            if (learnsDirect) {
-                if (m_silentGen != genAtSend) {
-                    m_silentEdges.clear();
-                    m_silentGen = genAtSend;
-                }
-                m_silentEdges.insert(edgeAtSend);
-                const QStringList cands = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges);
-                bool covered = !cands.isEmpty();
-                for (const QString &c : cands)
-                    covered = covered && m_silentEdges.contains(c);
-                if (covered)
-                    setReach(ApiReach::Unreachable);
-            }
+            if (learnsDirect)
+                noteEdgeNotTheApi(edgeAtSend, genAtSend);
             if (allSilent && edges < 2)
                 m_walkSilent = 0;
             if (edges >= 2 && allSilent) {
@@ -262,7 +265,7 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             if (staleCode != 0)
                 emit transportOk(); // an HTTP answer: the network is alive (the white-list detector)
             if (staleCode >= 200 && staleCode < 300)
-                applyBody(reply->readAll(), reply->rawHeader(QByteArrayLiteral("X-Tribe-Sig")), order);
+                applyBody(answerBody, answerSig, order);
             return;
         }
         m_configInFlight = false;
@@ -322,10 +325,25 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
         m_failStreak = 0;
         if (code < 200 || code >= 300)
             return;
-        const QByteArray body = reply->readAll();
-        const QByteArray sig = reply->rawHeader(QByteArrayLiteral("X-Tribe-Sig"));
-        applyBody(body, sig, order);
+        applyBody(answerBody, answerSig, order);
     });
+}
+
+// The set behind the Unreachable fact: an edge that, tried directly on this network generation, did not answer as the
+// API (silent on its quick try, or answered by something else). Every current edge candidate in it = Unreachable.
+void ConfigService::noteEdgeNotTheApi(const QString &edge, quint64 generation)
+{
+    if (m_silentGen != generation) {
+        m_silentEdges.clear();
+        m_silentGen = generation;
+    }
+    m_silentEdges.insert(edge);
+    const QStringList cands = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges);
+    bool covered = !cands.isEmpty();
+    for (const QString &c : cands)
+        covered = covered && m_silentEdges.contains(c);
+    if (covered)
+        setReach(ApiReach::Unreachable);
 }
 
 void ConfigService::fetchEdges()
@@ -564,6 +582,10 @@ void ConfigService::setReach(ApiReach r)
     m_reachGen = m_generationFn ? m_generationFn() : 0;
     if (before != r)
         emit directApiReachChanged(r);
+    // Second consolidated review, R3: a proof of the direct route is an EVENT, not only a change of the fact - a kept
+    // seat release waits for exactly this, also when the fact was Reachable all along (a short API outage).
+    if (r == ApiReach::Reachable)
+        emit directRouteProved();
 }
 
 void ConfigService::setSessionEdge(const QString &edge)

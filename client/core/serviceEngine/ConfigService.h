@@ -103,6 +103,7 @@ public:
 
 signals:
     void directApiReachChanged(avpn::ApiReach reach); // every flip of directApiReach() as observed here
+    void directRouteProved();                         // every answer of the API on the direct route (also with the fact unchanged)
     void configApplied(const avpn::RemoteConfig &cfg);
     void activeEdgeChanged(const QString &base);
     // AVPN (белые списки): транспортный фейл/успех фетча конфига — второй (после bootstrap)
@@ -140,6 +141,7 @@ private:
     QTimer       m_walkPause;
     QTimer       m_askLater;                         // the one deferred direct ask (askDirectOnce's spacing)
     void setReach(ApiReach r);
+    void noteEdgeNotTheApi(const QString &edge, quint64 generation);
     bool tunnelUp() const { return m_tunnelUpFn && m_tunnelUpFn(); }
     quint64 generationNow() const { return m_generationFn ? m_generationFn() : 0; }
     void askDirectOnce();

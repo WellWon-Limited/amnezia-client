@@ -541,6 +541,49 @@ private slots:
         QTest::qWait(600);                                        // B's quick timeout has fired too
         QVERIFY(service.directApiReach() != avpn::ApiReach::Unreachable);
     }
+    // Second consolidated review, R4: an HTTP answer that is not the API's (a block page instead of the signed config)
+    // proves no route: the fact never becomes Reachable from it; with a single edge it is Unreachable.
+    void foreignAnswerDoesNotProveTheRoute()
+    {
+        ConfigServer blocked([](int) { return httpAnswer("403 Forbidden", "<html>blocked</html>", "none"); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, blocked.base(), "fixture-key", {blocked.base()});
+        service.setNetworkGenerationSource([] { return quint64(1); });
+        QSignalSpy proved(&service, &avpn::ConfigService::directRouteProved);
+        service.setEdgeWalkTimingForTest(2000, 5000, 5000);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(blocked.configRequests, 1, 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Unreachable, 2000);
+        QCOMPARE(proved.count(), 0);
+        // the same for a 200 whose body is not signed by the API
+        ConfigServer unsignedPage([](int) { return httpAnswer("200 OK", "<html>portal</html>", "none"); });
+        avpn::ConfigService other(&network, unsignedPage.base(), "fixture-key", {unsignedPage.base()});
+        other.setNetworkGenerationSource([] { return quint64(1); });
+        other.setEdgeWalkTimingForTest(2000, 5000, 5000);
+        other.start();
+        QTRY_COMPARE_WITH_TIMEOUT(unsignedPage.configRequests, 1, 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(other.directApiReach(), avpn::ApiReach::Unreachable, 2000);
+    }
+    // Second consolidated review, R3: a proof of the direct route is announced every time, also when the fact was
+    // Reachable already (a kept seat release waits for the event, not for a change).
+    void everyDirectProofIsAnnounced()
+    {
+        ConfigServer edge([](int) { return httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, edge.base(), "fixture-key", {edge.base()});
+        service.setNetworkGenerationSource([] { return quint64(1); });
+        QSignalSpy proved(&service, &avpn::ConfigService::directRouteProved);
+        QSignalSpy changed(&service, &avpn::ConfigService::directApiReachChanged);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000);
+        const int provedOnce = proved.count(), changedOnce = changed.count();
+        QVERIFY(provedOnce >= 1);
+        service.reportNetworkSuccess(true); // another direct answer: the fact does not change, the proof is announced
+        QCOMPARE(changed.count(), changedOnce);
+        QCOMPARE(proved.count(), provedOnce + 1);
+        service.reportNetworkSuccess(false); // an answer through a tunnel proves nothing about the direct route
+        QCOMPARE(proved.count(), provedOnce + 1);
+    }
     // Final review, F5: the network changes while a request of the previous network is in flight. Its answer cannot speak
     // for the new network; the ask the new network is owed must still be sent (it was marked done with nothing sent).
     void askOwedWhileOldRequestInFlight()

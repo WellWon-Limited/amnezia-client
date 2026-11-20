@@ -244,10 +244,13 @@ has "$(grep -v '^[[:space:]]*//' "$ADP")" 'm_leaseClient->onSessionOrderFloor = 
 has "$(body_of "$ADP" 'VpnConnectionTunnelControl::VpnConnectionTunnelControl(')" 'st.sync();' \
     || bad "round 12 R2: the order store must be re-read (sync) before every allocation"
 
-# Round 16 F4: the direct control plane turning Reachable (the ONE fact, ConfigService) flushes the kept seat releases on the direct route
-reach_handler="$(grep -A6 -F 'ConfigService::directApiReachChanged' "$FAC" | grep -v '^[[:space:]]*//' || true)"
-has "$reach_handler" 'ApiReach::Reachable' && has "$reach_handler" 'm_tunnel.upstreamDirectRouteProved();' \
-    || bad "F4: the Reachable handler must call m_tunnel.upstreamDirectRouteProved() (kept seat releases would wait for an acquire)"
+# Round 16 F4 + round 17 R3: every proof of the direct route (ConfigService::directRouteProved - an answer of the API itself,
+# also when the fact stays Reachable) flushes the kept seat releases on the direct route
+proof_handler="$(grep -F 'ConfigService::directRouteProved' "$FAC" | grep -v '^[[:space:]]*//' || true)"
+has "$proof_handler" 'm_tunnel.upstreamDirectRouteProved();' \
+    || bad "F4/R3: the directRouteProved handler must call m_tunnel.upstreamDirectRouteProved() (kept seat releases would wait for an acquire)"
+has "$(grep -v '^[[:space:]]*//' "$SE/ConfigService.cpp")" 'emit directRouteProved();' \
+    || bad "R3: ConfigService must announce every direct proof, not only a change of the fact"
 has "$(grep -v '^[[:space:]]*//' "$ADH")" 'm_upOwner.directRouteProved(upstreamClockMs());' \
     || bad "F4: the adapter must hand the proof to the owner (directRouteProved)"
 

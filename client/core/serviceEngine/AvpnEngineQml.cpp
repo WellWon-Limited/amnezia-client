@@ -1266,9 +1266,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(m_configSvc, &avpn::ConfigService::directApiReachChanged, this, [this](avpn::ApiReach r) {
         reliabilityEvent(QStringLiteral("control_plane reach=%1 net_gen=%2")
                              .arg(QLatin1String(avpn::apiReachName(r))).arg(m_engine.network().generation));
-        if (r == avpn::ApiReach::Reachable)
-            m_tunnel.upstreamDirectRouteProved(); // proof of the direct route: kept seat releases are sent now
     });
+    // Every proof of the direct route (an answer of the API itself, also when the fact stays Reachable): kept seat
+    // releases are sent now - they do not wait for the next provider connect.
+    connect(m_configSvc, &avpn::ConfigService::directRouteProved, this, [this]() { m_tunnel.upstreamDirectRouteProved(); });
 
     // AVPN server-driven АнтиВПН (Task 10): сервис серверных bypass-списков (/v1/bypass-lists —
     // ru_cidrs/bypass_extra/cn_liauto_cidrs/split_dns, подпись+LKG). Тот же m_nam/kConfigPubKeyHex,
