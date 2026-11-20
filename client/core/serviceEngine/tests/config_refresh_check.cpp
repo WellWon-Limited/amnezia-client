@@ -520,6 +520,61 @@ private slots:
         QTest::qWait(200);
         QCOMPARE(edge.configRequests, 1); // ten changes in a row without a tunnel: one ask (the rest wait the spacing)
     }
+    // Round 9, R4: "every edge silent on THIS network" is a set of edges tried and silent under the current generation,
+    // not a counter a stale timeout can advance. A request to A sent on the old network times out after the change;
+    // the new request to B times out too - A was never tried on the new network, so the fact is not Unreachable.
+    void staleTimeoutDoesNotCompleteTheSilentSet()
+    {
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int) { return QByteArray(); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        quint64 generation = 1;
+        service.setNetworkGenerationSource([&generation] { return generation; });
+        service.setEdgeWalkTimingForTest(300, 5000, 5000);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(edgeA.configRequests, 1, 1000); // sent on generation 1
+        generation = 2;                                           // the network changed while it is in flight
+        service.noteNetworkChanged();
+        QTRY_COMPARE_WITH_TIMEOUT(edgeB.configRequests, 1, 2000); // the old request timed out, B asked on generation 2
+        QTest::qWait(600);                                        // B's quick timeout has fired too
+        QVERIFY(service.directApiReach() != avpn::ApiReach::Unreachable);
+    }
+    // Round 9, R5a: a negative fact learned before a tunnel of ours was up is stale when it goes down: Unknown at once
+    // and the direct route is asked again (the walk had stopped on an answer through the tunnel).
+    void negativeFactBeforeTunnelIsForgottenWhenItGoesDown()
+    {
+        ConfigServer edge([](int n) { return n < 2 ? QByteArray() : httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, edge.base(), "fixture-key", {edge.base()});
+        bool tunnel = false;
+        service.setTunnelUpSource([&tunnel] { return tunnel; });
+        service.setNetworkGenerationSource([] { return quint64(1); });
+        service.setEdgeWalkTimingForTest(100, 5000, 5000);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Unreachable, 2000);
+        tunnel = true;  // a tunnel of ours came up (the walk stopped on an answer through it)
+        tunnel = false; // Stop; the direct route has recovered meanwhile (the fixture answers from now on)
+        service.noteTunnelDown();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000);
+        QCOMPARE(edge.configRequests, 2);
+    }
+    // Round 9, R5a: while no tunnel is up the walk's own rounds keep re-testing an Unreachable fact: the pause ends by
+    // itself and a direct answer flips it back, with no other trigger.
+    void backOffRoundsKeepRetestingUnreachable()
+    {
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int n) { return n < 3 ? QByteArray() : httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNetworkGenerationSource([] { return quint64(1); });
+        service.setEdgeWalkTimingForTest(50, 100, 200);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Unreachable, 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 4000); // round 3 reaches B
+    }
     // Decision 2026-11-05: small calls succeed on the edge (they reset the edge walk), but two
     // /v1/subscription transport failures in a row on it switch the active edge; a delivered
     // subscription in between resets that streak.

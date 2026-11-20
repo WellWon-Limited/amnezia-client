@@ -175,6 +175,7 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     // was up, under this network generation (checked again at the answer).
     const bool directAtSend = !tunnelUp();
     const quint64 genAtSend = generationNow();
+    const QString edgeAtSend = activeBaseUrl();
     QNetworkRequest req{QUrl(activeBaseUrl() + QStringLiteral("/v1/config"))};
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply);
@@ -189,13 +190,15 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             }
         });
     }
-    connect(reply, &QNetworkReply::finished, this, [this, reply, seq, order, startedByApiSuccess, directAtSend, genAtSend]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, seq, order, startedByApiSuccess, directAtSend, genAtSend, edgeAtSend]() {
         reply->deleteLater();
         const bool learnsDirect = directAtSend && genAtSend == generationNow();
         if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()) {
             m_edgeAnswered = true;
-            if (learnsDirect)
+            if (learnsDirect) {
+                m_silentEdges.clear();
                 setReach(ApiReach::Reachable); // a direct request, sent on this network, was answered
+            }
             leaveWalkPause(); // an answer: the network reaches the API, the walk's back-off is over
         }
         if (reply->property("avpn_fast_edge").toBool() && seq == m_configSeq) {
@@ -212,8 +215,21 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             const int edges = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges).size();
             // Lane C: every edge silent on its quick first try = the direct control plane cannot be reached here.
             const bool allSilent = edges >= 1 && ++m_walkSilent >= edges;
-            if (allSilent && learnsDirect)
-                setReach(ApiReach::Unreachable);
+            // R4 (round 9): the FACT is not a counter any stale timeout can advance - it is the set of edges that were
+            // tried and stayed silent under the CURRENT generation with no tunnel up, covering every edge candidate.
+            if (learnsDirect) {
+                if (m_silentGen != genAtSend) {
+                    m_silentEdges.clear();
+                    m_silentGen = genAtSend;
+                }
+                m_silentEdges.insert(edgeAtSend);
+                const QStringList cands = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges);
+                bool covered = !cands.isEmpty();
+                for (const QString &c : cands)
+                    covered = covered && m_silentEdges.contains(c);
+                if (covered)
+                    setReach(ApiReach::Unreachable);
+            }
             if (allSilent && edges < 2)
                 m_walkSilent = 0;
             if (edges >= 2 && allSilent) {
@@ -472,6 +488,12 @@ void ConfigService::noteTunnelDown()
 {
     if (m_pinned)
         return;
+    // R5 (round 9): a negative fact learned before the tunnel came up is stale now - the direct route may have
+    // recovered meanwhile and an answer through the tunnel stopped the walk. Forget it and ask again (rate-bounded).
+    if (m_reach == ApiReach::Unreachable)
+        clearReach();
+    m_silentEdges.clear();
+    m_askedAny = false;
     QTimer::singleShot(0, this, [this]() { askDirectOnce(); }); // after the facade has recorded the tunnel as down
 }
 
@@ -515,6 +537,14 @@ ApiReach ConfigService::directApiReach() const
     if (m_generationFn && m_reachGen != m_generationFn())
         return ApiReach::Unknown;
     return m_reach;
+}
+
+void ConfigService::clearReach()
+{
+    const ApiReach before = directApiReach();
+    m_reach = ApiReach::Unknown;
+    if (before != ApiReach::Unknown)
+        emit directApiReachChanged(ApiReach::Unknown);
 }
 
 void ConfigService::setReach(ApiReach r)

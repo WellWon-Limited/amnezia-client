@@ -1443,6 +1443,25 @@ static void scenarioWhitelistNetworkNoControlPlane()
         CHECK(selectPaths(dead).size() == 1);
     }
     {
+        // Round 9, R5b: the C1 filter is an optimisation, never a reason to have nothing to try: with only providers
+        // that need the control plane left for this mode, they are offered (Unreachable, Xray mode)
+        const QList<PathCandidate> pool = { prov("up:n1", UpstreamKind::Country, "NL", 0), prov("up:n2", UpstreamKind::Country, "PL", 1) };
+        SelectInput in;
+        in.pool = pool;
+        in.mode = TransportMode::Xray;
+        in.controlPlane = ApiReach::Unreachable;
+        CHECK(selectPaths(in).size() == 2);
+        CHECK(!controlPlaneFilterActive(pool, in.mode, in.tried, in.controlPlane, false));
+        // with something else to try the filter still applies
+        PathCandidate w = prov("up:w1", UpstreamKind::Whitelist, "", 5);
+        w.standbyEntry = true;
+        in.pool = pool + QList<PathCandidate>{ w };
+        CHECK(selectPaths(in).size() == 1);
+        // and once the only path that does not need it was tried, the rest is offered again
+        in.tried.insert(QStringLiteral("up:w1"));
+        CHECK(selectPaths(in).size() == 2);
+    }
+    {
         // C3: the prior needs cellular, an unreachable control plane and no proof; a proof cancels it
         const QList<PathCandidate> pool = [] {
             PathCandidate w = prov("up:w1", UpstreamKind::Whitelist, "", 5);
