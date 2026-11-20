@@ -1072,7 +1072,12 @@ void ScanApiClient::sendRelease(const IScanHttp::Request &rq, int leases, int at
                                 std::function<void(qint64)> done, quint64 bgKey)
 {
     QPointer<ScanApiClient> self(this);
-    m_http->send(rq, [self, rq, leases, attempt, spent, spacedMs, done, bgKey](const IScanHttp::Response &r) {
+    // ONE byte budget for the whole chain (round 13 R2): `rq.maxBytes` is the release's allowance, every send is cut at what is left of
+    // it, like sendBatch does; the bytes of every send go to `done` as before.
+    IScanHttp::Request cur = rq;
+    if (rq.maxBytes >= 0)
+        cur.maxBytes = qMax<qint64>(0, rq.maxBytes - spent);
+    m_http->send(cur, [self, rq, leases, attempt, spent, spacedMs, done, bgKey](const IScanHttp::Response &r) {
         const qint64 total = spent + r.bytes;
         if (!self) {
             if (bgKey)
@@ -1085,7 +1090,9 @@ void ScanApiClient::sendRelease(const IScanHttp::Request &rq, int leases, int at
         // Round 12 R5: only the API's own answer (it carries the mark, like the session DELETE's) can finish a release; a blocking
         // proxy's short 200/403 is a transport-class failure: resent on the spacing, then given up.
         const bool fromApi = upstreamFromTribeApi(r.header(kUpstreamTribeApiHeader));
-        const SeatReleaseNext next = r.cut ? SeatReleaseNext{} : seatReleaseNext(r.status, attempt, spacedMs, self->releaseRetryBudgetMs, fromApi);
+        SeatReleaseNext next = r.cut ? SeatReleaseNext{} : seatReleaseNext(r.status, attempt, spacedMs, self->releaseRetryBudgetMs, fromApi);
+        if (next.kind == UpstreamReleaseTry::Resend && rq.maxBytes >= 0 && rq.maxBytes - total <= 0)
+            next.kind = UpstreamReleaseTry::NotConfirmed; // the byte budget is used up: the chain ends, the seat is left to its TTL
         const bool again = next.kind == UpstreamReleaseTry::Resend;
         self->emitLog(QStringLiteral("probe_release status=%1 leases=%2 by_op=%3 bytes=%4%5")
                           .arg(r.status).arg(leases).arg(rq.body.contains("\"operation_id\"") ? 1 : 0).arg(r.bytes)
