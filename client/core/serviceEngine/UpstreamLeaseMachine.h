@@ -199,8 +199,11 @@ public:
     virtual ~IUpstreamLeaseIo() = default;
     // standbyConfigSha256 non-empty = a standby acquire (upstreamAcquireBody), sent THROUGH the tunnel via
     // route.apiBase; empty = the normal direct acquire (route empty).
+    // sessionNonce: the nonce of the START this acquire belongs to (UpstreamLeaseWire.h::kUpstreamAcquireNonceField); the
+    // owner decides it, the machine knows nothing of it.
     virtual void acquire(quint64 requestId, const QString &profileId, LeaseKind kind,
-                         const QString &standbyConfigSha256, const LeaseRoute &route) = 0;
+                         const QString &standbyConfigSha256, const LeaseRoute &route,
+                         const QString &sessionNonce) = 0;
     virtual void renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
                        const LeaseRoute &route) = 0;
     virtual void release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
@@ -221,7 +224,7 @@ inline QVector<LeaseAction> dispatchLeaseIo(const LeaseStep &step, IUpstreamLeas
     for (const LeaseAction &a : step.actions) {
         switch (a.kind) {
         case LeaseActionKind::SendAcquire:
-            io.acquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route);
+            io.acquire(a.requestId, a.profileId, a.leaseKind, a.configSha256, a.route, QString()); // the machine knows no nonce
             break;
         case LeaseActionKind::SendRenew: io.renew(a.requestId, a.leaseId, a.meter, a.route); break;
         case LeaseActionKind::SendRelease: io.release(a.requestId, a.leaseId, a.meter, a.route); break;
