@@ -209,6 +209,11 @@ has "$(body_of "$CLI" 'void UpstreamLeaseClient::releaseVia(')" 'sendRelease(req
 # S4: a profile with a standby-pack entry waits only the hedge for the direct lease; the adapter tells the client which.
 has "$ctor" 'm_upOwner.hasStandbyFor(profile)' || bad "S4: the adapter must tell the client which profile has a standby entry (hasStandbyFor)"
 has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'upstreamAcquireHedgeMsTuned()' || bad "S4: acquire() must use the hedge for a profile with a standby entry"
+# R2 (round 9): the hedge is for the direct acquire only - decided by the request's own parameters (no standby sha, no tunnel
+# base), never by "the profile has a pack entry" alone: the seat confirmation through the tunnel keeps the full bound.
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" 'const bool directRequest = standbyConfigSha256.isEmpty() && route.apiBase.isEmpty();' \
+    && has "$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')" '(directRequest && hasStandbyFor && hasStandbyFor(profileId))' \
+    || bad "R2: the hedge must apply to the direct acquire only, not to the confirmation through the tunnel"
 
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"

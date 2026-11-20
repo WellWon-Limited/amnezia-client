@@ -2489,6 +2489,56 @@ static void lateGrantOwnership()
         pump(2500);
         CHECK(r.owner.active() && !r.owner.provisionalPending());
     }
+    // Round 9 R2: the hedge belongs to ONE request kind - the direct acquire that precedes a provisional start. The seat
+    // CONFIRMATION through the tunnel (a standby acquire on the pack's tunnel base) keeps the full bound: here the tunnel's
+    // API answers in 1.35 s, slower than the hedge (1.2 s) and inside the bound (1.5 s). Before: every such confirmation
+    // ended as a transport failure at the hedge, its late success went to lateGrant (released: the provisional session got
+    // no seat) and the retries ended with the disconnect of a working tunnel.
+    const auto confirmationRig = [&](Rig &r) {
+        TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {});
+        r.owner.setOptions({});
+        r.edge.token = QStringLiteral("tlr1.conf");
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"inbounds\":[]}");
+        sc.configSha256 = LeaseEdge::cfgSha();
+        sc.tunnelApiBase = r.edge.base();
+        sc.packRevision = 5;
+        r.begin(sc); // the direct acquire is never answered: the hedge starts the pack tunnel
+        QElapsedTimer t;
+        t.start();
+        while (!r.owner.provisionalPending() && t.elapsed() < 4000)
+            pump(10);
+        CHECK(r.owner.provisionalPending());
+        r.client.tunnelStarted();
+        r.apply(r.owner.tunnelUp(r.now())); // Connected: the seat is confirmed through the tunnel
+        t.start();
+        while (r.edge.posts.size() < 2 && t.elapsed() < 2000)
+            pump(10);
+        CHECK(r.edge.posts.size() == 2);
+    };
+    {
+        Rig r;
+        confirmationRig(r);
+        pump(1350); // slower than the hedge, inside the full bound
+        r.edge.grant(1);
+        pump(400);
+        CHECK(r.edge.deletes.isEmpty());                                                  // not released as a late grant
+        CHECK(r.owner.holdsLease(QLatin1String(kLease)) && !r.owner.provisionalPending()); // the seat is confirmed
+    }
+    {
+        Rig r; // what a SUCCESSFUL confirmation does when it is slower than even the full bound
+        confirmationRig(r);
+        pump(1900);
+        r.edge.grant(1);
+        pump(400);
+        // It is a late grant like any other and does NOT confirm the provisional session (which holds no lease to take it
+        // over): another request of the profile (the direct acquire, never answered) is still alive, so the ledger judges the
+        // seat when that one ends - then it is released, with the confirmation's own token.
+        CHECK(r.edge.deletes.isEmpty() && !r.owner.holdsLease(QLatin1String(kLease)));
+        r.edge.refuse(0);
+        pump(500);
+        CHECK(r.edge.deletes.size() == 1 && r.edge.deleteTokens == QStringList{ QStringLiteral("tlr1.conf") });
+    }
     // Row G1: the direct acquire exceeds its wait, the tunnel starts from the STANDBY pack (provisional); the original
     // request then returns L late and is released; Connected -> tunnelUp() confirms the seat with an acquire of the
     // same profile. That acquire does not wait for the release (round 9 R1): the DELETE carries the late grant's token, which the

@@ -99,7 +99,13 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
     // taken and the path was blamed. The attempt stops WAITING at the lease share of its leg (a transport failure
     // for the owner, never recorded against the path), but the request lives on for kUpstreamLateGrantGraceMs: a
     // grant that arrives after that point was a real seat and is released at once over the direct route.
-    const int waitMs = (hasStandbyFor && hasStandbyFor(profileId)) ? upstreamAcquireHedgeMsTuned() : upstreamAcquireTimeoutMsTuned();
+    // The hedge is a property of ONE request kind: the direct acquire that precedes a provisional start (round 9 R2). It is
+    // told by the request's own parameters - no standby confirmation sha, no tunnel base: that is the direct request - and
+    // by the owner's fact that this profile has a pack entry to start from. A seat confirmation through the tunnel (or the
+    // provisional re-acquire) has nothing to fall back to and keeps the full bound.
+    const bool directRequest = standbyConfigSha256.isEmpty() && route.apiBase.isEmpty();
+    const int waitMs = (directRequest && hasStandbyFor && hasStandbyFor(profileId)) ? upstreamAcquireHedgeMsTuned()
+                                                                                    : upstreamAcquireTimeoutMsTuned();
     QNetworkReply *r = base.isEmpty() ? nullptr
                                       : post(base + QStringLiteral("/v1/upstream/lease"),
                                              upstreamAcquireBody(profileId, kind, standbyConfigSha256), token,
