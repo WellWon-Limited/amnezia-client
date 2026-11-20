@@ -3424,6 +3424,15 @@ struct LedgerWorld {
         if (a.grant)
             newLease(a);
     }
+    // Round 12 R1: an answer of an OLDER start (a cancelled start's request) changes no field of the current session.
+    QString sessionFingerprint() const
+    {
+        return QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9").arg(o.wakeAtMs()).arg(int(o.phase())).arg(o.leaseId()).arg(o.releaseSent())
+            .arg(o.active()).arg(o.provisionalPending()).arg(o.sessionNonce()).arg(o.sessionOrder())
+            .arg(QString::fromUtf8(QJsonDocument(o.statusJson(0)).toJson(QJsonDocument::Compact)))
+            + QString::fromUtf8(QJsonDocument(o.leaseJson(0)).toJson(QJsonDocument::Compact));
+    }
+    bool olderStart(const Acq &a) const { return a.nonce != o.sessionNonce(); }
     void acqDeliver(int i)
     {
         trace << QStringLiteral("%1").arg(QLatin1String("acqDeliver")) + (QLatin1String("") + QString::number(i));
@@ -3431,7 +3440,11 @@ struct LedgerWorld {
         a.delivered = true;
         if (a.stale && o.machine().acquireInFlight() == a.id)
             violations << QStringLiteral("a stale_session denial reached the start that waits for its answer (a nonce was reused)");
+        const QString before = sessionFingerprint();
+        const bool older = olderStart(a);
         apply(o.onAcquireReply(a.id, replyOf(a), now));
+        if (older && sessionFingerprint() != before)
+            violations << QStringLiteral("an answer of an older start changed a field of the current session");
         apply(o.acquireEnded(profile(), a.grant ? a.lease : QString(), newerOut(i)));
         o.routeProved(a.id, now); // UpstreamLeaseClient: an HTTP answer, whichever path it took
     }
@@ -3439,7 +3452,11 @@ struct LedgerWorld {
     {
         trace << QStringLiteral("%1").arg(QLatin1String("acqTimeout")) + (QLatin1String("") + QString::number(i));
         acqs[i].timedOut = true;
+        const QString before = sessionFingerprint();
+        const bool older = olderStart(acqs[i]);
         apply(o.onAcquireReply(acqs[i].id, failed("transport"), now));
+        if (older && sessionFingerprint() != before)
+            violations << QStringLiteral("the timeout of an older start changed a field of the current session");
     }
     void acqLate(int i)
     {
@@ -3542,6 +3559,12 @@ struct LedgerWorld {
         if (!held.isEmpty() && o.holdsLease(held) && live != held)
             violations << QStringLiteral("the live session's seat is not live on the server (") + QLatin1String(where) + QLatin1Char(')');
         checkToken();
+        // Round 12 R1: a session that holds a lease (or waits for its confirmation through a tunnel that is up) has a wake time, as long as
+        // it owns the renewals; without one the lease expires under a running tunnel
+        if (o.active() && o.ownsRenewals() && !o.machine().requestInFlight()
+            && (o.phase() == LeasePhase::Active || o.machine().provisionalTunnelUp()))
+            if (o.wakeAtMs() < 0)
+                violations << QStringLiteral("a session that holds a lease or is provisional has no wake time scheduled (") + QLatin1String(where) + QLatin1Char(')');
     }
     // Contract 1.19.0: within ONE start every answer names the same lease and the same token (unless the lease expired in between,
     // then it is a new id); two different starts never share a lease id. So a lease the live session holds is the server's lease of
@@ -3747,6 +3770,67 @@ static void reviewerSequenceR1()
     CHECK(w.violations.isEmpty() && w.staleDenials == 1);
 }
 
+// Round 12 R1: the answer (or the timeout) of a CANCELLED older start must change nothing of the current session - above all not its
+// schedule: Connect A -> Stop -> Connect B, B gets its lease and a renewal is scheduled, then A's answer lands.
+static void lateAnswerKeepsSession()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const qint64 T = 16000000;
+    const char *kB = "LeaseBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    const char *kOldLease = "LeaseOldOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO";
+    for (int what = 0; what < 4; ++what) { // 0 timeout, 1 refusal, 2 late grant, 3 stale renew reply of the older session
+        for (const bool provisional : {false, true}) {
+            if (provisional && what == 3)
+                continue;
+            FakeIo io;
+            UpstreamLeaseOwner o(&io);
+            UpstreamLeaseOwner::Options op;
+            op.keepOwnership = true;
+            o.setOptions(op);
+            quint64 idA = 0, renewA = 0;
+            o.begin(a, 1, packFor(a), T, 1700000000000LL); // start A
+            idA = io.last("acquire")->id;
+            if (what == 3) {
+                o.onAcquireReply(idA, grantedAs(a, kOldLease), T + 100);
+                o.tick(o.wakeAtMs());
+                renewA = io.last("renew")->id; // a renewal of A's lease is in flight when the person stops
+            }
+            o.disconnect(T + 400000);
+            o.begin(a, 1, provisional ? std::optional<StandbyCandidate>(packFor(a)) : std::nullopt, T + 400100, 1700000400100LL); // start B
+            const quint64 idB = io.last("acquire")->id;
+            if (provisional) {
+                o.onAcquireReply(idB, failed("transport"), T + 401200); // B starts from the pack
+                CHECK(o.provisionalPending());
+                o.tunnelUp(T + 401300); // the confirmation through the tunnel goes out and fails: its retry is scheduled
+                o.onAcquireReply(io.last("acquire")->id, failed("transport"), T + 401400);
+            } else {
+                o.onAcquireReply(idB, grantedAs(a, kB), T + 400300);
+                CHECK(o.holdsLease(QLatin1String(kB)));
+            }
+            const qint64 wake = o.wakeAtMs();
+            const LeasePhase phase = o.phase();
+            const QString lease = o.leaseId();
+            const bool releaseSent = o.releaseSent();
+            CHECK(wake >= 0);
+            if (what == 0)
+                o.onAcquireReply(idA, failed("transport"), T + 401500);
+            else if (what == 1)
+                o.onAcquireReply(idA, refused(UpstreamErrorCode::NoSeat), T + 401500);
+            else if (what == 2)
+                o.onAcquireReply(idA, grantedAs(a, kOldLease), T + 401500);
+            else
+                o.onRenewReply(renewA, renewedOk(1, kServerT0 + 1200000), T + 401500, 1700000401500LL);
+            CHECK(o.wakeAtMs() == wake && o.phase() == phase && o.leaseId() == lease && o.releaseSent() == releaseSent && o.active());
+            // the schedule still works: the renewal (or the provisional confirmation attempt) goes out when due
+            const int calls = io.calls.size();
+            o.tick(wake);
+            CHECK(io.calls.size() > calls);
+            if (!provisional)
+                CHECK(io.last("renew") && io.last("renew")->profileOrLease == QLatin1String(kB));
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -3758,6 +3842,7 @@ int main(int argc, char **argv)
     lateGrantOwnership();
     ledgerModel();
     reviewerSequenceR1();
+    lateAnswerKeepsSession();
     unsentFlushOnAnyAnswer();
     sessionNonceCheck();
     lateOlderStart();

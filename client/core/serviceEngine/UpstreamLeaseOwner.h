@@ -217,7 +217,12 @@ public:
         // start's) is never the answer the CURRENT start waits for: its requests carry its own fresh nonce and order. If one comes
         // anyway it is a refusal like any terminal one (the machine leaves / the leg fails with lease_gone). The answer of an older
         // start's request is not the machine's request any more - nothing to release, nothing to tell.
-        apply(m_machine.onAcquireReply(requestId, r, nowMs), nowMs, ev); // a grant of a cancelled request: released
+        const LeaseStep s = m_machine.onAcquireReply(requestId, r, nowMs);
+        if (s.inert) {
+            applyInert(s, nowMs); // an older start's answer: its own lease is released, the current session is not touched
+            return ev;
+        }
+        apply(s, nowMs, ev);
         return ev;
     }
 
@@ -246,6 +251,8 @@ public:
     {
         QVector<UpstreamOwnerEvent> ev;
         const LeaseStep s = m_machine.onRenewReply(requestId, r, nowMs);
+        if (s.inert)
+            return ev; // a renewal the session does not wait for (its session ended): nothing of the current one changes
         if (r.kind == LeaseReplyKind::Granted && !s.has(LeaseActionKind::LeaveNode)) {
             m_renewedAtMs = nowMs;
             m_lastRenewal = r.renewal;
@@ -479,9 +486,31 @@ private:
         return p;
     }
 
+    // An INERT step (LeaseStep::inert: the answer of a request the current start does not own, or an ignored call) never writes the
+    // session's state (schedule, release flag, phase-driven events). The only thing such a step may do is give back the lease IT names:
+    // its releases go through the ledger and out, nothing else is looked at (round 12 R1). The answer paths call this directly; apply()
+    // routes any other inert step here as its first act.
+    void applyInert(const LeaseStep &s, qint64 nowMs)
+    {
+        m_lastNowMs = nowMs;
+        const QSet<quint64> merged = registerReleasesOf(s);
+        if (!m_io)
+            return;
+        for (const LeaseAction &a : s.actions) {
+            if (a.kind != LeaseActionKind::SendRelease || merged.contains(a.requestId))
+                continue;
+            const auto it = m_releases.constFind(a.leaseId);
+            m_io->release(a.requestId, a.leaseId, it != m_releases.constEnd() ? it->meter() : a.meter, a.route);
+        }
+    }
+
     // silentReady: the LeaseReady of an adoption (the tunnel already runs) is not a bring-up.
     void apply(const LeaseStep &s, qint64 nowMs, QVector<UpstreamOwnerEvent> &ev, bool silentReady = false)
     {
+        if (s.inert) {
+            applyInert(s, nowMs);
+            return;
+        }
         m_lastNowMs = nowMs;
         // Sends first (the machine expects them dispatched); the acquire's send time anchors the probe
         // grant's own expiry.
