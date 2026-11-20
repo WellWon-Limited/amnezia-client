@@ -34,6 +34,7 @@
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSet>
 #include <QVector>
 
 #include <optional>
@@ -201,6 +202,14 @@ public:
     {
         QVector<UpstreamOwnerEvent> ev;
         m_lastNowMs = nowMs;
+        if (m_reasserts.remove(requestId)) {
+            // The answer of our own re-assert (not a machine request): a grant is looked at like any late one - the session's
+            // own start's token equals ours, nothing to do; a session that ended meanwhile releases it with its token.
+            if (r.kind == LeaseReplyKind::Granted)
+                return lateGrant(r.grant.profileId, r.grant.leaseId, LeaseRoute{r.grant.renewToken, QString()},
+                                 acquireOfProfileAlive(r.grant.profileId), requestId);
+            return ev;
+        }
         if (requestId == m_lastAcquireRequest) {
             m_lastAcquire = r;
             if (r.kind == LeaseReplyKind::Granted) {
@@ -215,7 +224,7 @@ public:
             for (const QString &id : m_releases.keys()) {
                 const PendingRelease &p = m_releases[id];
                 if ((p.state == RelState::Withdrawn && p.profile == r.grant.profileId)
-                    || (p.state == RelState::Unsent && id == r.grant.leaseId)) // the server handed the id back: a session owns it now
+                    || (p.state == RelState::Unsent && p.leaseId == r.grant.leaseId)) // the server handed the id back: a session owns it now
                     m_releases.remove(id);
             }
         }
@@ -755,21 +764,28 @@ public:
     {
         QVector<UpstreamOwnerEvent> ev;
         noteToken(route.renewToken, acquireId);
-        if (holdsLease(leaseId))
-            return ev; // the live session's seat
+        if (holdsLease(leaseId)) {
+            // The live session's seat: nothing to release. Round 10 R2: a token equal to the held one is the same start's
+            // (nothing to do). A different one is an OLDER start's late grant that the server processed after ours and
+            // thereby rotated the token away from us (it keeps no order between starts): the session asserts its seat
+            // once more, with ITS nonce, and the server rotates back to our token. That late answer releases nothing.
+            if (!ownStart(acquireId) && route.renewToken != m_machine.route().renewToken)
+                reassertSeat();
+            return ev;
+        }
         if (ownStart(acquireId)) {
             // The grant of THIS start's own request (the direct acquire that outlived the hedge), and the session has no lease
             // yet (provisional: its confirmation through the tunnel is still to come). The server derives the token from the
             // nonce, so it is the very token the confirmation will get: releasing it now would end the seat the session is
             // about to confirm. It is the session's: judged when the session confirms (held: dropped) or ends (released).
             if (registerRelease(profileId, leaseId, route, 0))
-                m_releases[leaseId].state = RelState::Deferred;
+                m_releases[relKey(leaseId, route.renewToken)].state = RelState::Deferred;
             return ev;
         }
         if (newerAcquireOut) {
             // judged when the newer request ends; kept in the ledger like every release (one per lease id, newest token)
             if (registerRelease(profileId, leaseId, route, 0))
-                m_releases[leaseId].state = RelState::Deferred;
+                m_releases[relKey(leaseId, route.renewToken)].state = RelState::Deferred;
             return ev;
         }
         releaseThroughLedger(profileId, leaseId, route); // replaces a withdrawn release of the same id: one chain
@@ -792,6 +808,12 @@ public:
         return ev;
     }
 
+    // Some acquire of the profile is alive: the cancelled one, the machine's own, or an HTTP request the client still holds.
+    bool acquireOfProfileAlive(const QString &profileId) const
+    {
+        return m_orphanAcquire != 0 || (m_active && m_machine.acquireInFlight() != 0) || (m_io && m_io->acquireAlive(profileId));
+    }
+
     // Deferred releases of the profile are decided here: held by the live session -> dropped (it took the same seat over);
     // the live session's own start, not confirmed yet -> kept; otherwise released with ITS token. When the request that just
     // ended was granted the same lease (and was released itself) the two met in the ledger and the newer start's token won:
@@ -802,17 +824,38 @@ public:
             PendingRelease &d = m_releases[id];
             if (d.state != RelState::Deferred || d.profile != profileId)
                 continue;
-            if (holdsLease(id)) {
+            if (holdsLease(d.leaseId)) {
+                // the live session took the same seat over; an older start's token (the server may have processed that request
+                // after ours) is the one the server holds now, not ours: assert the seat again
+                if (m_tokenNonce.value(d.route.renewToken) != m_nonce && d.route.renewToken != m_machine.route().renewToken)
+                    reassertSeat();
                 m_releases.remove(id);
                 continue;
             }
             if (m_active && !m_nonce.isEmpty() && m_tokenNonce.value(d.route.renewToken) == m_nonce)
                 continue; // the session's own seat, not confirmed yet
-            if (checkAlive && (m_orphanAcquire != 0 || (m_active && m_machine.acquireInFlight() != 0)
-                               || (m_io && m_io->acquireAlive(profileId))))
+            if (checkAlive && acquireOfProfileAlive(profileId))
                 continue; // another acquire of the profile is alive: judged when it ends
             sendOut(d, d.route);
         }
+    }
+
+    // ONE acquire carrying THIS session's nonce, on the route the session uses (the tunnel's API base with the pack entry's sha
+    // when it came up from the standby pack, the direct path otherwise): the server answers it with the same lease and the
+    // token derived from our nonce, i.e. it rotates back to the token we hold (and the tunnel owner holds). It is not a start:
+    // it has no machine request, does not withdraw releases, and its answer (onAcquireReply) is only looked at as a late grant.
+    void reassertSeat()
+    {
+        if (!m_io || m_nonce.isEmpty() || m_profileId.isEmpty())
+            return;
+        const quint64 id = (quint64(1) << 62) | ++m_ownSerial;
+        noteAcquireNonce(id, m_nonce);
+        if (m_reasserts.size() > 16)
+            m_reasserts.clear();
+        m_reasserts.insert(id);
+        const bool viaTunnel = m_standby.has_value() && !m_provisionalBase.isEmpty();
+        m_io->acquire(id, m_profileId, LeaseKind::Session, viaTunnel ? m_standby->configSha256 : QString(),
+                      viaTunnel ? LeaseRoute{QString(), m_provisionalBase} : LeaseRoute{}, m_nonce);
     }
 
     // The native tunnel of the running session is gone and the app did not ask for it (Disconnected from the
@@ -859,7 +902,7 @@ public:
     int unsentCount() const { return countIn(RelState::Unsent); }
     int withdrawnCount() const { return countIn(RelState::Withdrawn); }
     int requestsOutstanding() const { return (m_orphanAcquire ? 1 : 0) + countIn(RelState::Out); }
-    int pendingReleases() const { return int(m_releases.size()); } // at most one per lease id
+    int pendingReleases() const { return int(m_releases.size()); } // at most one per (lease id, token)
 
     // The client asks before it resends a release (UpstreamLeaseClient::releaseWanted): false = the release was taken
     // back by a newer start of its profile or replaced by a newer one of the same lease id - no resend, no answer.
@@ -882,7 +925,7 @@ public:
             p->state = RelState::Unsent;
             p->requestId = 0;
         } else {
-            m_releases.remove(p->leaseId);
+            m_releases.remove(relKey(p->leaseId, p->route.renewToken));
         }
         return ev;
     }
@@ -987,6 +1030,11 @@ private:
         quint64 requestId = 0; // Out: the id the client knows it by
         quint64 start = 0;     // the place in the start order of the grant's start (noteToken); a newer start wins a collision
     };
+    // The key of a pending release: the lease AND the token. Round 10: two tokens of one lease are two STARTS' (the server keeps
+    // no order between starts: which one is current is not the client's to know). When neither start is a live session's both
+    // are worth a DELETE - the one that is current ends the seat, the other is a no-op - so neither replaces the other. The same
+    // token is the same start's: one chain (round 9 R6).
+    static QString relKey(const QString &leaseId, const QString &token) { return leaseId + QLatin1Char('|') + token; }
     int countIn(RelState st) const
     {
         int n = 0;
@@ -1040,10 +1088,17 @@ private:
         p.deadlineMs = m_lastNowMs + leaseTtlMs();
         p.requestId = requestId;
         p.start = startOrderOfToken(route.renewToken);
-        const auto old = m_releases.constFind(leaseId);
+        const auto old = m_releases.constFind(relKey(leaseId, route.renewToken));
         if (old != m_releases.constEnd() && old->start > p.start)
             return false;
-        m_releases.insert(leaseId, p);
+        // A taken-back release of an OLDER start for this very lease is dead: the newer start's acquire rotated the token away
+        // from it (the old session's own requests are all answered), so it is never sent again (round 9 R6: one chain).
+        for (const QString &k : m_releases.keys()) {
+            const PendingRelease &w = m_releases[k];
+            if (w.state == RelState::Withdrawn && w.leaseId == leaseId && w.route.renewToken != route.renewToken && w.start < p.start)
+                m_releases.remove(k);
+        }
+        m_releases.insert(relKey(leaseId, route.renewToken), p);
         return true;
     }
     // Sends the pending release (a new request id, the route given - its own token inside).
@@ -1065,7 +1120,7 @@ private:
     {
         if (!m_io || !registerRelease(profileId, leaseId, route, 0))
             return;
-        sendOut(m_releases[leaseId], route);
+        sendOut(m_releases[relKey(leaseId, route.renewToken)], route);
     }
 
     void noteReleasesSent(const LeaseStep &s)
@@ -1119,12 +1174,13 @@ private:
     quint64 m_orphanAcquire = 0;          // the acquire a session's end cancelled, until its answer
     QString m_orphanProfile;
     quint64 m_ownSerial = 0;
-    QHash<QString, PendingRelease> m_releases; // ONE pending release per lease id (Out / Withdrawn / Unsent)
+    QHash<QString, PendingRelease> m_releases; // ONE pending release per (lease id, renew token): relKey (Out / Withdrawn / Unsent / Deferred)
     QHash<QString, QString> m_tokenNonce;      // renew token -> the nonce (start) of the acquire it answered
     QHash<quint64, QString> m_acquireNonce;    // acquire request id -> the nonce (start) that sent it
     QHash<QString, quint64> m_startOrder;      // nonce -> its place in the start order (only grows)
     quint64 m_startCounter = 0;
     QString m_nonce;                           // the session nonce of the current start (resetSession)
+    QSet<quint64> m_reasserts;                 // our re-assert acquires (reassertSeat) not answered yet
     static constexpr int kUnsentMaxSends = 3;
     qint64 m_lastNowMs = 0;       // the owner's last clock reading (a deadline for a release made without one)
     bool m_lastAcquireStandby = false;

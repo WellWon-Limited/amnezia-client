@@ -2816,9 +2816,10 @@ static void sessionNonceCheck()
         CHECK(io.last("acquire")->id != direct.id && io.last("acquire")->nonce == direct.nonce);
     }
     // R3: tokens are NOT ordered by the request that answered them. The direct request A (the older request id) is late; the
-    // confirmation B of the same start got its token and Stop registered the release; A's answer then carries a token - the
-    // same start, so it is the one the server holds now, and the release goes with it. (Before: "2 > 1" dropped it, the
-    // DELETE of the old token was a no-op and the entry was gone with the only valid token.)
+    // confirmation B of the same start got its token and Stop registered the release; A's answer then carries ANOTHER token
+    // (the server may have processed A last: the real server hands one start one token, a test token stands for "unknown which
+    // is current"). The release with it goes out too: the one that is current ends the seat, the other is a no-op. (Before:
+    // "2 > 1" dropped it, the DELETE of the old token was a no-op and the entry was gone with the only valid token.)
     {
         FakeIo io;
         UpstreamLeaseOwner o(&io);
@@ -2833,9 +2834,15 @@ static void sessionNonceCheck()
         o.disconnect(T + 2000);
         CHECK(o.pendingReleases() == 1);
         o.lateGrant(a.upstream->profileId, QLatin1String(kA), LeaseRoute{QStringLiteral("tokA"), QString()}, false, idA);
-        CHECK(o.pendingReleases() == 1 && io.last("release")->route.renewToken == QLatin1String("tokA"));
+        CHECK(o.pendingReleases() == 2 && io.last("release")->route.renewToken == QLatin1String("tokA"));
+        // the same token again (the same start, any order): ONE chain
+        const int calls = io.calls.size();
+        o.lateGrant(a.upstream->profileId, QLatin1String(kA), LeaseRoute{QStringLiteral("tokA"), QString()}, false, idA);
+        CHECK(o.pendingReleases() == 2 && io.calls.size() == calls + 1); // replaced by its own twin: the old chain stops, one new
     }
-    // between starts the order is the client's own: the grant of an OLDER start never replaces the release of a newer one
+    // between starts the order is the client's own (the start order is local and monotonic); a stray late grant of an OLDER
+    // start while no session holds the lease does not replace the newer start's release - both tokens go out (which of the two
+    // the server holds now depends on the order it processed the requests in)
     {
         FakeIo io;
         UpstreamLeaseOwner o(&io);
@@ -2853,8 +2860,79 @@ static void sessionNonceCheck()
         o.disconnect(T + 1800);
         const int before = io.calls.size();
         o.lateGrant(a.upstream->profileId, QLatin1String(kA), LeaseRoute{QStringLiteral("tokOld"), QString()}, false, idOld);
-        CHECK(io.calls.size() == before); // refused: the newer start's release stays, nothing new on the wire
-        CHECK(o.pendingReleases() == 1);
+        CHECK(io.calls.size() == before + 1 && io.last("release")->route.renewToken == QLatin1String("tokOld"));
+        CHECK(o.pendingReleases() == 2);
+    }
+}
+
+// Round 10 R2: an OLDER start's late grant for the lease the CURRENT session holds. The server keeps no order between
+// starts: it processed the old request after ours and rotated the token away from the one we (and the tunnel owner) hold.
+// The session re-asserts its seat with ONE acquire carrying ITS nonce on the route it uses; that late answer releases nothing.
+static void lateOlderStartReassert()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const qint64 T = 14000000;
+    const char *kA = "LeaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const auto releases = [](const FakeIo &io) {
+        int n = 0;
+        for (const FakeIo::Call &c : io.calls)
+            n += c.what == QLatin1String("release") ? 1 : 0;
+        return n;
+    };
+    for (const bool viaTunnel : {false, true}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, packFor(a), T, 1); // start 1: its direct request outlives the hedge
+        const quint64 idOld = io.last("acquire")->id;
+        const QString nonceOld = io.last("acquire")->nonce;
+        o.onAcquireReply(idOld, failed("transport"), T + 1200);
+        o.disconnect(T + 1300);
+        o.begin(a, 1, packFor(a), T + 1400, 1); // start 2
+        quint64 idNew = io.last("acquire")->id;
+        const QString nonceNew = io.last("acquire")->nonce;
+        CHECK(nonceNew != nonceOld);
+        AcquireReply g = grantedAs(a, kA);
+        g.grant.renewToken = QStringLiteral("tokNew");
+        if (viaTunnel) { // the session came up from the pack and confirmed through the tunnel
+            o.onAcquireReply(idNew, failed("transport"), T + 2600);
+            o.tunnelUp(T + 2700);
+            idNew = io.last("acquire")->id;
+        }
+        o.onAcquireReply(idNew, g, T + 2800);
+        CHECK(o.holdsLease(QLatin1String(kA)));
+        const int calls = io.calls.size();
+        // the same start's late answer (equal token): nothing
+        o.lateGrant(a.upstream->profileId, QLatin1String(kA), LeaseRoute{QStringLiteral("tokNew"), QString()}, false, idNew);
+        CHECK(io.calls.size() == calls);
+        // an older start's late answer, token rotated away: ONE re-assert with OUR nonce, nothing released
+        o.lateGrant(a.upstream->profileId, QLatin1String(kA), LeaseRoute{QStringLiteral("tokOld"), QString()}, false, idOld);
+        CHECK(io.calls.size() == calls + 1 && releases(io) == 0);
+        const FakeIo::Call re = *io.last("acquire");
+        CHECK(re.nonce == nonceNew && re.id != idNew);
+        CHECK(viaTunnel ? (!re.sha.isEmpty() && !re.route.apiBase.isEmpty()) : (re.sha.isEmpty() && re.route.apiBase.isEmpty()));
+        // the server rotated back: its answer carries our token; it is looked at, releases nothing, asserts nothing more
+        o.onAcquireReply(re.id, g, T + 3000);
+        CHECK(io.calls.size() == calls + 1 && releases(io) == 0 && o.holdsLease(QLatin1String(kA)));
+        // the session's stop releases the seat with the token it holds
+        const QVector<UpstreamOwnerEvent> endEv = o.disconnect(T + 4000);
+        QString relToken = io.last("release") ? io.last("release")->route.renewToken : QString();
+        for (const UpstreamOwnerEvent &e : endEv)
+            if (e.kind == UpstreamOwnerEventKind::ReleaseAfterStop) // a tunnel that came up: the release goes after its confirmed stop
+                relToken = e.route.renewToken;
+        CHECK(relToken == QLatin1String("tokNew"));
+    }
+    // a late grant of a lease NOBODY holds is released with its own token (as before), and asserts nothing
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, packFor(a), T, 1);
+        const quint64 idOld = io.last("acquire")->id;
+        o.onAcquireReply(idOld, failed("transport"), T + 1200);
+        o.disconnect(T + 1300);
+        const int calls = io.calls.size();
+        o.lateGrant(a.upstream->profileId, QLatin1String(kA), LeaseRoute{QStringLiteral("tokOld"), QString()}, false, idOld);
+        CHECK(io.calls.size() == calls + 1 && io.last("release") && io.last("release")->route.renewToken == QLatin1String("tokOld"));
+        CHECK(io.calls.last().what == QLatin1String("release"));
     }
 }
 
@@ -3006,7 +3084,8 @@ struct LedgerWorld {
         Acq &a = acqs[i];
         a.processed = true;
         // sometimes no seat; a refusal (disabled, not entitled) leaves a live lease alone
-        a.grant = forceGrant || ((acqs.size() * 7 + serial) % 5 != 4 && (!live.isEmpty() || serial % 5 != 4));
+        // a re-acquire of a lease the device holds is idempotent and needs no seat: only an acquire with no lease live is refused
+        a.grant = forceGrant || !live.isEmpty() || ((acqs.size() * 7 + serial) % 5 != 4 && serial % 5 != 4);
         if (!live.isEmpty())
             a.lease = live;
         else if (a.grant) {
@@ -3127,6 +3206,24 @@ struct LedgerWorld {
         const QString held = o.machine().leaseId();
         if (!held.isEmpty() && o.holdsLease(held) && live != held)
             violations << QStringLiteral("the live session's seat is not live on the server (") + QLatin1String(where) + QLatin1Char(')');
+        checkToken();
+    }
+    // Round 10 R2: once every acquire is answered (nothing the server may still rotate the token for), the token the server
+    // holds for the lease a live session holds is THE session's: a late older-start grant that rotated it away was re-asserted.
+    bool acquiresQuiet() const
+    {
+        for (const Acq &a : acqs)
+            if (!a.processed || !(a.delivered || (a.timedOut && a.lateDone)))
+                return false;
+        return true;
+    }
+    void checkToken()
+    {
+        const QString held = o.machine().leaseId();
+        if (!acquiresQuiet() || held.isEmpty() || !o.holdsLease(held) || live != held)
+            return;
+        if (liveToken != o.machine().route().renewToken)
+            violations << QStringLiteral("the live session's token was rotated away by an older start and never re-asserted");
     }
     // every sequence ends: everything answered, the tunnel confirmed down, the session stopped
     void drain()
@@ -3149,6 +3246,7 @@ struct LedgerWorld {
             }
             if (did)
                 continue;
+            checkToken(); // everything answered, the session still up
             if (nativeStarted) {
                 disconnected(); // the confirmed stop frees what was held for it
                 continue;
@@ -3187,9 +3285,11 @@ static void ledgerModel()
             w.now += 150;
             switch (rnd(17)) {
             case 0: case 1: w.begin(rnd(2) == 0); break;
-            case 2: case 3: { // the server processes an acquire
+            case 2: case 3: { // the server processes an acquire - in ANY order (round 10: the client cannot know it)
+                QList<int> c;
                 for (int i = 0; i < w.acqs.size(); ++i)
-                    if (!w.acqs[i].processed) { w.acqProcess(i); break; }
+                    if (!w.acqs[i].processed) c << i;
+                if (!c.isEmpty()) w.acqProcess(c[rnd(c.size())]);
                 break;
             }
             case 4: case 5: { // an answer reaches the client (in time)
@@ -3270,6 +3370,7 @@ int main(int argc, char **argv)
     ledgerModel();
     unsentFlushOnAnyAnswer();
     sessionNonceCheck();
+    lateOlderStartReassert();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();
