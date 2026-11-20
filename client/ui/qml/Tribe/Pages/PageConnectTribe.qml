@@ -1158,12 +1158,17 @@ PageType {
                             font.family: Theme.font.mono; font.pixelSize: Theme.font.micro
                         }
                         // The person's chosen server did not work on this network and the card names the node CONNECTED now
-                        // (currentNode.choiceNodeId / choiceName / choiceIsShown from the engine): one yellow line
+                        // (currentNode.choiceNodeId / choiceName / choiceIsShown from the engine): one yellow line.
+                        // The cluster's two rows stand beside the name and the badge row. Below the badge row this line
+                        // runs under the cluster on one line; without a badge row it is the second line, the ms row, so it
+                        // keeps the text column and wraps to two lines (android1 D4: it ran under «184 ms», shot 29)
                         Text {
-                            width: infoCol.width   // runs under the signal cluster: the whole sentence stays readable
+                            width: subRow.visible ? infoCol.width : parent.width
                             visible: root.choiceElsewhere
                             text: qsTr("%1 в этой сети не отвечает").arg(String(root.curNode.choiceName || ""))
                             textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            maximumLineCount: subRow.visible ? 1 : 2
                             elide: Text.ElideRight
                             color: Theme.color.warning
                             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
