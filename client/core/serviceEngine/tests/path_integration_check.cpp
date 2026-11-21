@@ -1002,10 +1002,10 @@ int main(int argc, char **argv)
         Rig r(pool);
         QString err;
         CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
-        CHECK(r.eng.onLocalBuild(true) == false); // the phase stays Connecting
+        CHECK(r.eng.onLocalBuild(ServiceEngine::LocalBuildReport::Building, r.eng.attemptLeg()) == false); // the phase stays Connecting
         r.pass(8000);
         CHECK(r.tun.ups.size() == 1 && r.tun.downs == 0 && r.eng.attemptRunning()); // not judged while building
-        r.eng.onLocalBuild(false);
+        r.eng.onLocalBuild(ServiceEngine::LocalBuildReport::Built, r.eng.attemptLeg());
         r.pass(4000); // 4 s of the server's 4.5 s
         CHECK(r.tun.ups.size() == 1 && r.tun.downs == 0);
         r.up();
@@ -1023,7 +1023,7 @@ int main(int argc, char **argv)
         Rig r(pool);
         QString err;
         CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
-        r.eng.onLocalBuild(true);
+        r.eng.onLocalBuild(ServiceEngine::LocalBuildReport::Building, r.eng.attemptLeg());
         r.pass(19500);
         CHECK(r.tun.downs == 0 && r.tun.ups.size() == 1);
         r.pass(1000);
@@ -1037,6 +1037,65 @@ int main(int argc, char **argv)
         CHECK(plain.eng.connect(err) && plain.last() == QLatin1String("17"));
         plain.pass(4500);
         CHECK(plain.tun.downs == 1 && plain.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect"));
+    }
+    // android2 V2 (21.11): the service builds one start at a time and names the engine leg of every report. A leg is
+    // local from its start command until its own "built"; a report of another leg changes nothing; a start the service
+    // ended without a tunnel is a local outcome. Nothing is recorded against a server whose tunnel never began.
+    {
+        using LB = ServiceEngine::LocalBuildReport;
+        {   // the start waits in the service (busy with an earlier build): no "no handshake" at 4.5 s
+            Rig r(pool);
+            r.eng.setLocalBuildReported(true);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            const quint64 leg = r.eng.attemptLeg();
+            r.pass(8000);
+            CHECK(r.tun.downs == 0 && r.eng.attemptRunning()); // not judged: its build has not even begun
+            CHECK(r.eng.onLocalBuild(LB::Built, leg - 1) == false); // a late "built" of an earlier start: not this leg's
+            r.eng.onLocalBuild(LB::Building, leg + 1);              // nor a report of a later one
+            r.pass(4500);
+            CHECK(r.tun.downs == 0);
+            r.eng.onLocalBuild(LB::Building, leg); // its own build begins 12.5 s after the command
+            r.pass(7000);
+            CHECK(r.tun.downs == 0);
+            r.pass(1000);
+            CHECK(r.tun.downs == 1 && journalHas(r.journal, "leg_local_build_overrun leg=")); // the local bound, from the start
+            CHECK(journalHas(r.journal, "leg_build_other report=built") && journalHas(r.journal, "leg_build begin leg="));
+            r.confirmStop();
+            CHECK(r.last() == QLatin1String("16") && r.eng.attemptRunning());
+            CHECK(!journalHas(r.journal, "path_outcome") && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+        }
+        {   // the service did not start this leg's tunnel ("Tunnel build 7: end, not started"): a local outcome at once
+            Rig r(pool);
+            r.eng.setLocalBuildReported(true);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            const quint64 leg = r.eng.attemptLeg();
+            r.pass(500);
+            r.eng.onLocalBuild(LB::Building, leg);
+            r.eng.onLocalBuild(LB::NotStarted, leg);
+            r.pass(500);
+            CHECK(r.tun.downs == 1 && journalHas(r.journal, "leg_build not_started leg="));
+            r.confirmStop();
+            CHECK(r.last() == QLatin1String("16"));
+            r.pass(6000); // 16 is never built either: still not judged by the server deadline
+            CHECK(!journalHas(r.journal, "path_outcome"));
+        }
+        {   // its own "built": the server has the full deadline from then, and a server that does not answer is judged
+            Rig r(pool);
+            r.eng.setLocalBuildReported(true);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            const quint64 leg = r.eng.attemptLeg();
+            r.pass(1000);
+            r.eng.onLocalBuild(LB::Building, leg);
+            r.eng.onLocalBuild(LB::Built, leg);
+            r.pass(4000);
+            CHECK(r.tun.downs == 0);
+            r.pass(1000);
+            CHECK(r.tun.downs == 1 && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect"));
+            CHECK(journalHas(r.journal, "leg_build end leg="));
+        }
     }
     // android2 P5b (21.11): Wi-Fi off during connecting. The facade's observation carries the authoritative uplink
     // (NetworkKey.h withPhysicalUplink, AvpnEngineQml::currentNetworkObservation): the medium pick still said Wi-Fi

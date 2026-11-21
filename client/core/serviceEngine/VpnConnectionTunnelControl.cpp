@@ -204,6 +204,20 @@ bool VpnConnectionTunnelControl::invokeConnect(const QJsonObject &cfg, const QSt
     if (!m_conn)
         return false;
     ++m_statsSession; // a new tunnel session: statistics asked on the previous one are stale
+#if defined(Q_OS_ANDROID)
+    // android2 V2 (21.11): the engine leg of this start rides in the config to the VPN service, which names it in every
+    // build report of the start (TribeStart.kt) - a report of an earlier start is never taken for this leg. The key is
+    // unknown to every protocol backend (they read their own sections) and is set only on Android.
+    QJsonObject withLeg = cfg;
+    if (m_startLeg != 0)
+        withLeg.insert(QStringLiteral("tribeStartLeg"), qint64(m_startLeg));
+    m_startLeg = 0; // one start, one leg
+    return QMetaObject::invokeMethod(
+        m_conn, "connectToVpn", Qt::QueuedConnection,
+        Q_ARG(QString, serverId),
+        Q_ARG(DockerContainer, container),
+        Q_ARG(QJsonObject, withLeg));
+#endif
     // VpnConnection живёт в своём QThread → только через очередь. // AVPN
     // DockerContainer::Awg/Xray (containerEnum.h) и порядок аргументов connectToVpn
     // (serverId, container, vpnConfiguration) сверены с форком — корректно. // AVPN
@@ -595,6 +609,9 @@ bool VpnConnectionTunnelControl::rebindSocket()
 
 void VpnConnectionTunnelControl::beginNativeOp(quint64 leg)
 {
+#if defined(Q_OS_ANDROID)
+    m_startLeg = leg; // android2 V2: the start that follows carries it (invokeConnect)
+#endif
     if (!m_conn) {
         noteNativeLegSeen(leg);
         return;

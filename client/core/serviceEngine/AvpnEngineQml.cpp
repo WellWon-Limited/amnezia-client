@@ -1599,6 +1599,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 if (st == AndroidController::ConnectionState::CONNECTED && !thinkConnected) {
                     m_wantConnected = true;
                     syncIntent(); // I7
+                    m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild()); // android2 V2: its failover legs
                     m_engine.adoptTunnelConnected();
                     onConnectionStateChanged(Vpn::Connected);
                 } else if (st == AndroidController::ConnectionState::DISCONNECTED && thinkConnected) {
@@ -1629,12 +1630,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // and "built" when establish() returned and the backend runs (or the start ended without it); the owner's leg
     // clock stands in between and a build that never ends is a local outcome. A "built" carries the number of its
     // start: one of an older start (its stop was never confirmed) does not end the build of the leg in flight.
-    connect(AndroidController::instance(), &AndroidController::tunnelBuild, this, [this](int buildState, int seq) {
+    // android2 V2 (21.11): every report also names the engine leg of its start (the start config's tribeStartLeg,
+    // VpnConnectionTunnelControl), and a start the service ended without a tunnel says so (state 2) - the engine takes
+    // only the running leg's own reports, and its legs are local until their own "built" (setLocalBuildReported).
+    connect(AndroidController::instance(), &AndroidController::tunnelBuild, this, [this](int buildState, int seq, quint64 leg) {
         if (buildState == 0)
             m_tunnelBuildSeq = seq;
         else if (seq != m_tunnelBuildSeq)
             return;
-        m_engine.onLocalBuild(buildState == 0);
+        m_engine.onLocalBuild(buildState == 0   ? avpn::ServiceEngine::LocalBuildReport::Building
+                              : buildState == 1 ? avpn::ServiceEngine::LocalBuildReport::Built
+                                                : avpn::ServiceEngine::LocalBuildReport::NotStarted,
+                              leg);
         if (syncAttempt())
             QTimer::singleShot(0, this, [this]() { reconcile(); });
     }, Qt::QueuedConnection);
@@ -6835,6 +6842,9 @@ void AvpnEngineQml::guardedStart()
     // user's choice; the owner reads the ledger of that network.
     m_attemptOrigin = m_startOrigin;
     m_pathCheck.clear();
+#ifdef Q_OS_ANDROID
+    m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild()); // android2 V2 (read after initialize())
+#endif
     m_engine.observeNetwork(currentNetworkObservation());
     syncIntent();
     reliabilityEvent(QStringLiteral("attempt_start origin=%1 net=%2 net_gen=%3 choice=%4 mode=%5")

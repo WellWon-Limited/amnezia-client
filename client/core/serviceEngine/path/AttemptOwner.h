@@ -28,6 +28,13 @@
 // part. A build that does not finish within localBuildMs ends the leg with a LOCAL outcome (LocalBuildOverrun,
 // Inconclusive: nothing recorded against the path), and the next candidate is tried. The local time is not part of
 // the leg's connect time either. A platform that does not report builds (iOS, desktop) behaves exactly as before.
+// A platform that reports builds (setLocalBuildReported(true): Android with the service's build events) has the leg in
+// LOCAL time from the start command on: between "start sent" and the service's "building" the start may still wait in
+// the service, behind a previous build (android2 V2, 21.11: the service took a start 7.9 s after it was sent, the 4.5 s
+// clock had already written "no handshake" against a server whose tunnel build never began). So the start deadline
+// begins only at this leg's own "built"; until then the local bound applies (from the start), and a leg that never
+// reports "built" ends with a LOCAL outcome. Which leg a report belongs to is the platform layer's business (it
+// carries the leg number through the start and back: ServiceEngine::onLocalBuild) - the owner takes the stamp.
 //
 // Course of an attempt (stage 1, design §4 "no probe host": candidates one at a time with a short deadline):
 //   UserStart -> select (PathSelect.h, ledger of the current network) -> StartPath(leg, start timeout)
@@ -399,6 +406,10 @@ public:
     const AttemptTimings &timings() const { return m_t; }
     // New numbers (the server may tune them): they apply from the next deadline that is set.
     void setTimings(const AttemptTimings &t) { m_t = t; }
+    // The platform reports its builds (see "Local build" in the header): from the next leg on, a leg is local until
+    // its own "built". false (default: iOS, desktop): exactly as before.
+    void setLocalBuildReported(bool on) { m_localBuildReported = on; }
+    bool localBuildReported() const { return m_localBuildReported; }
 
     // A provider leg: the seat lease and the native start, each with its own share (review E6 of 18.11).
     int startTimeoutMs(PathKind k) const
@@ -839,6 +850,11 @@ private:
         m_leg.path = next;
         m_leg.startedAt = m_awake;
         m_leg.deadline = m_awake + startTimeoutMs(next.kind);
+        if (m_localBuildReported) {
+            // the device's time until this leg's own "built" (the start may wait in the service): the local bound runs
+            m_leg.buildSince = m_awake;
+            m_leg.deadline = m_awake + m_t.localBuildMs;
+        }
         m_phase = AttemptPhase::Starting;
         AttemptEffect start = effect(EffectType::StartPath, startTimeoutMs(next.kind));
         start.lead = li >= 0;
@@ -866,6 +882,7 @@ private:
     qint64 m_stopDeadline = 0;
     int m_progressTotal = 0;
     bool m_checkSuspended = false; // the running data check spanned a suspension
+    bool m_localBuildReported = false; // the platform reports its builds: a leg is local until its own "built"
     bool m_preferredTried = false; // a preferred path was brought up in this attempt
     QString m_lead;                // the path a proof named: the next choice takes it (see the header)
     QStringList m_proofs;          // the paths the race of THIS attempt proved on this network (see the header)

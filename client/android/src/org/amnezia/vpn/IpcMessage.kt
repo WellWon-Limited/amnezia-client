@@ -1,5 +1,6 @@
 package org.amnezia.vpn
 
+import org.amnezia.vpn.util.TribeStart
 import android.os.Bundle
 import android.os.Message
 import kotlin.enums.enumEntries
@@ -35,9 +36,10 @@ enum class ServiceEvent : IpcMessage {
     // change and after STATUS; Xray sessions only.
     SCAN_HOST_STATE,
     // AVPN (local build, emulator round 20.11): the service builds the tunnel interface of a start (MSG_TUNNEL_BUILD_STATE
-    // TUNNEL_BUILDING, from the start command) or has built it (TUNNEL_BUILT: establish() returned and the backend runs,
-    // or the start ended without it); MSG_TUNNEL_BUILD_SEQ numbers the starts. To every client; a client that registers
-    // during a build gets TUNNEL_BUILDING at once.
+    // TUNNEL_BUILDING, from the start command) or has built it (TUNNEL_BUILT: establish() returned and the backend runs),
+    // or the start ended without a tunnel (TUNNEL_NOT_STARTED, android2 V2); MSG_TUNNEL_BUILD_SEQ numbers the starts,
+    // MSG_TUNNEL_BUILD_LEG is the engine leg the start config named (TribeStart.legOf, 0 = none). To every client; a
+    // client that registers during a build gets TUNNEL_BUILDING at once.
     TUNNEL_BUILD
 }
 
@@ -71,8 +73,10 @@ const val MSG_SCAN_STATE = "SCAN_STATE"
 // AVPN (local build): Bundle keys and states of TUNNEL_BUILD (the states are QtAndroidController.onTunnelBuild's).
 const val MSG_TUNNEL_BUILD_STATE = "TUNNEL_BUILD_STATE"
 const val MSG_TUNNEL_BUILD_SEQ = "TUNNEL_BUILD_SEQ"
-const val TUNNEL_BUILDING = 0
-const val TUNNEL_BUILT = 1
+const val MSG_TUNNEL_BUILD_LEG = "TUNNEL_BUILD_LEG"
+const val TUNNEL_BUILDING = TribeStart.BUILDING
+const val TUNNEL_BUILT = TribeStart.BUILT
+const val TUNNEL_NOT_STARTED = TribeStart.NOT_STARTED
 
 fun <T> T.packToMessage(): Message
     where T : Enum<T>, T : IpcMessage = Message.obtain().also { it.what = ordinal }

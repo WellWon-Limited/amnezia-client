@@ -200,6 +200,9 @@ private:
 #endif
 
     VpnConnection *m_conn = nullptr;
+#if defined(Q_OS_ANDROID)
+    quint64 m_startLeg = 0; // android2 V2: the leg of the start being sent (beginNativeOp -> invokeConnect)
+#endif
     ClientKeys     m_keys;
     TunnelStats    m_stats;
     // AVPN (девайс-разбор 2026-09-02): текст причины, по которой ядро Xray не поднялось (iOS NE).

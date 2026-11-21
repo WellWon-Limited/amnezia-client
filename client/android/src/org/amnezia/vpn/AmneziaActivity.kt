@@ -157,7 +157,8 @@ class AmneziaActivity : QtActivity() {
                         // tunnel interface. Guarded like the permission prompt: without the native the clock just runs.
                         msg.data?.let { d ->
                             try {
-                                QtAndroidController.onTunnelBuild(d.getInt(MSG_TUNNEL_BUILD_STATE), d.getInt(MSG_TUNNEL_BUILD_SEQ))
+                                QtAndroidController.onTunnelBuild(d.getInt(MSG_TUNNEL_BUILD_STATE), d.getInt(MSG_TUNNEL_BUILD_SEQ),
+                                                                  d.getLong(MSG_TUNNEL_BUILD_LEG))
                             } catch (e: UnsatisfiedLinkError) {
                                 Log.w(TAG, "No native onTunnelBuild: $e")
                             }

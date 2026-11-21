@@ -58,6 +58,7 @@ import org.amnezia.vpn.protocol.xray.Xray
 import org.amnezia.vpn.util.LoadLibraryException
 import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.Prefs
+import org.amnezia.vpn.util.TribeStart
 import org.amnezia.vpn.util.net.NetworkState
 import org.amnezia.vpn.util.net.TrafficStats
 import org.json.JSONException
@@ -161,7 +162,7 @@ open class AmneziaVpnService : VpnService() {
                         Log.d(TAG, "Messenger client '$clientName' was registered")
                         // AVPN (local build): the first start comes with the service's start command, before the
                         // activity registered - it learns the build in progress now
-                        if (buildingSeq != 0) messenger.send { tunnelBuildMessage(TUNNEL_BUILDING, buildingSeq) }
+                        if (buildingSeq != 0) messenger.send { tunnelBuildMessage(TUNNEL_BUILDING, buildingSeq, buildingLeg) }
                         if (clientName == ACTIVITY_MESSENGER_NAME && isConnected) launchSendingStatistics()
                     }
 
@@ -594,43 +595,54 @@ open class AmneziaVpnService : VpnService() {
     // prefs, parse, builder, establish) until the protocol's start returned - the interface is established and the
     // backend runs - or the start ended without it ("built"). The engine stops the leg's start clock in between
     // (AttemptOwner.h "Local build"). Main thread only.
+    // android2 V2 (21.11): every report also names the engine leg of its start (TribeStart.legOf: the start config's
+    // tribeStartLeg; 0 for the saved config of a restart), so a report of an earlier start is never the running leg's;
+    // a start that ends without a tunnel is TUNNEL_NOT_STARTED, never "built".
     private var buildSeq = 0
     private var buildingSeq = 0 // the start being built now (0: none)
+    private var buildingLeg = 0L // its engine leg
 
-    private fun tunnelBuildMessage(state: Int, seq: Int) =
+    private fun tunnelBuildMessage(state: Int, seq: Int, leg: Long) =
         ServiceEvent.TUNNEL_BUILD.packToMessage {
             putInt(MSG_TUNNEL_BUILD_STATE, state)
             putInt(MSG_TUNNEL_BUILD_SEQ, seq)
+            putLong(MSG_TUNNEL_BUILD_LEG, leg)
         }
 
     @MainThread
-    private fun reportTunnelBuild(state: Int, seq: Int) {
-        if (state == TUNNEL_BUILDING) buildingSeq = seq
-        else if (buildingSeq == seq) buildingSeq = 0
-        clientMessengers.send { tunnelBuildMessage(state, seq) }
+    private fun reportTunnelBuild(state: Int, seq: Int, leg: Long) {
+        if (state == TUNNEL_BUILDING) {
+            buildingSeq = seq
+            buildingLeg = leg
+        } else if (buildingSeq == seq) {
+            buildingSeq = 0
+            buildingLeg = 0L
+        }
+        clientMessengers.send { tunnelBuildMessage(state, seq, leg) }
     }
 
     @MainThread
     private fun connect(vpnConfig: String? = null) {
         val seq = ++buildSeq
+        val leg = TribeStart.legOf(vpnConfig)
         val begin = SystemClock.elapsedRealtime()
-        reportTunnelBuild(TUNNEL_BUILDING, seq)
-        Log.i(TAG, "Tunnel build $seq: begin")
+        reportTunnelBuild(TUNNEL_BUILDING, seq, leg)
+        Log.i(TAG, "Tunnel build $seq: begin leg=$leg")
         val launched = if (vpnConfig == null) {
-            connectToVpn(Prefs.load(PREFS_CONFIG_KEY), seq, begin)
+            connectToVpn(Prefs.load(PREFS_CONFIG_KEY), seq, leg, begin)
         } else {
             Prefs.save(PREFS_CONFIG_KEY, vpnConfig)
-            connectToVpn(vpnConfig, seq, begin)
+            connectToVpn(vpnConfig, seq, leg, begin)
         }
         if (!launched) {
-            Log.i(TAG, "Tunnel build $seq: end, not started")
-            reportTunnelBuild(TUNNEL_BUILT, seq)
+            Log.i(TAG, "Tunnel build $seq: end, not started leg=$leg")
+            reportTunnelBuild(TribeStart.endState(started = false), seq, leg)
         }
     }
 
     // true: the start job was launched (it reports the end of the build itself)
     @MainThread
-    private fun connectToVpn(vpnConfig: String, seq: Int, begin: Long): Boolean {
+    private fun connectToVpn(vpnConfig: String, seq: Int, leg: Long, begin: Long): Boolean {
         if (isConnected || protocolState.value == CONNECTING) return false
 
         Log.d(TAG, "Start VPN connection")
@@ -681,9 +693,9 @@ open class AmneziaVpnService : VpnService() {
                 }
             } finally {
                 val end = SystemClock.elapsedRealtime()
-                Log.i(TAG, "Tunnel build $seq: end, started=$started prepare_ms=${prepared - begin} " +
+                Log.i(TAG, "Tunnel build $seq: end, started=$started leg=$leg prepare_ms=${prepared - begin} " +
                     "wait_stop_ms=${startAt - prepared} start_ms=${end - startAt} total_ms=${end - begin}")
-                mainScope.launch { reportTunnelBuild(TUNNEL_BUILT, seq) }
+                mainScope.launch { reportTunnelBuild(TribeStart.endState(started), seq, leg) }
             }
         }
         return true
