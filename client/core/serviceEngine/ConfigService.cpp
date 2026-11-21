@@ -504,10 +504,12 @@ void ConfigService::noteTunnelDown()
 {
     if (m_pinned)
         return;
-    // R5 (round 9): a negative fact learned before the tunnel came up is stale now - the direct route may have
-    // recovered meanwhile and an answer through the tunnel stopped the walk. Forget it and ask again (rate-bounded).
-    if (m_reach == ApiReach::Unreachable)
-        clearReach();
+    // R5 (round 9): a negative fact learned before the tunnel came up may be stale now - the direct route may have
+    // recovered meanwhile and an answer through the tunnel stopped the walk. It is RE-TESTED (the ask below is owed
+    // for a fact that is not a proven Reachable, askDirectOnce), not forgotten: on the same network it is still the
+    // best knowledge, and a direct answer flips it. Device round 13 (white-list LTE): forgetting it left about 5 s of
+    // "unknown" after every Stop and every failed leg; a start inside that window walked our own blocked servers
+    // (one connect of five did not come up in 45 s, the next took 11 s).
     m_silentEdges.clear();
     m_askedAny = false;
     QTimer::singleShot(0, this, [this]() { askDirectOnce(); }); // after the facade has recorded the tunnel as down
@@ -523,10 +525,11 @@ void ConfigService::askDirectOnce()
     if (m_pinned || !m_nam || tunnelUp() || !m_sessionEdge.isEmpty())
         return;
     const quint64 gen = generationNow();
-    // Two reasons to ask. The NETWORK's own ask: this generation has not been asked and its fact is not known. A PROOF
+    // Two reasons to ask. The NETWORK's own ask: this generation has not been asked and its fact is not proven. A PROOF
     // that is owed (setProofOwedSource): the ask is for the EVENT, so "already asked on this network" and "the fact is
     // known" do not end it. Everything below (the spacing, one request at a time) bounds either exactly the same way.
-    const bool networkOwed = !(m_askedAny && m_askedGen == gen) && directApiReach() == ApiReach::Unknown;
+    // (a fact that is not a proven Reachable: Unknown, or an Unreachable not re-tested since the tunnel went down)
+    const bool networkOwed = !(m_askedAny && m_askedGen == gen) && directApiReach() != ApiReach::Reachable;
     const bool proofOwed = m_proofOwedFn && m_proofOwedFn();
     if (!networkOwed && !proofOwed)
         return;
