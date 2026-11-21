@@ -8,6 +8,7 @@
 #include "../ReportDelivery.h"
 #include "../UplinkMonitor.h"
 #include "../UpstreamEngine.h" // upstreamNetworkKey (Scanner item 7)
+#include "../path/NetworkKey.h" // NetworkTracker: the generation the Scanner notice compares
 
 #include <QByteArray>
 #include <QJsonArray>
@@ -540,14 +541,47 @@ static void wave4UpstreamBehaviour()
     CHECK(networkChangeIsOwnTunnel(false, now - 2000, now));
     CHECK(!networkChangeIsOwnTunnel(false, now - 6000, now));
     CHECK(!networkChangeIsOwnTunnel(false, -1, now));
-    // Scanner notices (coordinator 18.11 (c) + device round air9 19.11 10:08): a new generation, or the Scanner's
-    // network key completing with the same generation; nothing new - no notice.
+    // Scanner notices (coordinator 18.11 (c), device round air9 19.11 10:08, device round 11 iPhone Air 20.11 13:05):
+    // another network = a new generation or a new cache identity (the physical network); the reporting key moving
+    // alone (the access ASN a row's seat grant names) is the same network refined; nothing new - no notice.
     {
-        const QString wifiBare = QStringLiteral("wifi|wifi|"), wifiFull = QStringLiteral("wifi|wifi:asn:64500|a1b2c3d4e5f60718");
-        CHECK(scanNetworkNoticeDue(3, 4, wifiBare, wifiBare));        // the engine's generation moved
-        CHECK(scanNetworkNoticeDue(4, 4, wifiBare, wifiFull));        // the key completed, the same generation (air9)
-        CHECK(!scanNetworkNoticeDue(4, 4, wifiFull, wifiFull));       // nothing moved: our own tunnel settling, a row tap
-        CHECK(scanNetworkNoticeDue(4, 4, QString(), wifiFull));       // the Scanner never got a notice
+        using N = ScanNetNotice;
+        const QString x = QStringLiteral("wifi|wifi:5f3a00c1b2d4|"), xGw = QStringLiteral("wifi|wifi:5f3a00c1b2d4|a1b2c3d4e5f60718");
+        const QString y = QStringLiteral("wifi|wifi:0d9e77a1c3f0|"), air = QStringLiteral("unknown|wifi:5f3a00c1b2d4|");
+        const QString bare = QStringLiteral("wifi"), asn = QStringLiteral("wifi:asn:64500");
+        CHECK(scanNetworkNotice(3, 4, x, x, bare, bare) == N::Changed);       // the engine's generation moved
+        CHECK(scanNetworkNotice(4, 4, x, xGw, bare, bare) == N::Changed);     // the identity completed, the same generation (air9)
+        CHECK(scanNetworkNotice(4, 4, x, x, bare, bare) == N::None);          // our own tunnel up / a path event: nothing physical
+        CHECK(scanNetworkNotice(4, 4, x, x, bare, asn) == N::Refined);        // the row connect's grant named the ASN: no new network
+        CHECK(scanNetworkNotice(4, 4, x, x, asn, bare) == N::Refined);        // ... and an older answer the other way: still none
+        CHECK(scanNetworkNotice(4, 4, QString(), x, QString(), bare) == N::Changed); // the Scanner never got a notice
+        CHECK(scanNetworkNotice(4, 5, x, y, asn, asn) == N::Changed);         // another Wi-Fi of the same operator
+        CHECK(scanNetworkNotice(5, 5, x, air, asn, QStringLiteral("unknown")) == N::Changed); // airplane mode
+        CHECK(scanNetworkNotice(5, 5, air, x, QStringLiteral("unknown"), asn) == N::Changed); // ... and back on X
+    }
+    // The generation those notices compare is the path engine's (path/NetworkKey.h NetworkTracker): physical facts
+    // only - the ASN learned later, the medium unknown while a VPN is up (iOS) - our own tunnel never bumps it.
+    {
+        using namespace avpn::path;
+        NetworkTracker t;
+        NetworkObservation x;
+        x.medium = NetMedium::Wifi;
+        x.subnet = QStringLiteral("192.168.1.0/24");
+        CHECK(t.observe(x));
+        const quint64 g = t.current().generation;
+        NetworkObservation xAsn = x;
+        xAsn.asn = 64500;
+        CHECK(!t.observe(xAsn) && t.current().generation == g);   // the ASN learned on the same network
+        CHECK(!t.observe(NetworkObservation()) && t.current().generation == g); // Unknown medium (our VPN up, airplane)
+        CHECK(!t.observe(x) && t.current().generation == g);
+        NetworkObservation y = x;
+        y.subnet = QStringLiteral("10.0.0.0/24");
+        CHECK(t.observe(y) && t.current().generation == g + 1);   // another Wi-Fi
+        NetworkObservation cell;
+        cell.medium = NetMedium::Cellular;
+        cell.radio = QStringLiteral("lte");
+        CHECK(t.observe(cell) && t.current().generation == g + 2); // Wi-Fi -> LTE
+        CHECK(t.observe(x) && t.current().generation == g + 3);    // LTE -> Wi-Fi X
     }
     // P2-4: координатор выхода на экран.
     CHECK(foregroundIsReturn(true, 0));                       // была заморозка/скрытие

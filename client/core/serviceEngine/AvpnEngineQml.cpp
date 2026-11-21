@@ -477,6 +477,9 @@ ScanNetFacts ScanEngineAdapter::network() const
     if (in.hasApp)
         f.appSources << in.app;
     f.gatewayHash = in.gatewayHash;
+    // The Scanner's cache identity: the physical network of the path engine (the path ledger's key, the source of the
+    // network generation) - never the reporting key, which gains the access ASN on the same network (scanNetIdentity).
+    f.localKey = m_e->m_engine.network().local;
     const QString &pathKind = in.pathKind;
     const QString &interfacesKind = in.interfacesKind;
     const ScanKindPick pick = scanNetworkKindPick(pathKind, interfacesKind, platformMedium);
@@ -7868,37 +7871,37 @@ void AvpnEngineQml::finishScannerSvc(bool ok, const QString &err)
 #endif
 
 // Coordinator 18.11 (c): the Scanner and the attempt owner see the same network - the generation of the path
-// engine's NetworkTracker (the physical medium, gateway and subnet; our own utun is not a network). The app's
-// network monitor fires on every up/down of our own tunnel; such a notice is compared once the tunnel settled and
-// reaches the Scanner only when the network generation or the network's key as the Scanner reads it moved
-// (scanNetworkNoticeDue; no «Сеть сменилась» on a row tap). Device round air9 (19.11, 10:08): the key completed with
-// the same generation and the cached result of that Wi-Fi never came back while only the generation was compared.
+// engine's NetworkTracker (the physical medium, gateway and subnet; our own utun is not a network). Every notice is
+// compared at once (scanNetworkNotice): the Scanner hears another network when the generation or its cache identity
+// moved (device round air9 19.11 10:08: the identity completed with the same generation), and a refined reporting key
+// as such (the list stays). Device round 11 (iPhone Air, LTE, 20.11 13:05): a row connect's seat grant named the access
+// ASN, the reporting key moved with the generation unchanged, and the old rule - the reporting key inside the cache
+// identity, compared once a 5 s window of our own operation had passed - dropped the 19 rows just found. Every input
+// here is physical, so our own tunnel coming up or going down is "unchanged" at any delay: no window.
 void AvpnEngineQml::scanNotifyNetwork()
 {
     if (!m_scanner || !m_scanSwitches.scanner)
         return;
-    if (networkChangeIsOwnTunnel(m_op != Op::None || m_engine.attemptRunning(), m_lastOwnOpMs,
-                                 QDateTime::currentMSecsSinceEpoch())) {
-        if (!m_scanNetCompareArmed) {
-            m_scanNetCompareArmed = true;
-            QTimer::singleShot(2000, this, [this]() {
-                m_scanNetCompareArmed = false;
-                scanNotifyNetwork();
-            });
-        }
-        return;
-    }
     const quint64 before = m_engine.network().generation;
     m_engine.observeNetwork(currentNetworkObservation());
     const ScanNetFacts f = m_scanAdapter->network();
-    const QString key = QLatin1String(scanNetKindName(f.kind)) + QLatin1Char('|') + f.reportingKey + QLatin1Char('|') + f.gatewayHash;
-    if (!scanNetworkNoticeDue(before, m_engine.network().generation, m_scanNetKeyTold, key)) {
+    const QString identity = QLatin1String(scanNetKindName(f.kind)) + QLatin1Char('|') + scanNetIdentity(f, f.reportingKey)
+                             + QLatin1Char('|') + f.gatewayHash;
+    const quint64 after = m_engine.network().generation;
+    switch (scanNetworkNotice(before, after, m_scanNetIdentityTold, identity, m_scanNetReportTold, f.reportingKey)) {
+    case ScanNetNotice::None:
         reliabilityEvent(QStringLiteral("scan_network_unchanged net_gen=%1").arg(before));
         return;
+    case ScanNetNotice::Refined:
+        reliabilityEvent(QStringLiteral("scan_network_key_refined net_gen=%1").arg(before)); // the list stays
+        break;
+    case ScanNetNotice::Changed:
+        if (after == before)
+            reliabilityEvent(QStringLiteral("scan_network_key_changed net_gen=%1").arg(before)); // the same generation, a new identity
+        break;
     }
-    if (m_engine.network().generation == before)
-        reliabilityEvent(QStringLiteral("scan_network_key_changed net_gen=%1").arg(before)); // the same generation, a new key
-    m_scanNetKeyTold = key;
+    m_scanNetIdentityTold = identity;
+    m_scanNetReportTold = f.reportingKey;
     m_scanner->networkChanged();
 }
 

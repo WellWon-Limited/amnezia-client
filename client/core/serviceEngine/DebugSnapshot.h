@@ -881,15 +881,23 @@ inline bool networkChangeIsOwnTunnel(bool ownOpInFlight, qint64 lastOwnOpMs, qin
     return ownOpInFlight || (lastOwnOpMs > 0 && nowMs - lastOwnOpMs < kApiTransitionWindowMs);
 }
 
-// AVPN Scanner (coordinator 18.11 (c), device round air9 19.11 10:08): a settled network notice reaches the Scanner
-// when the path engine's network generation moved (one rule with the attempt owner) OR the network's key as the
-// Scanner reads it moved (kind, reporting key, gateway hash: its cached results are stored under them). The key
-// can complete after the generation moved (the Wi-Fi key published, the gateway known) with no new generation;
-// gated on the generation alone the Scanner stayed on the incomplete key and the cached result never came back.
-// `keyTold` = the key of the last notice the Scanner got ("" = none yet).
-inline bool scanNetworkNoticeDue(quint64 genBefore, quint64 genAfter, const QString &keyTold, const QString &keyNow)
+// AVPN Scanner (coordinator 18.11 (c), device round air9 19.11 10:08, device round 11 iPhone Air 20.11 13:05): what a
+// network notice is to the Scanner, from two keys of the network as the Scanner reads it:
+//  - `identity` (kind | the physical network - TribeScanner.h::scanNetIdentity | gateway hash): what its cached
+//    results are keyed by. It moved, or the path engine's network generation moved: another network (Changed). The
+//    identity can complete after the generation moved (the gateway known) with no new generation (air9);
+//  - `report` (the reporting key): it moved alone - the same network with its key refined (the access ASN learned:
+//    a provider seat grant names it). Handed over (Refined) so what is reported carries it; the list stays.
+// No time enters: our own tunnel coming up or going down moves neither key nor the generation (all physical: the
+// app's path monitors prohibit virtual interfaces), so it is None at any delay - no window has to forgive it.
+// `...Told` = the keys of the last notice the Scanner got ("" = none yet).
+enum class ScanNetNotice { None, Changed, Refined };
+inline ScanNetNotice scanNetworkNotice(quint64 genBefore, quint64 genAfter, const QString &identityTold,
+                                       const QString &identityNow, const QString &reportTold, const QString &reportNow)
 {
-    return genAfter != genBefore || keyNow != keyTold;
+    if (genAfter != genBefore || identityNow != identityTold)
+        return ScanNetNotice::Changed;
+    return reportNow != reportTold ? ScanNetNotice::Refined : ScanNetNotice::None;
 }
 
 // P2-4: один координатор выхода на экран. Реагируем на возврат после реальной заморозки/скрытия

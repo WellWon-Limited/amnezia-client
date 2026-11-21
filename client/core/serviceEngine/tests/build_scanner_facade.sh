@@ -168,6 +168,7 @@ if [ "${1:-}" = "--mutate" ]; then
     "host-gen-moved-back@@TribeScanner.cpp@@    if (hostGenStale(g)) {@@    if (false) {"
     "left-epoch-forgotten@@TribeScanner.cpp@@        m_hostGenLeft << m_hostGen;\n@@"
     "held-start-stopped-kept-held@@TribeScanner.cpp@@        it->state = HostStart::Refused; // the held retry is never sent now\n@@"
+    "cache-identity-from-reporting-key@@TribeScanner.cpp@@scanNetIdentity(f, n.key), f.gatewayHash)@@n.key, f.gatewayHash)"
   )
   caught=0; missed=0; broken=0
   printf '%-38s %s\n' "mutation" "result"

@@ -1277,7 +1277,7 @@ static void caseFullScan()
     CHECK(!w.server.releasedLeases.isEmpty());
     CHECK(w.server.outcomeItems > 0);
     CHECK(w.store.m.contains(QLatin1String(kScanBudgetStoreKey)));
-    CHECK(w.store.m.contains(scanCacheStoreKey(QStringLiteral("wifi"), w.s->lastNetwork().fingerprint)));
+    CHECK(w.store.m.contains(scanCacheStoreKey(w.s->lastNetwork().fingerprint)));
     CHECK_EQ(w.engine.userConnects, 0);
     CHECK_EQ(w.engine.cancels, 0);
     CHECK(w.engine.rowCalls.isEmpty());
@@ -1607,8 +1607,8 @@ static void caseDrain()
 // Device round air9 (19.11, 10:08): back on Wi-Fi the Scanner adopted the network before its facts were complete;
 // the facts then changed with the SAME generation (the engine published its key, the gateway became known) and the
 // engine forwarded nothing, so the cached Germany result of that Wi-Fi never came back. The Scanner's own identity
-// (kind, reporting key, fingerprint, generation - ScanNetwork) is the one judge of a change: every notice reaches it
-// (AvpnEngineQml::scanNotifyNetwork: scanNetworkNoticeDue, facade_policy_check) and a key-only change with the same generation
+// (kind, fingerprint, generation - ScanNetwork::sameNetwork) is the one judge of a change: every notice reaches it
+// (AvpnEngineQml::scanNotifyNetwork: scanNetworkNotice, facade_policy_check) and an identity-only change with the same generation
 // adopts that network and its cached result; a notice with nothing new changes nothing.
 static void caseNetworkKeySameGeneration()
 {
@@ -1646,6 +1646,93 @@ static void caseNetworkKeySameGeneration()
     const QVariant before = w.s->view().value(QStringLiteral("list_build"));
     w.s->networkChanged();
     CHECK(w.s->view().value(QStringLiteral("list_build")) == before && w.host.count("scan_start") == starts);
+}
+
+// Device round 11 (iPhone Air, 20.11 13:04-13:05, RESULTS.md R1 / S3): 20 rows found, a row tapped and connected,
+// and 5 s later (`scan_network_key_changed net_gen=2`, the generation unchanged) the list was the connected row
+// alone. The row's provider seat grant had named the access ASN, so the reporting key went "unknown" ->
+// "cell:asn:<N>:4g" on the same physical network - and the Scanner's cache identity (fingerprint, store key, the
+// machine's "another network") was built from that key. The physical network the path engine names is the identity:
+// the key refined at any delay keeps the list and «Найти ещё» keeps it; a relaunch finds the result; another network
+// of the same operator (the same reporting key) is another list; airplane mode and back brings this network's result.
+static void caseRowConnectKeepsList()
+{
+    g_case = QStringLiteral("row_connect_keeps_list");
+    World w;
+    w.engine.net.reportingKey = QStringLiteral("wifi");            // the access ASN not known yet
+    w.engine.net.localKey = QStringLiteral("wifi:5f3a00c1b2d4");    // the path engine's physical network X
+    w.start();
+    w.s->open();
+    w.run(20000);
+    CHECK_EQ(w.phase(), QStringLiteral("done"));
+    const QStringList ids = [&w]() {
+        QStringList out;
+        for (const QVariant &r : w.rows())
+            out << r.toMap().value("id").toString();
+        out.sort();
+        return out;
+    }();
+    CHECK(ids.size() >= 10);
+    const ScanNetwork x = w.s->lastNetwork();
+    const auto sameRows = [&w, &ids](bool cached) {
+        QStringList now;
+        bool flagsOk = true;
+        for (const QVariant &r : w.rows()) {
+            now << r.toMap().value("id").toString();
+            flagsOk = flagsOk && r.toMap().value("flags").toStringList().contains(QStringLiteral("cache")) == cached;
+        }
+        now.sort();
+        return now == ids && flagsOk;
+    };
+    // the row connect: its seat grant names the access ASN - the same physical network, the same generation. The
+    // notice comes whenever the platform reports something (our own tunnel up, a path event): 1 s, 5 s, 30 s.
+    w.engine.net.reportingKey = QStringLiteral("wifi:asn:64500");
+    const int starts = w.host.count("scan_start");
+    for (const int delay : {1000, 5000, 30000}) {
+        w.run(delay);
+        w.s->networkChanged();
+        CHECK(sameRows(false));
+        CHECK_EQ(w.phase(), QStringLiteral("done"));
+        CHECK(w.s->lastNetwork().sameNetwork(x));
+    }
+    CHECK_EQ(w.s->lastNetwork().key, QStringLiteral("wifi:asn:64500")); // what is reported carries the refined key
+    CHECK_EQ(w.host.count("scan_start"), starts);                        // no rescan, no «Сеть сменилась»
+    // the page closed and opened again on the refined key: the same list
+    w.s->close();
+    w.s->show();
+    w.run(1000);
+    CHECK(sameRows(false));
+    // a relaunch on the same network with the refined key: the result found before the connect comes back as cache
+    w.s->close();
+    w.s.reset();
+    w.clock.t += 60000;
+    w.engine.net.appSources[0].epoch = 0xb2b2b2b2b2b2b2b2ULL; // a new process: a new monitor epoch
+    w.engine.net.appSources[0].counter = 0;
+    w.start();
+    w.s->show();
+    w.run(3000);
+    CHECK(sameRows(true));
+    // another Wi-Fi of the same operator (the same reporting key): another network, no list of X on it
+    w.engine.net.localKey = QStringLiteral("wifi:0d9e77a1c3f0");
+    w.engine.net.appSources[0].counter = 1;
+    w.s->networkChanged();
+    CHECK(w.rows().isEmpty());
+    // back on X: its cached result
+    w.engine.net.localKey = QStringLiteral("wifi:5f3a00c1b2d4");
+    w.engine.net.appSources[0].counter = 2;
+    w.s->networkChanged();
+    CHECK(sameRows(true));
+    // airplane mode (no physical path: the kind is unknown, the path engine keeps its last network) and back on X
+    w.engine.net.kind = ScanNetKind::Unknown;
+    w.engine.net.reportingKey = QStringLiteral("unknown");
+    w.engine.net.appSources[0].counter = 3;
+    w.s->networkChanged();
+    CHECK(w.rows().isEmpty());
+    w.engine.net.kind = ScanNetKind::Wifi;
+    w.engine.net.reportingKey = QStringLiteral("wifi:asn:64500");
+    w.engine.net.appSources[0].counter = 4;
+    w.s->networkChanged();
+    CHECK(sameRows(true));
 }
 
 static void caseNetworkChange()
@@ -4323,6 +4410,7 @@ int main(int argc, char **argv)
     caseDrain();
     caseNetworkChange();
     caseNetworkKeySameGeneration();
+    caseRowConnectKeepsList();
     caseCooldown();
     caseAbandonedManifest();
     caseAccessScope();

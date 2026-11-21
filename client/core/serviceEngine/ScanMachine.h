@@ -632,11 +632,13 @@ public:
         m_listRebuild = true; // the page opens: its list is built from empty (syncList)
         m_connectOnOpen = o.connectOnOpen;
         m_net.radio = o.network.radio; // display only, never part of the identity
-        if (o.network != m_net || m_rowsKey != o.network.key) {
+        if (!o.network.sameNetwork(m_net) || m_rowsKey != m_net.key) {
             if (scanPhaseScanning(m_phase))
                 applyNetworkChange(o.network, o.cached, now, s); // reopened on another network mid-scan
             else
                 adoptNetwork(o.network, o.cached, now);
+        } else {
+            refineKey(o.network.key);
         }
         setCurrent(o.current, now, s);
         if (o.withCheck)
@@ -675,11 +677,13 @@ public:
         m_listRebuild = true; // the page opens: its list is built from empty (syncList)
         m_connectOnOpen = o.connectOnOpen;
         m_net.radio = o.network.radio; // display only, never part of the identity
-        if (o.network != m_net || m_rowsKey != o.network.key) {
+        if (!o.network.sameNetwork(m_net) || m_rowsKey != m_net.key) {
             if (scanPhaseScanning(m_phase))
                 applyNetworkChange(o.network, o.cached, now, s); // reopened on another network mid-scan
             else
                 adoptNetwork(o.network, o.cached, now);
+        } else {
+            refineKey(o.network.key);
         }
         setCurrent(o.current, now, s);
         if (!scanPhaseScanning(m_phase) && m_rows.isEmpty())
@@ -773,7 +777,7 @@ public:
             finishStep(s, now);
             return s;
         }
-        const bool sameNet = m_completed && m_scanNet.key == m_net.key && m_scanNet.generation() == m_net.generation();
+        const bool sameNet = m_completed && m_scanNet.sameNetwork(m_net);
         m_continuation = true;
         m_moreKeepRows = sameNet;
         m_moreCountry = country.trimmed().isEmpty() ? m_scannedScope : scanScopeOf(country); // the scope it continues
@@ -823,8 +827,10 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (n != m_net)
+        if (!n.sameNetwork(m_net))
             applyNetworkChange(n, cached, now, s);
+        else
+            refineKey(n.key);
         m_net.radio = n.radio;
         finishStep(s, now);
         return s;
@@ -840,7 +846,18 @@ public:
     }
 
 private:
-    // Another strict tuple, kind or key: before anything was measured the scan just targets it; a running
+    // The same network with its reporting key refined (the access ASN learned later: a provider seat grant names it -
+    // device round 11, iPhone Air 20.11 13:05, a row connect turned "unknown" into "cell:asn:<N>:4g" and the list of 20
+    // rows shrank to the connected one). Not a network change: the list, its result and its slots stay; what is
+    // reported from now on carries the new key. A scan already running reports under the key it started with.
+    void refineKey(const QString &key)
+    {
+        if (m_rowsKey == m_net.key)
+            m_rowsKey = key; // the rows on the screen are this network's
+        m_net.key = key;
+    }
+
+    // Another strict tuple, kind or fingerprint: before anything was measured the scan just targets it; a running
     // scan (the person's own «Сканировать») is cancelled and restarted there; shown results become cache rows of
     // their fingerprint. A finished result never rescans by itself (owner 19.11: no scan starts unless the person
     // presses «Сканировать»): the screen shows this network's cached result with its age (and its scope), or the
@@ -2087,7 +2104,7 @@ private:
     {
         m_net = n;
         m_listRebuild = true; // the list belongs to its network (syncList)
-        const bool cachedGiven = cached.present() && cached.networkKey == n.key;
+        const bool cachedGiven = cached.present() && cached.fingerprint == n.fingerprint;
         // Fresh rows of the old generation are no longer current evidence: they stay only as cache rows of
         // their own fingerprint (shown with their age if it matches); unproven live rows go.
         for (int i = m_rows.size() - 1; i >= 0; --i) {
@@ -2110,7 +2127,7 @@ private:
             }
         }
         for (int i = m_slots.size() - 1; i >= 0; --i)
-            if (m_slots.at(i).networkKey != n.key)
+            if (m_slots.at(i).fingerprint != n.fingerprint)
                 m_slots.removeAt(i);
         m_unverified.clear();
         m_tapFailed.clear();
@@ -2144,7 +2161,7 @@ private:
     void loadCached(const ScanCachedResult &cached, qint64 now)
     {
         Q_UNUSED(now);
-        if (!cached.present() || cached.networkKey != m_net.key)
+        if (!cached.present() || cached.fingerprint != m_net.fingerprint)
             return;
         // One slot per scope this network was scanned in (the persisted result and its other scopes): a cached result
         // is shown only for the scope it covered. The newest is what the page opens on.
@@ -2153,7 +2170,7 @@ private:
         latest.otherScopes.clear();
         m_slots << latest;
         for (const ScanCachedResult &o : cached.otherScopes)
-            if (o.present() && o.networkKey == m_net.key)
+            if (o.present() && o.fingerprint == m_net.fingerprint)
                 m_slots << o;
         m_cachedFailures = latest;
         m_cachedScope = scanScopeOf(cached.scope);
@@ -2222,7 +2239,7 @@ private:
         QList<ScanCachedResult> kept;
         kept << own;
         for (const ScanCachedResult &o : m_slots)
-            if (scanScopeOf(o.scope) != scanScopeOf(own.scope) && o.networkKey == own.networkKey && !o.rows.isEmpty()
+            if (scanScopeOf(o.scope) != scanScopeOf(own.scope) && o.fingerprint == own.fingerprint && !o.rows.isEmpty()
                 && now - o.savedAtMs <= kScanCacheShowMaxMs && kept.size() < kScanCacheScopeSlots)
                 kept << o;
         c.otherScopes.clear();

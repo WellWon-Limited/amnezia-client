@@ -60,14 +60,24 @@ has "$(body "$FACADE" 'void AvpnEngineQml::reconcile()')" 'if (m_engine.attemptR
 [ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "1" ] || bad "§33: the facade calls reenterVerifying outside the hand-over's op"
 
 # Coordinator 18.11 (c): the Scanner hears a network change when the path engine's network generation moved (one
-# rule with the attempt owner) or the network's key as the Scanner reads it moved (device round air9 19.11 10:08: the
-# key completed with the same generation, the cached result never came back) - scanNetworkNoticeDue, tested in
-# facade_policy_check; our own tunnel going up or down is compared once it settled.
+# rule with the attempt owner) or its cache identity moved (device round air9 19.11 10:08: it completed with the same
+# generation) - scanNetworkNotice, tested in facade_policy_check. The identity is the physical network
+# (scanNetIdentity: the path engine's local key), never the reporting key, and no time window decides (device round
+# 11, iPhone Air 20.11 13:05: a row connect's seat grant refined the reporting key 5 s after the connect, outside the
+# window, and the 19 rows just found were dropped).
 scan_net="$(code "$FACADE" | awk '/^void AvpnEngineQml::scanNotifyNetwork\(\)/{f=1} f{print} f&&/^}/{exit}')"
-has "$scan_net" 'networkChangeIsOwnTunnel(' && has "$scan_net" 'm_engine.observeNetwork(currentNetworkObservation());' \
-    && has "$scan_net" 'if (!scanNetworkNoticeDue(before, m_engine.network().generation, m_scanNetKeyTold, key))' \
-    && has "$scan_net" 'const ScanNetFacts f = m_scanAdapter->network();' && has "$scan_net" 'm_scanNetKeyTold = key;' \
-    || bad "(c): scanNotifyNetwork must filter our own tunnel and notify on a new generation or a new Scanner key"
+has "$scan_net" 'm_engine.observeNetwork(currentNetworkObservation());' \
+    && has "$scan_net" 'const ScanNetFacts f = m_scanAdapter->network();' \
+    && has "$scan_net" 'scanNetIdentity(f, f.reportingKey)' \
+    && has "$scan_net" 'switch (scanNetworkNotice(before, after, m_scanNetIdentityTold, identity, m_scanNetReportTold, f.reportingKey)) {' \
+    && has "$scan_net" 'm_scanNetIdentityTold = identity;' && has "$scan_net" 'm_scanNetReportTold = f.reportingKey;' \
+    || bad "(c): scanNotifyNetwork must notify on a new generation or a new physical identity, a refined key as such"
+if has "$scan_net" 'networkChangeIsOwnTunnel(' || has "$scan_net" 'QTimer::singleShot('; then
+    bad "(c): scanNotifyNetwork must not judge by a time window of our own operation (device round 11, 20.11 13:05)"
+fi
+adapter="$(code "$FACADE" | awk '/^ScanNetFacts ScanEngineAdapter::network\(\) const/{f=1} f{print} f&&/^}/{exit}')"
+has "$adapter" 'f.localKey = m_e->m_engine.network().local;' \
+    || bad "(c): the Scanner's network facts must carry the path engine's physical network (its cache identity)"
 # Review E1/E2 of 18.11: the facade drops obsolete native events first and settles its operation in one place.
 for slot in 'void AvpnEngineQml::onConnectionStateChanged(' 'void AvpnEngineQml::onVpnProtocolError('; do
     first="$(code "$FACADE" | awk -v s="$slot" 'index($0,s)==1{f=1;n=0} f{n++; if(n>1 && $0 !~ /^[{[:space:]]*$/){print; exit}}')"

@@ -270,10 +270,12 @@ struct ScanHostCaps {
 //    when ANY component of ANY source changes (a new epoch = a monitor restart, a higher counter, a source that
 //    appears or vanishes) - never a max() of counters. CURRENT evidence (fresh rows, access facts, the
 //    live-tunnel proof, the exclusion bracket) is stamped with generation() and dies on any other value.
-//  - `fingerprint`: the WEAK local fingerprint (scanNetFingerprint: interface kind + operator key + a gateway /
-//    subnet hash where available; an opaque string here). It keys CACHED rows only - always drawn as cache
-//    with their age, never counted as verified - which may survive a relaunch within scan_cache_works_ttl_s.
-//    "" = none (no cached row ever matches).
+//  - `fingerprint`: the WEAK local fingerprint (scanNetFingerprint: interface kind + the physical network the path
+//    engine names - TribeScanner.h::scanNetIdentity - + a gateway / subnet hash where available; an opaque string
+//    here). It keys CACHED rows - always drawn as cache with their age, never counted as verified - which may
+//    survive a relaunch within scan_cache_works_ttl_s. "" = none (no cached row ever matches).
+// The network's identity is kind + fingerprint + generation (sameNetwork). `key` is NOT part of it: it is refined on
+// the same network (the access ASN learned later) and is then only taken over for what is reported.
 // None of them leaves the device except `key`.
 struct ScanNetwork {
     ScanNetKind kind = ScanNetKind::Unknown;
@@ -284,10 +286,13 @@ struct ScanNetwork {
                                   // shown only (view.net_radio), never part of the network's identity
 
     QString generation() const { return scanNetGeneration(sources); }
-    bool operator==(const ScanNetwork &o) const
+    // The same network: what a list, a cached result and current evidence belong to.
+    bool sameNetwork(const ScanNetwork &o) const
     {
-        return kind == o.kind && key == o.key && fingerprint == o.fingerprint && generation() == o.generation();
+        return kind == o.kind && fingerprint == o.fingerprint && generation() == o.generation();
     }
+    // Anything new at all (the reporting key included): a notice worth handing to the machine.
+    bool operator==(const ScanNetwork &o) const { return sameNetwork(o) && key == o.key; }
     bool operator!=(const ScanNetwork &o) const { return !(*this == o); }
 };
 
@@ -973,19 +978,19 @@ inline void scanDropLegacyLabels(ScanCachedResult &c, const QJsonObject &stored)
 }
 
 // The server list's figure of a node from the Scanner (owner 17.11: provider rows have no ICMP target). Source:
-// the persisted result of the network the device is on now - the same network key AND weak fingerprint - and
+// the persisted result of the network the device is on now - the same weak fingerprint (the network's identity;
+// the reporting key may have been refined since, ScanNetwork::sameNetwork) - and
 // only while the Scanner itself would show that result when no scan can run (ScanMachine::cachedVisible outside
 // a scan: at most worksTtlS (scan_cache_works_ttl_s) old; a clock up to 60 s behind tolerated, as rowShownAt).
 // Only working rows (works / slow) are ever persisted, so a failed or «Не проверено» node gets nothing; a row
 // without a figure (ms -1) is left out. The figure is the row's ms: rtt_ms of the data probe through that node
 // (first byte of a second request on the same connection - one full-path round trip), ttfb1 when rtt is
 // missing (ScanClass.h). Engine node id -> ms. Pure.
-inline QHash<QString, int> scanListFigures(const ScanCachedResult &c, const QString &networkKey,
-                                           const QString &fingerprint, qint64 nowMs, int worksTtlS)
+inline QHash<QString, int> scanListFigures(const ScanCachedResult &c, const QString &fingerprint, qint64 nowMs,
+                                           int worksTtlS)
 {
     QHash<QString, int> out;
-    if (!c.present() || networkKey.isEmpty() || fingerprint.isEmpty() || c.networkKey != networkKey
-        || c.fingerprint != fingerprint)
+    if (!c.present() || fingerprint.isEmpty() || c.fingerprint != fingerprint)
         return out;
     const qint64 age = nowMs - c.savedAtMs;
     if (age < -60000 || age > qint64(worksTtlS) * 1000)
