@@ -706,9 +706,11 @@ private slots:
         QTest::qWait(400);                                        // B's quick timeout has fired; A's next try has not ended
         QVERIFY(service.directApiReach() != avpn::ApiReach::Unreachable); // B alone does not cover {A, B} any more
     }
-    // Round 9, R5a: a negative fact learned before a tunnel of ours was up is stale when it goes down: Unknown at once
-    // and the direct route is asked again (the walk had stopped on an answer through the tunnel).
-    void negativeFactBeforeTunnelIsForgottenWhenItGoesDown()
+    // Round 9, R5 + device round 13 (white-list LTE): a negative fact learned before the tunnel came up is RE-TESTED
+    // when the tunnel goes down (the direct route may have recovered meanwhile) - but it is not forgotten: on the same
+    // network it is still the best knowledge. Forgetting it left about 5 s of "unknown" after every Stop and every
+    // failed leg, in which a start walked our own blocked servers (45 s without a connect). A direct answer flips it.
+    void negativeFactBeforeTunnelIsKeptAndRetestedWhenItGoesDown()
     {
         ConfigServer edge([](int n) { return n < 2 ? QByteArray() : httpAnswer("200 OK", R"({"features":{}})"); });
         LoopbackOnlyNam network;
@@ -722,8 +724,31 @@ private slots:
         tunnel = true;  // a tunnel of ours came up (the walk stopped on an answer through it)
         tunnel = false; // Stop; the direct route has recovered meanwhile (the fixture answers from now on)
         service.noteTunnelDown();
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unreachable); // kept until the re-test answers
         QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000);
         QCOMPARE(edge.configRequests, 2);
+    }
+    // The mirror: the route is still dead after the tunnel went down (operator white-list mode). The fact never passes
+    // through "unknown": every consumer keeps choosing for a network without the direct control plane.
+    void negativeFactSurvivesTunnelDownWhileTheRouteIsStillDead()
+    {
+        ConfigServer edge([](int) { return QByteArray(); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, edge.base(), "fixture-key", {edge.base()});
+        bool tunnel = false;
+        service.setTunnelUpSource([&tunnel] { return tunnel; });
+        service.setNetworkGenerationSource([] { return quint64(1); });
+        service.setEdgeWalkTimingForTest(100, 5000, 5000);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Unreachable, 2000);
+        QSignalSpy changed(&service, &avpn::ConfigService::directApiReachChanged);
+        tunnel = true;
+        tunnel = false;
+        service.noteTunnelDown();
+        QTRY_COMPARE_WITH_TIMEOUT(edge.configRequests, 2, 2000); // the re-test was sent
+        QTest::qWait(400);                                        // ... and stayed silent past the quick try
+        QCOMPARE(service.directApiReach(), avpn::ApiReach::Unreachable);
+        QCOMPARE(changed.count(), 0); // never "unknown" in between
     }
     // Round 9, R5a: while no tunnel is up the walk's own rounds keep re-testing an Unreachable fact: the pause ends by
     // itself and a direct answer flips it back, with no other trigger.

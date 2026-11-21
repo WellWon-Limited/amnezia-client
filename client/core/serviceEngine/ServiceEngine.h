@@ -291,8 +291,9 @@ public:
     // R1 (device round 4): the ledger outcome of a provider start failure code (Inconclusive = not the path's).
     static path::PathOutcome startFailureOutcome(const QString &code);
     bool raceRunning() const { return m_race.running(); }
-    // T1 (device round 6): the running data check has had no first byte past its first-byte share. With a proven
-    // alternative from the race, the leg is left at once (nothing recorded) and the owner brings the proven path up;
+    // T1 (device round 6): the running data check has had no first byte past its first-byte share. With a path the
+    // race of THIS attempt proved, the leg is left at once (nothing recorded) and the owner brings the proven path up;
+    // with none (the race was skipped or proved nothing) the leg keeps its whole check and writes its own outcome;
     // a leg that is receiving bytes is never abandoned. The facade tells it (its check knows the bytes): own and
     // provider legs alike, through one first-byte watch (NetAwait.h::watchFirstByte) - false once bytes arrive.
     void noteCheckStarved(bool starved);

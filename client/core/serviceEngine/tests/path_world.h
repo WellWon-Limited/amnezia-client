@@ -186,7 +186,8 @@ public:
     int lostSeatAnswers = 0;    // provider probe seats left to the server's TTL
     int yields = 0;             // legs that gave way to a proven path (ProofReady)
     // The facade's starving data check (WhoamiVerdict.h kWhoamiFirstByteShareMs): no first byte this long after the
-    // check started -> ProofReady(starved) with the race's first proof as the lead. -1 = not modelled.
+    // check started -> ProofReady(starved), no path named (the engine's rule: ServiceEngine::noteCheckStarved - the
+    // owner knows the proofs of its attempt itself). -1 = not modelled.
     int starveShareMs = -1;
     // The rule in front of the owner, for comparisons with the device rounds of 19.11 (test only; production = Proposed):
     //  Old     (build 086b20e0a): the first choice starts blind at once, only a starving check yields, no lead;
@@ -378,7 +379,10 @@ private:
                             || owner.phase() != AttemptPhase::Checking)
                             return;
                         m_checkStarved = true;
-                        deliver(AttemptEvent::proofReady(now, true, rule == Rule::Proposed ? race.winner() : QString()));
+                        if (rule == Rule::Proposed)
+                            deliver(AttemptEvent::proofReady(now, true));
+                        else
+                            yieldStarvedAsBefore();
                     });
                 }
                 rechecks += e.recheck ? 1 : 0;
@@ -436,6 +440,28 @@ private:
     TransportMode m_raceMode = TransportMode::Auto;
     bool m_checkStarved = false; // the running check passed its first-byte share (the facade's m_checkStarved)
 
+    // Rule::Old / Rule::Current only - the starve yield of those builds: a starving check gave way as soon as ANY
+    // untried path was "working" in the ledger, and the choice after the stop took the head of the order (no lead).
+    // The owner no longer has that rule (AttemptOwner.h: only a proof of its own attempt ends a leg that is up), so
+    // the emulation of the earlier builds ends the leg itself, nothing recorded.
+    void yieldStarvedAsBefore()
+    {
+        if (owner.phase() != AttemptPhase::Checking)
+            return;
+        QSet<QString> tried;
+        for (const LegTrace &l : legs)
+            if (l.stamp.attempt == owner.attempt())
+                tried.insert(l.path);
+        for (const PathCandidate &c : m_pool) {
+            if (tried.contains(c.id.id) || ledger.view(tracker.current().local, c.id, wall()).state != PathState::Working)
+                continue;
+            ++yields;
+            raceLog << QStringLiteral("yield:%1").arg(owner.currentPath().id.id);
+            deliver(AttemptEvent::pathFailed(now, owner.currentLeg(), PathOutcome::Inconclusive));
+            return;
+        }
+    }
+
     void startOwnerAfterRace(const char *why, const QString &lead = {})
     {
         if (!raceFirst)
@@ -492,8 +518,11 @@ private:
                     deliver(AttemptEvent::pathFailed(now, owner.currentLeg(), PathOutcome::Inconclusive));
                 } else if (owner.running() && (rule != Rule::Old || m_checkStarved)) {
                     // a proof while a leg is in flight (the engine's rule; build 086b20e0a: only to a starving check)
-                    deliver(AttemptEvent::proofReady(now, m_checkStarved,
-                                                     rule == Rule::Proposed ? e.path.id.id : QString()));
+                    if (rule != Rule::Proposed && m_checkStarved)
+                        yieldStarvedAsBefore();
+                    else
+                        deliver(AttemptEvent::proofReady(now, m_checkStarved,
+                                                         rule == Rule::Proposed ? e.path.id.id : QString()));
                 }
                 break;
             case RaceEffectType::Winner:

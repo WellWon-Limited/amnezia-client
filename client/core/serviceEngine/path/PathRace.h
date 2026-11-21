@@ -285,8 +285,6 @@ public:
     // The engine confirms a Winner the ledger accepted (it is "working" there); a refused one leaves the race open.
     void acceptWinner(const QString &pathId) { m_winner = pathId; }
     bool hasWinner() const { return !m_winner.isEmpty(); }
-    // The first proof of this race the ledger accepted (empty: none yet) - the lead of a leg that yields later.
-    const QString &winner() const { return m_winner; }
 
     QList<RaceEffect> tick(qint64 now)
     {

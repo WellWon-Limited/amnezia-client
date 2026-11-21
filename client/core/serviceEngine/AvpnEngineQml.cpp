@@ -8558,7 +8558,7 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok, const QString &failReason)
         const qint64 rxDelta = (st.valid && m_verifyRxStart >= 0) ? st.rxBytes - m_verifyRxStart : -1;
         const avpn::CheckBlame blame = avpn::checkFailureBlame(
             uplinkUp(), QDateTime::currentMSecsSinceEpoch() - m_verifyWallStartMs, m_engine.dataCheckMs(),
-            st.valid && m_verifyRxStart >= 0, rxDelta);
+            st.valid && m_verifyRxStart >= 0, rxDelta, m_engine.network().generation == m_verifyNetGen);
         if (blame != avpn::CheckBlame::Path) {
             reliabilityEvent(QStringLiteral("check_not_attributable blame=%1 node=%2 rx_delta=%3 reason=%4")
                                  .arg(QLatin1String(avpn::checkBlameName(blame)), m_engine.currentNodeId())
@@ -8588,6 +8588,7 @@ void AvpnEngineQml::startDataPathVerification()
     m_upstreamFallbackVerify = false;
     // R1: what the attribution gate of a failure needs - the wall clock and the tunnel's receive counter at the start
     m_verifyWallStartMs = QDateTime::currentMSecsSinceEpoch();
+    m_verifyNetGen = m_engine.network().generation; // a check judges the network it began on (checkFailureBlame)
     {
         const avpn::TunnelStats st = m_tunnel.readStats();
         m_verifyRxStart = st.valid ? st.rxBytes : -1;

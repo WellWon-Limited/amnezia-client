@@ -487,8 +487,11 @@ inline int trafficSyncTicks(int configuredTicks, bool uiActive)
 // reaches the ledger (AvpnEngineQml::finishVerify). Not the path's ("the check did not happen", nothing recorded):
 // the device had no network; the check was stretched by a suspension (wall time far past its budget - a request
 // that hung 13.8 s after the app sat in the background); the tunnel itself carried data while the check ran (its
-// receive counter grew) but our endpoints did not answer - a control-plane problem, not a dead path.
-enum class CheckBlame { Path, NoNetwork, Suspended, ControlPlane };
+// receive counter grew) but our endpoints did not answer - a control-plane problem, not a dead path; the network
+// changed while the check ran (review of the live-loss report, R25: a re-check of a live session begun on Wi-Fi that
+// ended on the mobile network a moment later was written as the mobile network's "no data") - a check judges the
+// network it ran on, and a check that spans two describes neither.
+enum class CheckBlame { Path, NoNetwork, Suspended, ControlPlane, NetworkChanged };
 inline const char *checkBlameName(CheckBlame b)
 {
     switch (b) {
@@ -496,16 +499,19 @@ inline const char *checkBlameName(CheckBlame b)
     case CheckBlame::NoNetwork: return "no_network";
     case CheckBlame::Suspended: return "suspended";
     case CheckBlame::ControlPlane: return "control_plane";
+    case CheckBlame::NetworkChanged: return "network_changed";
     }
     return "";
 }
 inline constexpr qint64 kCheckStretchGraceMs = 3000;
 inline constexpr qint64 kCheckTunnelRxProofBytes = 4096;
 inline CheckBlame checkFailureBlame(bool uplinkUp, qint64 wallElapsedMs, qint64 budgetMs, bool statsValid,
-                                    qint64 rxDeltaBytes)
+                                    qint64 rxDeltaBytes, bool sameNetwork)
 {
     if (!uplinkUp)
         return CheckBlame::NoNetwork;
+    if (!sameNetwork)
+        return CheckBlame::NetworkChanged;
     if (wallElapsedMs > budgetMs + kCheckStretchGraceMs)
         return CheckBlame::Suspended;
     if (statsValid && rxDeltaBytes >= kCheckTunnelRxProofBytes)

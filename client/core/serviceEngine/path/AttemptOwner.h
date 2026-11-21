@@ -46,7 +46,8 @@
 // carried data; Failed(nothing proven / exact node failed / stopped by user / no candidate / no network).
 // After Connected the owner keeps the leg as the live session: a later UserStart or UserStop stops it first
 // (the owner is the only one that raised it). Keeping a live session healthy is NOT this class (design stage 3);
-// a network change after Connected only updates the owner's network key.
+// a network change after Connected only updates the owner's network key - the session lives on, so what its loss
+// proves (LiveLost) is recorded for the network it is on when it is lost (key and generation of that one network).
 //
 // STAGE 2 (probe race) without changing this contract: the race is a separate component in front of the
 // owner. It writes its results into the ledger as outcomes (probe ok / no handshake ...). The owner reads the
@@ -61,12 +62,21 @@
 // the ~1 s stop, when two AmneziaWG probe proofs had landed and outranked it by probe time). The lead is taken only
 // when the ordinary choice could take it: it is in the order (mode, tried) as a working path of this network and
 // no preferred path is ahead of it; otherwise the order decides as always. It is consumed by the next choice.
-// A proof while a leg is in flight (ProofReady): the leg yields to the proven path (the proof's own, else the first
-// working path of the order; nothing is recorded for the leg) only when it has shown nothing of its own:
-//  - it is up and its one data check got no first byte within its share (`starved`), or
-//  - it is not up yet and was raised without evidence. With a probe host that happens only after the race had its
-//    wait (PathRace.h hedgeAfterMs) and proved nothing - the blind path's own probe included - or after the race
-//    ended: a bet against a network that already proved hostile, and a proof is better evidence than that bet.
+// A proof while a leg is in flight (ProofReady): the leg yields to the proven path (nothing is recorded for the leg)
+// only when it has shown nothing of its own:
+//  - it is up and its one data check got no first byte within its share (`starved`): it yields to a path the race of
+//    THIS attempt proved on this network - the proof's own, else the first of the attempt's proofs the choice can
+//    take (see "Lead"). The owner keeps those proofs itself (the lead of UserStart, the leads of ProofReady) and
+//    forgets them with the attempt and with the network, so a winner of an earlier tap's race is never one of them.
+//    With no such proof the leg keeps its whole data check and writes its own outcome: what the ledger remembers
+//    about other paths ("works here") is history, not a proof that waits, and never ends a leg that is up (device
+//    round 12 of 21.11, iPhone Air, Wi-Fi: the race was skipped for a known path, every tap left it and the next
+//    working path 1 s into their checks for whatever the ledger ranked next, recorded nothing and repeated it:
+//    4.8-6.9 s per connect, four taps in a row);
+//  - it is not up yet and was raised without evidence: it yields to the proof's own path, else to the first working
+//    path of the order. With a probe host that happens only after the race had its wait (PathRace.h hedgeAfterMs)
+//    and proved nothing - the blind path's own probe included - or after the race ended: a bet against a network
+//    that already proved hostile, and a proof is better evidence than that bet.
 // A lead, a known path and a leg up and receiving bytes are never ended by a proof. Device round of 19.11 (iPhone
 // Air, Auto, empty ledger): the blind leg raised AT ONCE beside the race yielded to the first proof ~1 s in and
 // dropped a working Serbia 1 AmneziaWG leg on Wi-Fi (5.56 s to data, 3.7-3.9 s before); with the race first that leg
@@ -80,6 +90,7 @@
 
 #include <QList>
 #include <QSet>
+#include <QStringList>
 
 #include <algorithm>
 #include <optional>
@@ -184,7 +195,7 @@ enum class EventType {
     // with `choice` / `mode` / `network`, already up - one in-tunnel data check decides like for any leg.
     Adopted,
     // The race proved a path of this network (`lead`: that path), or the running data check starves (`starved`: no
-    // first byte within its share). A starving leg yields (see the header).
+    // first byte within its share, no `lead`). A starving leg yields to a proof of this attempt (see the header).
     ProofReady,
     // The person refused the system's VPN permission dialog while this leg was starting (stamp = the leg). The
     // tunnel never started: the attempt ends PermissionDenied at once - nothing recorded, no other leg. (While the
@@ -522,8 +533,13 @@ private:
         if (!isAttributable(o))
             return;
         AttemptEffect e = effect(EffectType::Report);
+        // One network per report: the key and the generation are both the owner's current network's - the one the
+        // outcome was observed on. A leg in flight never outlives its network (a change stops it, unrecorded), so for
+        // it this is the leg's own network; a live session does (it stays up across a change), and its loss is
+        // evidence about the network it was lost on. Device round 12: the new network's key went out with the old
+        // leg's generation, the write was dropped as not current and the server stayed "working" there.
         e.report.network = m_net.local;
-        e.report.networkGeneration = m_leg.stamp.network;
+        e.report.networkGeneration = m_net.generation;
         e.report.path = m_leg.path.id;
         e.report.outcome = o;
         e.report.connectMs = connectMs;
@@ -610,6 +626,7 @@ private:
     {
         beginAttempt(ev, out);
         m_lead = ev.lead;
+        noteProof(ev.lead);
         if (legActive() || m_phase == AttemptPhase::Connected)
             stopLeg(out); // what the previous attempt raised goes down first
         else if (m_phase != AttemptPhase::Stopping)
@@ -635,6 +652,7 @@ private:
             return; // an older observation
         m_net = net;
         m_lead.clear(); // a proof of the old network says nothing about this one
+        m_proofs.clear();
         if (!m_running)
             return;
         restartOnNetwork();
@@ -661,6 +679,7 @@ private:
         m_pathsTotal = 0;
         m_preferredTried = false;
         m_lead.clear();
+        m_proofs.clear(); // the proofs of an earlier attempt's race are not this attempt's
         m_attemptStart = m_awake;
         restartOnNetwork();
     }
@@ -720,9 +739,19 @@ private:
         return -1;
     }
 
+    // A path the race of this attempt proved on this network (kept in the order the proofs were named).
+    void noteProof(const QString &pathId)
+    {
+        if (!pathId.isEmpty() && !m_proofs.contains(pathId))
+            m_proofs << pathId;
+    }
+
     void onProofReady(const AttemptEvent &ev, const SelectionContext &ctx, QList<AttemptEffect> &out)
     {
-        if (!m_running || !legActive() || exact())
+        if (!m_running)
+            return;
+        noteProof(ev.lead); // whatever the leg in flight does with it now
+        if (!legActive() || exact())
             return;
         // The person's own choice gets its full try (device round 19.11: a chosen provider server was left 1 s
         // into its check for a proven path of another country). A fallback follows only its real failure.
@@ -735,9 +764,16 @@ private:
         if (!blind && !starved)
             return;
         const QList<RankedPath> next = order(ctx);
-        const int li = leadIndex(next, ev.lead);
-        if (li < 0 && (next.isEmpty() || next.first().view.state != PathState::Working))
+        int li = leadIndex(next, ev.lead);
+        if (starved) {
+            // Up and being checked: only a proof of THIS attempt ends it, never the ledger's history alone.
+            for (int i = 0; li < 0 && i < m_proofs.size(); ++i)
+                li = leadIndex(next, m_proofs.at(i));
+            if (li < 0)
+                return; // no proof waits: the leg keeps its whole data check and writes its own outcome
+        } else if (li < 0 && (next.isEmpty() || next.first().view.state != PathState::Working)) {
             return;
+        }
         const PathCandidate &to = next.at(li < 0 ? 0 : li).path;
         AttemptEffect y = effect(EffectType::Yield);
         y.phase = m_phase;
@@ -832,6 +868,7 @@ private:
     bool m_checkSuspended = false; // the running data check spanned a suspension
     bool m_preferredTried = false; // a preferred path was brought up in this attempt
     QString m_lead;                // the path a proof named: the next choice takes it (see the header)
+    QStringList m_proofs;          // the paths the race of THIS attempt proved on this network (see the header)
 };
 
 } // namespace avpn::path
