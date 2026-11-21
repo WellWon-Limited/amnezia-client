@@ -110,6 +110,10 @@ struct ScanNetFacts {
 // access ASN later on the same network (a provider seat grant names it; device round 11, iPhone Air 20.11 13:05:
 // a row connect turned "unknown" into "cell:asn:<N>:4g" and the 19 rows just found were gone), so a cache keyed by it
 // changed identity on the person's own connect.
+// The path engine's "unknown" (its constructor's placeholder) is never read with a known kind: the engine tells its
+// tracker the platform network at start-up and before every Scanner notice (DebugSnapshot.h::ScanNetworkNotifier),
+// and the tracker keeps "unknown" only while the platform's medium is unknown - then the Scanner's kind (the same
+// pick, AvpnEngineQml::networkKind) is unknown too, and the network learned later is honestly another identity.
 inline QString scanNetIdentity(const ScanNetFacts &f, const QString &reportingKey)
 {
     return f.localKey.isEmpty() ? reportingKey : f.localKey;

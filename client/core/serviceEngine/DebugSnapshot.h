@@ -900,6 +900,72 @@ inline ScanNetNotice scanNetworkNotice(quint64 genBefore, quint64 genAfter, cons
     return reportNow != reportTold ? ScanNetNotice::Refined : ScanNetNotice::None;
 }
 
+// The one owner of "the Scanner hears the network" (AvpnEngineQml::scanNotifyNetwork). Invariant: the Scanner never
+// reads its network identity from a path engine that has not been told the platform network as it is now. So every
+// entry goes through notice(), and notice() tells the path engine FIRST (observe), whatever the Scanner's state:
+//  - the engine's start-up (a host whose platform publishes its first state before we subscribe - Windows'
+//    QNetworkInformation - or never emits one: the tracker would hold its "unknown" placeholder until the first
+//    connect; a list scanned under it would be "another network" once the connect observed - the defect of device
+//    round 11 back by another door);
+//  - every platform notice (QNetworkInformation, the path monitors), also while the Scanner is switched off: the
+//    path engine stays current, and the Scanner is told afresh when it is switched on (the keys told are forgotten
+//    while it is off, so its first notice is a change);
+//  - the Scanner switching on.
+// The facts are read only here, right after the observation; `read` returns scannerOn=false when there is no Scanner.
+struct ScanNetRead {
+    bool scannerOn = false;
+    QString identity; // kind | physical network | gateway hash (scanNetIdentity)
+    QString report;   // the reporting key
+};
+class ScanNetworkNotifier
+{
+public:
+    std::function<quint64()> generation;          // the path engine's network generation
+    std::function<void()> observe;                // tell the path engine the platform network now
+    std::function<ScanNetRead()> read;            // the Scanner's facts (after observe)
+    std::function<void()> notify;                 // the Scanner's networkChanged()
+    std::function<void(const QString &)> journal; // reliability journal
+
+    void notice()
+    {
+        const quint64 before = generation();
+        observe();
+        const ScanNetRead r = read();
+        if (!r.scannerOn) {
+            m_identityTold.clear(); // switched on later: its first notice is a change, from the facts as they are then
+            m_reportTold.clear();
+            return;
+        }
+        const quint64 after = generation();
+        switch (scanNetworkNotice(before, after, m_identityTold, r.identity, m_reportTold, r.report)) {
+        case ScanNetNotice::None:
+            journal(QStringLiteral("scan_network_unchanged net_gen=%1").arg(before));
+            return;
+        case ScanNetNotice::Refined:
+            journal(QStringLiteral("scan_network_key_refined net_gen=%1").arg(before)); // the list stays
+            break;
+        case ScanNetNotice::Changed:
+            if (after == before)
+                journal(QStringLiteral("scan_network_key_changed net_gen=%1").arg(before)); // the same generation, a new identity
+            break;
+        }
+        m_identityTold = r.identity;
+        m_reportTold = r.report;
+        notify();
+    }
+    // The Scanner switched on: the same notice, with nothing told before it.
+    void noticeAfresh()
+    {
+        m_identityTold.clear();
+        m_reportTold.clear();
+        notice();
+    }
+
+private:
+    QString m_identityTold; // the Scanner's last notice ("" = none since it was switched on)
+    QString m_reportTold;
+};
+
 // P2-4: один координатор выхода на экран. Реагируем на возврат после реальной заморозки/скрытия
 // (Suspended/Hidden) или после долгого Inactive (десктоп: фокус в браузере после оплаты), не на
 // Inactive→Active-мигание (Пункт управления, системный алерт); подписка — с троттлом, конфиг —

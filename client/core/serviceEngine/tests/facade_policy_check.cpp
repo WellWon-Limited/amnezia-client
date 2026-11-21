@@ -583,6 +583,103 @@ static void wave4UpstreamBehaviour()
         CHECK(t.observe(cell) && t.current().generation == g + 2); // Wi-Fi -> LTE
         CHECK(t.observe(x) && t.current().generation == g + 3);    // LTE -> Wi-Fi X
     }
+    // ScanNetworkNotifier (review of 3d3cdc686): the Scanner never reads its identity from a path engine that has not
+    // been told the platform network now. The host: ServiceEngine's tracker (its constructor's "unknown" placeholder),
+    // the platform's reading, the Scanner's facts as ScanEngineAdapter::network() builds them (kind from the platform,
+    // the physical network from the tracker).
+    {
+        using namespace avpn::path;
+        struct Host {
+            NetworkTracker t;
+            NetworkObservation platform;
+            bool scannerOn = false;
+            int notified = 0;
+            QString told;     // the identity the Scanner was handed (what read() gave)
+            QString lastRead;
+            QStringList journal;
+            ScanNetworkNotifier n;
+            QString identity() const
+            {
+                const QString kind = platform.medium == NetMedium::Wifi ? QStringLiteral("wifi")
+                                     : platform.medium == NetMedium::Cellular ? QStringLiteral("cellular") : QStringLiteral("unknown");
+                return kind + QLatin1Char('|') + t.current().local + QLatin1Char('|');
+            }
+            Host()
+            {
+                t.observe(NetworkObservation()); // ServiceEngine(): "unknown" until the platform tells the network
+                n.generation = [this]() { return t.current().generation; };
+                n.observe = [this]() { t.observe(platform); };
+                n.read = [this]() {
+                    ScanNetRead r;
+                    if (!scannerOn)
+                        return r;
+                    r.scannerOn = true;
+                    r.identity = identity();
+                    lastRead = r.identity;
+                    r.report = QStringLiteral("wifi");
+                    return r;
+                };
+                n.notify = [this]() { ++notified; told = lastRead; };
+                n.journal = [this](const QString &l) { journal << l; };
+            }
+        };
+        NetworkObservation x;
+        x.medium = NetMedium::Wifi;
+        x.subnet = QStringLiteral("192.168.1.0/24");
+        NetworkObservation y = x;
+        y.subnet = QStringLiteral("10.0.0.0/24");
+        // (control) the defect without the one notice: a host that never emits a first event (Windows' QNetworkInformation
+        // published it before we subscribed) - the Scanner reads the placeholder, the first connect observes, and the list
+        // scanned under the placeholder is "another network" (device round 11 by another door)
+        {
+            Host h;
+            h.platform = x;
+            h.scannerOn = true;
+            const QString scanned = h.identity();
+            CHECK(scanned.contains(QLatin1String("|unknown|")));
+            h.t.observe(h.platform); // the connect's observation (AvpnEngineQml::guardedStart)
+            CHECK(h.identity() != scanned);
+        }
+        // (A, B) the same host with the start-up notice: told before the Scanner exists; a scan, a connect and our own
+        // tunnel's notice leave the identity and the generation as they were - the list stays
+        {
+            Host h;
+            h.platform = x;
+            h.n.notice(); // the engine's constructor, right after subscribing; no Scanner yet
+            CHECK(h.t.current().local == localNetworkKey(x));
+            CHECK(h.notified == 0);
+            h.scannerOn = true;
+            h.n.noticeAfresh(); // the Scanner attached and switched on
+            CHECK(h.notified == 1);
+            const QString scanned = h.identity();
+            CHECK(h.told == scanned);
+            const quint64 g = h.t.current().generation;
+            h.t.observe(h.platform); // the row's connect
+            h.n.notice();            // our own tunnel came up: a platform notice
+            CHECK(h.identity() == scanned && h.t.current().generation == g && h.notified == 1);
+            CHECK(!h.journal.isEmpty() && h.journal.last() == QStringLiteral("scan_network_unchanged net_gen=%1").arg(g));
+            h.platform = y; // a real change still reaches it
+            h.n.notice();
+            CHECK(h.notified == 2 && h.told.contains(localNetworkKey(y)) && h.t.current().generation == g + 1);
+        }
+        // (C) the first platform notice comes while the Scanner is off (its switches come with the config): the path
+        // engine is told anyway; then the facts change with no notice at all (iOS: the app's path monitor is hooked only
+        // with the Scanner) - switching on observes first and tells the Scanner the network as it is then
+        {
+            Host h;
+            h.platform = NetworkObservation(); // iOS before the first path-monitor update: the medium unknown
+            h.n.notice();                      // start-up
+            CHECK(h.t.current().local == QStringLiteral("unknown"));
+            h.platform = x;
+            h.n.notice(); // QNetworkInformation's first event, the Scanner still off
+            CHECK(h.t.current().local == localNetworkKey(x));
+            CHECK(h.notified == 0);
+            h.platform = y; // the path monitor's update: no notice reaches anybody
+            h.scannerOn = true;
+            h.n.noticeAfresh();
+            CHECK(h.notified == 1 && h.told == h.identity() && h.told.contains(localNetworkKey(y)));
+        }
+    }
     // P2-4: координатор выхода на экран.
     CHECK(foregroundIsReturn(true, 0));                       // была заморозка/скрытие
     CHECK(!foregroundIsReturn(false, 3000));                  // Пункт управления: 3 с Inactive

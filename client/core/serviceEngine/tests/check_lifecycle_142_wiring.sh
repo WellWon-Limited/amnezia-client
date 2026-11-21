@@ -66,15 +66,27 @@ has "$(body "$FACADE" 'void AvpnEngineQml::reconcile()')" 'if (m_engine.attemptR
 # 11, iPhone Air 20.11 13:05: a row connect's seat grant refined the reporting key 5 s after the connect, outside the
 # window, and the 19 rows just found were dropped).
 scan_net="$(code "$FACADE" | awk '/^void AvpnEngineQml::scanNotifyNetwork\(\)/{f=1} f{print} f&&/^}/{exit}')"
-has "$scan_net" 'm_engine.observeNetwork(currentNetworkObservation());' \
-    && has "$scan_net" 'const ScanNetFacts f = m_scanAdapter->network();' \
-    && has "$scan_net" 'scanNetIdentity(f, f.reportingKey)' \
-    && has "$scan_net" 'switch (scanNetworkNotice(before, after, m_scanNetIdentityTold, identity, m_scanNetReportTold, f.reportingKey)) {' \
-    && has "$scan_net" 'm_scanNetIdentityTold = identity;' && has "$scan_net" 'm_scanNetReportTold = f.reportingKey;' \
-    || bad "(c): scanNotifyNetwork must notify on a new generation or a new physical identity, a refined key as such"
+has "$scan_net" 'm_scanNotifier.notice();' \
+    || bad "(c): scanNotifyNetwork must be the one notice (ScanNetworkNotifier: the path engine told first)"
 if has "$scan_net" 'networkChangeIsOwnTunnel(' || has "$scan_net" 'QTimer::singleShot('; then
     bad "(c): scanNotifyNetwork must not judge by a time window of our own operation (device round 11, 20.11 13:05)"
 fi
+# The notifier's wiring and its start-up notice (review of 3d3cdc686: a platform that never emits a first event left
+# the path engine on its "unknown" placeholder, and the Scanner's identity with it, until the first connect).
+wiring="$(code "$FACADE" | awk '/m_scanNotifier.generation = /{f=1} f{print} f&&/^    scanNotifyNetwork\(\);$/{exit}')"
+has "$wiring" 'm_scanNotifier.observe = [this]() { m_engine.observeNetwork(currentNetworkObservation()); };' \
+    && has "$wiring" 'scanNetIdentity(f, f.reportingKey)' \
+    && has "$wiring" 'm_scanNotifier.notify = [this]() { m_scanner->networkChanged(); };' \
+    && printf '%s\n' "$wiring" | tail -1 | grep -qx '    scanNotifyNetwork();' \
+    || bad "(c): the constructor must wire the notifier (observe, the physical identity) and notice once at start-up"
+ctor_end="$(code "$FACADE" | grep -n '^    scanNotifyNetwork();$' | head -1 | cut -d: -f1)"
+qni="$(code "$FACADE" | grep -n 'connect(ni, &QNetworkInformation::transportMediumChanged, this, \[this\]() { scanNotifyNetwork(); });' | head -1 | cut -d: -f1)"
+[ -n "$ctor_end" ] && [ -n "$qni" ] && [ "$ctor_end" -gt "$qni" ] \
+    || bad "(c): the start-up notice must come after the platform subscriptions"
+nc="$(code "$FACADE" | grep -c 'm_scanner->networkChanged()' || true)"
+[ "$nc" = "1" ] || bad "(c): the Scanner hears the network only through the notifier (m_scanner->networkChanged() x$nc)"
+code "$FACADE" | grep -qF 'm_scanNotifier.noticeAfresh(); // switched on' \
+    || bad "(c): the Scanner switching on must go through the one notice"
 adapter="$(code "$FACADE" | awk '/^ScanNetFacts ScanEngineAdapter::network\(\) const/{f=1} f{print} f&&/^}/{exit}')"
 has "$adapter" 'f.localKey = m_e->m_engine.network().local;' \
     || bad "(c): the Scanner's network facts must carry the path engine's physical network (its cache identity)"

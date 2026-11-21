@@ -1932,6 +1932,26 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         });
         connect(ni, &QNetworkInformation::transportMediumChanged, this, [this]() { scanNotifyNetwork(); }); // AVPN Scanner
     }
+    // The one notice of the network (ScanNetworkNotifier): it tells the path engine first, then hands the Scanner its
+    // facts. Told once now, right after subscribing: a platform that published its state before we subscribed
+    // (Windows' QNetworkInformation) or never emits one leaves the path engine on its "unknown" placeholder until
+    // the first connect otherwise - the ledger, the generation and the Scanner's identity would start from it.
+    m_scanNotifier.generation = [this]() { return m_engine.network().generation; };
+    m_scanNotifier.observe = [this]() { m_engine.observeNetwork(currentNetworkObservation()); };
+    m_scanNotifier.read = [this]() {
+        ScanNetRead r;
+        if (!m_scanner || !m_scanSwitches.scanner || !m_scanAdapter)
+            return r;
+        const ScanNetFacts f = m_scanAdapter->network();
+        r.scannerOn = true;
+        r.identity = QLatin1String(scanNetKindName(f.kind)) + QLatin1Char('|') + scanNetIdentity(f, f.reportingKey)
+                     + QLatin1Char('|') + f.gatewayHash;
+        r.report = f.reportingKey;
+        return r;
+    };
+    m_scanNotifier.notify = [this]() { m_scanner->networkChanged(); };
+    m_scanNotifier.journal = [this](const QString &line) { reliabilityEvent(line); };
+    scanNotifyNetwork();
     // Ответы control plane: метод, путь без идентификаторов, код. Только пути API (/v1, /admin) —
     // запросы к сторонним хостам (бенч, пробы) сюда не попадают; саму досылку журнала не пишем.
     connect(m_nam, &QNetworkAccessManager::finished, this, [](QNetworkReply *r) {
@@ -7779,8 +7799,7 @@ void AvpnEngineQml::scanApplySwitches(const char *why)
     }
     if (next.scanner && !wasOn) {
         m_scanLastCurrent.clear();
-        if (m_scanner)
-            m_scanner->networkChanged(); // switched on: it starts from the network as it is now
+        m_scanNotifier.noticeAfresh(); // switched on: told the network as it is now, through the one notice
         scanSyncState();
     }
     if (changedSwitches) {
@@ -7878,31 +7897,11 @@ void AvpnEngineQml::finishScannerSvc(bool ok, const QString &err)
 // ASN, the reporting key moved with the generation unchanged, and the old rule - the reporting key inside the cache
 // identity, compared once a 5 s window of our own operation had passed - dropped the 19 rows just found. Every input
 // here is physical, so our own tunnel coming up or going down is "unchanged" at any delay: no window.
+// One owner (DebugSnapshot.h::ScanNetworkNotifier, wired in the constructor): the path engine is told first, on every
+// entry - start-up, every platform notice, also with the Scanner off, and the Scanner switching on.
 void AvpnEngineQml::scanNotifyNetwork()
 {
-    if (!m_scanner || !m_scanSwitches.scanner)
-        return;
-    const quint64 before = m_engine.network().generation;
-    m_engine.observeNetwork(currentNetworkObservation());
-    const ScanNetFacts f = m_scanAdapter->network();
-    const QString identity = QLatin1String(scanNetKindName(f.kind)) + QLatin1Char('|') + scanNetIdentity(f, f.reportingKey)
-                             + QLatin1Char('|') + f.gatewayHash;
-    const quint64 after = m_engine.network().generation;
-    switch (scanNetworkNotice(before, after, m_scanNetIdentityTold, identity, m_scanNetReportTold, f.reportingKey)) {
-    case ScanNetNotice::None:
-        reliabilityEvent(QStringLiteral("scan_network_unchanged net_gen=%1").arg(before));
-        return;
-    case ScanNetNotice::Refined:
-        reliabilityEvent(QStringLiteral("scan_network_key_refined net_gen=%1").arg(before)); // the list stays
-        break;
-    case ScanNetNotice::Changed:
-        if (after == before)
-            reliabilityEvent(QStringLiteral("scan_network_key_changed net_gen=%1").arg(before)); // the same generation, a new identity
-        break;
-    }
-    m_scanNetIdentityTold = identity;
-    m_scanNetReportTold = f.reportingKey;
-    m_scanner->networkChanged();
+    m_scanNotifier.notice();
 }
 
 // The live status for the coordinator (deduplicated), the own connect's «Подключено» latch and a row tap's
