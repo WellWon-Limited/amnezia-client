@@ -633,6 +633,36 @@ static void testOwnerLive()
                                      TransportMode::Auto, s.tracker.current()));
     CHECK(s.owner.phase() == AttemptPhase::Idle && !s.owner.running());
 
+    // Device round 12: the live session moved to another network and was lost there. What a report says is about ONE
+    // network - its key and its generation are the same network's (the one the loss was observed on), so the ledger
+    // write is not dropped as "not current" and the path stops being "working" there; the old network keeps its own.
+    {
+        const NetworkObservation lte = cell("250-02", "lte");
+        World w2 = w;
+        w2.set(key(lte), QStringLiteral("17"), Behaviour::noData(300));
+        w2.set(key(lte), QStringLiteral("16"), ok);
+        Sim m(pool, w2, home);
+        m.ledger.record(key(lte), pool[0].id, PathOutcome::DataOk, m.wall(), 300, 100); // 17 "works" on LTE by history
+        CHECK(m.tap(UserChoice::automatic()).connected && m.owner.currentPath().id.id == QLatin1String("17"));
+        m.changeNetworkAt(m.now, lte);
+        m.idle(200);
+        CHECK(m.owner.phase() == AttemptPhase::Connected && m.owner.network().local == key(lte));
+        const int before = int(m.reports.size());
+        m.deliver(AttemptEvent::liveLost(m.now, PathOutcome::NoData, false, true, UserChoice::automatic(),
+                                         TransportMode::Auto, m.tracker.current()));
+        CHECK(m.reports.size() == before + 1);
+        const OutcomeReport rep = m.reports.value(before);
+        CHECK(rep.outcome == PathOutcome::NoData && rep.path.id == QLatin1String("17"));
+        CHECK(rep.network == key(lte) && rep.networkGeneration == m.tracker.current().generation);
+        CHECK(stateOf(m, pool[0]) == PathState::Suspect);                                       // on LTE
+        CHECK(m.ledger.view(k, pool[0].id, m.wall()).state == PathState::Working);              // on Wi-Fi, untouched
+        m.run([&] { return m.results.size() > 1; }, 30000);
+        CHECK(m.results.size() == 2 && m.results.last().connected && m.results.last().path.id.id == QLatin1String("16"));
+        // every report of a leg names one network too (key and generation of the network the leg ran on)
+        for (const OutcomeReport &o : m.reports)
+            CHECK(o.network == (o.networkGeneration == m.tracker.current().generation ? key(lte) : k));
+    }
+
     // an adopted live tunnel: one data check decides; data passes -> Connected without a start
     from = int(s.legs.size());
     s.deliver(AttemptEvent::adopted(s.now, pool[1], UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));

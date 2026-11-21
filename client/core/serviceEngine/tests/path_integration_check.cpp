@@ -380,6 +380,52 @@ int main(int argc, char **argv)
         CHECK(!r.eng.pathLedgerJson().contains("wifi:")); // the Wi-Fi leg was cut, not recorded
     }
 
+    // 7b. Device round 12 (iPhone Air): a live session moves from Wi-Fi to a mobile network where its server carries
+    //     nothing. The loss is evidence about the network it was observed on: the report's key and generation are both
+    //     that network's, so it is recorded there and the next start there does not lead with the server again.
+    //     Before: the mobile network's key with the Wi-Fi leg's generation - dropped as not current, "working" kept.
+    {
+        Rig r(pool);
+        QString err;
+        path::NetworkObservation lte, home;
+        lte.medium = path::NetMedium::Cellular;
+        lte.carrier = QStringLiteral("250-01");
+        lte.radio = QStringLiteral("lte");
+        home.medium = path::NetMedium::Wifi;
+        home.gateway = QStringLiteral("192.168.1.1");
+        home.subnet = QStringLiteral("192.168.1.0/24");
+        const auto connect17 = [&r, &err] {
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            r.up();
+            CHECK(r.eng.verifySucceeded(220) && r.result().connected);
+        };
+        r.eng.observeNetwork(lte);
+        connect17(); // an earlier session on the mobile network: 17 "works" there
+        r.eng.requestStop();
+        r.confirmStop();
+        r.eng.observeNetwork(home);
+        connect17(); // live on Wi-Fi
+        r.eng.observeNetwork(lte); // the phone moves while connected: the session stays, the network is the mobile one
+        CHECK(r.eng.state() == EngineState::Connected && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("working"));
+        r.journal.clear();
+        CHECK(r.eng.reenterVerifying() && r.eng.verifyFailed(QStringLiteral("no data")) && r.eng.attemptRunning());
+        r.journal << r.eng.takeAttemptJournal();
+        const QByteArray here = QStringLiteral("path_outcome net=%1 net_gen=%2 node=17")
+                                    .arg(r.eng.network().local).arg(r.eng.network().generation).toUtf8();
+        CHECK(r.eng.network().local.startsWith(QLatin1String("cell:")));
+        CHECK(journalLineHas(r.journal, here.constData(), "outcome=no_data", "state=suspect"));
+        CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect"));
+        r.confirmStop();
+        CHECK(r.last() == QLatin1String("16")); // the failover attempt, without 17
+        r.eng.requestStop(); // the person stops it before it connects: nothing known about 16 here
+        r.confirmStop();
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("16")); // the next start here: 17 is not the first choice
+        r.eng.requestStop();
+        r.confirmStop();
+        r.eng.observeNetwork(home);
+        CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("working")); // Wi-Fi's own evidence is untouched
+    }
+
     // 8. A live tunnel found at launch: adopted as a leg, one data check decides; no data -> the attempt walks on.
     {
         Rig r(pool);

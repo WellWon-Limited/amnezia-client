@@ -46,7 +46,8 @@
 // carried data; Failed(nothing proven / exact node failed / stopped by user / no candidate / no network).
 // After Connected the owner keeps the leg as the live session: a later UserStart or UserStop stops it first
 // (the owner is the only one that raised it). Keeping a live session healthy is NOT this class (design stage 3);
-// a network change after Connected only updates the owner's network key.
+// a network change after Connected only updates the owner's network key - the session lives on, so what its loss
+// proves (LiveLost) is recorded for the network it is on when it is lost (key and generation of that one network).
 //
 // STAGE 2 (probe race) without changing this contract: the race is a separate component in front of the
 // owner. It writes its results into the ledger as outcomes (probe ok / no handshake ...). The owner reads the
@@ -532,8 +533,13 @@ private:
         if (!isAttributable(o))
             return;
         AttemptEffect e = effect(EffectType::Report);
+        // One network per report: the key and the generation are both the owner's current network's - the one the
+        // outcome was observed on. A leg in flight never outlives its network (a change stops it, unrecorded), so for
+        // it this is the leg's own network; a live session does (it stays up across a change), and its loss is
+        // evidence about the network it was lost on. Device round 12: the new network's key went out with the old
+        // leg's generation, the write was dropped as not current and the server stayed "working" there.
         e.report.network = m_net.local;
-        e.report.networkGeneration = m_leg.stamp.network;
+        e.report.networkGeneration = m_net.generation;
         e.report.path = m_leg.path.id;
         e.report.outcome = o;
         e.report.connectMs = connectMs;
