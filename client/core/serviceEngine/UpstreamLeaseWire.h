@@ -755,6 +755,18 @@ inline bool upstreamRouteProved(const AcquireReply &r)
     return r.fromTribeApi;
 }
 
+// An acquire request ENDED and the client cannot tell what the server did with it (device round 11 of 20.11: the server had granted
+// a seat one second after the request, the answer was on its way when the app's own API reset of a tunnel transition ended the
+// request - the seat stayed taken for ten minutes with nobody knowing its id). Unknown = anything that is neither a grant (it names
+// its lease) nor a refusal with a code (the server said no seat was given): no HTTP answer at all (a transport failure, the request's
+// own timeout, our own abort), a 2xx cut on the way or not usable, a status without an UpstreamError body (a gateway's 502 / 504 may
+// follow a request the API did carry out). THE one place that decides it; the owner then owes that start's seat back by its nonce
+// (UpstreamLeaseOwner.h, row "answer lost").
+inline bool upstreamAcquireOutcomeUnknown(const AcquireReply &r)
+{
+    return r.kind == LeaseReplyKind::Failed;
+}
+
 // The order floor an acquire answer carries (round 12 R2), -1 = none: only an answer of the API counts (it carries the API's mark - a
 // foreign page must never move the counter), whatever its status or body, in time or late, of the current start or of an older one.
 // THE one place that decides it; UpstreamLeaseClient calls it for every acquire answer.

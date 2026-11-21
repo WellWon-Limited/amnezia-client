@@ -136,7 +136,7 @@ has "$rel" 'const LeaseRoute direct = upstreamReleaseRoute(route);' && has "$rel
 # every DELETE is a decision of the owner, so the adapter only forwards.
 ctor="$(body_of "$ADP" 'VpnConnectionTunnelControl::VpnConnectionTunnelControl(')"
 has "$ctor" 'm_upOwner.lateGrant(profile, lease, route, newerOut, acquireId)' || bad "ledger: a late grant must be decided by the owner (lateGrant)"
-has "$ctor" 'm_upOwner.acquireEnded(profile, lease, stillOut)' || bad "ledger: the end of an acquire must reach the owner (acquireEnded)"
+has "$ctor" 'm_upOwner.acquireEnded(profile, lease, stillOut, ' || bad "ledger: the end of an acquire must reach the owner (acquireEnded)"
 has "$ctor" 'm_leaseClient->tunnelStarted();' || bad "ledger: a native tunnel coming up must tell the client (a stop is waited for only while one runs)"
 has "$(grep -F 'm_leaseClient->release(' "$ADP")" 'e.requestId' || bad "R5: the after-stop release must carry the owner's request id"
 has "$(grep -F 'holdReleasesForStopIfRunning' "$ADP")" 'holdReleasesForStopIfRunning' || bad "F4: the after-stop release must not wait for a stop that already happened"
@@ -265,6 +265,34 @@ has "$(grep -v '^[[:space:]]*//' "$SE/ConfigService.cpp")" 'emit directRouteProv
     || bad "R3: ConfigService must announce every direct proof, not only a change of the fact"
 has "$(grep -v '^[[:space:]]*//' "$ADH")" 'm_upOwner.directRouteProved(upstreamClockMs());' \
     || bad "F4: the adapter must hand the proof to the owner (directRouteProved)"
+
+# Device round 11 of 20.11 (a seat left taken for ten minutes after a failed start: the lease answer was lost to the app's own API
+# reset of a tunnel transition, nobody knew the lease id, nothing was owed). The rule is UpstreamLeaseOwner.h, row "answer lost"
+# (upstream_engine_check lostAnswerSeatDebt, ledgerModel, ownerSeatModel); here only the forwarding:
+#   the client tells the owner, with the end of every acquire request, which request it was and whether its outcome is unknown;
+#   every step of the owner is followed by the look at what it keeps (noteSeatDebts), which asks the control plane for the proof;
+#   ConfigService consults the owner before every ask, and the facade connects the two.
+acq="$(body_of "$CLI" 'void UpstreamLeaseClient::acquire(')"
+has "$acq" 'const bool seatUnknown = upstreamAcquireOutcomeUnknown(reply);' \
+    || bad "answer lost: the client must decide the unknown outcome by upstreamAcquireOutcomeUnknown"
+[ "$(printf '%s\n' "$acq" | grep -cF 'requestId, seatUnknown);')" = "2" ] \
+    || bad "answer lost: both ends of an acquire request (in time, after the wait) must carry the request id and seatUnknown"
+has "$ctor" 'applyUpstreamEvents(m_upOwner.acquireEnded(profile, lease, stillOut, acquireId, seatUnknown, upstreamClockMs()));' \
+    || bad "answer lost: the end of an acquire request must reach the owner with its id and seatUnknown"
+aue="$(body_of "$ADP" 'void VpnConnectionTunnelControl::applyUpstreamEvents(')"
+has "$aue" 'noteSeatDebts();' || bad "answer lost: every step of the owner must be followed by noteSeatDebts()"
+nsd="$(body_of "$ADP" 'void VpnConnectionTunnelControl::noteSeatDebts()')"
+has "$nsd" 'if (upstreamProofOwed())' && has "$nsd" 'emit upstreamRouteProofOwed();' \
+    || bad "answer lost: what the owner keeps on an idle device must ask for the proof of the direct route"
+has "$(grep -v '^[[:space:]]*//' "$ADH")" 'bool upstreamProofOwed() { return m_upOwner.proofOwed(upstreamClockMs()); }' \
+    || bad "answer lost: the adapter must expose the owner's proofOwed()"
+fac_nc="$(grep -v '^[[:space:]]*//' "$FAC")"
+has "$fac_nc" 'm_configSvc->setProofOwedSource([this]() { return m_tunnel.upstreamProofOwed(); });' \
+    && has "$fac_nc" 'connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamRouteProofOwed, m_configSvc, &avpn::ConfigService::noteProofOwed);' \
+    || bad "answer lost: the facade must connect the owner's owed proof to ConfigService (source + noteProofOwed)"
+ask="$(body_of "$SE/ConfigService.cpp" 'void ConfigService::askDirectOnce()')"
+has "$ask" 'const bool proofOwed = m_proofOwedFn && m_proofOwedFn();' && has "$ask" 'm_askLater.start(int(kAskSpacingMs));' \
+    || bad "answer lost: askDirectOnce must consult the owed proof and come back after the spacing while it is owed"
 
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"

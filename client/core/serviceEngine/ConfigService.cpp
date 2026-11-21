@@ -523,10 +523,15 @@ void ConfigService::askDirectOnce()
     if (m_pinned || !m_nam || tunnelUp() || !m_sessionEdge.isEmpty())
         return;
     const quint64 gen = generationNow();
-    if (m_askedAny && m_askedGen == gen)
-        return;
-    if (directApiReach() != ApiReach::Unknown)
-        return;
+    // A proof is owed (setProofOwedSource): the ask is for the EVENT, so "already asked on this network" and "the fact is known" do
+    // not end it; everything else below (the spacing, one request at a time) bounds it exactly as any ask.
+    const bool proofOwed = m_proofOwedFn && m_proofOwedFn();
+    if (!proofOwed) {
+        if (m_askedAny && m_askedGen == gen)
+            return;
+        if (directApiReach() != ApiReach::Unknown)
+            return;
+    }
     const qint64 now = nowMs();
     if (m_lastAskMs >= 0 && now >= m_lastAskMs && now - m_lastAskMs < kAskSpacingMs) {
         // The spacing bounds the rate, it does not cancel the ask this network is owed: one deferred ask when the
@@ -548,6 +553,14 @@ void ConfigService::askDirectOnce()
     m_askedAny = true;
     m_askedGen = gen;
     m_lastAskMs = now;
+    if (proofOwed) {
+        // The same network as before: the walk keeps what it knows (which edge answered, its back-off - a backed-off walk's own next
+        // round is the ask). One config request; the next ask of the proof comes after the spacing, while it is still owed.
+        if (!m_walkPause.isActive())
+            fetchConfig();
+        m_askLater.start(int(kAskSpacingMs));
+        return;
+    }
     m_edgeAnswered = false;
     m_walkSilent = 0;
     if (!leaveWalkPause())

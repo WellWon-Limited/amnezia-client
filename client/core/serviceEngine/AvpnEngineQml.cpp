@@ -1294,6 +1294,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // Every proof of the direct route (an answer of the API itself, also when the fact stays Reachable): kept seat
     // releases are sent now - they do not wait for the next provider connect.
     connect(m_configSvc, &avpn::ConfigService::directRouteProved, this, [this]() { m_tunnel.upstreamDirectRouteProved(); });
+    // ... and while such a release (or a seat owed after a lost lease answer) waits on a device where nothing runs, its owner asks
+    // for that proof: ConfigService's one spaced ask of the direct route, repeated only while the owner still says it is owed.
+    m_configSvc->setProofOwedSource([this]() { return m_tunnel.upstreamProofOwed(); });
+    connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamRouteProofOwed, m_configSvc, &avpn::ConfigService::noteProofOwed);
 
     // AVPN server-driven АнтиВПН (Task 10): сервис серверных bypass-списков (/v1/bypass-lists —
     // ru_cidrs/bypass_extra/cn_liauto_cidrs/split_dns, подпись+LKG). Тот же m_nam/kConfigPubKeyHex,

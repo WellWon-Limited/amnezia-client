@@ -141,16 +141,20 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         // Round 12 R2: the server's floor for the start orders, from ANY answer that carries it (also a late one of an older start).
         if (const qint64 floorOrder = upstreamOrderFloorOf(reply); floorOrder >= 0 && onSessionOrderFloor)
             onSessionOrderFloor(floorOrder);
+        // The request is over. When nobody can tell whether the server granted it (no answer, a cut one, the app's own API reset of a
+        // tunnel transition - upstreamAcquireOutcomeUnknown) the owner is told so with the end of the request: the start it was sent
+        // for owes its seat back by nonce. The fact goes to the ledger; this client never asks again by itself.
+        const bool seatUnknown = upstreamAcquireOutcomeUnknown(reply);
         if (*answered) {
             if (reply.kind == LeaseReplyKind::Granted && upstreamLeaseIdValid(reply.grant.leaseId))
                 reportLateGrant(profileId, reply.grant.leaseId, LeaseRoute{reply.grant.renewToken, route.apiBase}, requestId);
             else
-                reportAcquireEnded(profileId, QString());
+                reportAcquireEnded(profileId, QString(), requestId, seatUnknown);
         } else {
             *answered = true;
             if (onAcquire)
                 onAcquire(requestId, reply);
-            reportAcquireEnded(profileId, reply.kind == LeaseReplyKind::Granted ? reply.grant.leaseId : QString());
+            reportAcquireEnded(profileId, reply.kind == LeaseReplyKind::Granted ? reply.grant.leaseId : QString(), requestId, seatUnknown);
         }
         // THE one place where an answer proves its route (round 10 R4), for every path above: an answer of the API (it carries the
         // API's mark; round 11 R3) says the API on this route works - a foreign answer (a proxy's 403) or a transport failure does not.
@@ -181,10 +185,11 @@ void UpstreamLeaseClient::reportLateGrant(const QString &profileId, const QStrin
     sendRelease(0, leaseId, UpstreamMeter{}, upstreamReleaseRoute(route), /*attempt=*/0);
 }
 
-void UpstreamLeaseClient::reportAcquireEnded(const QString &profileId, const QString &grantedLeaseId)
+void UpstreamLeaseClient::reportAcquireEnded(const QString &profileId, const QString &grantedLeaseId, quint64 acquireId,
+                                             bool seatUnknown)
 {
     if (onAcquireEnded)
-        onAcquireEnded(profileId, grantedLeaseId, acquireOutFor(profileId));
+        onAcquireEnded(profileId, grantedLeaseId, acquireOutFor(profileId), acquireId, seatUnknown);
 }
 
 void UpstreamLeaseClient::renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,

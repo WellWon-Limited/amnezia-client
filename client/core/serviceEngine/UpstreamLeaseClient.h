@@ -57,7 +57,9 @@ public:
     // newerOut / stillOut = another acquire of the same profile is still alive.
     // route = the late grant's own token and the base it was asked on; acquireId = the request that was answered.
     std::function<void(const QString &profileId, const QString &leaseId, const LeaseRoute &route, bool newerOut, quint64 acquireId)> onLateGrant;
-    std::function<void(const QString &profileId, const QString &grantedLeaseId, bool stillOut)> onAcquireEnded;
+    // acquireId = the request that ended; seatUnknown = nobody can tell whether the server granted it (UpstreamLeaseWire.h::
+    // upstreamAcquireOutcomeUnknown: no answer, a cut one, our own abort) - the ledger then owes that start's seat back by nonce.
+    std::function<void(const QString &profileId, const QString &grantedLeaseId, bool stillOut, quint64 acquireId, bool seatUnknown)> onAcquireEnded;
     // An acquire request got an HTTP answer of the API (any status, any body except a cut one): its route works. Fired once per
     // request, in every path (in time or after the attempt stopped waiting), after the owner was told of the answer.
     std::function<void(quint64 requestId)> onRouteProved;
@@ -133,7 +135,7 @@ private:
     void sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route,
                      int attempt, qint64 spacedMs = 0, quint64 bgKey = 0);
     void reportLateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route, quint64 acquireId);
-    void reportAcquireEnded(const QString &profileId, const QString &grantedLeaseId);
+    void reportAcquireEnded(const QString &profileId, const QString &grantedLeaseId, quint64 acquireId, bool seatUnknown);
     QNetworkReply *post(const QString &url, const QByteArray &body, const QString &bearer, int timeoutMs);
 
     QPointer<QNetworkAccessManager> m_nam;

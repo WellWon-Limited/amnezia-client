@@ -131,7 +131,14 @@ public:
     qint64 upstreamWakeAtMs() const { return m_upOwner.wakeAtMs(); }
     bool upstreamActive() const { return m_upOwner.active(); }
     // The direct control plane answered (ConfigService reach became Reachable): kept seat releases go out on the direct route.
-    void upstreamDirectRouteProved() { m_upOwner.directRouteProved(upstreamClockMs()); }
+    void upstreamDirectRouteProved()
+    {
+        m_upOwner.directRouteProved(upstreamClockMs());
+        noteSeatDebts();
+    }
+    // The ledger keeps something for a proof of the direct route and no start runs (UpstreamLeaseOwner::proofOwed): read by
+    // ConfigService before every ask of the direct route (its proof-owed source).
+    bool upstreamProofOwed() { return m_upOwner.proofOwed(upstreamClockMs()); }
     bool upstreamProvisionalPending() const { return m_upOwner.provisionalPending(); }
     QString upstreamNodeId() const { return m_upOwner.active() ? m_upOwner.nodeId() : QString(); }
     QString upstreamProfileId() const { return m_upOwner.active() ? m_upOwner.profileId() : QString(); }
@@ -170,6 +177,9 @@ signals:
     // prepareUpstream's answer: ok = the seat is held and the profile passed the connect's check; else code =
     // the refusal (the lease code, transport, profile_<sanitizer code>) - the seat is already given back.
     void upstreamPrepared(const QString &nodeId, quint64 prepareId, bool ok, const QString &code);
+    // upstreamProofOwed() is true after a step of the lease owner: the control plane is asked for a proof of the direct route
+    // (ConfigService::noteProofOwed - rate-bounded there; emitted again on every such step, never by a timer).
+    void upstreamRouteProofOwed();
 
 private slots:
     void onBytesChanged(quint64 rx, quint64 tx);
@@ -180,6 +190,8 @@ private:
     void applyUpstreamEvents(const QVector<UpstreamOwnerEvent> &events);
     void bringUpUpstream(const UpstreamOwnerEvent &e);
     void failUpstreamStart(const QString &code, const QString &detail = QString());
+    void noteSeatDebts();
+    int m_seatDebtsTold = 0; // seats owed by nonce as last written to the journal (noteSeatDebts; decides nothing)
 #if AVPN_UPSTREAM_GUI_OWNER // macOS desktop; Windows since release C (UpstreamEngine.h)
     // AVPN awg31-xray-v1 (этап D2): статистика xray-пути демона — async QtRO-вызов xrayRuntimeStatus
     // по таймеру, пока поднят xray (кумулятивы rx/tx с подъёма сессии, §17.1). Без nested QEventLoop.
