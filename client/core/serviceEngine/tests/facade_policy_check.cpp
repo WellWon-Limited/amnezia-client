@@ -1255,6 +1255,24 @@ static void p5bOfflineObservation()
     CHECK(t.observe(withPhysicalUplink(wifi, true, true)) && t.current().usable() && t.current().generation == g + 2);
 }
 
+// android2 "P7 card after UI kill" (21.11): connected through Германия 1 with the choice Эстония 3 pinned; the UI process
+// restarted, the adopted session's identity was unknown, and the card named the pin.
+static void p7CardNeverNamesThePinForALiveSession()
+{
+    // live (connected / verifying), identity unknown, a pin: the session's own hint, never the pin
+    CHECK(cardNodeSource(/*live=*/true, false, false, /*idKnown=*/false, /*pinned=*/true) == CardNodeSource::Unknown);
+    CHECK(cardNodeSource(true, false, false, false, false) == CardNodeSource::Unknown);
+    // live and identified: the live node, pin or not (a failover away from the pin shows where the traffic goes)
+    CHECK(cardNodeSource(true, false, false, true, true) == CardNodeSource::Live);
+    // the attempt walks: the node being tried now; between legs (no node yet) the person's pick at once
+    CHECK(cardNodeSource(false, /*walking=*/true, false, true, true) == CardNodeSource::Live);
+    CHECK(cardNodeSource(false, true, false, false, true) == CardNodeSource::Pin);
+    // nothing live: the pin (the picker tap shows its server while connecting), else the old node of a switch, else none
+    CHECK(cardNodeSource(false, false, false, false, true) == CardNodeSource::Pin);
+    CHECK(cardNodeSource(false, false, /*switching=*/true, true, false) == CardNodeSource::Live);
+    CHECK(cardNodeSource(false, false, false, false, false) == CardNodeSource::None);
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1652,6 +1670,7 @@ int main()
 {
     r20PhysicalLossDuringConnect();
     p5bOfflineObservation();
+    p7CardNeverNamesThePinForALiveSession();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

@@ -1713,6 +1713,29 @@ inline int hintedPoolRow(const QList<NodeDebugRow> &pool, const QString &hintNod
     return -1;
 }
 
+// Which server the home card names (AvpnEngineQml::currentNode). android2 "P7 card after UI kill" (21.11): the UI
+// process restarted while connected with a pinned choice, the adopted session's identity was unknown and the card
+// named the PINNED server (Эстония 3) while the traffic went through another (Германия 1). The pin is the person's
+// choice, never the identity of a running session:
+//  - Live: the live session's node (connected / verifying), or the node the walking attempt tries now;
+//  - Unknown: a live session whose node is not known - the session's own hint (hintedPoolRow / its address,
+//    «Текущий сервер»), never the pin;
+//  - Pin: no live session - the person's choice at once (a tap in the picker shows it while connecting);
+//  - None: nothing to name («Умный выбор сервера»).
+enum class CardNodeSource { None, Live, Unknown, Pin };
+inline CardNodeSource cardNodeSource(bool liveSession, bool walking, bool switching, bool liveIdKnown, bool pinned)
+{
+    if ((liveSession || walking) && liveIdKnown)
+        return CardNodeSource::Live;
+    if (liveSession)
+        return CardNodeSource::Unknown;
+    if (pinned)
+        return CardNodeSource::Pin;
+    if (switching && liveIdKnown)
+        return CardNodeSource::Live;
+    return CardNodeSource::None;
+}
+
 struct DebugSnapshot {
     QString state;                       // фаза машины состояний
     QString currentNodeId;

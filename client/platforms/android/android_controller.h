@@ -4,6 +4,7 @@
 #include <QJniObject>
 #include <QPixmap>
 
+#include <QVariantMap> // AVPN (android2 P7)
 #include <atomic> // AVPN (android2 V2)
 
 #include "core/protocols/vpnProtocol.h"
@@ -95,6 +96,9 @@ signals:
     // the "building" with the same number; `leg` is the engine leg the start config named (tribeStartLeg, 0 = none). The
     // engine's leg is local until its own "built" (AttemptOwner.h "Local build"). Optional native.
     void tunnelBuild(int state, int seq, quint64 leg);
+    // AVPN (android2 P7): the tribeSessionMetadata {node_id, proto, endpoint, ...} of the session the service runs
+    // (empty: none), emitted before the status() / vpnStateChanged() it came with. Optional native.
+    void sessionMetadata(const QVariantMap &metadata);
     void notificationStateChanged();
     void vpnStateChanged(ConnectionState state);
     void statisticsUpdated(quint64 rxBytes, quint64 txBytes);
@@ -146,6 +150,7 @@ private:
     static void onVpnPermissionRejected(JNIEnv *env, jobject thiz);
     static void onVpnPermissionPrompt(JNIEnv *env, jobject thiz, jint state); // AVPN, optional native
     static void onTunnelBuild(JNIEnv *env, jobject thiz, jint state, jint seq, jlong leg); // AVPN, optional native
+    static void onSessionMetadata(JNIEnv *env, jobject thiz, jstring json); // AVPN (android2 P7), optional native
     static void onNotificationStateChanged(JNIEnv *env, jobject thiz);
     static void onVpnStateChanged(JNIEnv *env, jobject thiz, jint stateCode);
     static void onStatisticsUpdate(JNIEnv *env, jobject thiz, jlong rxBytes, jlong txBytes,

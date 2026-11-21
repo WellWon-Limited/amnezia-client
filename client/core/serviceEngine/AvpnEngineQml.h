@@ -1437,6 +1437,7 @@ private:
     // Ревью CL-A r2 (K3/C4): системный диалог «Разрешить VPN» в пути — сторож старта не рвёт коннект.
     bool                        m_permissionPromptPending = false;
     int                         m_tunnelBuildSeq = -1; // Android local build: the service's start being built (seq)
+    QVariantMap                 m_serviceSessionMeta;  // Android (android2 P7): the session the VPN service runs (STATUS)
     // K3: после liveSessionFound ждём реальный статус профиля ограниченно (без вечного m_busy);
     // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
     bool                        m_liveSessionPending = false;

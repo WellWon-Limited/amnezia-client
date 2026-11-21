@@ -24,6 +24,9 @@ object QtAndroidController {
     // (1) or ended it without a tunnel (2); `leg` = the engine leg the start config named (0 = none). Registered by
     // AndroidController::initialize as an optional native "(IIJ)V".
     external fun onTunnelBuild(state: Int, seq: Int, leg: Long)
+    // AVPN (android2 P7): the tribeSessionMetadata JSON of the session the service runs ("" = none), before the STATUS /
+    // STATUS_CHANGED state it came with. Registered by AndroidController::initialize as an optional native.
+    external fun onSessionMetadata(json: String)
     external fun onNotificationStateChanged()
     external fun onVpnStateChanged(stateCode: Int)
     external fun onStatisticsUpdate(rxBytes: Long, txBytes: Long, lastHandshakeSec: Long) // AVPN: + handshake

@@ -105,6 +105,16 @@ class AmneziaActivity : QtActivity() {
     private var openFileDeliveryScheduled = false
 
 
+    // AVPN (android2 P7): the identity of the session the service runs, to C++ BEFORE the state it comes with (the
+    // adoption of a live tunnel reads it). Guarded like the other optional natives.
+    private fun handSessionMetadata(data: Bundle) {
+        try {
+            QtAndroidController.onSessionMetadata(data.getString(MSG_SESSION_METADATA) ?: "")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w(TAG, "No native onSessionMetadata: $e")
+        }
+    }
+
     private val vpnServiceEventHandler: Handler by lazy(NONE) {
         object : Handler(Looper.getMainLooper()) {
             override fun handleMessage(msg: Message) {
@@ -112,6 +122,7 @@ class AmneziaActivity : QtActivity() {
                 Log.d(TAG, "Handle event: $event")
                 when (event) {
                     ServiceEvent.STATUS_CHANGED -> {
+                        msg.data?.let(::handSessionMetadata)
                         msg.data?.getStatus()?.let { (state) ->
                             Log.d(TAG, "Handle protocol state: $state")
                             QtAndroidController.onVpnStateChanged(state.ordinal)
@@ -121,6 +132,7 @@ class AmneziaActivity : QtActivity() {
                     ServiceEvent.STATUS -> {
                         if (isWaitingStatus) {
                             isWaitingStatus = false
+                            msg.data?.let(::handSessionMetadata)
                             msg.data?.getStatus()?.let { QtAndroidController.onStatus(it) }
                         }
                     }

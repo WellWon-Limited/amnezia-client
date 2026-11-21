@@ -1593,6 +1593,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     //  - факт Disconnected, мы «connected» -> честный Disconnected (туннель погас, пока были в фоне);
     //  - состояния согласованы -> НИЧЕГО (никаких пере-проб/вспышек при обычном возврате из фона).
     // Промежуточные снапшоты (Connecting/...) не трогаем -- терминал прилетит обычным путём.
+    // android2 P7 (21.11): the service returns the tribeSessionMetadata of the session it runs with every STATUS (before
+    // it); the adoption names that session's node like iOS does (restoreSessionMetadata -> adoptTunnelConnected with
+    // node_id / proto / endpoint). Without it the identity was unknown and the card named the pinned server.
+    connect(AndroidController::instance(), &AndroidController::sessionMetadata, this,
+            [this](const QVariantMap &metadata) { m_serviceSessionMeta = metadata; }, Qt::QueuedConnection);
     connect(AndroidController::instance(), &AndroidController::status, this,
             [this](AndroidController::ConnectionState st) {
                 const bool thinkConnected = (state() == QLatin1String("connected"));
@@ -1600,7 +1605,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     m_wantConnected = true;
                     syncIntent(); // I7
                     m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild()); // android2 V2: its failover legs
-                    m_engine.adoptTunnelConnected();
+                    m_engine.adoptTunnelConnected(m_serviceSessionMeta.value(QStringLiteral("node_id")).toString(),
+                                                  m_serviceSessionMeta.value(QStringLiteral("proto")).toString(),
+                                                  m_serviceSessionMeta.value(QStringLiteral("endpoint")).toString());
+                    reliabilityEvent(QStringLiteral("adopt_android node=%1 session_node=%2")
+                                         .arg(m_engine.currentNodeId().isEmpty() ? QStringLiteral("-") : m_engine.currentNodeId(),
+                                              m_serviceSessionMeta.value(QStringLiteral("node_id")).toString().isEmpty()
+                                                  ? QStringLiteral("-")
+                                                  : m_serviceSessionMeta.value(QStringLiteral("node_id")).toString()));
                     onConnectionStateChanged(Vpn::Connected);
                 } else if (st == AndroidController::ConnectionState::DISCONNECTED && thinkConnected) {
                     onConnectionStateChanged(Vpn::Disconnected);
@@ -2866,15 +2878,17 @@ QVariantMap AvpnEngineQml::currentNode() const
     QString showId;
     // AVPN awg31-xray-v1: в verifying туннель поднят на реальной ноде — показываем её (как connected).
     // R4 (device round 4): while the owner walks, the card shows the server being tried now (the choice stays in
-    // «Вы выбрали: …»), not the chosen one.
-    if ((connectedNow || s.state == QLatin1String("verifying")
-         || (m_engine.attemptRunning() && (s.state == QLatin1String("connecting") || s.state == QLatin1String("switching"))))
-        && !s.currentNodeId.isEmpty())
+    // «Вы выбрали: …»), not the chosen one. android2 P7: a live session of unknown identity is never shown as the pin
+    // (DebugSnapshot.h cardNodeSource).
+    const bool liveSession = connectedNow || s.state == QLatin1String("verifying");
+    const CardNodeSource source = cardNodeSource(
+        liveSession,
+        m_engine.attemptRunning() && (s.state == QLatin1String("connecting") || s.state == QLatin1String("switching")),
+        s.state == QLatin1String("switching"), !s.currentNodeId.isEmpty(), !pinned.isEmpty());
+    if (source == CardNodeSource::Live)
         showId = s.currentNodeId;
-    else if (!pinned.isEmpty())
+    else if (source == CardNodeSource::Pin)
         showId = pinned;
-    else if (s.state == QLatin1String("switching") && !s.currentNodeId.isEmpty())
-        showId = s.currentNodeId;
     const NodeDebugRow *pick = nullptr;
     if (!showId.isEmpty()) {
         for (const NodeDebugRow &r : s.pool)
@@ -2885,7 +2899,7 @@ QVariantMap AvpnEngineQml::currentNode() const
     // сервера» при работающем VPN. Показываем честный факт из подсказки сессии: ноду пула с тем же
     // id или хостом, иначе сам адрес. Identity движка (health/failover) это не меняет.
     QString hintOnlyEndpoint;
-    if (!pick && (connectedNow || s.state == QLatin1String("verifying")) && s.currentNodeId.isEmpty()) {
+    if (source == CardNodeSource::Unknown) {
         const ServiceEngine::SessionHint hint = m_engine.sessionHint();
         const int row = hintedPoolRow(s.pool, hint.nodeId, hint.endpoint);
         if (row >= 0)
@@ -2893,7 +2907,10 @@ QVariantMap AvpnEngineQml::currentNode() const
         else
             hintOnlyEndpoint = hint.endpoint;
     }
-    const bool hintOnly = !pick && !hintOnlyEndpoint.isEmpty();
+    // android2 P7: with a pin and no hint at all the card still says «Текущий сервер», not «Умный выбор сервера» (that
+    // names Auto, which the person did not choose); in Auto the old look stays.
+    const bool unknownLive = source == CardNodeSource::Unknown && !pick;
+    const bool hintOnly = !pick && (!hintOnlyEndpoint.isEmpty() || (unknownLive && !pinned.isEmpty()));
     // Owner test of 5.1.102: a listener without a label shows its location's label (the AWG
     // sibling), else the country name - never the region code (NodeRanking.h::pickerDisplay).
     QString pickName;
@@ -2979,7 +2996,8 @@ QVariantMap AvpnEngineQml::currentNode() const
             break;
         }
     }
-    bool choiceShown = choiceId.isEmpty();
+    // an unknown live server is not "another one than the choice": no «… в этой сети не отвечает» about the choice
+    bool choiceShown = choiceId.isEmpty() || unknownLive;
     if (!choiceShown && pick) {
         if (!choice.pathIds.isEmpty())
             choiceShown = choice.pathIds.contains(pick->nodeId); // an exact path or the preferred server's transports

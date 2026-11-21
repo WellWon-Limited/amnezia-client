@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
 import android.net.VpnService
+import android.os.Bundle
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -58,6 +59,7 @@ import org.amnezia.vpn.protocol.xray.Xray
 import org.amnezia.vpn.util.LoadLibraryException
 import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.Prefs
+import org.amnezia.vpn.util.TribeSession
 import org.amnezia.vpn.util.TribeStart
 import org.amnezia.vpn.util.net.NetworkState
 import org.amnezia.vpn.util.net.TrafficStats
@@ -190,6 +192,7 @@ open class AmneziaVpnService : VpnService() {
                             clientMessenger.send {
                                 ServiceEvent.STATUS.packToMessage {
                                     putStatus(this@AmneziaVpnService.protocolState.value)
+                                    putSessionMetadata()
                                 }
                             }
                             // AVPN (android-ipc-contract.md section 3 rule 3): a recreated activity learns the
@@ -423,6 +426,7 @@ open class AmneziaVpnService : VpnService() {
                 clientMessengers.send {
                     ServiceEvent.STATUS_CHANGED.packToMessage {
                         putStatus(protocolState)
+                        putSessionMetadata()
                     }
                 }
 
@@ -600,6 +604,13 @@ open class AmneziaVpnService : VpnService() {
     // a start that ends without a tunnel is TUNNEL_NOT_STARTED, never "built".
     private var buildSeq = 0
     private var buildingSeq = 0 // the start being built now (0: none)
+    // android2 P7 (21.11): the tribeSessionMetadata of the start this service launched last - the session it runs (or
+    // brings up), returned with STATUS / STATUS_CHANGED so a UI process that comes back knows the live session's node.
+    private var sessionMetadata: String? = null
+
+    private fun Bundle.putSessionMetadata() {
+        sessionMetadata?.let { putString(MSG_SESSION_METADATA, it) }
+    }
     private var buildingLeg = 0L // its engine leg
 
     private fun tunnelBuildMessage(state: Int, seq: Int, leg: Long) =
@@ -678,6 +689,7 @@ open class AmneziaVpnService : VpnService() {
         }
 
         val prepared = SystemClock.elapsedRealtime()
+        sessionMetadata = TribeSession.metadataOf(config) // the session this start brings up (android2 P7)
         connectionJob = connectionScope.launch {
             var started = false
             var startAt = prepared

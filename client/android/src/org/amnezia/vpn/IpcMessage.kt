@@ -74,6 +74,10 @@ const val MSG_SCAN_STATE = "SCAN_STATE"
 const val MSG_TUNNEL_BUILD_STATE = "TUNNEL_BUILD_STATE"
 const val MSG_TUNNEL_BUILD_SEQ = "TUNNEL_BUILD_SEQ"
 const val MSG_TUNNEL_BUILD_LEG = "TUNNEL_BUILD_LEG"
+
+// AVPN (android2 P7): STATUS / STATUS_CHANGED carry the tribeSessionMetadata of the session the service runs (JSON,
+// absent when it has none); the activity hands it to C++ before the state (QtAndroidController.onSessionMetadata).
+const val MSG_SESSION_METADATA = "SESSION_METADATA"
 const val TUNNEL_BUILDING = TribeStart.BUILDING
 const val TUNNEL_BUILT = TribeStart.BUILT
 const val TUNNEL_NOT_STARTED = TribeStart.NOT_STARTED
