@@ -557,6 +557,21 @@ inline FailedAttemptIntent failedAttemptIntent(bool serversWereJudged, bool upli
     return afterLiveLoss ? FailedAttemptIntent::DropAndResume : FailedAttemptIntent::Drop;
 }
 
+// The start was refused (guardedStart: connect() returned false). Who decides what happens to the request: when the
+// start ended in a terminal result of its own attempt and syncAttempt judged that result (failedAttemptIntent - keep
+// and wait for the uplink, or drop with the result's own text), the result does; the refusal adds nothing - no second
+// intent-off, no second error text. Only a refusal that no judged result explains (no tunnel adapter, no subscription
+// and no nodes - the owner was never fed - or a result superseded by a newer intent) is the start's own: the intent is
+// dropped and its error shown. Review F1 (21.11): Connect with no physical network ended NoNetwork at once, the result
+// kept the request («Нет сети — подключимся, когда она появится») and the start dropped it on the next line.
+// endedAttempt: the attempt number of the result the start ended with (0 = none); judgedAttempt: the attempt number of
+// the last result syncAttempt judged for the current intent.
+enum class StartRefusal { JudgedByResult, DropIntent };
+inline StartRefusal startRefusal(quint64 endedAttempt, quint64 judgedAttempt)
+{
+    return endedAttempt != 0 && endedAttempt == judgedAttempt ? StartRefusal::JudgedByResult : StartRefusal::DropIntent;
+}
+
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
 {
     return legStartFailures > 0 || attemptEndedNothingProven;

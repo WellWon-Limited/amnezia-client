@@ -6,6 +6,7 @@
 // the same node first, then without it), refused provider seats, the user's stop, an exact server, a network change,
 // an adopted session judged by its data check, a stop that is never confirmed, and that a user action clears no
 // evidence. Build/run: build_path_integration.sh. QtCore/QtNetwork, no event loop needed.
+#include "../DebugSnapshot.h" // startRefusal, failedAttemptIntent (review F1)
 #include "../ServiceEngine.h"
 #include "../SubscriptionParser.h"
 #include "../TuningStore.h"
@@ -1163,6 +1164,37 @@ int main(int argc, char **argv)
             r.pass(1000);
             CHECK(r.tun.downs == 0 && r.eng.state() == EngineState::Connected && !r.eng.attemptRunning());
         }
+    }
+    // Review F1 (21.11): Connect tapped while the authoritative uplink says "no physical network". The start ends at
+    // once with a result of its own attempt (NoNetwork) - the facade's syncAttempt judges it (Wait: the request kept),
+    // and the start's refusal adds nothing (startRefusal). The uplink returns: the start (after the facade's 1.5 s
+    // rule) connects. Control: a refusal without a result (no tunnel adapter) is the start's own and drops the intent.
+    {
+        path::NetworkObservation home;
+        home.medium = path::NetMedium::Wifi;
+        home.gateway = QStringLiteral("192.168.1.1");
+        home.subnet = QStringLiteral("192.168.1.0/24");
+        Rig r(pool);
+        r.eng.observeNetwork(path::withPhysicalUplink(home, /*authoritative=*/true, /*up=*/false));
+        QString err;
+        CHECK(!r.eng.connect(err) && err == QLatin1String("no_network"));
+        const std::optional<path::AttemptResult> ended = r.eng.takeAttemptResult();
+        CHECK(ended.has_value() && ended->reason == path::FailReason::NoNetwork && r.tun.ups.isEmpty());
+        // the facade: syncAttempt judges this result (it serves the intent of the tap) and keeps the request
+        const quint64 judged = ended ? ended->attempt : 0;
+        CHECK(failedAttemptIntent(true, /*uplinkUp=*/false, r.eng.attemptAfterLiveLoss()) == FailedAttemptIntent::Wait);
+        CHECK(startRefusal(ended ? ended->attempt : 0, judged) == StartRefusal::JudgedByResult); // the intent stays
+        // the uplink returns; the facade's reconcile (1.5 s later) starts again
+        r.eng.observeNetwork(path::withPhysicalUplink(home, true, true));
+        r.now += 1500;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        r.up();
+        CHECK(r.eng.verifySucceeded(300));
+        CHECK(r.result().connected);
+
+        ServiceEngine bare; // no tunnel adapter: refused before any attempt - no result to judge
+        CHECK(!bare.connect(err) && !bare.takeAttemptResult().has_value());
+        CHECK(startRefusal(0, judged) == StartRefusal::DropIntent);
     }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;

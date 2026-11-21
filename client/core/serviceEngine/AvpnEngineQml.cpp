@@ -3568,6 +3568,7 @@ bool AvpnEngineQml::syncAttempt()
     const std::optional<avpn::path::AttemptResult> current = resultIsCurrent ? result : std::optional<avpn::path::AttemptResult>();
     if (const std::optional<avpn::path::AttemptResult> &r = current) {
         changedAny = true;
+        m_judgedAttempt = r->attempt; // this result decides the request (a start that ended with it adds nothing)
         if (m_exactReq.active() && r->reason != avpn::path::FailReason::StoppedByUser)
             endExactRowRequest(r->connected);
         if (!r->connected && r->reason != avpn::path::FailReason::StoppedByUser)
@@ -6883,16 +6884,28 @@ void AvpnEngineQml::guardedStart()
     // застекало второй loop.exec(). QScopedValueRollback гарантирует сброс даже при исключении.
     syncStandbyCandidates(); // upstream nodes: pack candidates against the pool in force (pure, no I/O)
     bool ok;
+    bool connectCalled; // review F1: only a connect() that ran can have ended in its own attempt's result
     {
         QScopedValueRollback<bool> syncGuard(m_inSyncNetCall, true);
         syncIntent(); // I1/I7: the value in force is read and pushed right before the attempt begins
-        ok = (m_engine.hasSubscription() || !m_engine.candidateNodes().isEmpty()) && m_engine.connect(err);
+        connectCalled = m_engine.hasSubscription() || !m_engine.candidateNodes().isEmpty();
+        ok = connectCalled && m_engine.connect(err);
     }
     if (!ok) {
         // Подъём не удался ДО туннеля (терминального колбэка не будет) — снимаем op-in-flight, считаем
         // попытку, показываем ошибку. Авто-ретрай не запускаем; орб станет «Connect».
+        // Review F1: an attempt that ended at once has a result, and syncAttempt judges it (the request kept for the
+        // uplink, or dropped with the result's own text) - that judgement stands (DebugSnapshot.h startRefusal).
         settleOperation("attempt_not_started");
+        const std::optional<avpn::path::AttemptResult> &ended = m_engine.pendingAttemptResult();
+        const quint64 endedAttempt = connectCalled && ended ? ended->attempt : 0;
         syncAttempt(); // the attempt's journal lines and its result (ended at once)
+        if (startRefusal(endedAttempt, m_judgedAttempt) == StartRefusal::JudgedByResult) {
+            reliabilityEvent(QStringLiteral("attempt_not_started judged_by_result attempt=%1 err=%2 want=%3")
+                                 .arg(endedAttempt).arg(err).arg(int(m_wantConnected)));
+            emit changed();
+            return;
+        }
         m_wantConnected = false;
         reliabilityEvent(QStringLiteral("intent_off why=attempt_not_started err=%1").arg(err));
         emit error(humanEngineError(err)); // AVPN awg31-xray-v1: no_transport/unsupported_proto → человеческий текст

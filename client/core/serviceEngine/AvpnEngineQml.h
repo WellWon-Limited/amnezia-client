@@ -1438,6 +1438,7 @@ private:
     bool                        m_permissionPromptPending = false;
     int                         m_tunnelBuildSeq = -1; // Android local build: the service's start being built (seq)
     QVariantMap                 m_serviceSessionMeta;  // Android (android2 P7): the session the VPN service runs (STATUS)
+    quint64                     m_judgedAttempt = 0;   // the attempt whose result syncAttempt judged last (startRefusal)
     // K3: после liveSessionFound ждём реальный статус профиля ограниченно (без вечного m_busy);
     // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
     bool                        m_liveSessionPending = false;

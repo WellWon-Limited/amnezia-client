@@ -1273,6 +1273,23 @@ static void p7CardNeverNamesThePinForALiveSession()
     CHECK(cardNodeSource(false, false, false, false, false) == CardNodeSource::None);
 }
 
+// Review F1 of the android2 lane (21.11): Connect tapped with no physical network. The observation is offline, the
+// attempt ends at once inside the start with NoNetwork; syncAttempt judges that result (failedAttemptIntent: keep the
+// request and wait for the uplink, «Нет сети — подключимся, когда она появится») - and guardedStart dropped the intent
+// right after it, so the uplink's return started nothing. The start's refusal adds nothing to a result already judged.
+static void f1StartRefusalJudgedByItsResult()
+{
+    // the start ended in a result of THIS attempt that syncAttempt judged: the result decides (intent, text)
+    CHECK(startRefusal(/*endedAttempt=*/7, /*judgedAttempt=*/7) == StartRefusal::JudgedByResult);
+    // the judged result kept the request: the uplink's return is what starts it
+    CHECK(failedAttemptIntent(/*serversWereJudged=*/true, /*uplinkUp=*/false, false) == FailedAttemptIntent::Wait);
+    // a refusal no result explains (no tunnel adapter, no subscription and no nodes: connect() never fed the owner)
+    CHECK(startRefusal(0, 0) == StartRefusal::DropIntent);
+    CHECK(startRefusal(0, 6) == StartRefusal::DropIntent); // an earlier attempt's judgement is not this start's
+    // a result syncAttempt did not judge (superseded by a newer intent): the start's own rule
+    CHECK(startRefusal(7, 6) == StartRefusal::DropIntent);
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1671,6 +1688,7 @@ int main()
     r20PhysicalLossDuringConnect();
     p5bOfflineObservation();
     p7CardNeverNamesThePinForALiveSession();
+    f1StartRefusalJudgedByItsResult();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

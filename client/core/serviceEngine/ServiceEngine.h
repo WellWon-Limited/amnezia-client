@@ -304,6 +304,8 @@ public:
     // The data check deadline of a leg (the facade's checks finish inside it).
     int dataCheckMs() const { return m_owner.timings().dataCheckMs; }
     std::optional<path::AttemptResult> takeAttemptResult() { return std::exchange(m_lastResult, std::nullopt); }
+    // The result waiting to be taken, without taking it (review F1: the start that ended at once names its attempt).
+    const std::optional<path::AttemptResult> &pendingAttemptResult() const { return m_lastResult; }
     QStringList takeAttemptJournal() { return std::exchange(m_attemptJournal, QStringList()); }
     // Legs whose tunnel never came up (no handshake / no connect within the start deadline) since the last call -
     // the white-list detector's "the connect did not come up" input (DebugSnapshot.h::whitelistTriggerFromAttempt).
