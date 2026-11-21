@@ -1290,6 +1290,35 @@ static void f1StartRefusalJudgedByItsResult()
     CHECK(startRefusal(7, 6) == StartRefusal::DropIntent);
 }
 
+// Review F2 (21.11): after an offline observation (empty key) the network returned as a kind the app cannot name
+// (Bluetooth tethering: authoritative uplink up, medium Unknown). "Unknown is not a network change" kept the EMPTY key
+// and every start ended NoNetwork until the app restarted. Unknown keeps the last KNOWN network; with none it is the
+// usable placeholder "unknown".
+static void f2UnknownAfterOffline()
+{
+    using namespace avpn::path;
+    NetworkObservation wifi;
+    wifi.medium = NetMedium::Wifi;
+    wifi.gateway = QStringLiteral("gw-a");
+    wifi.subnet = QStringLiteral("192.168.1.0/24");
+    const NetworkObservation unknown; // medium Unknown
+    NetworkTracker t;
+    CHECK(t.observe(withPhysicalUplink(wifi, true, true)));
+    const QString wifiKey = t.current().local;
+    CHECK(t.observe(withPhysicalUplink(wifi, /*authoritative=*/true, /*up=*/false)) && !t.current().usable());
+    const quint64 offlineGen = t.current().generation;
+    // the uplink is back, its kind unknown: a usable network, a new generation
+    CHECK(t.observe(withPhysicalUplink(unknown, true, true)));
+    CHECK(t.current().usable() && t.current().local == QLatin1String("unknown") && t.current().generation == offlineGen + 1);
+    CHECK(!t.observe(withPhysicalUplink(unknown, true, true))); // a repeated unknown changes nothing
+    // the real kind becomes known: its own key, one more change
+    CHECK(t.observe(withPhysicalUplink(wifi, true, true)) && t.current().local == wifiKey
+          && t.current().generation == offlineGen + 2);
+    // Unknown with a known network (iOS under any VPN, the uplink up): the network is kept, no change - as before
+    CHECK(!t.observe(withPhysicalUplink(unknown, true, true)) && t.current().local == wifiKey);
+    CHECK(!t.observe(withPhysicalUplink(unknown, /*authoritative=*/false, false)) && t.current().local == wifiKey);
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1689,6 +1718,7 @@ int main()
     p5bOfflineObservation();
     p7CardNeverNamesThePinForALiveSession();
     f1StartRefusalJudgedByItsResult();
+    f2UnknownAfterOffline();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

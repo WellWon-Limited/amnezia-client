@@ -19,8 +19,9 @@
 //  - cellular: "cell:<MCC-MNC>:<generation>" (design §3: operator and radio generation), "-" for an unknown part;
 //  - offline: empty local key - nothing is read or written, an attempt cannot run;
 //  - Unknown medium is NOT a network change: iOS reports it while any VPN is up (the "net" flip of the 17.11
-//    journal, SELECTION-MAP §2.4), so it keeps the current key and generation; as the FIRST observation it
-//    starts one usable network "unknown" (a platform that cannot tell the medium still connects);
+//    journal, SELECTION-MAP §2.4), so it keeps the current key and generation; as the FIRST observation, or after
+//    an offline (empty) key, it starts one usable network "unknown" (a platform that cannot tell the medium still
+//    connects);
 //  - coarse key: "<medium>:asn:<N>" when the ASN is known (the Scanner's format), else "cellular:<MCC-MNC>"
 //    for cellular, else empty. Learning the ASN later on the same local key is not a network change.
 #pragma once
@@ -123,10 +124,15 @@ public:
     bool observe(const NetworkObservation &o)
     {
         if (o.medium == NetMedium::Unknown) {
-            if (m_started)
+            // Unknown keeps the last KNOWN network. An empty key (offline: the authoritative uplink said "none") is no
+            // network to keep - review F2 (21.11): the uplink returned as a kind the app cannot name (Bluetooth
+            // tethering) and every start ended NoNetwork until the app restarted. Unknown reaches here after an
+            // offline key only with the uplink up (withPhysicalUplink turns an authoritative "down" into Offline,
+            // and only an authoritative source ever empties the key), so it is a network whose kind is unknown.
+            if (m_started && m_key.usable())
                 return false;
-            // nothing known yet and the platform cannot tell: one usable "unknown" network (an attempt can
-            // run; its evidence stays apart from every identified network)
+            // nothing known (yet, or since the uplink came back) and the platform cannot tell: one usable "unknown"
+            // network (an attempt can run; its evidence stays apart from every identified network)
             m_started = true;
             m_key.local = QStringLiteral("unknown");
             m_key.coarse.clear();

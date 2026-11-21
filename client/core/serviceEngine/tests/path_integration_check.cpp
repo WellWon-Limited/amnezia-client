@@ -1196,6 +1196,24 @@ int main(int argc, char **argv)
         CHECK(!bare.connect(err) && !bare.takeAttemptResult().has_value());
         CHECK(startRefusal(0, judged) == StartRefusal::DropIntent);
     }
+    // Review F2 (21.11): offline, then the uplink returns as a kind the app cannot name (Bluetooth tethering). A start
+    // then is not refused with no_network: it runs on the placeholder network "unknown".
+    {
+        path::NetworkObservation home;
+        home.medium = path::NetMedium::Wifi;
+        home.gateway = QStringLiteral("192.168.1.1");
+        home.subnet = QStringLiteral("192.168.1.0/24");
+        Rig r(pool);
+        r.eng.observeNetwork(path::withPhysicalUplink(home, true, false));
+        CHECK(!r.eng.network().usable());
+        r.eng.observeNetwork(path::withPhysicalUplink(path::NetworkObservation{}, /*authoritative=*/true, /*up=*/true));
+        CHECK(r.eng.network().usable() && r.eng.network().local == QLatin1String("unknown"));
+        QString err;
+        CHECK(r.eng.connect(err) && err.isEmpty() && r.last() == QLatin1String("17"));
+        r.up();
+        CHECK(r.eng.verifySucceeded(300));
+        CHECK(r.result().connected);
+    }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
 }
