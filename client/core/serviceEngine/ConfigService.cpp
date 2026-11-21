@@ -523,15 +523,13 @@ void ConfigService::askDirectOnce()
     if (m_pinned || !m_nam || tunnelUp() || !m_sessionEdge.isEmpty())
         return;
     const quint64 gen = generationNow();
-    // A proof is owed (setProofOwedSource): the ask is for the EVENT, so "already asked on this network" and "the fact is known" do
-    // not end it; everything else below (the spacing, one request at a time) bounds it exactly as any ask.
+    // Two reasons to ask. The NETWORK's own ask: this generation has not been asked and its fact is not known. A PROOF
+    // that is owed (setProofOwedSource): the ask is for the EVENT, so "already asked on this network" and "the fact is
+    // known" do not end it. Everything below (the spacing, one request at a time) bounds either exactly the same way.
+    const bool networkOwed = !(m_askedAny && m_askedGen == gen) && directApiReach() == ApiReach::Unknown;
     const bool proofOwed = m_proofOwedFn && m_proofOwedFn();
-    if (!proofOwed) {
-        if (m_askedAny && m_askedGen == gen)
-            return;
-        if (directApiReach() != ApiReach::Unknown)
-            return;
-    }
+    if (!networkOwed && !proofOwed)
+        return;
     const qint64 now = nowMs();
     if (m_lastAskMs >= 0 && now >= m_lastAskMs && now - m_lastAskMs < kAskSpacingMs) {
         // The spacing bounds the rate, it does not cancel the ask this network is owed: one deferred ask when the
@@ -553,14 +551,18 @@ void ConfigService::askDirectOnce()
     m_askedAny = true;
     m_askedGen = gen;
     m_lastAskMs = now;
-    if (proofOwed) {
-        // The same network as before: the walk keeps what it knows (which edge answered, its back-off - a backed-off walk's own next
-        // round is the ask). One config request; the next ask of the proof comes after the spacing, while it is still owed.
+    if (proofOwed)
+        m_askLater.start(int(kAskSpacingMs)); // the next ask of the proof, while it is still owed
+    if (!networkOwed) {
+        // Only the proof, on a network already asked: the walk keeps what it knows (which edge answered, its back-off -
+        // a backed-off walk's own next round is the ask). One config request.
         if (!m_walkPause.isActive())
             fetchConfig();
-        m_askLater.start(int(kAskSpacingMs));
         return;
     }
+    // The network's own ask, whether or not a proof is owed too (review of the seat-debt lane, F1: the proof branch
+    // ran on a NEW network as well and kept "this edge answered" from the old one - a silent edge then got the full
+    // request timeout instead of the quick first try, and a Connect tapped meanwhile went to the dead edge).
     m_edgeAnswered = false;
     m_walkSilent = 0;
     if (!leaveWalkPause())

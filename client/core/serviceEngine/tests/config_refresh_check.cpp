@@ -631,6 +631,40 @@ private slots:
         QTest::qWait(200);
         QCOMPARE(edge.configRequests, 3);
     }
+    // Review of the seat-debt lane (F1): a proof is owed AND the network changed. The ask is then the new network's own
+    // first ask - the walk starts over with the quick first try (the edge that answered on the old network proves
+    // nothing here). The owed-proof branch kept "this edge answered" across the change, so a silent edge got the full
+    // request timeout instead of the quick try and a Connect tapped meanwhile went to the dead edge.
+    void owedProofOnANewNetworkStartsTheWalkOver()
+    {
+        bool silentA = false;
+        ConfigServer edgeA([&silentA](int) { return silentA ? QByteArray() : httpAnswer("200 OK", R"({"features":{}})"); });
+        ConfigServer edgeB([](int) { return httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setEdgeWalkTimingForTest(300, 100, 400);
+        qint64 now = kTestNowMs;
+        quint64 generation = 1;
+        bool owed = false;
+        service.setNowMsForTest([&now] { return now; });
+        service.setNetworkGenerationSource([&generation] { return generation; });
+        service.setProofOwedSource([&owed] { return owed; });
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000); // edge A answered
+        owed = true;       // a failed start left a seat owed
+        now += 30001;      // the spacing has passed
+        generation = 2;    // Wi-Fi -> cellular: edge A is silent there, edge B answers
+        silentA = true;
+        QElapsedTimer t;
+        t.start();
+        service.noteNetworkChanged();
+        QTRY_COMPARE_WITH_TIMEOUT(switched.count(), 1, 3000); // the quick first try, not the 15 s request timeout
+        QVERIFY2(t.elapsed() < 2000, qPrintable(QString::number(t.elapsed())));
+        QCOMPARE(service.activeBaseUrl(), b);
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000);
+    }
     // Final review, F5: the network changes while a request of the previous network is in flight. Its answer cannot speak
     // for the new network; the ask the new network is owed must still be sent (it was marked done with nothing sent).
     void askOwedWhileOldRequestInFlight()
