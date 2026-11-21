@@ -117,6 +117,9 @@ has "$(code "$FACADE")" 'if (r->error() == QNetworkReply::OperationCanceledError
 # Device round 4: R1 the attribution gate before a check failure reaches the ledger; R3 a Scanner row is one request;
 # R5 the button below the orb follows the orb's own stop state; R6 the empty-ledger control file is dev-only.
 has "$(code "$FACADE")" 'const avpn::CheckBlame blame = avpn::checkFailureBlame(' || bad "R1: finishVerify must ask checkFailureBlame"
+has "$(code "$FACADE")" 'm_engine.network().generation == m_verifyNetGen);' \
+    && has "$(code "$FACADE")" 'm_verifyNetGen = m_engine.network().generation;' \
+    || bad "R25: a data check judges the network it began on (the generation at its start reaches checkFailureBlame)"
 has "$(code "$ENGINE/ServiceEngine.cpp")" 'feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(), o));' \
     || bad "R1: a provider start failure must go through startFailureOutcome"
 has "$(code "$FACADE")" 'endExactRowRequest(r->connected);' || bad "R3: the end of a Scanner row's request must restore or demote the choice"

@@ -1090,6 +1090,7 @@ private:
     void restoreChoiceBeforeRow(const avpn::ExactRowRequest &req);
     void endScanRowRequest(const QString &node, const char *why); // S1: the one end of a Scanner row's request
     qint64 m_verifyWallStartMs = 0;  // R1: wall clock at the start of the data check
+    quint64 m_verifyNetGen = 0;      // the network generation at the start of the data check
     qint64 m_verifyRxStart = -1;     // R1: the tunnel's receive counter then (-1 = unknown)       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     // опустить туннель (requestStop+down): op-in-flight + сторож. why — кто гасит (reliability-кольцо,

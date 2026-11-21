@@ -1226,12 +1226,14 @@ static void r20PhysicalLossDuringConnect()
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
-    CHECK(avpn::checkFailureBlame(true, 4500, 4000, true, 100) == CheckBlame::Path);       // no data through the tunnel
-    CHECK(avpn::checkFailureBlame(true, 4500, 4000, false, -1) == CheckBlame::Path);       // no counter: as before
-    CHECK(avpn::checkFailureBlame(false, 4500, 4000, true, 0) == CheckBlame::NoNetwork);   // the network went away
-    CHECK(avpn::checkFailureBlame(true, 13800, 4000, true, 0) == CheckBlame::Suspended);   // 13.8 s after the background
-    CHECK(avpn::checkFailureBlame(true, 6400, 4000, true, 90000) == CheckBlame::ControlPlane); // the tunnel carries data
-    CHECK(avpn::checkFailureBlame(true, 7000, 4000, true, 0) == CheckBlame::Path);         // within the stretch grace
+    CHECK(avpn::checkFailureBlame(true, 4500, 4000, true, 100, true) == CheckBlame::Path);       // no data through the tunnel
+    CHECK(avpn::checkFailureBlame(true, 4500, 4000, false, -1, true) == CheckBlame::Path);       // no counter: as before
+    CHECK(avpn::checkFailureBlame(false, 4500, 4000, true, 0, true) == CheckBlame::NoNetwork);   // the network went away
+    CHECK(avpn::checkFailureBlame(true, 13800, 4000, true, 0, true) == CheckBlame::Suspended);   // 13.8 s after the background
+    CHECK(avpn::checkFailureBlame(true, 6400, 4000, true, 90000, true) == CheckBlame::ControlPlane); // the tunnel carries data
+    CHECK(avpn::checkFailureBlame(true, 7000, 4000, true, 0, true) == CheckBlame::Path);         // within the stretch grace
+    CHECK(avpn::checkFailureBlame(true, 4500, 4000, true, 0, false) == CheckBlame::NetworkChanged); // began on another network
+    CHECK(avpn::checkFailureBlame(false, 4500, 4000, true, 0, false) == CheckBlame::NoNetwork);     // no network outranks it
 }
 
 static void whitelistTriggerFromOwner()
