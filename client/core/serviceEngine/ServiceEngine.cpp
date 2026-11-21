@@ -752,8 +752,11 @@ bool ServiceEngine::recordProbeProof(const QString &nodeId, const QString &sourc
 void ServiceEngine::noteCheckStarved(bool starved)
 {
     m_checkStarved = starved;
-    if (starved) // T1: a starving check of a leg goes when a proven path waits - the race's first proof leads
-        feedOwner(path::AttemptEvent::proofReady(nowMs(), true, m_race.winner()));
+    // T1: a starving check of a leg goes when a path proven by the race of THIS attempt waits. Which paths those are
+    // is the owner's own knowledge (AttemptOwner.h: the proofs it was told in this attempt on this network) - no path
+    // is named here: the race object outlives its tap, and its winner would be an earlier attempt's (round 12).
+    if (starved)
+        feedOwner(path::AttemptEvent::proofReady(nowMs(), true));
 }
 
 void ServiceEngine::startOwnerAfterRace(const char *why, const QString &lead)

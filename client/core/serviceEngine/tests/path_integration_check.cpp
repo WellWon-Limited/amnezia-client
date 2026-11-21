@@ -172,6 +172,15 @@ static bool journalHas(const QStringList &j, const char *needle)
     return false;
 }
 
+// One journal line that has all three.
+static bool journalLineHas(const QStringList &j, const char *a, const char *b, const char *c)
+{
+    for (const QString &l : j)
+        if (l.contains(QLatin1String(a)) && l.contains(QLatin1String(b)) && l.contains(QLatin1String(c)))
+            return true;
+    return false;
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -577,6 +586,84 @@ int main(int argc, char **argv)
         CHECK(t.last() == QLatin1String("16") && t.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
         t.journal << t.eng.takeAttemptJournal();
         CHECK(journalHas(t.journal, "leg_preempted_for_proof node=17 to=16") && journalHas(t.journal, "pick=proof"));
+        // Device round 12 (iPhone Air, Wi-Fi, Auto): a path that carried data here a moment ago leads and the race is
+        // skipped for it. Its check starving is then nobody's proof: "another path works here" in the ledger alone never
+        // ends a leg that is up and being checked. It keeps its whole data check and writes its own outcome, so the next
+        // tap reorders by itself. Before: every tap left the known path 1 s into its check, recorded nothing and repeated.
+        const auto knownLeads = [&err](Rig &k, FakeProber &kp) {
+            CHECK(k.eng.connect(err) && k.last() == QLatin1String("17")); // no probe host yet: one plain start
+            k.up();
+            CHECK(k.eng.verifySucceeded(220));
+            k.result();
+            k.eng.requestStop();
+            k.confirmStop();
+            CHECK(k.eng.recordProbeProof(QStringLiteral("16"), QStringLiteral("test"))); // 16 "works here" by the ledger
+            k.eng.setProber(&kp);
+            k.journal.clear();
+            CHECK(k.eng.connect(err) && k.last() == QLatin1String("17") && !k.eng.raceRunning() && kp.started.isEmpty());
+            k.journal << k.eng.takeAttemptJournal();
+            CHECK(journalHas(k.journal, "race_skipped known=17 fresh"));
+            k.up(); // 17 is up, in its check
+        };
+        {   // no first byte for the whole check: no_data is recorded, 17 is suspect, the next tap does not lead with it
+            Rig k(pool);
+            FakeProber kp;
+            knownLeads(k, kp);
+            const int downs = k.tun.downs;
+            k.pass(1000);
+            k.eng.noteCheckStarved(true); // 1 s without a first byte
+            CHECK(k.tun.downs == downs && k.eng.isVerifying());
+            k.pass(3000);
+            CHECK(k.tun.downs == downs && k.eng.isVerifying()); // the whole data check is its own
+            CHECK(k.eng.verifyFailed(QStringLiteral("whoami no data")) && k.tun.downs == downs + 1);
+            k.confirmStop();
+            CHECK(k.last() == QLatin1String("16") && k.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect"));
+            CHECK(journalLineHas(k.journal, "path_outcome", "node=17", "outcome=no_data")
+                  && !journalHas(k.journal, "leg_preempted_for_proof"));
+            k.up();
+            CHECK(k.eng.verifySucceeded(300) && k.result().connected);
+            k.eng.requestStop();
+            k.confirmStop();
+            CHECK(k.eng.connect(err) && k.last() == QLatin1String("16")); // the second tap: 17 is not the first choice
+        }
+        {   // a first byte at 1.5 s: connected on the known path, data_ok
+            Rig k(pool);
+            FakeProber kp;
+            knownLeads(k, kp);
+            const int downs = k.tun.downs;
+            k.pass(1000);
+            k.eng.noteCheckStarved(true);
+            k.pass(500);
+            k.eng.noteCheckStarved(false); // bytes arrive
+            CHECK(k.tun.downs == downs && k.eng.verifySucceeded(1500));
+            const path::AttemptResult res = k.result();
+            CHECK(res.connected && res.path.id.id == QLatin1String("17") && res.paths == 1);
+            CHECK(journalLineHas(k.journal, "path_outcome", "node=17", "outcome=data_ok")
+                  && !journalHas(k.journal, "leg_preempted_for_proof"));
+        }
+        {   // the winner of an EARLIER tap's race is not a proof of this attempt: it does not end the leg either
+            Rig k(pool);
+            FakeProber kp;
+            k.eng.setProber(&kp);
+            k.eng.setRaceTimingsForTest(atOnce);
+            CHECK(k.eng.connect(err) && k.last() == QLatin1String("17"));
+            k.up();
+            k.pass(500);
+            k.eng.onProbeResult(kp.stampOf("16"), path::PathOutcome::ProbeOk, 1000); // this tap's race proves 16
+            CHECK(k.eng.verifySucceeded(220) && k.result().connected); // 17 carried data: the race ends with the result
+            CHECK(journalHas(k.journal, "race_winner node=16"));
+            k.eng.requestStop();
+            k.confirmStop();
+            k.journal.clear();
+            CHECK(k.eng.connect(err) && k.last() == QLatin1String("17") && !k.eng.raceRunning());
+            k.up();
+            k.pass(1000);
+            const int downs = k.tun.downs;
+            k.eng.noteCheckStarved(true);
+            k.journal << k.eng.takeAttemptJournal();
+            CHECK(journalHas(k.journal, "race_skipped known=17 fresh"));
+            CHECK(k.tun.downs == downs && k.eng.isVerifying() && !journalHas(k.journal, "leg_preempted_for_proof"));
+        }
         // A leg raised blind after the race's wait (its own probe proved nothing) yields to a later proof: nothing
         // recorded, the proven path comes up; a leg already up keeps its check.
         Rig y(pool);

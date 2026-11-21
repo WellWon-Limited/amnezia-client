@@ -676,6 +676,84 @@ static void testOwnerLive()
 // blocked (RU blocks of their exits since 06.11 / 10.11, COMPLAINTS K01). Provider priority: the journal's fresh
 // Xray-mode attempt at 19:59 took 2eec first among the providers (it had the best priority then) -
 // `providerFirst` = that order; false = the pessimistic order of the 20:03 rounds (b1fd, 53a6 before 2eec).
+// --- AttemptOwner: a starving check yields only to a proof of its own attempt (device round 12 of 21.11) ---
+
+static void testOwnerStarved()
+{
+    const NetworkObservation home = wifi("192.168.12.1"), lte = cell("250-02", "lte");
+    const QList<PathCandidate> pool = { awg("17", "EE", false, 2.0), awg("16", "NL") };
+    World w;
+    for (const NetworkObservation &n : { home, lte }) {
+        w.set(key(n), QStringLiteral("17"), Behaviour::works(300, 3000, 1500)); // first byte at 1.5 s: past the 1 s share
+        w.set(key(n), QStringLiteral("16"), Behaviour::works(300, 400, 100));
+    }
+    Sim s(pool, w, home);
+    // Both "work" on both networks by the ledger - 17 carried data, 16 has a probe proof: history, not a proof that waits.
+    for (const NetworkObservation &n : { home, lte }) {
+        s.ledger.record(key(n), pool[0].id, PathOutcome::DataOk, s.wall(), 300, 100);
+        s.ledger.record(key(n), pool[1].id, PathOutcome::ProbeOk, s.wall(), 200);
+    }
+    const auto checking17 = [&s] {
+        return s.owner.phase() == AttemptPhase::Checking && s.owner.currentPath().id.id == QLatin1String("17");
+    };
+    const auto start = [&s, &checking17] {
+        s.deliver(AttemptEvent::userStart(s.now, UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));
+        s.run(checking17, 5000);
+        return checking17();
+    };
+    const auto finish = [&s] {
+        const int before = int(s.results.size());
+        s.run([&s, before] { return s.results.size() > before; }, 20000);
+        return s.results.size() > before ? s.results.last() : AttemptResult{};
+    };
+
+    // 1. No proof in this attempt: the starving leg is not ended - it connects on its own late first byte.
+    CHECK(start());
+    s.deliver(AttemptEvent::proofReady(s.now, true));
+    CHECK(s.yields == 0 && checking17());
+    AttemptResult r = finish();
+    CHECK(r.connected && r.path.id.id == QLatin1String("17") && r.paths == 1);
+    stopLive(s);
+
+    // 2. A proof named in this attempt while the leg was not starving: nothing then; the leg connects.
+    CHECK(start());
+    s.deliver(AttemptEvent::proofReady(s.now, false, QStringLiteral("16")));
+    CHECK(s.yields == 0 && checking17());
+    r = finish();
+    CHECK(r.connected && r.path.id.id == QLatin1String("17"));
+    stopLive(s);
+    //    The NEXT attempt: that proof was the earlier attempt's. 16 still "works" by the ledger and is in the order,
+    //    yet the starving leg is not ended.
+    CHECK(start());
+    s.deliver(AttemptEvent::proofReady(s.now, true));
+    CHECK(s.yields == 0 && checking17());
+    r = finish();
+    CHECK(r.connected && r.path.id.id == QLatin1String("17") && r.paths == 1);
+    stopLive(s);
+
+    // 3. A proof of the old network says nothing about the new one: named on Wi-Fi, the leg restarted on cellular starves.
+    CHECK(start());
+    s.deliver(AttemptEvent::proofReady(s.now, false, QStringLiteral("16")));
+    s.changeNetworkAt(s.now, lte);
+    s.run([&s, &checking17] { return s.legs.size() >= 5 && checking17(); }, 5000);
+    CHECK(s.legs.size() == 5 && s.legs.last().network == key(lte) && checking17());
+    s.deliver(AttemptEvent::proofReady(s.now, true));
+    CHECK(s.yields == 0 && checking17());
+    r = finish();
+    CHECK(r.connected && r.path.id.id == QLatin1String("17"));
+    stopLive(s);
+
+    // 4. A proof of THIS attempt on this network, then the check starves: the leg yields to it (nothing recorded) and
+    //    the next leg is that path - whichever came first, the proof or the starving.
+    CHECK(start());
+    s.deliver(AttemptEvent::proofReady(s.now, false, QStringLiteral("16")));
+    const int reports = int(s.reports.size());
+    s.deliver(AttemptEvent::proofReady(s.now, true));
+    CHECK(s.yields == 1 && s.reports.size() == reports && s.owner.phase() == AttemptPhase::Stopping);
+    r = finish();
+    CHECK(r.connected && r.path.id.id == QLatin1String("16") && r.paths == 2);
+}
+
 static QList<PathCandidate> pool1711(bool providerFirst = true)
 {
     const int p2eec = providerFirst ? 0 : 2, pb1fd = providerFirst ? 1 : 0, p53a6 = providerFirst ? 2 : 1;
@@ -2428,6 +2506,7 @@ int main()
     testSpeedOrder();
     testOwnerStale();
     testOwnerLive();
+    testOwnerStarved();
     scenarioHomeWifi();
     scenarioClean();
     scenarioWhitelist();
