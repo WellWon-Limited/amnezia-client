@@ -60,6 +60,24 @@ inline QString shortHash(const QString &s)
 inline QString orDash(const QString &s) { return s.trimmed().isEmpty() ? QStringLiteral("-") : s.trimmed(); }
 } // namespace detail
 
+// The physical uplink is part of the observation (android2 P5b, 21.11: Wi-Fi off during connecting, the medium was
+// still read as Wi-Fi with no subnet - "wifi:-", a usable key - and the attempt walked four servers with no network,
+// recording "no handshake" against three of them). When the platform's uplink source is AUTHORITATIVE (it sees only
+// the physical networks: UplinkMonitor::authoritative() - Android's NOT_VPN set, the macOS route-table monitor) and
+// says there is none, the device is offline whatever the medium pick says: the empty key (not usable). The attempt
+// owner then stops the leg in flight unrecorded and ends with NoNetwork; the facade keeps the request and starts again
+// when the uplink returns. A source that is NOT authoritative (QNetworkInformation: iOS, Windows, Linux, the macOS
+// Network Extension build) is never taken for "offline": it watches the default network, which is our own tunnel
+// while it exists, and reads every teardown of it as a loss (emulator round, D2) - its observation stays as it was.
+inline NetworkObservation withPhysicalUplink(const NetworkObservation &o, bool uplinkAuthoritative, bool uplinkUp)
+{
+    if (!uplinkAuthoritative || uplinkUp)
+        return o;
+    NetworkObservation offline;
+    offline.medium = NetMedium::Offline;
+    return offline;
+}
+
 inline QString localNetworkKey(const NetworkObservation &o)
 {
     switch (o.medium) {

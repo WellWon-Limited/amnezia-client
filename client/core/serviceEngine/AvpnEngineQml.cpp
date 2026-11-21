@@ -1846,6 +1846,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // (попытки старта без сети не считаются) — поднимаем туннель через 1,5 с (DHCP/DNS доседают).
     connect(avpn::UplinkMonitor::instance(), &avpn::UplinkMonitor::changed, this, [this](bool up) {
         reliabilityEvent(QStringLiteral("uplink %1").arg(up ? QStringLiteral("up") : QStringLiteral("down")));
+        // android2 P5b: the observation (scanNotifyNetwork, connected before this handler) may have ended the attempt
+        // with NoNetwork - its result is taken now, while the uplink is as this event says (Wait, not Drop). Only an
+        // authoritative source makes the observation offline (NetworkKey.h withPhysicalUplink): elsewhere (iOS,
+        // Windows, the NE build) nothing changes here.
+        if (avpn::UplinkMonitor::instance()->authoritative())
+            syncAttempt();
         if (!up || !m_wantConnected || !m_waitUplink)
             return;
         // F1: the pending look stays through the 1.5 s the network needs to settle: busy replaces "waiting", so the
@@ -3670,7 +3676,10 @@ avpn::path::NetworkObservation AvpnEngineQml::currentNetworkObservation() const
     o.subnet = physicalSubnet(kind);
     o.carrier = avpn::carrierCode();
     o.radio = avpn::cellularGenerationForKind(kind, avpn::cellularGeneration());
-    return o;
+    // android2 P5b: the authoritative physical uplink decides "offline" (NetworkKey.h withPhysicalUplink); the down
+    // event itself reaches the engine through scanNotifyNetwork (UplinkMonitor::changed).
+    const avpn::UplinkMonitor *uplink = avpn::UplinkMonitor::instance();
+    return avpn::path::withPhysicalUplink(o, uplink->authoritative(), uplink->up());
 }
 
 void AvpnEngineQml::persistPin()

@@ -1038,6 +1038,73 @@ int main(int argc, char **argv)
         plain.pass(4500);
         CHECK(plain.tun.downs == 1 && plain.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect"));
     }
+    // android2 P5b (21.11): Wi-Fi off during connecting. The facade's observation carries the authoritative uplink
+    // (NetworkKey.h withPhysicalUplink, AvpnEngineQml::currentNetworkObservation): the medium pick still said Wi-Fi
+    // with no fingerprint, the uplink said "no physical network". The leg in flight is stopped unrecorded, the attempt
+    // ends NoNetwork once (the facade then waits for the uplink), and no further leg is raised without a network.
+    {
+        path::NetworkObservation pickedWifi; // what the medium pick gave the moment Wi-Fi went off
+        pickedWifi.medium = path::NetMedium::Wifi;
+        path::NetworkObservation home;
+        home.medium = path::NetMedium::Wifi;
+        home.gateway = QStringLiteral("192.168.1.1");
+        home.subnet = QStringLiteral("192.168.1.0/24");
+        path::NetworkObservation cell;
+        cell.medium = path::NetMedium::Cellular;
+        cell.carrier = QStringLiteral("250-01");
+        cell.radio = QStringLiteral("lte");
+        {
+            Rig r(pool);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            r.pass(500);
+            r.eng.observeNetwork(path::withPhysicalUplink(pickedWifi, /*authoritative=*/true, /*up=*/false));
+            CHECK(!r.eng.network().usable());
+            CHECK(r.tun.downs == 1); // the leg in flight goes down at once
+            r.confirmStop();
+            const path::AttemptResult res = r.result();
+            CHECK(!res.connected && res.reason == path::FailReason::NoNetwork && res.paths == 1);
+            r.pass(20000);
+            CHECK(r.tun.ups.size() == 1 && !r.eng.attemptRunning()); // no server walked without a network
+            CHECK(!journalHas(r.journal, "path_outcome")); // nothing written against any server
+            // the uplink returns: the network is usable again and the next start (the facade's reconcile) connects
+            r.eng.observeNetwork(path::withPhysicalUplink(home, true, true));
+            CHECK(r.eng.network().usable());
+            CHECK(r.eng.connect(err) && r.tun.ups.size() == 2);
+        }
+        {   // a gap shorter than the stop (a Wi-Fi -> cellular handover with an empty physical set for 300 ms): the
+            // attempt goes on on the new network - no NoNetwork result, the next leg starts after the stop
+            Rig r(pool);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            r.pass(500);
+            r.eng.observeNetwork(path::withPhysicalUplink(pickedWifi, true, false));
+            r.now += 300;
+            r.eng.observeNetwork(path::withPhysicalUplink(cell, true, true));
+            CHECK(r.eng.network().usable() && r.eng.attemptRunning());
+            r.confirmStop();
+            CHECK(r.tun.ups.size() == 2 && r.eng.attemptRunning());
+            CHECK(!r.eng.takeAttemptResult().has_value());
+            r.up();
+            CHECK(r.eng.verifySucceeded(300));
+            const path::AttemptResult res = r.result();
+            CHECK(res.connected && !journalHas(r.journal, "no_handshake"));
+        }
+        {   // a LIVE session is not ended by a down (the service's own reconnect handles it - android2 P5a passed)
+            Rig r(pool);
+            QString err;
+            CHECK(r.eng.connect(err));
+            r.up();
+            CHECK(r.eng.verifySucceeded(300));
+            CHECK(r.result().connected);
+            r.eng.observeNetwork(path::withPhysicalUplink(pickedWifi, true, false));
+            r.pass(25000);
+            CHECK(r.tun.downs == 0 && r.tun.ups.size() == 1 && r.eng.state() == EngineState::Connected);
+            r.eng.observeNetwork(path::withPhysicalUplink(home, true, true));
+            r.pass(1000);
+            CHECK(r.tun.downs == 0 && r.eng.state() == EngineState::Connected && !r.eng.attemptRunning());
+        }
+    }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
 }

@@ -1223,6 +1223,38 @@ static void r20PhysicalLossDuringConnect()
     CHECK(afterFailure(false, false, false) == FailedAttemptIntent::Drop);
 }
 
+// android2 P5b (21.11): Wi-Fi off during connecting. The medium pick still said Wi-Fi with no subnet ("wifi:-", a usable
+// key) and the attempt walked four servers without a network. The observation now carries the authoritative uplink.
+static void p5bOfflineObservation()
+{
+    using namespace avpn::path;
+    NetworkObservation wifi;
+    wifi.medium = NetMedium::Wifi;
+    wifi.gateway = QStringLiteral("gw-a");
+    wifi.subnet = QStringLiteral("192.168.1.0/24");
+    NetworkObservation wifiNoFingerprint; // what the pick gave on the phone the moment Wi-Fi went off
+    wifiNoFingerprint.medium = NetMedium::Wifi;
+
+    // authoritative source, physical set empty: offline (empty key), whatever the medium pick says
+    CHECK(localNetworkKey(withPhysicalUplink(wifiNoFingerprint, /*authoritative=*/true, /*up=*/false)).isEmpty());
+    CHECK(withPhysicalUplink(wifi, true, false).medium == NetMedium::Offline);
+    CHECK(withPhysicalUplink(wifi, true, false).gateway.isEmpty());
+    // authoritative and up: the observation as the platform read it
+    CHECK(localNetworkKey(withPhysicalUplink(wifi, true, true)) == localNetworkKey(wifi));
+    // the fallback (QNetworkInformation: iOS, Windows, the NE build) says down on every own-tunnel teardown (D2):
+    // never "offline" from it - the observation is unchanged
+    CHECK(localNetworkKey(withPhysicalUplink(wifiNoFingerprint, /*authoritative=*/false, false)) == QLatin1String("wifi:-"));
+    CHECK(localNetworkKey(withPhysicalUplink(wifi, false, false)) == localNetworkKey(wifi));
+
+    // through the generation owner: Wi-Fi -> down -> the same Wi-Fi back = two network changes, the middle one unusable
+    NetworkTracker t;
+    CHECK(t.observe(withPhysicalUplink(wifi, true, true)) && t.current().usable());
+    const quint64 g = t.current().generation;
+    CHECK(t.observe(withPhysicalUplink(wifiNoFingerprint, true, false)) && !t.current().usable());
+    CHECK(!t.observe(withPhysicalUplink(wifiNoFingerprint, true, false))); // a repeated down changes nothing
+    CHECK(t.observe(withPhysicalUplink(wifi, true, true)) && t.current().usable() && t.current().generation == g + 2);
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1619,6 +1651,7 @@ static void nodeFigureOneRule()
 int main()
 {
     r20PhysicalLossDuringConnect();
+    p5bOfflineObservation();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();
