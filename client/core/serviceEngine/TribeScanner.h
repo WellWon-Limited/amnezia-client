@@ -100,7 +100,24 @@ struct ScanNetFacts {
     QList<ScanNetSource> appSources;                   // the app process's path monitor element(s)
     QString radio;                                     // cellular radio generation: "5g" | "lte" | "3g" | "2g" | ""
                                                        // (the engine's own network observation; display only)
+    QString localKey;                                  // the PHYSICAL network as the path engine knows it
+                                                       // (path/NetworkKey.h local key; "" = none observed). Local only.
 };
+
+// The network the Scanner keys its cached results by (the input of the weak fingerprint): the physical network the
+// path engine names (its local key - the same network as the path ledger and the network generation), or the
+// reporting key when the host names none. Never the reporting key while a local key exists: that key gains the
+// access ASN later on the same network (a provider seat grant names it; device round 11, iPhone Air 20.11 13:05:
+// a row connect turned "unknown" into "cell:asn:<N>:4g" and the 19 rows just found were gone), so a cache keyed by it
+// changed identity on the person's own connect.
+// The path engine's "unknown" (its constructor's placeholder) is never read with a known kind: the engine tells its
+// tracker the platform network at start-up and before every Scanner notice (DebugSnapshot.h::ScanNetworkNotifier),
+// and the tracker keeps "unknown" only while the platform's medium is unknown - then the Scanner's kind (the same
+// pick, AvpnEngineQml::networkKind) is unknown too, and the network learned later is honestly another identity.
+inline QString scanNetIdentity(const ScanNetFacts &f, const QString &reportingKey)
+{
+    return f.localKey.isEmpty() ? reportingKey : f.localKey;
+}
 
 // The AmneziaWG mini-session input of ONE own AWG node, from the engine (plan awg-probe-plan.md §3): the
 // DEVICE'S OWN key and config for that node, exactly as the live tunnel would get them (AwgConfigBuilder, the
@@ -254,8 +271,10 @@ inline constexpr char kScanCacheStorePrefix[] = "avpn/scanCache/";
 inline constexpr char kScanCacheIndexKey[] = "avpn/scanCacheIndex";
 inline constexpr int kScanCacheMaxNetworks = 8;
 
-// Store key of a network's cached result (network key + weak fingerprint, hashed: nothing readable on disk).
-QString scanCacheStoreKey(const QString &networkKey, const QString &fingerprint);
+// Store key of a network's cached result: its weak fingerprint alone, hashed (nothing readable on disk). Not the
+// reporting key: that key is refined on the same network (scanNetIdentity) and the result must stay found. The
+// "-v2" store forgets the results an earlier build keyed by (reporting key, fingerprint) - they age out of the index.
+QString scanCacheStoreKey(const QString &fingerprint);
 
 class TribeScanner : public QObject
 {

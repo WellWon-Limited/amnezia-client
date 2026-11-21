@@ -4585,16 +4585,19 @@ static void rowsAfter17Nov()
         nf.ms = -1; // no figure: nothing is invented
         c.rows << a << b << nf;
         const int ttl = ScanTunables().cacheWorksTtlS;
-        QHash<QString, int> f = scanListFigures(c, c.networkKey, c.fingerprint, kT0 + 5000, ttl);
+        QHash<QString, int> f = scanListFigures(c, c.fingerprint, kT0 + 5000, ttl);
         CHECK(f.size() == 2 && f.value(a.id) == 44 && f.value(b.id) == 310 && !f.contains(nf.id));
-        CHECK(scanListFigures(c, c.networkKey, c.fingerprint, kT0 + qint64(ttl) * 1000, ttl).size() == 2);
-        CHECK(scanListFigures(c, c.networkKey, c.fingerprint, kT0 + qint64(ttl) * 1000 + 1, ttl).isEmpty()); // too old
-        CHECK(scanListFigures(c, c.networkKey, c.fingerprint, kT0 - 60000, ttl).size() == 2);               // clock behind
-        CHECK(scanListFigures(c, c.networkKey, c.fingerprint, kT0 - 60001, ttl).isEmpty());
-        CHECK(scanListFigures(c, QStringLiteral("cell:250-02:4g"), c.fingerprint, kT0, ttl).isEmpty());   // other network
-        CHECK(scanListFigures(c, c.networkKey, QStringLiteral("fp-b"), kT0, ttl).isEmpty());              // other fingerprint
-        CHECK(scanListFigures(c, c.networkKey, QString(), kT0, ttl).isEmpty());
-        CHECK(scanListFigures(ScanCachedResult(), c.networkKey, c.fingerprint, kT0, ttl).isEmpty());
+        CHECK(scanListFigures(c, c.fingerprint, kT0 + qint64(ttl) * 1000, ttl).size() == 2);
+        CHECK(scanListFigures(c, c.fingerprint, kT0 + qint64(ttl) * 1000 + 1, ttl).isEmpty()); // too old
+        CHECK(scanListFigures(c, c.fingerprint, kT0 - 60000, ttl).size() == 2);               // clock behind
+        CHECK(scanListFigures(c, c.fingerprint, kT0 - 60001, ttl).isEmpty());
+        CHECK(scanListFigures(c, QStringLiteral("fp-b"), kT0, ttl).isEmpty());              // other network
+        // saved before the reporting key was refined (the access ASN learned later on the same network): still its own
+        ScanCachedResult refined = c;
+        refined.networkKey = QStringLiteral("wifi");
+        CHECK(scanListFigures(refined, c.fingerprint, kT0, ttl).size() == 2);
+        CHECK(scanListFigures(c, QString(), kT0, ttl).isEmpty());
+        CHECK(scanListFigures(ScanCachedResult(), c.fingerprint, kT0, ttl).isEmpty());
         // a failure never gives a figure: it is not a row of the persisted result
         ScanCachedRow bad = a;
         bad.cls = ScanClass::NoData;

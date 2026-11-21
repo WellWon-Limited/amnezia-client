@@ -1078,8 +1078,7 @@ private:
     void settleOperation(const char *why); // review E1 of 18.11: the one release of the operation latches
     void syncControlPlaneEdge(bool tunnelUp); // E10: the provider session's control-plane edge
     QString m_sessionEdge;                    // E10: the session edge in force ("" = the stored edge)
-    bool m_scanNetCompareArmed = false;
-    QString m_scanNetKeyTold; // the network key (kind|reporting key|gateway hash) of the Scanner's last notice
+    avpn::ScanNetworkNotifier m_scanNotifier; // the one notice of the network: path engine first, then the Scanner
     QString m_intentServerPin;         // J1: the last chosen server seen in the pool and its identity (a refresh that removes it
     QString m_intentServerIdentity;    //     is not a new choice)
     avpn::IntentEpoch m_intentEpoch;   // G3/H3: moves on a Stop or another choice only; stamps the attempts (DebugSnapshot.h)

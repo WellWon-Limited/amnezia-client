@@ -11,9 +11,11 @@
 //    appears or vanishes. Evidence stamped with another value is invalid, so it dies on any change and on every
 //    relaunch.
 //  - The weak FINGERPRINT keys CACHED rows only (drawn as cache with their age, never verified, never S6,
-//    never access or exclusion): interface kind + the operator-level reporting key + a hash of the gateway /
+//    never access or exclusion): interface kind + the physical network the path engine names (its local key;
+//    the reporting key only where a host names none - TribeScanner.h::scanNetIdentity) + a hash of the gateway /
 //    subnet where the platform gives it (absent = not part of it). It survives a relaunch, so the last result
-//    of a network shows at once while the new scan runs (artboard fig. 18).
+//    of a network shows at once while the new scan runs (artboard fig. 18). The reporting key is not in it: it
+//    gains the access ASN later on the same network (device round 11, iPhone Air 20.11 13:05).
 // Neither ever leaves the device: requests, outcomes and summaries carry only the reporting key.
 //
 // Sources per platform (plan §2.11a): iOS `app` (nw_path_monitor) + `ne` (the extension's defaultPath observer,
@@ -67,10 +69,11 @@ inline const ScanNetSource *scanNetSourceOf(const QList<ScanNetSource> &sources,
 }
 
 // The weak fingerprint from what the platform gives without permissions: interface kind ("wifi", "cellular",
-// ...), the operator-level reporting key, and an optional local hash of gateway / subnet ("" = not part of it).
-inline QString scanNetFingerprint(const QString &interfaceKind, const QString &reportingKey, const QString &gatewaySubnetHash = QString())
+// ...), the network's local identity (scanNetIdentity: the physical network), and an optional local hash of
+// gateway / subnet ("" = not part of it).
+inline QString scanNetFingerprint(const QString &interfaceKind, const QString &networkIdentity, const QString &gatewaySubnetHash = QString())
 {
-    QString in = QStringLiteral("tribe-scan-fp-v1|") + interfaceKind + QLatin1Char('|') + reportingKey;
+    QString in = QStringLiteral("tribe-scan-fp-v1|") + interfaceKind + QLatin1Char('|') + networkIdentity;
     if (!gatewaySubnetHash.isEmpty())
         in += QLatin1Char('|') + gatewaySubnetHash;
     return QString::fromLatin1(QCryptographicHash::hash(in.toUtf8(), QCryptographicHash::Sha256).toHex().left(16));

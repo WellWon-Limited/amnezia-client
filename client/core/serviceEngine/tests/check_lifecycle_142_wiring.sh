@@ -60,14 +60,45 @@ has "$(body "$FACADE" 'void AvpnEngineQml::reconcile()')" 'if (m_engine.attemptR
 [ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "1" ] || bad "§33: the facade calls reenterVerifying outside the hand-over's op"
 
 # Coordinator 18.11 (c): the Scanner hears a network change when the path engine's network generation moved (one
-# rule with the attempt owner) or the network's key as the Scanner reads it moved (device round air9 19.11 10:08: the
-# key completed with the same generation, the cached result never came back) - scanNetworkNoticeDue, tested in
-# facade_policy_check; our own tunnel going up or down is compared once it settled.
+# rule with the attempt owner) or its cache identity moved (device round air9 19.11 10:08: it completed with the same
+# generation) - scanNetworkNotice, tested in facade_policy_check. The identity is the physical network
+# (scanNetIdentity: the path engine's local key), never the reporting key, and no time window decides (device round
+# 11, iPhone Air 20.11 13:05: a row connect's seat grant refined the reporting key 5 s after the connect, outside the
+# window, and the 19 rows just found were dropped).
 scan_net="$(code "$FACADE" | awk '/^void AvpnEngineQml::scanNotifyNetwork\(\)/{f=1} f{print} f&&/^}/{exit}')"
-has "$scan_net" 'networkChangeIsOwnTunnel(' && has "$scan_net" 'm_engine.observeNetwork(currentNetworkObservation());' \
-    && has "$scan_net" 'if (!scanNetworkNoticeDue(before, m_engine.network().generation, m_scanNetKeyTold, key))' \
-    && has "$scan_net" 'const ScanNetFacts f = m_scanAdapter->network();' && has "$scan_net" 'm_scanNetKeyTold = key;' \
-    || bad "(c): scanNotifyNetwork must filter our own tunnel and notify on a new generation or a new Scanner key"
+has "$scan_net" 'm_scanNotifier.notice();' \
+    || bad "(c): scanNotifyNetwork must be the one notice (ScanNetworkNotifier: the path engine told first)"
+if has "$scan_net" 'networkChangeIsOwnTunnel(' || has "$scan_net" 'QTimer::singleShot('; then
+    bad "(c): scanNotifyNetwork must not judge by a time window of our own operation (device round 11, 20.11 13:05)"
+fi
+# The notifier's wiring and its start-up notice (review of 3d3cdc686: a platform that never emits a first event left
+# the path engine on its "unknown" placeholder, and the Scanner's identity with it, until the first connect).
+wiring="$(code "$FACADE" | awk '/m_scanNotifier.generation = /{f=1} f{print} f&&/m_scanNotifier.journal = /{exit}')"
+has "$wiring" 'm_scanNotifier.observe = [this]() { m_engine.observeNetwork(currentNetworkObservation()); };' \
+    && has "$wiring" 'scanNetIdentity(f, f.reportingKey)' \
+    && has "$wiring" 'm_scanNotifier.notify = [this]() { m_scanner->networkChanged(); };' \
+    || bad "(c): the constructor must wire the notifier (observe, the physical identity)"
+# Review of 05a9e01b3: the saved config is applied synchronously inside m_configSvc->start() and switches the Scanner
+# on (scanApplySwitches -> noticeAfresh) - the notifier must be wired before that and before every subscription that
+# can call it, or the app dies at every launch with the Scanner enabled (an empty std::function).
+wired="$(code "$FACADE" | grep -n 'm_scanNotifier.journal = ' | head -1 | cut -d: -f1)"
+cfg_start="$(code "$FACADE" | grep -n '^    m_configSvc->start();$' | head -1 | cut -d: -f1)"
+first_sub="$(code "$FACADE" | grep -n 'scanNotifyNetwork(); })' | head -1 | cut -d: -f1)"
+first_switch="$(code "$FACADE" | grep -n 'scanApplySwitches(' | head -1 | cut -d: -f1)"
+[ -n "$wired" ] && [ -n "$cfg_start" ] && [ -n "$first_sub" ] && [ -n "$first_switch" ] \
+    && [ "$wired" -lt "$cfg_start" ] && [ "$wired" -lt "$first_sub" ] && [ "$wired" -lt "$first_switch" ] \
+    || bad "(c): the notifier must be wired before m_configSvc->start(), the platform subscriptions and any scanApplySwitches"
+ctor_end="$(code "$FACADE" | grep -n '^    scanNotifyNetwork();$' | head -1 | cut -d: -f1)"
+qni="$(code "$FACADE" | grep -n 'connect(ni, &QNetworkInformation::transportMediumChanged, this, \[this\]() { scanNotifyNetwork(); });' | head -1 | cut -d: -f1)"
+[ -n "$ctor_end" ] && [ -n "$qni" ] && [ "$ctor_end" -gt "$qni" ] \
+    || bad "(c): the start-up notice must come after the platform subscriptions"
+nc="$(code "$FACADE" | grep -c 'm_scanner->networkChanged()' || true)"
+[ "$nc" = "1" ] || bad "(c): the Scanner hears the network only through the notifier (m_scanner->networkChanged() x$nc)"
+code "$FACADE" | grep -qF 'm_scanNotifier.noticeAfresh(); // switched on' \
+    || bad "(c): the Scanner switching on must go through the one notice"
+adapter="$(code "$FACADE" | awk '/^ScanNetFacts ScanEngineAdapter::network\(\) const/{f=1} f{print} f&&/^}/{exit}')"
+has "$adapter" 'f.localKey = m_e->m_engine.network().local;' \
+    || bad "(c): the Scanner's network facts must carry the path engine's physical network (its cache identity)"
 # Review E1/E2 of 18.11: the facade drops obsolete native events first and settles its operation in one place.
 for slot in 'void AvpnEngineQml::onConnectionStateChanged(' 'void AvpnEngineQml::onVpnProtocolError('; do
     first="$(code "$FACADE" | awk -v s="$slot" 'index($0,s)==1{f=1;n=0} f{n++; if(n>1 && $0 !~ /^[{[:space:]]*$/){print; exit}}')"

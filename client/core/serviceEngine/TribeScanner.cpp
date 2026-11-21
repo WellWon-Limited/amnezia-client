@@ -152,9 +152,9 @@ QStringList scanBaseIpsOf(const QStringList &in)
 
 } // namespace
 
-QString scanCacheStoreKey(const QString &networkKey, const QString &fingerprint)
+QString scanCacheStoreKey(const QString &fingerprint)
 {
-    const QByteArray h = QCryptographicHash::hash((QStringLiteral("tribe-scan-cache|") + networkKey + QLatin1Char('|') + fingerprint).toUtf8(),
+    const QByteArray h = QCryptographicHash::hash((QStringLiteral("tribe-scan-cache-v2|") + fingerprint).toUtf8(),
                                                   QCryptographicHash::Sha256);
     return QLatin1String(kScanCacheStorePrefix) + QString::fromLatin1(h.toHex().left(16));
 }
@@ -499,14 +499,14 @@ ScanNetwork TribeScanner::buildNetwork() const
     n.sources = f.appSources;
     if (m_hostGenFolded)
         n.sources << m_hostGen;
-    n.fingerprint = scanNetFingerprint(QLatin1String(scanNetKindName(f.kind)), n.key, f.gatewayHash);
+    n.fingerprint = scanNetFingerprint(QLatin1String(scanNetKindName(f.kind)), scanNetIdentity(f, n.key), f.gatewayHash);
     n.radio = f.kind != ScanNetKind::Cellular ? QString() : !f.radio.isEmpty() ? f.radio : m_radio ? m_radio() : QString();
     return n;
 }
 
 ScanCachedResult TribeScanner::cachedFor(const ScanNetwork &n) const
 {
-    const QByteArray raw = m_store->read(scanCacheStoreKey(n.key, n.fingerprint));
+    const QByteArray raw = m_store->read(scanCacheStoreKey(n.fingerprint));
     if (raw.isEmpty())
         return ScanCachedResult();
     const QJsonObject stored = QJsonDocument::fromJson(raw).object();
@@ -521,14 +521,14 @@ ScanCachedResult TribeScanner::cachedFor(const ScanNetwork &n) const
 // not know (device round 13, A10: scan_connect_ignored why=pin).
 ScanCachedResult TribeScanner::cachedWithStubs(const ScanNetwork &n)
 {
-    loadCachedStubs(scanCacheStoreKey(n.key, n.fingerprint));
+    loadCachedStubs(scanCacheStoreKey(n.fingerprint));
     return cachedFor(n);
 }
 
 QHash<QString, int> TribeScanner::listFigures() const
 {
     const ScanNetwork n = buildNetwork();
-    return scanListFigures(cachedFor(n), n.key, n.fingerprint, m_clock->nowMs(), m_m.tunables().cacheWorksTtlS);
+    return scanListFigures(cachedFor(n), n.fingerprint, m_clock->nowMs(), m_m.tunables().cacheWorksTtlS);
 }
 
 void TribeScanner::persistCache(const ScanCachedResult &c)
@@ -537,7 +537,9 @@ void TribeScanner::persistCache(const ScanCachedResult &c)
         return;
     if (onResultsSaved)
         onResultsSaved(c);
-    const QString key = scanCacheStoreKey(c.networkKey, c.fingerprint);
+    if (c.fingerprint.isEmpty())
+        return; // no network identity: nothing could ever find it again
+    const QString key = scanCacheStoreKey(c.fingerprint);
     QJsonObject stored = scanCachedResultToJson(c);
     stored.insert(QLatin1String(kScanCachedLabelRuleKey), QLatin1String(kScanCachedLabelRule));
     m_store->write(key, QJsonDocument(stored).toJson(QJsonDocument::Compact));
