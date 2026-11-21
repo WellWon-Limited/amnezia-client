@@ -596,6 +596,26 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_processEpoch = QRandomGenerator::global()->generate64() | 1;
     m_scanAdapter = std::make_unique<ScanEngineAdapter>(this);
     m_scanHost = std::make_unique<GatedScanHost>();
+    // The one notice of the network (ScanNetworkNotifier): it tells the path engine first, then hands the Scanner its
+    // facts. Wired HERE, before anything in this constructor can call it: the saved config is applied synchronously by
+    // m_configSvc->start() below and switches the Scanner on (scanApplySwitches -> noticeAfresh) long before the
+    // platform subscriptions - an unwired notifier there is an empty std::function call, the app dying at every launch
+    // with the Scanner enabled (review of 05a9e01b3). Every member the lambdas touch exists by now or is guarded.
+    m_scanNotifier.generation = [this]() { return m_engine.network().generation; };
+    m_scanNotifier.observe = [this]() { m_engine.observeNetwork(currentNetworkObservation()); };
+    m_scanNotifier.read = [this]() {
+        ScanNetRead r;
+        if (!m_scanner || !m_scanSwitches.scanner || !m_scanAdapter)
+            return r;
+        const ScanNetFacts f = m_scanAdapter->network();
+        r.scannerOn = true;
+        r.identity = QLatin1String(scanNetKindName(f.kind)) + QLatin1Char('|') + scanNetIdentity(f, f.reportingKey)
+                     + QLatin1Char('|') + f.gatewayHash;
+        r.report = f.reportingKey;
+        return r;
+    };
+    m_scanNotifier.notify = [this]() { m_scanner->networkChanged(); };
+    m_scanNotifier.journal = [this](const QString &line) { reliabilityEvent(line); };
     m_scanSwitches = scannerSwitchesFrom([](const QString &k, bool d) { return avpn::TuningStore::flag(k, d); },
                                          kScanHostOnThisBuild);
 
@@ -1932,25 +1952,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         });
         connect(ni, &QNetworkInformation::transportMediumChanged, this, [this]() { scanNotifyNetwork(); }); // AVPN Scanner
     }
-    // The one notice of the network (ScanNetworkNotifier): it tells the path engine first, then hands the Scanner its
-    // facts. Told once now, right after subscribing: a platform that published its state before we subscribed
-    // (Windows' QNetworkInformation) or never emits one leaves the path engine on its "unknown" placeholder until
-    // the first connect otherwise - the ledger, the generation and the Scanner's identity would start from it.
-    m_scanNotifier.generation = [this]() { return m_engine.network().generation; };
-    m_scanNotifier.observe = [this]() { m_engine.observeNetwork(currentNetworkObservation()); };
-    m_scanNotifier.read = [this]() {
-        ScanNetRead r;
-        if (!m_scanner || !m_scanSwitches.scanner || !m_scanAdapter)
-            return r;
-        const ScanNetFacts f = m_scanAdapter->network();
-        r.scannerOn = true;
-        r.identity = QLatin1String(scanNetKindName(f.kind)) + QLatin1Char('|') + scanNetIdentity(f, f.reportingKey)
-                     + QLatin1Char('|') + f.gatewayHash;
-        r.report = f.reportingKey;
-        return r;
-    };
-    m_scanNotifier.notify = [this]() { m_scanner->networkChanged(); };
-    m_scanNotifier.journal = [this](const QString &line) { reliabilityEvent(line); };
+    // The start-up notice (ScanNetworkNotifier, wired at the top of this constructor), right after subscribing: a
+    // platform that published its state before we subscribed (Windows' QNetworkInformation) or never emits one leaves
+    // the path engine on its "unknown" placeholder until the first connect otherwise - the ledger, the generation and
+    // the Scanner's identity would start from it.
     scanNotifyNetwork();
     // Ответы control plane: метод, путь без идентификаторов, код. Только пути API (/v1, /admin) —
     // запросы к сторонним хостам (бенч, пробы) сюда не попадают; саму досылку журнала не пишем.

@@ -73,12 +73,21 @@ if has "$scan_net" 'networkChangeIsOwnTunnel(' || has "$scan_net" 'QTimer::singl
 fi
 # The notifier's wiring and its start-up notice (review of 3d3cdc686: a platform that never emits a first event left
 # the path engine on its "unknown" placeholder, and the Scanner's identity with it, until the first connect).
-wiring="$(code "$FACADE" | awk '/m_scanNotifier.generation = /{f=1} f{print} f&&/^    scanNotifyNetwork\(\);$/{exit}')"
+wiring="$(code "$FACADE" | awk '/m_scanNotifier.generation = /{f=1} f{print} f&&/m_scanNotifier.journal = /{exit}')"
 has "$wiring" 'm_scanNotifier.observe = [this]() { m_engine.observeNetwork(currentNetworkObservation()); };' \
     && has "$wiring" 'scanNetIdentity(f, f.reportingKey)' \
     && has "$wiring" 'm_scanNotifier.notify = [this]() { m_scanner->networkChanged(); };' \
-    && printf '%s\n' "$wiring" | tail -1 | grep -qx '    scanNotifyNetwork();' \
-    || bad "(c): the constructor must wire the notifier (observe, the physical identity) and notice once at start-up"
+    || bad "(c): the constructor must wire the notifier (observe, the physical identity)"
+# Review of 05a9e01b3: the saved config is applied synchronously inside m_configSvc->start() and switches the Scanner
+# on (scanApplySwitches -> noticeAfresh) - the notifier must be wired before that and before every subscription that
+# can call it, or the app dies at every launch with the Scanner enabled (an empty std::function).
+wired="$(code "$FACADE" | grep -n 'm_scanNotifier.journal = ' | head -1 | cut -d: -f1)"
+cfg_start="$(code "$FACADE" | grep -n '^    m_configSvc->start();$' | head -1 | cut -d: -f1)"
+first_sub="$(code "$FACADE" | grep -n 'scanNotifyNetwork(); })' | head -1 | cut -d: -f1)"
+first_switch="$(code "$FACADE" | grep -n 'scanApplySwitches(' | head -1 | cut -d: -f1)"
+[ -n "$wired" ] && [ -n "$cfg_start" ] && [ -n "$first_sub" ] && [ -n "$first_switch" ] \
+    && [ "$wired" -lt "$cfg_start" ] && [ "$wired" -lt "$first_sub" ] && [ "$wired" -lt "$first_switch" ] \
+    || bad "(c): the notifier must be wired before m_configSvc->start(), the platform subscriptions and any scanApplySwitches"
 ctor_end="$(code "$FACADE" | grep -n '^    scanNotifyNetwork();$' | head -1 | cut -d: -f1)"
 qni="$(code "$FACADE" | grep -n 'connect(ni, &QNetworkInformation::transportMediumChanged, this, \[this\]() { scanNotifyNetwork(); });' | head -1 | cut -d: -f1)"
 [ -n "$ctor_end" ] && [ -n "$qni" ] && [ "$ctor_end" -gt "$qni" ] \
