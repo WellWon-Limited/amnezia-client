@@ -95,10 +95,16 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
         applyUpstreamEvents(ev);
         return wanted;
     };
-    m_leaseClient->onAcquireEnded = [this](const QString &profile, const QString &lease, bool stillOut) {
-        applyUpstreamEvents(m_upOwner.acquireEnded(profile, lease, stillOut));
+    m_leaseClient->onAcquireEnded = [this](const QString &profile, const QString &lease, bool stillOut, quint64 acquireId,
+                                          bool seatUnknown) {
+        // seatUnknown: the request ended and nobody can tell whether the server granted it - the ledger owes that start's seat
+        // back by nonce (UpstreamLeaseOwner.h, row "answer lost"); the journal line is noteSeatDebts' below.
+        applyUpstreamEvents(m_upOwner.acquireEnded(profile, lease, stillOut, acquireId, seatUnknown, upstreamClockMs()));
     };
-    m_leaseClient->onRouteProved = [this](quint64 requestId) { m_upOwner.routeProved(requestId, upstreamClockMs()); };
+    m_leaseClient->onRouteProved = [this](quint64 requestId) {
+        m_upOwner.routeProved(requestId, upstreamClockMs());
+        noteSeatDebts();
+    };
     m_leaseClient->onSessionOrderFloor = [this](qint64 floorOrder) { m_upOwner.raiseOrderFloor(floorOrder); };
     {
         UpstreamLeaseOwner::Options o;
@@ -807,6 +813,28 @@ void VpnConnectionTunnelControl::applyUpstreamEvents(const QVector<UpstreamOwner
             break;
         }
     }
+    noteSeatDebts(); // every step of the owner passes here: what it keeps for a proof of the direct route is looked at once
+}
+
+// What the ledger keeps for a route that works (an unsent release, a seat owed by nonce) on a device where nothing runs: no
+// start, no tunnel - so no answer of ours will ever prove a route. The owner of the direct route's fact (ConfigService) is asked
+// for the proof (upstreamRouteProofOwed -> its one spaced ask); its directRouteProved() comes back as upstreamDirectRouteProved().
+// No timer here and nothing that decides: the ask is repeated by ConfigService while upstreamProofOwed() stays true, i.e. until the
+// entries are delivered, given up, or their lease's lifetime has passed. The journal says when a seat becomes owed by nonce and when
+// that is over (the count last written is kept for these two lines only).
+void VpnConnectionTunnelControl::noteSeatDebts()
+{
+    const int debts = m_upOwner.seatDebts();
+    if (debts != m_seatDebtsTold) {
+        if (debts > m_seatDebtsTold)
+            qInfo() << "avpn upstream: a lease answer was lost - the seat of that start is owed back (asked for by its nonce when the API answers), owed="
+                    << debts;
+        else
+            qInfo() << "avpn upstream: a seat owed after a lost lease answer is settled, owed=" << debts;
+        m_seatDebtsTold = debts;
+    }
+    if (upstreamProofOwed())
+        emit upstreamRouteProofOwed();
 }
 
 void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)

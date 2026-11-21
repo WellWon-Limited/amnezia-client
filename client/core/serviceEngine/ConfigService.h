@@ -72,6 +72,13 @@ public:
     // Read-only: is a tunnel of ours up now (any state in which it may carry the app's requests). A request sent while
     // one is up says nothing about the direct route; stamped at send time. Unset = never.
     void setTunnelUpSource(std::function<bool()> up) { m_tunnelUpFn = std::move(up); }
+    // Read-only: does something wait for a PROOF of the direct route - the event directRouteProved(), not the fact (kept seat
+    // releases of the upstream lease owner; device round 11 of 20.11: on an idle, disconnected phone nobody asked the API, so a kept
+    // release had no trigger). While it says true, the one spaced ask (askDirectOnce) also goes when this network generation was
+    // already asked or its fact is known, and comes back every kAskSpacingMs - until the source says false (delivered, given up, or
+    // the lease's lifetime passed). noteProofOwed(): the source has just turned true - ask now (the same rate bound).
+    void setProofOwedSource(std::function<bool()> owed) { m_proofOwedFn = std::move(owed); }
+    void noteProofOwed() { askDirectOnce(); }
     // When the physical network last changed (the system clock of nowMs); the facade uses it to tell whether an API
     // request was sent before the change.
     qint64 lastNetworkChangeMs() const { return m_netChangeMs; }
@@ -149,6 +156,7 @@ private:
     static constexpr qint64 kAskSpacingMs = 30000;
     static constexpr int kAskBusyRetryMs = 1000;     // an ask that found a request in flight comes back after this
     std::function<bool()> m_tunnelUpFn;
+    std::function<bool()> m_proofOwedFn;
     quint64        m_askedGen = 0;
     bool           m_askedAny = false;
     qint64         m_lastAskMs = -1;

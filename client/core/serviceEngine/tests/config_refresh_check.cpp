@@ -584,6 +584,53 @@ private slots:
         service.reportNetworkSuccess(false); // an answer through a tunnel proves nothing about the direct route
         QCOMPARE(proved.count(), provedOnce + 1);
     }
+    // Device round 11 of 20.11: a kept seat release (or a seat owed after a lost lease answer) waits for the EVENT
+    // directRouteProved on a phone where nothing runs - nobody asked the API, so the event never came and the seat stayed
+    // taken until its lease expired. While the owner says a proof is owed (setProofOwedSource) the direct route is asked
+    // although this network was asked already and its fact is known; not closer than the spacing; never under a tunnel;
+    // and no more once the owner says it is not owed.
+    void aProofThatIsOwedIsAskedFor()
+    {
+        ConfigServer edge([](int) { return httpAnswer("200 OK", R"({"features":{}})"); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, edge.base(), "fixture-key", {edge.base()});
+        qint64 now = kTestNowMs;
+        bool owed = false, tunnel = false;
+        service.setNowMsForTest([&now] { return now; });
+        service.setNetworkGenerationSource([] { return quint64(1); });
+        service.setTunnelUpSource([&tunnel] { return tunnel; });
+        service.setProofOwedSource([&owed] { return owed; });
+        QSignalSpy proved(&service, &avpn::ConfigService::directRouteProved);
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(service.directApiReach(), avpn::ApiReach::Reachable, 2000);
+        QCOMPARE(edge.configRequests, 1);
+        const int provedAtStart = proved.count();
+        service.noteProofOwed(); // nothing is owed: the fact is known, nothing is asked
+        QTest::qWait(150);
+        QCOMPARE(edge.configRequests, 1);
+        owed = true; // the lease owner keeps a release and nothing runs
+        tunnel = true;
+        service.noteProofOwed(); // never while a tunnel of ours is up (nothing direct can be learned)
+        QTest::qWait(150);
+        QCOMPARE(edge.configRequests, 1);
+        tunnel = false;
+        service.noteProofOwed(); // asked now, although the fact is Reachable and this network was asked
+        QTRY_COMPARE_WITH_TIMEOUT(edge.configRequests, 2, 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(proved.count(), provedAtStart + 1, 2000); // the event the release waits for
+        service.noteProofOwed(); // still owed (the release went out and failed): not closer than the spacing
+        service.noteProofOwed();
+        QTest::qWait(200);
+        QCOMPARE(edge.configRequests, 2);
+        now += 30001; // the spacing has passed
+        service.noteProofOwed();
+        QTRY_COMPARE_WITH_TIMEOUT(edge.configRequests, 3, 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(proved.count(), provedAtStart + 2, 2000);
+        owed = false; // delivered (or the lease's lifetime passed): the asks end
+        now += 30001;
+        service.noteProofOwed();
+        QTest::qWait(200);
+        QCOMPARE(edge.configRequests, 3);
+    }
     // Final review, F5: the network changes while a request of the previous network is in flight. Its answer cannot speak
     // for the new network; the ask the new network is owed must still be sent (it was marked done with nothing sent).
     void askOwedWhileOldRequestInFlight()

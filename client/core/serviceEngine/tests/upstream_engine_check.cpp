@@ -15,6 +15,7 @@
 //     the lease record, the probe grant / meter tags parsing, the acquire timeout bound.
 // Build/run: build_upstream_engine.sh (QtCore/QtNetwork + libcrypto; no network, no tunnel).
 #include "../ConnectTunables.h"
+#include "../NetAwait.h" // resetApiConnections: the app's own API reset of a tunnel transition
 #include "../NodeRanking.h" // pickerDisplay
 #include "../NodeRotation.h"
 #include "../ServiceEngine.h"
@@ -1657,10 +1658,13 @@ static QJsonObject xrayOwnNode(const QString &id, int hostId, const char *cc)
 // seat leaves the live lease alone; DELETE ends the lease only with its current token. The owner picks B or C (prepare / begin),
 // cancels, brings up; every request is answered in a random order. Invariants after every step: a seat the owner holds is live
 // on the server (it never released, or let something replace, its own seat); at the end every seat is given back.
+// Device round 11 of 20.11: an acquire's answer may be LOST (the server did what it did, the client got a transport failure and the
+// end of the request). After the stop the device stays idle: only proofs of the direct route arrive (while the owner says one is
+// owed). The seat of a start whose answers were lost is then asked for by its nonce - on the profile of THAT start - and released.
 static void ownerSeatModel()
 {
     const SubscriptionNode nodes[2] = {stubOf(QStringLiteral("bbbbbbbbbbbbbbb0")), stubOf(QStringLiteral("ccccccccccccccc0"))};
-    int violations = 0, steps = 0, releases = 0, reuses = 0;
+    int violations = 0, steps = 0, releases = 0, reuses = 0, lost = 0, asks = 0, askGrants = 0, orderLockedSeats = 0;
     for (int seed = 1; seed <= 400; ++seed) {
         quint32 rng = quint32(seed) * 2654435761u;
         const auto rnd = [&rng](int n) { rng = rng * 1664525u + 1013904223u; return int((rng >> 8) % quint32(n)); };
@@ -1675,6 +1679,8 @@ static void ownerSeatModel()
         int serial = 0, delivered = 0;
         QList<int> pending; // indices into io.calls not answered yet
         qint64 now = 20000000;
+        QHash<QString, QString> profileOfNonce; // the profile each start asked for (an ask must name the same one)
+        bool orderLocked = false, idle = false; // the known limit (see ledgerModel): the live lease's start was refused by the order check
         const auto sync = [&]() {
             for (int i = delivered; i < io.calls.size(); ++i)
                 pending << i;
@@ -1703,10 +1709,21 @@ static void ownerSeatModel()
             now += 37;
             if (call.what == QLatin1String("acquire")) {
                 const SubscriptionNode &n = call.profileOrLease == nodes[0].upstream->profileId ? nodes[0] : nodes[1];
+                const bool ask = profileOfNonce.contains(call.nonce) && (!o.active() || call.nonce != o.sessionNonce());
+                if (ask) {
+                    ++asks;
+                    if (profileOfNonce.value(call.nonce) != call.profileOrLease || call.hedged) {
+                        ++violations;
+                        std::printf("seat model seed %d: an ask named another profile than its start, or was hedged\n", seed);
+                    }
+                }
+                profileOfNonce.insert(call.nonce, call.profileOrLease);
                 AcquireReply r;
                 if (staleNonces.contains(call.nonce) || call.order < highestOrder) {
                     r = refused(UpstreamErrorCode::LeaseGone); // 404 lease_gone / stale_session: nothing changes
                     r.error.reason = QStringLiteral("stale_session");
+                    if (ask && !staleNonces.contains(call.nonce) && live.nonce == call.nonce)
+                        orderLocked = true; // refused by its order while its lease is live: left to the server's TTL (the known limit)
                 } else {
                     highestOrder = call.order;
                     if (!live.lease.isEmpty() && live.nonce == call.nonce) {
@@ -1727,6 +1744,14 @@ static void ownerSeatModel()
                         r.grant.renewToken = live.token = QStringLiteral("tlr1.%1.%2").arg(live.lease, call.nonce);
                     }
                 }
+                if (!idle && rnd(6) == 0) {
+                    // the answer never arrives: the request ends with a transport failure, whatever the server did
+                    ++lost;
+                    o.onAcquireReply(call.id, failed("transport"), now);
+                    o.acquireEnded(call.profileOrLease, QString(), false, call.id, /*seatUnknown=*/true, now);
+                    return;
+                }
+                askGrants += (ask && r.kind == LeaseReplyKind::Granted) ? 1 : 0;
                 o.onAcquireReply(call.id, r, now);
             } else if (call.what == QLatin1String("release")) {
                 ++releases;
@@ -1756,9 +1781,25 @@ static void ownerSeatModel()
         // the end: stop, then every request answered - no seat may stay held on the server
         o.disconnect(now + 1);
         sync();
-        while (!pending.isEmpty()) {
-            answer(0);
+        idle = true; // from here the phone is idle and disconnected, and the API answers
+        for (int proofs = 0; proofs < 12; ++proofs) {
+            while (!pending.isEmpty()) {
+                answer(0);
+                sync();
+            }
+            if (!o.proofOwed(now))
+                break;
+            now += 30000; // the control plane is asked for the proof (ConfigService's spacing); it answers
+            o.directRouteProved(now);
             sync();
+        }
+        if (orderLocked && !live.lease.isEmpty()) {
+            ++orderLockedSeats; // the server's TTL ends it
+            live = Live();
+        }
+        if (o.seatDebts() > 0 || o.proofOwed(now)) {
+            ++violations;
+            std::printf("seat model seed %d: something is still owed after the idle end\n", seed);
         }
         if (!live.lease.isEmpty()) {
             ++violations;
@@ -1767,6 +1808,9 @@ static void ownerSeatModel()
     }
     CHECK(violations == 0);
     std::printf("seat model: %d steps, %d releases, %d same-start re-answers\n", steps, releases, reuses);
+    std::printf("seat model: %d answers lost, %d asks by nonce, %d of them granted and released, %d seats left to the TTL by the order limit\n",
+                lost, asks, askGrants, orderLockedSeats);
+    CHECK(lost > 300 && asks > 50 && askGrants > 20);
     // The model really exercised releases and same-lease re-issues (an acquire of a profile whose release is still out
     // is no longer held back, round 9 R1: the server's token rule makes the old release harmless).
     CHECK(releases > 100);
@@ -2149,6 +2193,7 @@ static void lateGrantOwnership()
         TestKey key;
         QTcpServer server;
         QList<QTcpSocket *> posts;   // acquire requests, in arrival order
+        QList<QJsonObject> postBodies; // their JSON bodies (the start's nonce and order are in them)
         QList<QTcpSocket *> pendingDeletes;
         QStringList deletes, log;    // lease ids of DELETEs; "POST" / "DELETE" in arrival order
         QStringList renews;          // lease ids of renewals (never answered here)
@@ -2189,6 +2234,8 @@ static void lateGrantOwnership()
                             renews << QString::fromLatin1(rq.mid(24, idEnd - 24));
                         } else if (rq.startsWith("POST /v1/upstream/lease ")) {
                             posts << s;
+                            const int postBodyAt = rq.indexOf("\r\n\r\n");
+                            postBodies << QJsonDocument::fromJson(postBodyAt < 0 ? QByteArray() : rq.mid(postBodyAt + 4)).object();
                             log << QStringLiteral("POST");
                         }
                     });
@@ -2264,7 +2311,9 @@ static void lateGrantOwnership()
             client.onLateGrant = [this](const QString &p, const QString &l, const LeaseRoute &r, bool newer, quint64 id) {
                 apply(owner.lateGrant(p, l, r, newer, id));
             };
-            client.onAcquireEnded = [this](const QString &p, const QString &l, bool out) { apply(owner.acquireEnded(p, l, out)); };
+            client.onAcquireEnded = [this](const QString &p, const QString &l, bool out, quint64 id, bool seatUnknown) {
+                apply(owner.acquireEnded(p, l, out, id, seatUnknown, now()));
+            };
             client.onRouteProved = [this](quint64 id) { owner.routeProved(id, now()); };
             client.releaseWanted = [this](quint64 id) {
                 QVector<UpstreamOwnerEvent> ev;
@@ -2583,7 +2632,9 @@ static void lateGrantOwnership()
         r.edge.foreignAnswers = true;
         r.edge.answer(1, "403 X", "<html>blocked</html>", {}); // a proxy's page: HTTP 403, no mark
         pump(800);
-        CHECK(r.owner.unsentCount() == 1 && r.edge.deletes.size() == deletesBefore); // nothing proved the route: nothing was sent
+        // nothing proved the route: nothing was sent. (Kept: the unsent release of A - and, since device round 11, the seat of B's
+        // own start owed by nonce: its direct request ended without an answer of the API, so nobody can tell what the server did.)
+        CHECK(r.owner.unsentCount() - r.owner.seatDebts() == 1 && r.edge.deletes.size() == deletesBefore);
     }
     // ... the release half: a foreign answer to a DELETE is not an answer of the API. It is a transport-class failure: resent on the
     // shared spacing, then KEPT (unsent) for the next route that works - never taken as final and forgotten.
@@ -2944,7 +2995,310 @@ static void lateGrantOwnership()
         pump(500);
         CHECK(r.edge.deletes == QStringList{ QLatin1String(kLease) } && !r.owner.active());
     }
+    // Device round 11 of 20.11 (iPhone, slow LTE; the seat stayed taken for ten minutes after a failed start), on the wire: the direct
+    // acquire is slower than the hedge, the start goes on from its pack entry, and the tunnel coming up resets the app's API
+    // connections - the request the server is about to answer ends with no answer. The confirmation through the tunnel is lost the
+    // same way when the tunnel goes down. Nobody learned the lease id; the phone is idle. The start still owes its seat by nonce:
+    // at the first proof of the direct route the SAME nonce and order are asked once more, and the lease that answer names is
+    // released with its token.
+    {
+        Rig r;
+        r.owner.setOptions({});
+        r.edge.token = QStringLiteral("tlr1.lostanswer");
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"pack\":1}");
+        sc.configSha256 = LeaseEdge::cfgSha();
+        sc.tunnelApiBase = r.edge2.base();
+        sc.packRevision = 5;
+        r.begin(sc);
+        QElapsedTimer t;
+        t.start();
+        while (!r.owner.provisionalPending() && t.elapsed() < 4000) // the hedge: the attempt stops waiting, the request lives on
+            pump(10);
+        CHECK(r.owner.provisionalPending() && r.edge.posts.size() == 1 && r.owner.seatDebts() == 0);
+        r.client.tunnelStarted();
+        avpn::resetApiConnections(&r.nam, /*clearCache=*/true, /*abortInFlight=*/true); // Connected: the facade's transition reset
+        pump(200);
+        CHECK(r.owner.seatDebts() == 1 && !r.owner.proofOwed(r.now())); // owed, but the start still runs: its confirmation may name the lease
+        r.apply(r.owner.tunnelUp(r.now()));
+        pump(200);
+        CHECK(r.edge2.posts.size() == 1); // the seat confirmation, through the tunnel
+        r.client.holdReleasesForStop();
+        r.apply(r.owner.disconnect(r.now())); // the data check found no data: the attempt fails, the tunnel is stopped
+        avpn::resetApiConnections(&r.nam, true, true); // Disconnected: the reset again - the confirmation ends with no answer too
+        r.client.tunnelStopped();
+        pump(300);
+        CHECK(!r.owner.active() && r.edge.deletes.isEmpty() && r.owner.seatDebts() == 1 && r.owner.proofOwed(r.now()));
+        CHECK(r.edge.posts.size() == 1); // nothing is asked without a proof of the route
+        r.owner.directRouteProved(r.now()); // ConfigService: the API answered a direct request (asked for because a proof is owed)
+        pump(300);
+        CHECK(r.edge.posts.size() == 2 && r.edge.postBodies.size() == 2);
+        if (r.edge.postBodies.size() == 2) {
+            const QJsonObject first = r.edge.postBodies[0], ask = r.edge.postBodies[1];
+            CHECK(!first.value(QLatin1String("session_nonce")).toString().isEmpty()
+                  && ask.value(QLatin1String("session_nonce")) == first.value(QLatin1String("session_nonce"))
+                  && ask.value(QLatin1String("session_order")) == first.value(QLatin1String("session_order"))
+                  && ask.value(QLatin1String("profile_id")) == first.value(QLatin1String("profile_id"))
+                  && !ask.contains(QLatin1String("standby")));
+        }
+        r.edge.grant(1); // the server: the same start - the lease it holds, its token
+        pump(600);
+        CHECK(r.edge.deletes == QStringList{ QLatin1String(kLease) }
+              && r.edge.deleteTokens == QStringList{ QStringLiteral("tlr1.lostanswer") });
+        CHECK(r.owner.seatDebts() == 0 && r.owner.pendingReleases() == 0 && !r.owner.proofOwed(r.now()));
+        r.owner.directRouteProved(r.now()); // a later proof: nothing is owed any more
+        pump(200);
+        CHECK(r.edge.posts.size() == 2 && r.edge.deletes.size() == 1);
+    }
     TuningStore::set({}, {}, {}, {});
+}
+
+// --- device round 11 of 20.11: a start whose lease answers were all lost owes its seat back by NONCE --------------------------
+// What the phone did: 14:06:33.3 the direct acquire of a provider row (slow LTE); 14:06:34.5 the hedge - the start goes on from the
+// pack entry; the server granted the seat at 14:06:34; 14:06:34.96 the tunnel came up and the app's API reset ended the request
+// (net_error 5 after 1660 ms) - the grant never arrived; the confirmation through the tunnel was sent, the tunnel carried no data
+// (no_data 14:06:40.3), the attempt failed and the tunnel's stop ended that request too (14:06:40.8). The ledger knew no lease id, so
+// nothing was released and nothing was kept: the seat stayed live until the next start replaced it at 14:16:39.
+// The rule now (UpstreamLeaseOwner.h, row "answer lost"), driven here with a fake I/O and clock.
+static StandbyCandidate packFor(const SubscriptionNode &n);
+static void lostAnswerSeatDebt()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0")), b = stubOf(QStringLiteral("bbbbbbbbbbbbbbb0"));
+    const QString pa = a.upstream->profileId;
+    const qint64 T = 15000000;
+    const auto count = [](const FakeIo &io, const char *what) {
+        int n = 0;
+        for (const FakeIo::Call &c : io.calls)
+            n += c.what == QLatin1String(what) ? 1 : 0;
+        return n;
+    };
+    struct Lost { quint64 id1 = 0, id2 = 0; QString nonce; qint64 order = -1; };
+    // The device sequence up to the idle phone: both acquires of the start end with no answer, the attempt fails.
+    const auto deviceSequence = [&](UpstreamLeaseOwner &o, FakeIo &io, qint64 t0) {
+        Lost l;
+        o.setOptions({}); // iOS: the tunnel owner would renew and release - it never got a lease either
+        const QVector<UpstreamOwnerEvent> ev0 = o.begin(a, 1, packFor(a), t0, 1);
+        CHECK(ev0.isEmpty() && io.last("acquire") && io.last("acquire")->hedged);
+        l.id1 = io.last("acquire")->id;
+        l.nonce = io.last("acquire")->nonce;
+        l.order = io.last("acquire")->order;
+        const QVector<UpstreamOwnerEvent> ev1 = o.onAcquireReply(l.id1, failed("transport"), t0 + 1200); // the hedge: 1200 ms
+        CHECK(findEv(ev1, UpstreamOwnerEventKind::BringUp) && findEv(ev1, UpstreamOwnerEventKind::BringUp)->provisional);
+        o.tunnelUp(t0 + 1640); // Connected: the confirmation goes through the tunnel ...
+        l.id2 = io.last("acquire")->id;
+        CHECK(l.id2 != l.id1 && io.last("acquire")->nonce == l.nonce && io.last("acquire")->order == l.order && !io.last("acquire")->hedged);
+        o.acquireEnded(pa, QString(), /*stillOut=*/true, l.id1, /*seatUnknown=*/true, t0 + 1660); // ... and the API reset ends the first request
+        CHECK(o.seatDebts() == 1 && !o.proofOwed(t0 + 1700)); // owed; the start still runs (its confirmation may name the lease)
+        o.disconnect(t0 + 7000); // no_data: the attempt fails, the tunnel is stopped
+        CHECK(!o.active() && count(io, "release") == 0);
+        o.onAcquireReply(l.id2, failed("transport"), t0 + 7400); // the confirmation's wait ends
+        o.acquireEnded(pa, QString(), /*stillOut=*/false, l.id2, /*seatUnknown=*/true, t0 + 7500); // and its request (the Disconnected reset)
+        CHECK(o.seatDebts() == 1 && count(io, "acquire") == 2 && count(io, "release") == 0); // ONE debt per start, nothing sent blind
+        return l;
+    };
+    // 1) The idle phone: the proof of the direct route discharges the debt - no tap, no new connect.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        const Lost l = deviceSequence(o, io, T);
+        CHECK(o.proofOwed(T + 7600)); // the adapter asks the control plane for the proof
+        o.directRouteProved(T + 8000);
+        CHECK(count(io, "acquire") == 3);
+        const FakeIo::Call ask = *io.last("acquire");
+        CHECK(ask.profileOrLease == pa && ask.nonce == l.nonce && ask.order == l.order && !ask.hedged && ask.sha.isEmpty()
+              && ask.route.apiBase.isEmpty() && ask.id != l.id1 && ask.id != l.id2);
+        CHECK(!o.proofOwed(T + 8100)); // the ask is out: nothing waits for a proof
+        o.directRouteProved(T + 8200);
+        CHECK(count(io, "acquire") == 3); // one ask at a time
+        AcquireReply g = grantedAs(a, kLease); // the same start: the server answers with the lease it holds and its token
+        g.fromTribeApi = true;
+        const QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(ask.id, g, T + 8300);
+        CHECK(ev.isEmpty() && !o.active() && o.seatDebts() == 0); // never a bring-up: the answer belongs to no session
+        CHECK(count(io, "release") == 1);
+        const FakeIo::Call rel = *io.last("release");
+        CHECK(rel.profileOrLease == QLatin1String(kLease) && rel.route.renewToken == QLatin1String("tlr1.secret")
+              && rel.route.apiBase.isEmpty() && rel.meter.seq < 1);
+        o.acquireEnded(pa, QLatin1String(kLease), false, ask.id, false, T + 8310);
+        o.routeProved(ask.id, T + 8310);
+        CHECK(count(io, "release") == 1 && count(io, "acquire") == 3);
+        o.onReleaseDone(rel.id, T + 8500, /*confirmed=*/true);
+        CHECK(o.pendingReleases() == 0 && !o.proofOwed(T + 8600));
+        o.directRouteProved(T + 9000);
+        CHECK(count(io, "acquire") == 3 && count(io, "release") == 1);
+    }
+    // 2) The API cannot be reached at that moment: the ask ends with no answer too - the debt is kept, and discharged when the API
+    //    answers again; three asks at most, and never past the lease's lifetime.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        const Lost l = deviceSequence(o, io, T);
+        o.directRouteProved(T + 8000);
+        const quint64 ask1 = io.last("acquire")->id;
+        o.onAcquireReply(ask1, failed("transport"), T + 14000);
+        o.acquireEnded(pa, QString(), false, ask1, true, T + 24000);
+        CHECK(o.seatDebts() == 1 && o.proofOwed(T + 24100) && count(io, "release") == 0);
+        o.directRouteProved(T + 60000); // reachable again
+        CHECK(count(io, "acquire") == 4 && io.last("acquire")->nonce == l.nonce && io.last("acquire")->order == l.order);
+        const quint64 ask2 = io.last("acquire")->id;
+        CHECK(ask2 != ask1);
+        o.onAcquireReply(ask2, grantedAs(a, kLease), T + 60300);
+        CHECK(count(io, "release") == 1 && io.last("release")->profileOrLease == QLatin1String(kLease) && o.seatDebts() == 0);
+    }
+    {   // ... the ask's answer lands after the client stopped waiting for it: a grant nobody waits for - released at once
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        deviceSequence(o, io, T);
+        o.directRouteProved(T + 8000);
+        const quint64 ask = io.last("acquire")->id;
+        o.onAcquireReply(ask, failed("transport"), T + 14000); // the client's wait (6 s); the request lives on
+        CHECK(o.seatDebts() == 1 && count(io, "release") == 0);
+        o.lateGrant(pa, QLatin1String(kLease), LeaseRoute{QStringLiteral("tlr1.secret"), QString()}, /*newerOut=*/false, ask);
+        CHECK(o.seatDebts() == 0 && count(io, "release") == 1 && io.last("release")->profileOrLease == QLatin1String(kLease)
+              && io.last("release")->route.renewToken == QLatin1String("tlr1.secret"));
+        o.directRouteProved(T + 20000);
+        CHECK(count(io, "acquire") == 3);
+    }
+    {   // ... three asks without an answer: given up (each one may have extended the lease; the server's TTL ends it)
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        deviceSequence(o, io, T);
+        qint64 t = T + 8000;
+        for (int i = 0; i < 5; ++i, t += 30000) {
+            o.directRouteProved(t);
+            const FakeIo::Call *c = io.last("acquire");
+            if (count(io, "acquire") == 3 + i) {
+                o.onAcquireReply(c->id, failed("transport"), t + 6000);
+                o.acquireEnded(pa, QString(), false, c->id, true, t + 16000);
+            }
+        }
+        CHECK(count(io, "acquire") == 5 && o.seatDebts() == 0 && !o.proofOwed(t) && count(io, "release") == 0);
+    }
+    {   // ... the lease's lifetime passes with no proof: the server has freed the seat, nothing is asked any more
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        deviceSequence(o, io, T);
+        CHECK(o.proofOwed(T + 1660 + 899000)); // (counted from the end of the request that was lost)
+        CHECK(!o.proofOwed(T + 1660 + 900001) && o.seatDebts() == 0 && o.pendingReleases() == 0);
+        o.directRouteProved(T + 1660 + 900100);
+        CHECK(count(io, "acquire") == 2);
+    }
+    // 3) The server's answer to the ask says there is no seat of this start to give back: the debt is over, nothing is released.
+    for (const UpstreamErrorCode code : {UpstreamErrorCode::LeaseGone, UpstreamErrorCode::NoSeat, UpstreamErrorCode::NotEntitled}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        deviceSequence(o, io, T);
+        o.directRouteProved(T + 8000);
+        const quint64 ask = io.last("acquire")->id;
+        AcquireReply r = refused(code, code == UpstreamErrorCode::LeaseGone ? QStringLiteral("stale_session") : QString());
+        r.fromTribeApi = true;
+        CHECK(o.onAcquireReply(ask, r, T + 8300).isEmpty());
+        o.acquireEnded(pa, QString(), false, ask, false, T + 8310);
+        CHECK(o.seatDebts() == 0 && o.pendingReleases() == 0 && count(io, "release") == 0 && !o.proofOwed(T + 8400));
+        o.directRouteProved(T + 9000);
+        CHECK(count(io, "acquire") == 3);
+    }
+    // 4) An answer of the same start names the lease after all: the seat is released by its id, nothing is owed by nonce.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions({});
+        o.begin(a, 1, packFor(a), T, 1);
+        const quint64 id1 = io.last("acquire")->id;
+        o.onAcquireReply(id1, failed("transport"), T + 1200);
+        o.tunnelUp(T + 1640);
+        const quint64 id2 = io.last("acquire")->id;
+        o.acquireEnded(pa, QString(), true, id1, true, T + 1660);
+        CHECK(o.seatDebts() == 1);
+        o.onAcquireReply(id2, grantedAs(a, kLease), T + 2000); // the confirmation through the tunnel is granted
+        CHECK(o.seatDebts() == 0 && o.holdsLease(QLatin1String(kLease)));
+        o.acquireEnded(pa, QLatin1String(kLease), false, id2, false, T + 2010);
+        const QVector<UpstreamOwnerEvent> end = o.disconnect(T + 5000);
+        CHECK(findEv(end, UpstreamOwnerEventKind::ReleaseAfterStop) && findEv(end, UpstreamOwnerEventKind::ReleaseAfterStop)->leaseId == QLatin1String(kLease));
+        o.directRouteProved(T + 6000);
+        CHECK(count(io, "acquire") == 2 && o.seatDebts() == 0);
+    }
+    {   // the confirmation was granted BEFORE the first request ended with no answer: the lease is known, no debt is made
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions({});
+        o.begin(a, 1, packFor(a), T, 1);
+        const quint64 id1 = io.last("acquire")->id;
+        o.onAcquireReply(id1, failed("transport"), T + 1200);
+        o.tunnelUp(T + 1640);
+        o.onAcquireReply(io.last("acquire")->id, grantedAs(a, kLease), T + 2000);
+        o.disconnect(T + 3000);
+        o.acquireEnded(pa, QString(), false, id1, true, T + 11200); // the first request's own timeout, long after
+        CHECK(o.seatDebts() == 0);
+    }
+    // 5) A newer start. While it runs nothing of the older start is asked (an older start's acquire is never sent beside a newer
+    //    one's); its grant ends the older debt - the server gave the device's one session seat to the newer start.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        const Lost l = deviceSequence(o, io, T);
+        o.begin(b, 1, std::nullopt, T + 9000, 1); // the person connects to another provider row
+        const FakeIo::Call start2 = *io.last("acquire");
+        CHECK(start2.nonce != l.nonce && start2.order > l.order && o.seatDebts() == 1 && !o.proofOwed(T + 9100));
+        o.directRouteProved(T + 9200);
+        CHECK(count(io, "acquire") == 3); // only the new start's own request
+        AcquireReply g = grantedAs(b, "LeaseBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+        g.fromTribeApi = true;
+        o.onAcquireReply(start2.id, g, T + 9400);
+        o.routeProved(start2.id, T + 9400);
+        CHECK(o.seatDebts() == 0 && count(io, "acquire") == 3);
+    }
+    {   // the newer start is refused (no seat): the older start's seat may still be live - its debt stays and is asked when idle
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        const Lost l = deviceSequence(o, io, T);
+        o.begin(b, 1, std::nullopt, T + 9000, 1);
+        const quint64 id3 = io.last("acquire")->id;
+        AcquireReply no = refused(UpstreamErrorCode::NoSeat);
+        no.fromTribeApi = true;
+        o.onAcquireReply(id3, no, T + 9400);
+        CHECK(!o.active() && o.seatDebts() == 1);
+        o.acquireEnded(b.upstream->profileId, QString(), false, id3, false, T + 9410);
+        o.routeProved(id3, T + 9410); // the API answered on the direct route: the debt is asked now
+        CHECK(count(io, "acquire") == 4 && io.last("acquire")->nonce == l.nonce && io.last("acquire")->order == l.order);
+    }
+    // 7) Only a proof of the DIRECT route sends the ask. The confirmation's answer comes back through the tunnel that is being
+    //    abandoned (an answer of the API: it proves that tunnel's route, on which kept releases of a running session go) - the seat
+    //    of the first, lost request is not asked for on that proof; the direct proof asks for it.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions({});
+        o.begin(a, 1, packFor(a), T, 1);
+        const quint64 id1 = io.last("acquire")->id;
+        const QString nonce = io.last("acquire")->nonce;
+        o.onAcquireReply(id1, failed("transport"), T + 1200);
+        o.tunnelUp(T + 1640);
+        const quint64 id2 = io.last("acquire")->id;
+        o.acquireEnded(pa, QString(), true, id1, true, T + 1660);
+        o.disconnect(T + 7000);
+        AcquireReply no = refused(UpstreamErrorCode::NoSeat);
+        no.fromTribeApi = true;
+        o.onAcquireReply(id2, no, T + 7100); // late for the session (it ended), in time for the client
+        o.acquireEnded(pa, QString(), false, id2, upstreamAcquireOutcomeUnknown(no), T + 7110);
+        o.routeProved(id2, T + 7110); // the tunnel's route answered
+        CHECK(o.seatDebts() == 1 && count(io, "acquire") == 2);
+        o.directRouteProved(T + 8000);
+        CHECK(count(io, "acquire") == 3 && io.last("acquire")->nonce == nonce && io.last("acquire")->route.apiBase.isEmpty());
+    }
+    // 6) A request that was never sent (no token, no base) and a refusal with a code leave nothing owed.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, std::nullopt, T, 1);
+        const quint64 id = io.last("acquire")->id;
+        AcquireReply no = refused(UpstreamErrorCode::NoSeat);
+        no.fromTribeApi = true;
+        o.onAcquireReply(id, no, T + 300);
+        o.acquireEnded(pa, QString(), false, id, upstreamAcquireOutcomeUnknown(no), T + 310);
+        CHECK(o.seatDebts() == 0 && !o.proofOwed(T + 400));
+        CHECK(upstreamAcquireOutcomeUnknown(failed("transport")) && upstreamAcquireOutcomeUnknown(failed("http_502"))
+              && upstreamAcquireOutcomeUnknown(failed("signature")) && !upstreamAcquireOutcomeUnknown(grantedAs(a, kLease)));
+    }
 }
 
 // Round 16 F4: the fact "the direct API answered on this network" (ConfigService::directApiReach turning Reachable) proves the direct
@@ -3318,8 +3672,15 @@ static void lateOlderStart()
 // the server's lease is the owner's), (2) no acquire of profile P is sent while a release of P is pending, (3) after
 // everything is answered and the session stopped no lease is left live on the server, (4) nothing waits for ever
 // (no start queued, no gated acquire, no release pending or held).
+// Device round 11 of 20.11 added the answer that never arrives: an acquire's HTTP request ENDS with no answer (acqLost: the app's own
+// API reset of a tunnel transition, a dead path) - before the server processed it, after, or it is processed later - also for a
+// request the attempt had stopped waiting for, also after the next start began. The device may then stay idle and disconnected:
+// the only thing that happens is a proof of the direct route (directProof: ConfigService answers the owner's proofOwed()), with the
+// API unreachable for a while first (an ask that is lost too). Invariant (3) holds for these sequences as well: the seat of a start
+// whose answers were all lost is asked for by its nonce and released; (5) an acquire of an older start never goes out while a newer
+// start runs, and never after the client released that start's lease.
 struct LedgerWorld {
-    struct Acq { quint64 id; bool processed = false, delivered = false, timedOut = false, lateDone = false; QString lease, token, nonce; qint64 order = -1; bool grant = false, stale = false; qint64 floorOrder = -1; bool hedged = false; };
+    struct Acq { quint64 id; bool processed = false, delivered = false, timedOut = false, lateDone = false; QString lease, token, nonce; qint64 order = -1; bool grant = false, stale = false; qint64 floorOrder = -1; bool hedged = false; bool lost = false, ask = false; };
     struct Rel { quint64 id; QString lease, token; int unprocessed = 0, unanswered = 0, tries = 0; bool done = false, held = false, report = false; };
     struct Io : IUpstreamLeaseIo {
         LedgerWorld *w = nullptr;
@@ -3348,6 +3709,9 @@ struct LedgerWorld {
     QHash<quint64, int> floorDenials; // per leg (the owner's session serial): floor denials of the current start so far
     QList<Rel> rels;
     bool stopPending = false, tunnelDown = true, nativeStarted = false, forceGrant = false, deadApi = false;
+    int lostAnswers = 0, asksSent = 0, asksGranted = 0, proofs = 0, debtSteps = 0;
+    QHash<QString, int> asksLostOf; // nonce -> asks of its seat that ended with no answer (three: the client gives up, the TTL ends the seat)
+    QSet<QString> orderLocked;      // starts whose ask was refused by the ORDER check while their lease was live (the known limit)
     qint64 now = 40000000;
     QStringList violations, trace;
     int deletesSent = 0;
@@ -3383,6 +3747,18 @@ struct LedgerWorld {
         a.nonce = nonce;
         a.order = order;
         a.hedged = hedged; // the client waits only the hedge for it (the owner's decision)
+        // An acquire that is not the running start's own: the ledger's ask of a seat owed by nonce.
+        a.ask = !o.active() || nonce != o.sessionNonce();
+        if (a.ask) {
+            ++asksSent;
+            if (known == orderOfNonce.constEnd())
+                violations << QStringLiteral("an ask went out for a start that never sent an acquire");
+            if (o.active())
+                violations << QStringLiteral("an acquire of an older start went out while a newer start runs");
+            if (hedged)
+                violations << QStringLiteral("an ask was hedged");
+        }
+        trace << QStringLiteral("%1%2").arg(QLatin1String(a.ask ? "ask" : "send")).arg(acqs.size());
         acqs << a;
     }
     // UpstreamLeaseClient::release / sendRelease
@@ -3507,6 +3883,13 @@ struct LedgerWorld {
         trace << QStringLiteral("%1").arg(QLatin1String("acqProcess")) + (QLatin1String("") + QString::number(i));
         Acq &a = acqs[i];
         a.processed = true;
+        // The model's one assumption about a request that ended with no answer: once the server processes an ASK of the same start,
+        // an earlier request of that start it has not seen by then never arrives (it was cut on the way, long before the proof of the
+        // route and the ask). Without it "ask refused, then the old request granted" would be a seat nobody can know of.
+        if (a.ask)
+            for (Acq &other : acqs)
+                if (&other != &a && other.nonce == a.nonce && other.lost && !other.processed)
+                    other.processed = true; // never reaches the server: no grant, nothing changes
         // a start whose lease was released or replaced, or whose order is behind a newer start's the server has seen: a late acquire of
         // it takes nothing (contract 1.19.0 / 1.20.0); the highest order seen is kept even when no seat is given
         if (staleNonces.contains(a.nonce) || a.order < highestOrderSeen) {
@@ -3514,6 +3897,12 @@ struct LedgerWorld {
             if (!staleNonces.contains(a.nonce))
                 a.floorOrder = highestOrderSeen; // contract 1.21.0: the ORDER check names the highest order seen; the tenure denial does not
             ++staleDenials;
+            // KNOWN LIMIT of the deployed contract (1.21.1), counted here and never hidden: the server has seen a higher order from
+            // this device WITHOUT replacing this start's live lease (a newer start that was refused a seat, or the "jump" of this
+            // model), so the ask of the older start is refused by its order although its seat is live. No request of this client can
+            // name that lease any more: it is left to the server's TTL (a release BY NONCE on the server would end it).
+            if (a.ask && a.floorOrder >= 0 && !live.isEmpty() && liveNonce == a.nonce)
+                orderLocked.insert(a.nonce);
             return;
         }
         highestOrderSeen = a.order;
@@ -3575,8 +3964,39 @@ struct LedgerWorld {
                 violations << QStringLiteral("a second floor denial in one leg began yet another start");
             }
         }
-        apply(o.acquireEnded(profile(), a.grant ? a.lease : QString(), newerOut(i)));
+        if (a.ask && a.grant)
+            ++asksGranted;
+        apply(o.acquireEnded(profile(), a.grant ? a.lease : QString(), newerOut(i), a.id, false, now));
         o.routeProved(a.id, now); // UpstreamLeaseClient: an HTTP answer, whichever path it took
+    }
+    // The HTTP request ends with NO answer (the app's own API reset of a tunnel transition, a dead path, its own timeout): in time -
+    // the owner gets a transport failure - or after the attempt stopped waiting. What the server did with it is not known.
+    void acqLost(int i)
+    {
+        trace << QStringLiteral("acqLost%1").arg(i);
+        Acq &a = acqs[i];
+        a.lost = true;
+        ++lostAnswers;
+        if (a.ask)
+            asksLostOf[a.nonce] += 1;
+        if (!a.timedOut) {
+            a.delivered = true;
+            const QString before = sessionFingerprint();
+            const bool older = olderStart(a);
+            apply(o.onAcquireReply(a.id, failed("transport"), now));
+            if (older && sessionFingerprint() != before)
+                violations << QStringLiteral("the lost answer of an older start changed a field of the current session");
+        } else {
+            a.lateDone = true;
+        }
+        apply(o.acquireEnded(profile(), QString(), newerOut(i), a.id, /*seatUnknown=*/true, now));
+    }
+    // ConfigService: the API answered a direct request, no tunnel of ours up (asked for because the owner said a proof is owed).
+    void directProof()
+    {
+        trace << QStringLiteral("proof");
+        ++proofs;
+        o.directRouteProved(now);
     }
     void acqTimeout(int i)
     {
@@ -3596,10 +4016,12 @@ struct LedgerWorld {
         if (a.floorOrder >= 0)
             o.raiseOrderFloor(a.floorOrder);
         // UpstreamLeaseClient: a late grant is reported as such; any other late end as the end of the request
+        if (a.ask && a.grant)
+            ++asksGranted;
         if (a.grant)
             apply(o.lateGrant(profile(), a.lease, LeaseRoute{a.token, QString()}, newerOut(i), a.id));
         else
-            apply(o.acquireEnded(profile(), QString(), newerOut(i)));
+            apply(o.acquireEnded(profile(), QString(), newerOut(i), a.id, false, now));
         o.routeProved(a.id, now); // the same single place, for the late path too (round 10 R4)
     }
     // Round 18 R1: the server answers an ACTIVE session's re-acquire later than the hedge but inside the full wait (2 s against 1.2 s and
@@ -3702,6 +4124,7 @@ struct LedgerWorld {
     void checkSeat(const char *where)
     {
         unsentSeen = unsentSeen || o.unsentCount() > 0;
+        debtSteps += o.seatDebts() > 0 ? 1 : 0;
         if (o.active() && !o.provisionalPending() && o.holdsLease(live) == false) {
             // a live session whose machine holds a lease must have it live on the server
         }
@@ -3776,6 +4199,15 @@ struct LedgerWorld {
                     disconnected(); // with no native tunnel there is no state change, so no Disconnected comes
                 continue;
             }
+            // The device stays idle and disconnected: what the ledger keeps (an unsent release, a seat owed by nonce) asks the control
+            // plane for the proof itself (proofOwed -> ConfigService), and the proof arrives. In half of the sequences; in the other
+            // half the person connects again first (row S2 below), as before.
+            if (idleEnd && idleProofs < 8 && tunnelDown && o.proofOwed(now)) {
+                ++idleProofs;
+                now += 30000; // ConfigService's spacing of the asks
+                directProof();
+                continue;
+            }
             if (o.unsentCount() > 0 && !unsentTried) {
                 // row S2: releases that never reached the server wait for a route that works - a later direct answer
                 unsentTried = true;
@@ -3783,20 +4215,40 @@ struct LedgerWorld {
                 begin(false);
                 continue;
             }
+            if (!idleEnd && idleProofs < 8 && tunnelDown && o.proofOwed(now)) { // ... and then leaves the phone alone
+                ++idleProofs;
+                now += 30000;
+                directProof();
+                continue;
+            }
             break;
         }
+        // The server's own clock: a seat whose client gave up asking (three asks with no answer) or whose lifetime has passed is freed
+        // by its TTL - the bound the ledger relies on for both.
+        if (!live.isEmpty() && !o.holdsLease(live)
+            && (asksLostOf.value(liveNonce) >= 3 || orderLocked.contains(liveNonce) || liveSince + 900000 <= now)) {
+            ttlOnly += 1;
+            live.clear();
+            liveToken.clear();
+            liveNonce.clear();
+            ++expiries;
+        }
     }
+    bool idleEnd = false;
+    int idleProofs = 0, ttlOnly = 0;
 };
 
 static void ledgerModel()
 {
     int afterHedge = 0, afterHedgeGrants = 0, activeFloor = 0, sequences = 0, steps = 0, failedSeqs = 0, deletes = 0, unsentSeqs = 0, staleDenials = 0, expiries = 0, reports = 0;
+    int lostAnswers = 0, asksSent = 0, asksGranted = 0, debtSeqs = 0, ttlOnly = 0, orderLocked = 0;
     QMap<QString, int> kinds;
     for (int seed = 1; seed <= 6000; ++seed) {
         quint32 rng = quint32(seed) * 2654435761u + 12345u;
         const auto rnd = [&rng](int n) { rng = rng * 1664525u + 1013904223u; return int((rng >> 8) % quint32(n)); };
         LedgerWorld w;
         w.deadApi = seed % 3 == 0;
+        w.idleEnd = seed % 2 == 0;
         UpstreamLeaseOwner::Options op;
         op.keepOwnership = seed % 4 == 0; // the macOS GUI owner releases itself; elsewhere the tunnel owner does
         w.o.setOptions(op);
@@ -3894,6 +4346,18 @@ static void ledgerModel()
                     ++w.expiries;
                 }
                 break;
+            case 18: { // an acquire's request ends with NO answer (processed by the server or not - nobody knows), or the direct route is proved
+                if (rnd(3) == 0) {
+                    if (w.tunnelDown && !w.nativeStarted)
+                        w.directProof();
+                    break;
+                }
+                QList<int> c;
+                for (int i = 0; i < w.acqs.size(); ++i)
+                    if (!w.acqs[i].delivered && !(w.acqs[i].timedOut && w.acqs[i].lateDone)) c << i;
+                if (!c.isEmpty()) w.acqLost(c[rnd(c.size())]);
+                break;
+            }
             default: { // a DELETE reaches the server / is answered / is cut
                 QList<int> c;
                 for (int i = 0; i < w.rels.size(); ++i)
@@ -3920,7 +4384,23 @@ static void ledgerModel()
                 w.violations << QStringLiteral("a final meter report was lost: a release without it ended the lease");
         if (w.o.requestsOutstanding() > 0 || w.releasePending())
             w.violations << QStringLiteral("something still waits after everything was answered and stopped");
-        if (!w.violations.isEmpty() && std::getenv("LEDGER_TRACE")) { std::printf("seed %d:", seed); for (const QString &t : w.trace) std::printf(" %s", qPrintable(t)); std::printf(" => %s\n", qPrintable(w.violations[0])); }
+        if (w.o.seatDebts() > 0 && w.idleProofs < 8)
+            w.violations << QStringLiteral("a seat owed by nonce was left waiting with nothing to trigger it");
+        if (!w.violations.isEmpty() && std::getenv("LEDGER_TRACE")) {
+            std::printf("seed %d:", seed);
+            for (const QString &t : w.trace)
+                std::printf(" %s", qPrintable(t));
+            std::printf(" => %s\n", qPrintable(w.violations[0]));
+            // every acquire: index, the start it was sent for (by order), what happened to it
+            std::printf("   keep=%d active=%d debts=%d live_order=%lld;", int(op.keepOwnership), int(w.o.active()), w.o.seatDebts(),
+                        (long long)w.orderOfNonce.value(w.liveNonce, -1));
+            for (int i = 0; i < w.acqs.size(); ++i) {
+                const LedgerWorld::Acq &a = w.acqs[i];
+                std::printf(" [%d order=%lld%s%s%s%s floor=%lld]", i, (long long)a.order, a.ask ? " ask" : "", a.lost ? " lost" : "",
+                            a.grant ? " grant" : "", a.stale ? " stale" : "", (long long)a.floorOrder);
+            }
+            std::printf("\n");
+        }
         ++sequences;
         unsentSeqs += w.unsentSeen ? 1 : 0;
         deletes += w.deletesSent;
@@ -3930,6 +4410,12 @@ static void ledgerModel()
         afterHedgeGrants += w.afterHedgeGrants;
         expiries += w.expiries;
         reports += w.reportTaken.size();
+        lostAnswers += w.lostAnswers;
+        asksSent += w.asksSent;
+        asksGranted += w.asksGranted;
+        debtSeqs += w.debtSteps > 0 ? 1 : 0;
+        ttlOnly += w.ttlOnly;
+        orderLocked += w.orderLocked.size();
         if (!w.violations.isEmpty()) {
             ++failedSeqs;
             for (const QString &v : w.violations)
@@ -3943,6 +4429,11 @@ static void ledgerModel()
     std::printf("ledger model server: %d stale_session denials, %d lease expiries, %d final reports taken\n", staleDenials, expiries, reports);
     std::printf("ledger model: %d floor denials of an active session's re-acquire\n", activeFloor);
     std::printf("ledger model: %d active re-acquires answered after the hedge, %d of them granted\n", afterHedge, afterHedgeGrants);
+    std::printf("ledger model: %d acquire requests ended with no answer, %d sequences owed a seat by nonce, %d asks sent, %d of them granted (and released)\n",
+                lostAnswers, debtSeqs, asksSent, asksGranted);
+    std::printf("ledger model: %d seats left to the server's TTL at the end (given up after three lost asks, lifetime passed, or the known limit: %d asks refused by the order check while their lease was live)\n",
+                ttlOnly, orderLocked);
+    CHECK(lostAnswers > 1000 && debtSeqs > 300 && asksSent > 200 && asksGranted > 100);
     CHECK(activeFloor > 20);
     CHECK(afterHedgeGrants > 200);
     CHECK(failedSeqs == 0 && deletes > 1000 && unsentSeqs > 100 && staleDenials > 100 && expiries > 100 && reports > 100);
@@ -4445,6 +4936,7 @@ int main(int argc, char **argv)
     localRefusalRecordsNothing();
     apiMarkRules();
     lateGrantOwnership();
+    lostAnswerSeatDebt();
     ledgerModel();
     reviewerSequenceR1();
     lateAnswerKeepsSession();
