@@ -203,6 +203,28 @@ inline ReconcileGate reconcileGate(const TeardownLatch &latch, ObservedTunnel s,
 }
 // Можно ли действовать (стартовать) из этого состояния. Error — только когда он не требует
 // подтверждения (не-iOS, либо бюджет запросов статуса исчерпан и латч снят).
+// Android: what a status snapshot of the VPN service (AvpnEngineQml, AndroidController::status) does to the facade's view.
+//  Adopt          - the service runs a tunnel the engine does not hold: adopt it (the existing rule, §13a);
+//  Disconnected   - the engine holds a session the service no longer runs: the honest Disconnected (existing);
+//  ConfirmOwnStop - android3 runs a, f (21.11): the facade still sees our own teardown in progress (Disconnecting: the
+//                   owner gave its stop up, no DISCONNECTED ever came) and no attempt runs - the service says it runs
+//                   nothing: that is the end of OUR stop, not a loss (the attempt's result already decided the request).
+//                   Before, the view stayed transitional forever: reconcile waited for a terminal, and both the uplink's
+//                   return and a tap did nothing;
+//  Nothing        - the views agree, or the snapshot is in between (its terminal state comes as an event).
+enum class AndroidStatusAction { Nothing, Adopt, Disconnected, ConfirmOwnStop };
+inline AndroidStatusAction androidStatusAction(bool serviceConnected, bool serviceDisconnected, bool engineConnected,
+                                               ObservedTunnel facadeView, bool attemptRunning)
+{
+    if (serviceConnected && !engineConnected)
+        return AndroidStatusAction::Adopt;
+    if (serviceDisconnected && engineConnected)
+        return AndroidStatusAction::Disconnected;
+    if (serviceDisconnected && facadeView == ObservedTunnel::Transitional && !attemptRunning)
+        return AndroidStatusAction::ConfirmOwnStop;
+    return AndroidStatusAction::Nothing;
+}
+
 inline bool reconcileActionable(ObservedTunnel s, const TeardownLatch &latch)
 {
     return s == ObservedTunnel::Disconnected || s == ObservedTunnel::Unknown

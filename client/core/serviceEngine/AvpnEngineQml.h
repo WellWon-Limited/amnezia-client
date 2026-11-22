@@ -1116,6 +1116,9 @@ private:
     // The network as the platform sees it with the tunnel down (the facade's one networkKind() source, the
     // physical interface's subnet, the macOS gateway hash, the cellular operator and generation).
     avpn::path::NetworkObservation currentNetworkObservation() const;
+    // A native tunnel state; confirmsOwnStop: it ends OUR teardown (android3 runs a, f: a status snapshot after the owner
+    // gave its stop up) - not a loss, the attempt's result already decided the request.
+    void applyNativeState(Vpn::ConnectionState s, bool confirmsOwnStop);
     // AVPN (фикс-волна 2026-09-22, A7): pinBefore — pin движка ДО применения тела подписки/reseed
     // (перенос явного pin на соседа сохраняется, неявный pin в памяти не персистится).
     void restorePin(const QString &pinBefore);

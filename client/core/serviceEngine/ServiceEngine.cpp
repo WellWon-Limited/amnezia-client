@@ -482,6 +482,7 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
             attemptJournal(QStringLiteral("attempt_stop_unconfirmed leg=%1 node=%2 (platform, not recorded)")
                                .arg(e.stamp.leg).arg(e.path.id.id));
             m_facadeStop = false;
+            m_stopGivenUp = true;
             break;
         case path::EffectType::Show:
             if (e.phase == path::AttemptPhase::Idle)

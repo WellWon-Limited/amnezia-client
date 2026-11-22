@@ -1319,6 +1319,32 @@ static void f2UnknownAfterOffline()
     CHECK(!t.observe(withPhysicalUplink(unknown, /*authoritative=*/false, false)) && t.current().local == wifiKey);
 }
 
+// android3 runs a, f (21.11): the owner's stop never reached the service and was given up (attempt_stop_unconfirmed); the
+// facade's view stayed "Disconnecting" - reconcile waits for a terminal there, so the uplink's return and a tap did
+// nothing. The service's next status snapshot resolves the view.
+static void android3StatusResolvesAGivenUpStop()
+{
+    using A = AndroidStatusAction;
+    const TeardownLatch none;
+    // the block, as it was: a transitional view is not actionable (reconcile waits for its terminal)
+    CHECK(!reconcileActionable(ObservedTunnel::Transitional, none));
+    // the service runs nothing: our own stop is over (not a loss) - and then a start is possible again
+    CHECK(androidStatusAction(false, /*serviceDisconnected=*/true, /*engineConnected=*/false, ObservedTunnel::Transitional,
+                              /*attemptRunning=*/false) == A::ConfirmOwnStop);
+    CHECK(reconcileActionable(ObservedTunnel::Disconnected, none));
+    // the service runs the tunnel (the orphan came up): adopted, as any live tunnel the engine does not hold
+    CHECK(androidStatusAction(/*serviceConnected=*/true, false, false, ObservedTunnel::Transitional, false) == A::Adopt);
+    // the existing rules stay: a session the service no longer runs; views that agree
+    CHECK(androidStatusAction(false, true, /*engineConnected=*/true, ObservedTunnel::Connected, false) == A::Disconnected);
+    CHECK(androidStatusAction(false, true, false, ObservedTunnel::Disconnected, false) == A::Nothing);
+    CHECK(androidStatusAction(true, false, true, ObservedTunnel::Connected, false) == A::Nothing);
+    // an attempt walks (its own legs resolve the view) or the snapshot is in between (its terminal comes as an event)
+    CHECK(androidStatusAction(false, true, false, ObservedTunnel::Transitional, /*attemptRunning=*/true) == A::Nothing);
+    CHECK(androidStatusAction(false, false, false, ObservedTunnel::Transitional, false) == A::Nothing);
+    // a stop that ends late is not a loss: the result's decision on the request stands
+    CHECK(classifyLoss(/*weAreOperating=*/true, QStringLiteral("error"), false, false, /*uplinkUp=*/true) == LossClass::Own);
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1719,6 +1745,7 @@ int main()
     p7CardNeverNamesThePinForALiveSession();
     f1StartRefusalJudgedByItsResult();
     f2UnknownAfterOffline();
+    android3StatusResolvesAGivenUpStop();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

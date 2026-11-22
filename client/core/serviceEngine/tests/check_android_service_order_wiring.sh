@@ -7,7 +7,10 @@
 #   Q1  the activity gives every start/stop messenger command through the queue and flushes it, in order, on the bind;
 #       a start behind a waiting command does not overtake it as a second intent;
 #   Q2  a running tunnel reported after our stop (the stop did not take) is not lost with the stopped protocol: VpnConnection
-#       wires the protocol back (restoreConnection) and reports Connected; the facade adopts it with the session's identity.
+#       wires the protocol back (restoreConnection) and reports Connected; the facade adopts it with the session's identity;
+#   Q3  a stop the owner gave up leaves no dead view: the engine says so (takeStopGivenUp), the facade asks the service
+#       for a status snapshot (AndroidController::requestStatus -> activity requestStatus) and resolves its view by
+#       androidStatusAction - ConfirmOwnStop applies Disconnected as the end of our own stop and reconciles.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -46,6 +49,20 @@ printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 10 ))p" | grep -qF 'resto
 adopt="$(body "$FACADE" 'bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)')"
 has "$adopt" 'const bool adopted = m_engine.adoptTunnelConnected(m_serviceSessionMeta.value(QStringLiteral("node_id")).toString(),' \
     || bad "Q2: the Android adoption of a native Connected must name the session's node"
+
+# ---- Q3 ----
+SE="$HERE/../ServiceEngine.cpp"
+JNI="$CLIENT/platforms/android/android_controller.cpp"
+fac="$(code "$FACADE")"
+has "$(code "$SE")" 'm_stopGivenUp = true;' || bad "Q3: the engine must say it gave a stop up"
+has "$fac" 'if (m_engine.takeStopGivenUp()) {' && has "$fac" 'AndroidController::instance()->requestStatus();' \
+    || bad "Q3: the facade must ask the service for its status after a given-up stop"
+has "$(body "$JNI" 'void AndroidController::requestStatus()')" 'callActivityMethod("requestStatus", "()V");' \
+    || bad "Q3: AndroidController::requestStatus must ask the activity"
+has "$act" 'fun requestStatus() {' || bad "Q3: the activity must answer requestStatus"
+has "$fac" 'const AndroidStatusAction action = androidStatusAction(' || bad "Q3: the status handler must decide by androidStatusAction"
+has "$fac" 'applyNativeState(Vpn::Disconnected, /*confirmsOwnStop=*/true);' || bad "Q3: ConfirmOwnStop must end our own stop"
+has "$fac" '|| confirmsOwnStop; // android3: the end of the owner' || bad "Q3: the end of our own stop is not a loss"
 
 [ "$fail" = "0" ] && echo "check_android_service_order_wiring: OK"
 exit "$fail"

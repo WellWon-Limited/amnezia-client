@@ -57,6 +57,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.amnezia.vpn.protocol.getStatistics
+import org.amnezia.vpn.protocol.ProtocolState
 import org.amnezia.vpn.protocol.getStatus
 import org.amnezia.vpn.qt.QtAndroidController
 import org.amnezia.vpn.util.LibraryLoader.loadSharedLibrary
@@ -827,6 +828,24 @@ class AmneziaActivity : QtActivity() {
             checkVpnPermission {
                 checkNotificationPermission {
                     startVpn(vpnConfig)
+                }
+            }
+        }
+    }
+
+    // AVPN (android3 runs a, f): the service's status snapshot, as after a bind (the engine gave up waiting for a stop).
+    // Not bound yet: the bind in progress sends REQUEST_STATUS itself; no service at all: nothing of ours runs.
+    @Suppress("unused")
+    fun requestStatus() {
+        mainScope.launch {
+            isWaitingStatus = true
+            when {
+                isServiceConnected -> vpnServiceMessenger.send(Action.REQUEST_STATUS, replyTo = activityMessenger)
+                isInBoundState -> Log.i(TAG, "Request status: on the bind in progress")
+                vpnProto != null -> doBindService()
+                else -> {
+                    isWaitingStatus = false
+                    QtAndroidController.onStatus(ProtocolState.DISCONNECTED)
                 }
             }
         }

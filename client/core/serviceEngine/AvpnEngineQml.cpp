@@ -1601,7 +1601,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(AndroidController::instance(), &AndroidController::status, this,
             [this](AndroidController::ConnectionState st) {
                 const bool thinkConnected = (state() == QLatin1String("connected"));
-                if (st == AndroidController::ConnectionState::CONNECTED && !thinkConnected) {
+                const AndroidStatusAction action = androidStatusAction(
+                    st == AndroidController::ConnectionState::CONNECTED, st == AndroidController::ConnectionState::DISCONNECTED,
+                    thinkConnected, observedTunnelOf(m_lastTunnelState), m_engine.attemptRunning());
+                if (action == AndroidStatusAction::Adopt) {
                     m_wantConnected = true;
                     syncIntent(); // I7
                     m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild()); // android2 V2: its failover legs
@@ -1614,8 +1617,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                                                   ? QStringLiteral("-")
                                                   : m_serviceSessionMeta.value(QStringLiteral("node_id")).toString()));
                     onConnectionStateChanged(Vpn::Connected);
-                } else if (st == AndroidController::ConnectionState::DISCONNECTED && thinkConnected) {
+                } else if (action == AndroidStatusAction::Disconnected) {
                     onConnectionStateChanged(Vpn::Disconnected);
+                } else if (action == AndroidStatusAction::ConfirmOwnStop) {
+                    // android3 runs a, f: the stop the owner gave up on is over - the facade's view leaves "Disconnecting"
+                    reliabilityEvent(QStringLiteral("native_status_confirms_stop native=%1").arg(int(m_lastTunnelState)));
+                    applyNativeState(Vpn::Disconnected, /*confirmsOwnStop=*/true);
+                    QTimer::singleShot(0, this, [this]() { reconcile(); });
                 }
             },
             Qt::QueuedConnection);
@@ -3530,6 +3538,16 @@ bool AvpnEngineQml::syncAttempt()
     }
     // The owner asked for the data check again on the same tunnel: the running check is void at once (its late
     // answer is dropped by the epoch), the new one starts from the top of the event loop.
+    // android3 runs a, f: the owner gave a stop up - nothing will tell the facade how the platform's tunnel ended. With
+    // the attempt over, ask the service once (its snapshot resolves the view: AndroidStatusAction, restoreConnection).
+    if (m_engine.takeStopGivenUp()) {
+#ifdef Q_OS_ANDROID
+        if (!m_engine.attemptRunning()) {
+            reliabilityEvent(QStringLiteral("native_status_requested why=stop_unconfirmed native=%1").arg(int(m_lastTunnelState)));
+            AndroidController::instance()->requestStatus();
+        }
+#endif
+    }
     if (m_engine.takeCheckRerun()) {
         ++m_verifyEpoch;
         QTimer::singleShot(0, this, [this]() {
@@ -5845,6 +5863,11 @@ void AvpnEngineQml::clearBenchHistory()
 
 void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 {
+    applyNativeState(s, /*confirmsOwnStop=*/false);
+}
+
+void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnStop)
+{
     // Review E2 of 18.11: an event of an older leg (a duplicate error, a late answer) is dropped before any state
     // changes; a confirmed teardown of that older tunnel still frees what was held for its stop.
     if (m_engine.nativeEventStale(m_tunnel.nativeLegSeen())) {
@@ -6033,7 +6056,8 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         reliabilityEvent(QStringLiteral("live_session_lost native=%1").arg(int(s)));
     if (s == Vpn::Disconnected || s == Vpn::Error) {
         const QString est = m_engine.debugSnapshot().state; // DebugSnapshot-структура (поле, не QVariantMap)
-        const bool weAreOperating = (m_op != Op::None) || liveSessionLost; // наш start/stop в полёте
+        const bool weAreOperating = (m_op != Op::None) || liveSessionLost // наш start/stop в полёте
+                                    || confirmsOwnStop; // android3: the end of the owner's own stop, seen late
         const bool engineStillSwitching = (s == Vpn::Disconnected && engineOwnTransitionState(est));
         const bool interrupted = m_engine.attemptRunning(); // the attempt owner walks on: our own operation
         // Волна-3 (2026-09-28): класс обрыва вместо «внешний / не внешний». Намерение снимает ТОЛЬКО

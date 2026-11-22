@@ -37,6 +37,9 @@ public:
 
     ErrorCode start(const QJsonObject &vpnConfig);
     void stop();
+    // AVPN (android3 runs a, f): ask the bound service for its status snapshot (STATUS -> status() /
+    // initConnectionState()), as after a bind - for a stop the engine gave up waiting for.
+    void requestStatus();
     void resetLastServer(int serverIndex);
     void saveFile(const QString &fileName, const QString &data);
     QString openFile(const QString &filter);

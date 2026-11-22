@@ -222,6 +222,14 @@ void AndroidController::stop()
     callActivityMethod("stop", "()V");
 }
 
+// AVPN (android3 runs a, f): the snapshot is taken like the one after a bind - initConnectionState() wires the protocol
+// back (VpnConnection::restoreConnection), the engine's status() handler resolves its own view.
+void AndroidController::requestStatus()
+{
+    isWaitingStatus = true;
+    callActivityMethod("requestStatus", "()V");
+}
+
 // AVPN (upstream nodes, release C): android-ipc-contract.md §2. The message carries the renew token: only the
 // method name is logged. A missing Kotlin method (NoSuchMethodError) is cleared and reads as "not sent".
 bool AndroidController::sendUpstreamLeaseSet(const QByteArray &message)

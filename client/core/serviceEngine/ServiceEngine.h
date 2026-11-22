@@ -304,6 +304,9 @@ public:
     // The data check deadline of a leg (the facade's checks finish inside it).
     int dataCheckMs() const { return m_owner.timings().dataCheckMs; }
     std::optional<path::AttemptResult> takeAttemptResult() { return std::exchange(m_lastResult, std::nullopt); }
+    // android3 runs a, f: the owner gave a stop up (StopUnconfirmed) since the last look - the platform's view of the
+    // tunnel is unknown and only a fresh native status can tell it (the facade asks for one on Android).
+    bool takeStopGivenUp() { return std::exchange(m_stopGivenUp, false); }
     // The result waiting to be taken, without taking it (review F1: the start that ended at once names its attempt).
     const std::optional<path::AttemptResult> &pendingAttemptResult() const { return m_lastResult; }
     QStringList takeAttemptJournal() { return std::exchange(m_attemptJournal, QStringList()); }
@@ -700,6 +703,7 @@ private:
     int m_legStartFailures = 0;
     bool m_checkRerun = false;
     bool m_facadeStop = false;                 // the facade itself takes the tunnel down (user stop / restart)
+    bool m_stopGivenUp = false;                // takeStopGivenUp
     quint64 m_legBuildBegun = 0;               // the leg whose own "building" was reported (onLocalBuild)
     std::optional<path::AttemptTimings> m_timingsForTest;
     QList<SubscriptionNode> m_packCandidates;  // upstream: synthesized from the standby pack
