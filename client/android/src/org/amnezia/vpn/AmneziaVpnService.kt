@@ -345,6 +345,11 @@ open class AmneziaVpnService : VpnService() {
             disconnect()
             disconnectionJob?.join()
         }
+        // AVPN (android4 G4 run 2): the service can be destroyed while DISCONNECTING (no client bound, the system's VPN
+        // binding gone) - the state collector on mainScope ends below and never posts DISCONNECTED, and the last posted
+        // notification («Отключение…») outlived the service. Nothing of this service runs any more: its notification goes.
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        serviceNotification.cancel()
         connectionScope.cancel()
         mainScope.cancel()
         super.onDestroy()

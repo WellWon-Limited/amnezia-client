@@ -1385,6 +1385,23 @@ static void r3StatusAdoptionObeysThePersonsStop()
                   == (adoptObservedTunnel(pending, want) == ObservedTunnelAdoption::StopIt));
 }
 
+// android4 G4 (21.11): the service ended while the app was in the background (the notification's «Отключиться»). The
+// activity now tells the app DISCONNECTED at once on its return (ServiceReach, Kotlin) and for a stop with no service to
+// give it to. What that DISCONNECTED means to the facade - the person's belief vs what runs:
+static void g4ServiceGoneOnReturn()
+{
+    // the app believed a live session, nothing of ours in flight: an external end - the intent goes off (not a loss to
+    // recover from: the person ended it from the notification), and a start is possible at once
+    CHECK(classifyLoss(/*weAreOperating=*/false, QStringLiteral("connected"), false, false, /*uplinkUp=*/true)
+          == LossClass::External);
+    CHECK(reconcileActionable(ObservedTunnel::Disconnected, TeardownLatch{}));
+    // the person's tap was a stop (our operation): it is confirmed - no 10 s wait for a stop that has nothing to stop
+    CHECK(classifyLoss(/*weAreOperating=*/true, QStringLiteral("connected"), false, false, true) == LossClass::Own);
+    // the same truth as a status snapshot: a session the service no longer runs is the honest Disconnected
+    CHECK(androidStatusAction(false, /*serviceDisconnected=*/true, /*engineConnected=*/true, ObservedTunnel::Connected, false)
+          == AndroidStatusAction::Disconnected);
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1788,6 +1805,7 @@ int main()
     android3StatusResolvesAGivenUpStop();
     r2LateConnectedAfterThePersonsStop();
     r3StatusAdoptionObeysThePersonsStop();
+    g4ServiceGoneOnReturn();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

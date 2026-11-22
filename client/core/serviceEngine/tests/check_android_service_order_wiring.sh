@@ -13,7 +13,10 @@
 #       androidStatusAction - ConfirmOwnStop applies Disconnected as the end of our own stop and reconciles;
 #   R3  (review R3) a stop of a start intent Android accepted goes as an intent (ACTION_DISCONNECT, handled in
 #       onStartCommand), never kept for a bind; the STATUS entry decides by androidStatusDecision (the native entry's
-#       adoptObservedTunnel inside) before it touches the intent.
+#       adoptObservedTunnel inside) before it touches the intent;
+#   G4  (android4 G4) on return the activity always learns the service's truth (ServiceReach.onForeground: rebind a running
+#       one, DISCONNECTED at once for one that ended); a stop with no service to give it to is never dropped
+#       (ServiceReach.unsentStop); a destroyed service removes its notification.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -98,6 +101,19 @@ want="$(printf '%s\n' "$status" | grep -nF 'm_wantConnected = true;' | head -1 |
 [ -n "$stopit" ] && [ -n "$want" ] && [ "$stopit" -lt "$want" ] || bad "R3: StopIt must be decided before the intent is touched"
 has "$(code "$HERE/../DebugSnapshot.h")" 'if (a == AndroidStatusAction::Adopt && adoptObservedTunnel(ourStopPending, wantConnected) == ObservedTunnelAdoption::StopIt)' \
     || bad "R3: the STATUS rule must be the native entry's rule"
+
+# ---- G4 ----
+NOTIF="$CLIENT/android/src/org/amnezia/vpn/ServiceNotification.kt"
+has "$act" 'when (ServiceReach.onForeground(knownService = vpnProto != null, running = isServiceRunning(),' \
+    && has "$act" 'ServiceReach.OnForeground.GONE -> {' || bad "G4: onStart must learn the service's truth"
+[ "$(count "$act" 'QtAndroidController.onVpnStateChanged(ProtocolState.DISCONNECTED.ordinal)')" -ge "3" ] \
+    || bad "G4: a gone service and a stop with nothing to stop must tell DISCONNECTED"
+has "$act" 'ServiceCommandQueue.Disposition.NO_SERVICE -> giveUnsentCommand(command)' \
+    && has "$act" 'when (ServiceReach.unsentStop(running = isServiceRunning())) {' || bad "G4: a stop must never go into the void"
+dest="$(code "$SVC" | awk '/override fun onDestroy\(\)/{f=1} f{print} f&&/^    }$/{exit}')"
+has "$dest" 'serviceNotification.cancel()' && has "$dest" 'ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)' \
+    || bad "G4: a destroyed service must remove its notification"
+has "$(code "$NOTIF")" 'notificationManager.cancel(NOTIFICATION_ID)' || bad "G4: the notification must be cancellable"
 
 [ "$fail" = "0" ] && echo "check_android_service_order_wiring: OK"
 exit "$fail"

@@ -64,6 +64,7 @@ import org.amnezia.vpn.util.LibraryLoader.loadSharedLibrary
 import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.Prefs
 import org.amnezia.vpn.util.ServiceCommandQueue
+import org.amnezia.vpn.util.ServiceReach
 import org.json.JSONException
 import org.json.JSONObject
 import org.qtproject.qt.android.bindings.QtActivity
@@ -335,13 +336,22 @@ class AmneziaActivity : QtActivity() {
         Log.d(TAG, "Start Amnezia activity")
         mainScope.launch {
             qtInitialized.await()
-            vpnProto?.let { proto ->
-                if (AmneziaVpnService.isRunning(applicationContext, proto.processName)) {
-                    doBindService()
+            // AVPN (android4 G4): the service's true state, always (ServiceReach) - rebind a running one, and a service
+            // that ended while we were away (the notification's «Отключиться») is the end of the tunnel, told at once
+            when (ServiceReach.onForeground(knownService = vpnProto != null, running = isServiceRunning(),
+                                            startInFlight = startIntentAccepted)) {
+                ServiceReach.OnForeground.REBIND -> doBindService()
+                ServiceReach.OnForeground.GONE -> {
+                    Log.i(TAG, "Start Amnezia activity: the VPN service does not run - DISCONNECTED")
+                    QtAndroidController.onVpnStateChanged(ProtocolState.DISCONNECTED.ordinal)
                 }
+                ServiceReach.OnForeground.NOTHING -> {}
             }
         }
     }
+
+    private fun isServiceRunning(): Boolean =
+        vpnProto?.let { AmneziaVpnService.isRunning(applicationContext, it.processName) } ?: false
 
     override fun onStop() {
         isActivityResumed = false
@@ -820,7 +830,7 @@ class AmneziaActivity : QtActivity() {
             ServiceCommandQueue.Disposition.SEND -> sendServiceCommand(command)
             ServiceCommandQueue.Disposition.AS_INTENT -> sendStopIntent()
             ServiceCommandQueue.Disposition.QUEUED -> Log.i(TAG, "Service command ${command.javaClass.simpleName}: kept until the service is bound")
-            ServiceCommandQueue.Disposition.NO_SERVICE -> Log.w(TAG, "Service command ${command.javaClass.simpleName}: no service bound or binding - not sent")
+            ServiceCommandQueue.Disposition.NO_SERVICE -> giveUnsentCommand(command)
         }
     }
 
@@ -837,6 +847,29 @@ class AmneziaActivity : QtActivity() {
             ContextCompat.startForegroundService(this, Intent(this, proto.serviceClass).setAction(ACTION_DISCONNECT))
         } catch (e: RuntimeException) {
             Log.e(TAG, "Disconnect from VPN: the stop intent was refused: $e")
+        }
+    }
+
+    // AVPN (android4 G4): a command with no service bound or binding - never into the void. A stop: nothing runs = it is
+    // already true (DISCONNECTED at once, the event the service would have sent); a running service is bound and gets
+    // it on that bind. A start never comes here (it goes as the start intent when not bound).
+    @MainThread
+    private fun giveUnsentCommand(command: ServiceCommand) {
+        if (command !is ServiceCommand.Disconnect) {
+            Log.w(TAG, "Service command ${command.javaClass.simpleName}: no service bound or binding - not sent")
+            return
+        }
+        when (ServiceReach.unsentStop(running = isServiceRunning())) {
+            ServiceReach.UnsentStop.ALREADY_STOPPED -> {
+                Log.i(TAG, "Disconnect from VPN: the service does not run - already DISCONNECTED")
+                QtAndroidController.onVpnStateChanged(ProtocolState.DISCONNECTED.ordinal)
+            }
+            ServiceReach.UnsentStop.BIND_AND_SEND -> {
+                Log.i(TAG, "Disconnect from VPN: binding the running service to deliver it")
+                doBindService()
+                if (isInBoundState) giveServiceCommand(command)
+                else QtAndroidController.onVpnStateChanged(ProtocolState.DISCONNECTED.ordinal) // the bind was refused
+            }
         }
     }
 
