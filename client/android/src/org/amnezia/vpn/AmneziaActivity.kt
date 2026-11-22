@@ -62,6 +62,7 @@ import org.amnezia.vpn.qt.QtAndroidController
 import org.amnezia.vpn.util.LibraryLoader.loadSharedLibrary
 import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.Prefs
+import org.amnezia.vpn.util.ServiceCommandQueue
 import org.json.JSONException
 import org.json.JSONObject
 import org.qtproject.qt.android.bindings.QtActivity
@@ -90,6 +91,13 @@ class AmneziaActivity : QtActivity() {
     private var isWaitingStatus = true
     private var isServiceConnected = false
     private var isInBoundState = false
+    // AVPN (android3 runs a, f): the commands given while the service is not bound yet, delivered in order on the bind
+    // (ServiceCommandQueue) - a stop sent before the bind completed used to vanish and leave the start's tunnel running.
+    private sealed interface ServiceCommand {
+        object Disconnect : ServiceCommand
+        class Connect(val vpnConfig: String) : ServiceCommand
+    }
+    private val serviceCommands = ServiceCommandQueue<ServiceCommand>()
     private var notificationStateReceiver: BroadcastReceiver? = null
     private lateinit var vpnServiceMessenger: IpcMessenger
     private var pfd: ParcelFileDescriptor? = null
@@ -208,6 +216,8 @@ class AmneziaActivity : QtActivity() {
                 if (isWaitingStatus) {
                     vpnServiceMessenger.send(Action.REQUEST_STATUS, replyTo = activityMessenger)
                 }
+                // AVPN (android3 runs a, f): what was given before the bind, in order
+                serviceCommands.onBound().forEach(::sendServiceCommand)
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
@@ -591,8 +601,12 @@ class AmneziaActivity : QtActivity() {
         }
     }
 
+    // dropPending: the service is left for another one (another protocol's service class) - the commands that waited for
+    // this bind are not that service's. Otherwise (the activity stops, the binding died) they wait for the next bind.
     @MainThread
-    private fun doUnbindService() {
+    private fun doUnbindService(dropPending: Boolean = false) {
+        if (dropPending && serviceCommands.waiting > 0)
+            Log.w(TAG, "Unbind service: ${serviceCommands.clear().size} command(s) for it dropped (another service)")
         if (isInBoundState) {
             Log.d(TAG, "Unbind service")
             isWaitingStatus = true
@@ -711,13 +725,20 @@ class AmneziaActivity : QtActivity() {
             if (isServiceConnected) {
                 if (proto.serviceClass == vpnProto?.serviceClass) {
                     vpnProto = proto
-                    connectToVpn(vpnConfig)
+                    giveServiceCommand(ServiceCommand.Connect(vpnConfig))
                     return
                 }
-                doUnbindService()
+                doUnbindService(dropPending = true)
             }
             vpnProto = proto
             isWaitingStatus = false
+            // AVPN (android3 runs a, f): a stop given before the bind still waits - this start goes behind it, not as a
+            // second intent ahead of it
+            if (serviceCommands.startWaits(ServiceCommand.Connect(vpnConfig), bound = false)) {
+                Log.i(TAG, "Start VPN: waits behind a command given before the service was bound")
+                if (!isInBoundState) doBindService()
+                return
+            }
             startVpnService(vpnConfig, proto)
             doBindService()
         } ?: QtAndroidController.onServiceError()
@@ -768,7 +789,26 @@ class AmneziaActivity : QtActivity() {
     @MainThread
     private fun disconnectFromVpn() {
         Log.d(TAG, "Disconnect from VPN")
-        vpnServiceMessenger.send(Action.DISCONNECT)
+        giveServiceCommand(ServiceCommand.Disconnect)
+    }
+
+    // AVPN (android3 runs a, f): every messenger command of the start/stop protocol goes through the queue - sent now when
+    // bound and nothing waits ahead of it, kept for the bind in progress, or logged when there is no service to give it to.
+    @MainThread
+    private fun giveServiceCommand(command: ServiceCommand) {
+        when (serviceCommands.offer(command, bound = isServiceConnected, binding = isInBoundState && !isServiceConnected)) {
+            ServiceCommandQueue.Disposition.SEND -> sendServiceCommand(command)
+            ServiceCommandQueue.Disposition.QUEUED -> Log.i(TAG, "Service command ${command.javaClass.simpleName}: kept until the service is bound")
+            ServiceCommandQueue.Disposition.NO_SERVICE -> Log.w(TAG, "Service command ${command.javaClass.simpleName}: no service bound or binding - not sent")
+        }
+    }
+
+    @MainThread
+    private fun sendServiceCommand(command: ServiceCommand) {
+        when (command) {
+            is ServiceCommand.Disconnect -> vpnServiceMessenger.send(Action.DISCONNECT)
+            is ServiceCommand.Connect -> connectToVpn(command.vpnConfig)
+        }
     }
 
     /**
