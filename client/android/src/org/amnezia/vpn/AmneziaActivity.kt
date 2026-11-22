@@ -226,6 +226,7 @@ class AmneziaActivity : QtActivity() {
                 isServiceConnected = false
                 vpnServiceMessenger.reset()
                 isWaitingStatus = true
+                dropServiceCommands("the service went away")
                 QtAndroidController.onServiceDisconnected()
                 doBindService()
             }
@@ -595,19 +596,31 @@ class AmneziaActivity : QtActivity() {
     private fun doBindService() {
         Log.d(TAG, "Bind service")
         vpnProto?.let { proto ->
-            Intent(this, proto.serviceClass).also {
-                bindService(it, serviceConnection, BIND_ABOVE_CLIENT and BIND_AUTO_CREATE)
+            // AVPN (review R1): `or` - the flags combine (upstream's `and` gave 0: no BIND_AUTO_CREATE, a bind to a service
+            // that is not running waited for nothing); the bound state is what bindService answered
+            isInBoundState = Intent(this, proto.serviceClass).let {
+                bindService(it, serviceConnection, BIND_ABOVE_CLIENT or BIND_AUTO_CREATE)
             }
-            isInBoundState = true
+            if (!isInBoundState) {
+                Log.w(TAG, "Bind service: refused")
+                dropServiceCommands("the bind was refused")
+            }
         }
     }
 
-    // dropPending: the service is left for another one (another protocol's service class) - the commands that waited for
-    // this bind are not that service's. Otherwise (the activity stops, the binding died) they wait for the next bind.
+    // AVPN (review R1): the commands kept for a bind that is given up are moot (ServiceCommandQueue)
     @MainThread
-    private fun doUnbindService(dropPending: Boolean = false) {
-        if (dropPending && serviceCommands.waiting > 0)
-            Log.w(TAG, "Unbind service: ${serviceCommands.clear().size} command(s) for it dropped (another service)")
+    private fun dropServiceCommands(why: String) {
+        val dropped = serviceCommands.clear()
+        if (dropped.isNotEmpty())
+            Log.w(TAG, "Service commands dropped ($why): ${dropped.joinToString { it.javaClass.simpleName }}")
+    }
+
+    // Review R1: whatever the reason (the activity stops, the binding died, another protocol's service), the bind is given
+    // up - what was kept for it is dropped.
+    @MainThread
+    private fun doUnbindService() {
+        dropServiceCommands("unbind")
         if (isInBoundState) {
             Log.d(TAG, "Unbind service")
             isWaitingStatus = true
@@ -729,15 +742,15 @@ class AmneziaActivity : QtActivity() {
                     giveServiceCommand(ServiceCommand.Connect(vpnConfig))
                     return
                 }
-                doUnbindService(dropPending = true)
+                doUnbindService()
             }
             vpnProto = proto
             isWaitingStatus = false
             // AVPN (android3 runs a, f): a stop given before the bind still waits - this start goes behind it, not as a
             // second intent ahead of it
-            if (serviceCommands.startWaits(ServiceCommand.Connect(vpnConfig), bound = false)) {
+            if (serviceCommands.startWaits(ServiceCommand.Connect(vpnConfig), bound = false,
+                                           binding = isInBoundState && !isServiceConnected)) {
                 Log.i(TAG, "Start VPN: waits behind a command given before the service was bound")
-                if (!isInBoundState) doBindService()
                 return
             }
             startVpnService(vpnConfig, proto)

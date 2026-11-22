@@ -31,8 +31,14 @@ act="$(code "$ACT")"
 has "$act" 'serviceCommands.onBound().forEach(::sendServiceCommand)' || bad "Q1: the bind must deliver the waiting commands"
 has "$act" 'giveServiceCommand(ServiceCommand.Disconnect)' || bad "Q1: the stop must go through the queue"
 has "$act" 'giveServiceCommand(ServiceCommand.Connect(vpnConfig))' || bad "Q1: a bound start must go through the queue"
-has "$act" 'if (serviceCommands.startWaits(ServiceCommand.Connect(vpnConfig), bound = false)) {' \
-    || bad "Q1: a start behind a waiting command must wait behind it"
+has "$act" 'if (serviceCommands.startWaits(ServiceCommand.Connect(vpnConfig), bound = false,' \
+    && has "$act" 'binding = isInBoundState && !isServiceConnected)) {' \
+    || bad "Q1: a start waits behind a kept command only while that bind is in progress (review R1)"
+# review R1: the queue belongs to one bind; the bind flags combine; the bound state is bindService's answer
+has "$act" 'bindService(it, serviceConnection, BIND_ABOVE_CLIENT or BIND_AUTO_CREATE)' || bad "R1: the bind flags must combine (or)"
+has "$act" 'isInBoundState = Intent(this, proto.serviceClass).let {' || bad "R1: the bound state must be bindService's answer"
+[ "$(count "$act" 'dropServiceCommands(')" -ge "4" ] || bad "R1: a given-up bind (unbind, service gone, bind refused) must drop what was kept"
+has "$act" '        dropServiceCommands("unbind")' || bad "R1: every unbind drops what was kept for that bind"
 [ "$(count "$act" 'vpnServiceMessenger.send(Action.DISCONNECT)')" = "1" ] \
     || bad "Q1: DISCONNECT may be sent only by sendServiceCommand"
 has "$act" 'serviceCommands.offer(command, bound = isServiceConnected, binding = isInBoundState && !isServiceConnected)' \

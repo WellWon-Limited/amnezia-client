@@ -14,6 +14,12 @@ package org.amnezia.vpn.util
 // goes behind it as a message instead of a second intent (a newer start must not overtake an older stop). With no
 // service bound or being bound there is nothing to deliver to: the caller logs the drop. Pure (JVM unit tests:
 // src/test ServiceCommandQueueTest).
+//
+// The queue belongs to ONE bind (review R1, 21.11): what it keeps is for the service instance being bound now. When that
+// bind is given up (the activity stops and unbinds, the binding dies, the service went away, bindService refused) the
+// kept commands are moot and dropped - a stop for a service that no longer exists has nothing to stop. A start with no
+// bind in progress therefore never waits: it goes as the start intent, which creates and starts the service. Before,
+// a stop kept across onStop made every later Connect wait behind it for a bind that never completed.
 class ServiceCommandQueue<T> {
     enum class Disposition { SEND, QUEUED, NO_SERVICE }
 
@@ -28,10 +34,10 @@ class ServiceCommandQueue<T> {
         else -> Disposition.NO_SERVICE
     }
 
-    // A start that is not bound: true = it waits behind a pending command (send it as a message on the bind), false = it
-    // goes as the service's start intent, as before.
-    fun startWaits(start: T, bound: Boolean): Boolean {
-        if (bound || pending.isEmpty()) return false
+    // A start that is not bound: true = it waits behind a command kept for the bind in progress (sent as a message on
+    // that bind), false = it goes as the service's start intent, as before (no bind in progress: nothing it could wait for).
+    fun startWaits(start: T, bound: Boolean, binding: Boolean): Boolean {
+        if (bound || !binding || pending.isEmpty()) return false
         pending.addLast(start)
         return true
     }
@@ -39,6 +45,7 @@ class ServiceCommandQueue<T> {
     // The bind completed: the commands to send now, in the order they were given.
     fun onBound(): List<T> = pending.toList().also { pending.clear() }
 
-    // The service went away for good (unbound on purpose, another service class): nothing waits for it any more.
+    // The bind is given up (unbound, the binding died, the service went away, the bind was refused): the commands kept
+    // for it are dropped - returned for the caller's log.
     fun clear(): List<T> = pending.toList().also { pending.clear() }
 }

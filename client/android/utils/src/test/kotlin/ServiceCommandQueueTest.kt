@@ -15,7 +15,7 @@ class ServiceCommandQueueTest {
     fun stopBeforeTheBindReachesTheServiceAfterTheStart() {
         val q = ServiceCommandQueue<Cmd>()
         // the first start goes as the service's intent (nothing waits): the activity binds
-        assertFalse(q.startWaits(Start(1), bound = false))
+        assertFalse(q.startWaits(Start(1), bound = false, binding = false))
         // the engine stops 1.3 s later, the bind has not completed: kept, not dropped
         assertEquals(ServiceCommandQueue.Disposition.QUEUED, q.offer(Stop, bound = false, binding = true))
         assertEquals(1, q.waiting)
@@ -28,9 +28,9 @@ class ServiceCommandQueueTest {
     @Test
     fun aNewerStartWaitsBehindTheStop() {
         val q = ServiceCommandQueue<Cmd>()
-        assertFalse(q.startWaits(Start(1), bound = false))
+        assertFalse(q.startWaits(Start(1), bound = false, binding = false))
         q.offer(Stop, bound = false, binding = true)
-        assertTrue(q.startWaits(Start(2), bound = false)) // not a second intent ahead of the stop
+        assertTrue(q.startWaits(Start(2), bound = false, binding = true)) // not a second intent ahead of the stop
         assertEquals(listOf(Stop, Start(2)), q.onBound())
     }
 
@@ -51,5 +51,23 @@ class ServiceCommandQueueTest {
         q.offer(Stop, bound = false, binding = true)
         assertEquals(listOf<Cmd>(Stop), q.clear())
         assertEquals(emptyList(), q.onBound())
+    }
+
+    // Review R1 (21.11): Connect, Stop before the bind completed, the app went to the background (onStop unbinds), the
+    // service ended later (the notification's «Отключиться»). The kept Stop is for a bind that was given up - it is
+    // dropped, and the next Connect goes as the start intent (which creates the service), never behind the old Stop.
+    @Test
+    fun aGivenUpBindKeepsNothingAndTheNextStartGoesAsTheIntent() {
+        val q = ServiceCommandQueue<Cmd>()
+        assertFalse(q.startWaits(Start(1), bound = false, binding = false))
+        assertEquals(ServiceCommandQueue.Disposition.QUEUED, q.offer(Stop, bound = false, binding = true))
+        assertEquals(listOf<Cmd>(Stop), q.clear()) // onStop: the bind is given up
+        assertFalse(q.startWaits(Start(2), bound = false, binding = false)) // as the intent
+        assertEquals(0, q.waiting)
+        // even a leftover command never holds a start when no bind is in progress
+        q.offer(Stop, bound = false, binding = true)
+        assertFalse(q.startWaits(Start(3), bound = false, binding = false))
+        // bound: a start is the messenger's, never "waiting"
+        assertFalse(q.startWaits(Start(4), bound = true, binding = false))
     }
 }
