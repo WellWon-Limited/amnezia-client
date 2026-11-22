@@ -482,6 +482,7 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
             attemptJournal(QStringLiteral("attempt_stop_unconfirmed leg=%1 node=%2 (platform, not recorded)")
                                .arg(e.stamp.leg).arg(e.path.id.id));
             m_facadeStop = false;
+            m_stopGivenUp = true;
             break;
         case path::EffectType::Show:
             if (e.phase == path::AttemptPhase::Idle)
@@ -1760,19 +1761,44 @@ bool ServiceEngine::onPermissionDenied()
     return m_state != before;
 }
 
-bool ServiceEngine::onLocalBuild(bool building)
+bool ServiceEngine::onLocalBuild(LocalBuildReport report, quint64 leg)
 {
     if (m_owner.phase() != path::AttemptPhase::Starting)
         return false;
-    if (building == m_owner.legBuilding())
-        return false; // a repeated report changes nothing
+    const char *what = report == LocalBuildReport::Building ? "building"
+                       : report == LocalBuildReport::Built  ? "built"
+                                                            : "not_started";
+    if (leg != m_owner.currentLeg().leg) {
+        attemptJournal(QStringLiteral("leg_build_other report=%1 of_leg=%2 leg=%3 (a report of another start - not this leg's build)")
+                           .arg(QLatin1String(what)).arg(leg).arg(m_owner.currentLeg().leg));
+        return false;
+    }
     const EngineState before = m_state;
-    attemptJournal(building ? QStringLiteral("leg_build begin leg=%1 node=%2 (the device builds its tunnel: the start clock stands)")
-                                  .arg(m_owner.currentLeg().leg).arg(m_owner.currentPath().id.id)
-                            : QStringLiteral("leg_build end leg=%1 node=%2 build_ms=%3 (the server's start deadline runs from now)")
-                                  .arg(m_owner.currentLeg().leg).arg(m_owner.currentPath().id.id)
-                                  .arg(m_owner.legLocalBuildMs()));
-    feedOwner(path::AttemptEvent::localBuild(nowMs(), m_owner.currentLeg(), building));
+    switch (report) {
+    case LocalBuildReport::Building:
+        if (m_legBuildBegun == leg)
+            return false; // a repeated report changes nothing
+        m_legBuildBegun = leg;
+        attemptJournal(QStringLiteral("leg_build begin leg=%1 node=%2 (the device builds its tunnel: the start clock stands)")
+                           .arg(leg).arg(m_owner.currentPath().id.id));
+        if (!m_owner.legBuilding())
+            feedOwner(path::AttemptEvent::localBuild(nowMs(), m_owner.currentLeg(), true));
+        break;
+    case LocalBuildReport::Built:
+        if (!m_owner.legBuilding())
+            return false; // nothing local runs for this leg (a repeated report)
+        attemptJournal(QStringLiteral("leg_build end leg=%1 node=%2 build_ms=%3 (the server's start deadline runs from now)")
+                           .arg(leg).arg(m_owner.currentPath().id.id).arg(m_owner.legLocalBuildMs()));
+        feedOwner(path::AttemptEvent::localBuild(nowMs(), m_owner.currentLeg(), false));
+        break;
+    case LocalBuildReport::NotStarted:
+        // the tunnel of this leg never started: the device's outcome, nothing about the server; the stop that follows
+        // also ends what the service may still be building for an earlier start
+        attemptJournal(QStringLiteral("leg_build not_started leg=%1 node=%2 build_ms=%3 (the device did not start this tunnel - a local outcome, nothing recorded against the path)")
+                           .arg(leg).arg(m_owner.currentPath().id.id).arg(m_owner.legLocalBuildMs()));
+        feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(), path::PathOutcome::Inconclusive));
+        break;
+    }
     return m_state != before;
 }
 

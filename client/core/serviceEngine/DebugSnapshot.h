@@ -84,6 +84,21 @@ inline TunnelAdoption decideTunnelAdoption(bool connected, bool intentKnown, boo
                                 SessionGeneration{ observedGeneration, QString() });
 }
 
+// Non-iOS (Android, desktop): a live tunnel observed while the engine holds none (review R2, 21.11). The person tapped
+// Stop as the handshake completed; the Connected already in flight arrived after our stop and the adoption set the
+// intent back on - the person's Stop was overruled. The person's last will owns the outcome: with a stop of ours still
+// unconfirmed and the request off, the tunnel is stopped (reconcile: connected + intent off -> the stop again), never
+// adopted. A stop that was not the person's (no network, failover, a restart for another choice: the request is on)
+// and a session started outside the app while no stop of ours is pending are adopted as before. iOS decides the same
+// question with the session generation (decideTunnelAdoption: a stop of the SAME session blocks, a new session from
+// Settings is adopted after OFF); Android's service has no generation to compare, so a pending stop of ours with the
+// request off is taken as that same session.
+enum class ObservedTunnelAdoption { Adopt, StopIt };
+inline ObservedTunnelAdoption adoptObservedTunnel(bool ourStopPending, bool wantConnected)
+{
+    return ourStopPending && !wantConnected ? ObservedTunnelAdoption::StopIt : ObservedTunnelAdoption::Adopt;
+}
+
 // Native observations never override a pause, our own in-flight operation or a stop of the same
 // session that has not been confirmed yet. An OFF intent does NOT block a new session (A4).
 inline bool canAdoptObservedTunnel(bool connected, bool intentKnown, bool wantConnected,
@@ -203,6 +218,28 @@ inline ReconcileGate reconcileGate(const TeardownLatch &latch, ObservedTunnel s,
 }
 // Можно ли действовать (стартовать) из этого состояния. Error — только когда он не требует
 // подтверждения (не-iOS, либо бюджет запросов статуса исчерпан и латч снят).
+// Android: what a status snapshot of the VPN service (AvpnEngineQml, AndroidController::status) does to the facade's view.
+//  Adopt          - the service runs a tunnel the engine does not hold: adopt it (the existing rule, §13a);
+//  Disconnected   - the engine holds a session the service no longer runs: the honest Disconnected (existing);
+//  ConfirmOwnStop - android3 runs a, f (21.11): the facade still sees our own teardown in progress (Disconnecting: the
+//                   owner gave its stop up, no DISCONNECTED ever came) and no attempt runs - the service says it runs
+//                   nothing: that is the end of OUR stop, not a loss (the attempt's result already decided the request).
+//                   Before, the view stayed transitional forever: reconcile waited for a terminal, and both the uplink's
+//                   return and a tap did nothing;
+//  Nothing        - the views agree, or the snapshot is in between (its terminal state comes as an event).
+enum class AndroidStatusAction { Nothing, Adopt, Disconnected, ConfirmOwnStop };
+inline AndroidStatusAction androidStatusAction(bool serviceConnected, bool serviceDisconnected, bool engineConnected,
+                                               ObservedTunnel facadeView, bool attemptRunning)
+{
+    if (serviceConnected && !engineConnected)
+        return AndroidStatusAction::Adopt;
+    if (serviceDisconnected && engineConnected)
+        return AndroidStatusAction::Disconnected;
+    if (serviceDisconnected && facadeView == ObservedTunnel::Transitional && !attemptRunning)
+        return AndroidStatusAction::ConfirmOwnStop;
+    return AndroidStatusAction::Nothing;
+}
+
 inline bool reconcileActionable(ObservedTunnel s, const TeardownLatch &latch)
 {
     return s == ObservedTunnel::Disconnected || s == ObservedTunnel::Unknown
@@ -555,6 +592,21 @@ inline FailedAttemptIntent failedAttemptIntent(bool serversWereJudged, bool upli
     if (!uplinkUp)
         return FailedAttemptIntent::Wait;
     return afterLiveLoss ? FailedAttemptIntent::DropAndResume : FailedAttemptIntent::Drop;
+}
+
+// The start was refused (guardedStart: connect() returned false). Who decides what happens to the request: when the
+// start ended in a terminal result of its own attempt and syncAttempt judged that result (failedAttemptIntent - keep
+// and wait for the uplink, or drop with the result's own text), the result does; the refusal adds nothing - no second
+// intent-off, no second error text. Only a refusal that no judged result explains (no tunnel adapter, no subscription
+// and no nodes - the owner was never fed - or a result superseded by a newer intent) is the start's own: the intent is
+// dropped and its error shown. Review F1 (21.11): Connect with no physical network ended NoNetwork at once, the result
+// kept the request («Нет сети — подключимся, когда она появится») and the start dropped it on the next line.
+// endedAttempt: the attempt number of the result the start ended with (0 = none); judgedAttempt: the attempt number of
+// the last result syncAttempt judged for the current intent.
+enum class StartRefusal { JudgedByResult, DropIntent };
+inline StartRefusal startRefusal(quint64 endedAttempt, quint64 judgedAttempt)
+{
+    return endedAttempt != 0 && endedAttempt == judgedAttempt ? StartRefusal::JudgedByResult : StartRefusal::DropIntent;
 }
 
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
@@ -1711,6 +1763,29 @@ inline int hintedPoolRow(const QList<NodeDebugRow> &pool, const QString &hintNod
             if (endpointHost(pool.at(i).endpoint) == host)
                 return i;
     return -1;
+}
+
+// Which server the home card names (AvpnEngineQml::currentNode). android2 "P7 card after UI kill" (21.11): the UI
+// process restarted while connected with a pinned choice, the adopted session's identity was unknown and the card
+// named the PINNED server (Эстония 3) while the traffic went through another (Германия 1). The pin is the person's
+// choice, never the identity of a running session:
+//  - Live: the live session's node (connected / verifying), or the node the walking attempt tries now;
+//  - Unknown: a live session whose node is not known - the session's own hint (hintedPoolRow / its address,
+//    «Текущий сервер»), never the pin;
+//  - Pin: no live session - the person's choice at once (a tap in the picker shows it while connecting);
+//  - None: nothing to name («Умный выбор сервера»).
+enum class CardNodeSource { None, Live, Unknown, Pin };
+inline CardNodeSource cardNodeSource(bool liveSession, bool walking, bool switching, bool liveIdKnown, bool pinned)
+{
+    if ((liveSession || walking) && liveIdKnown)
+        return CardNodeSource::Live;
+    if (liveSession)
+        return CardNodeSource::Unknown;
+    if (pinned)
+        return CardNodeSource::Pin;
+    if (switching && liveIdKnown)
+        return CardNodeSource::Live;
+    return CardNodeSource::None;
 }
 
 struct DebugSnapshot {

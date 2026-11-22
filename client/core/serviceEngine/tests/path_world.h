@@ -171,6 +171,11 @@ public:
     static constexpr int kBuildNever = std::numeric_limits<int>::max();
     int buildMs = -1;
     QHash<QString, int> buildMsFor;
+    // The service that builds (android2 V2, 21.11): `buildReachMs` - the start command reaches it this long after it was
+    // sent; `serialBuilds` - it builds one start at a time and a stop does not cut a build short, so a start sent during
+    // the previous leg's build begins only when that build ends. Defaults: at once, independent (the model above).
+    int buildReachMs = 0;
+    bool serialBuilds = false;
     int localOverruns = 0; // LocalBuildOverrun effects
 
     // --- driving --------------------------------------------------------------------------------------------
@@ -340,10 +345,16 @@ private:
                 const int build = buildMsFor.value(e.path.id.id, buildMs);
                 qint64 base = now;
                 if (build >= 0) {
-                    schedule(now, AttemptEvent::localBuild(0, e.stamp, true));
-                    if (build == kBuildNever)
+                    qint64 begin = now + buildReachMs;
+                    if (serialBuilds)
+                        begin = std::max(begin, m_serviceFreeAt);
+                    schedule(begin, AttemptEvent::localBuild(0, e.stamp, true));
+                    if (build == kBuildNever) {
+                        m_serviceFreeAt = std::numeric_limits<qint64>::max();
                         break;
-                    base = now + build;
+                    }
+                    base = begin + build;
+                    m_serviceFreeAt = base;
                     schedule(base, AttemptEvent::localBuild(0, e.stamp, false));
                 }
                 switch (b.kind) {
@@ -435,6 +446,7 @@ private:
     quint64 m_seq = 0;
     QList<std::pair<qint64, qint64>> m_suspend;
     QHash<quint64, Behaviour> m_legBehaviour;
+    qint64 m_serviceFreeAt = 0; // serialBuilds: the end of the build in progress
     QHash<quint64, int> m_checkGen;
     UserChoice m_raceChoice;
     TransportMode m_raceMode = TransportMode::Auto;

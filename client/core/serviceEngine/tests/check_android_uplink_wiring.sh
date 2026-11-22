@@ -12,7 +12,13 @@
 #   U4  the Kotlin source: the NOT_VPN + INTERNET request, onLost leaves the set, every set change goes through
 #       PhysicalUplink and a move is told to C++;
 #   U5  the network-change signals that still read QNetworkInformation (the default network: our own VPN on
-#       Android) keep their own-tunnel rule.
+#       Android) keep their own-tunnel rule;
+#   U6  (android2 P5b) the path engine's network observation carries the authoritative uplink (withPhysicalUplink,
+#       tested in facade_policy_check p5bOfflineObservation and path_integration_check), the uplink event reaches the
+#       engine (scanNotifyNetwork) before the facade's uplink handler, and that handler takes the attempt's result;
+#   U7  (review F1) a start refused with a result of its own attempt leaves the request to that result's judgement:
+#       syncAttempt marks the attempt it judged, guardedStart asks startRefusal (facade_policy_check
+#       f1StartRefusalJudgedByItsResult, path_integration_check) before its own intent-off.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -80,6 +86,27 @@ has "$kt" 'runCatching { onPhysicalUplink(up) }' || bad "U4: a move must be told
 # ---- U5 ----
 [ "$(count "$FACADE" 'reliabilityEvent(QStringLiteral("network_change_ignored own_tunnel"));')" = "2" ] \
     || bad "U5: the QNetworkInformation change signals must keep their own-tunnel rule"
+
+# ---- U6 ----
+obs="$(body "$FACADE" 'avpn::path::NetworkObservation AvpnEngineQml::currentNetworkObservation() const')"
+has "$obs" 'return avpn::path::withPhysicalUplink(o, uplink->authoritative(), uplink->up());' \
+    || bad "U6: the network observation must carry the authoritative uplink"
+notify="$(code "$FACADE" | grep -nF '&avpn::UplinkMonitor::changed, this, [this](bool) { scanNotifyNetwork(); });' | head -1 | cut -d: -f1)"
+handler="$(code "$FACADE" | grep -nF '&avpn::UplinkMonitor::changed, this, [this](bool up) {' | head -1 | cut -d: -f1)"
+[ -n "$notify" ] && [ -n "$handler" ] && [ "$notify" -lt "$handler" ] \
+    || bad "U6: the uplink event must reach the engine before the facade's uplink handler"
+code "$FACADE" | sed -n "${handler:-1},$(( ${handler:-1} + 6 ))p" | grep -qF 'if (avpn::UplinkMonitor::instance()->authoritative())' \
+    && code "$FACADE" | sed -n "${handler:-1},$(( ${handler:-1} + 6 ))p" | grep -qF '            syncAttempt();' \
+    || bad "U6: the uplink handler must take the attempt's result while the uplink is as it says"
+
+# ---- U7 ----
+has "$sync" 'm_judgedAttempt = r->attempt;' || bad "U7: syncAttempt must mark the attempt whose result it judged"
+gs="$(body "$FACADE" 'void AvpnEngineQml::guardedStart()')"
+has "$gs" 'if (startRefusal(endedAttempt, m_judgedAttempt) == StartRefusal::JudgedByResult) {' \
+    || bad "U7: guardedStart must leave a judged result's decision standing"
+judge="$(printf '%s\n' "$gs" | grep -nF 'startRefusal(endedAttempt, m_judgedAttempt)' | head -1 | cut -d: -f1)"
+off="$(printf '%s\n' "$gs" | grep -nF 'intent_off why=attempt_not_started' | head -1 | cut -d: -f1)"
+[ -n "$judge" ] && [ -n "$off" ] && [ "$judge" -lt "$off" ] || bad "U7: the judged-result exit must come before the intent-off"
 
 [ "$fail" = "0" ] && echo "check_android_uplink_wiring: OK"
 exit "$fail"

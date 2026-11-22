@@ -123,7 +123,7 @@ p2="$(first_line "$down" 'applyUpstreamEvents(m_upOwner.disconnect(upstreamClock
 { [ -n "$p1" ] && [ -n "$p2" ] && [ "$p1" -lt "$p2" ]; } || bad "R1: down() must hold the release for the stop before it ends the lease"
 has "$down" 'QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedConnection);' && ! has "$down" 'm_stopAfterRelease' \
     || bad "R1: the core stop must not wait for the release"
-has "$(body_of "$FAC" 'void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s)')" 'm_tunnel.upstreamTunnelDown();' \
+has "$(body_of "$FAC" 'void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnStop)')" 'm_tunnel.upstreamTunnelDown();' \
     || bad "R1: the facade must tell the adapter that the stop is confirmed"
 has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::upstreamTunnelDown(bool endsSession)')" 'm_leaseClient->tunnelStopped();' \
     || bad "R1: a confirmed stop must send the held releases"
@@ -143,7 +143,7 @@ has "$(grep -F 'holdReleasesForStopIfRunning' "$ADP")" 'holdReleasesForStopIfRun
 ! grep -qF 'm_leaseClient->release(0,' "$ADP" || bad "R5: a release with request id 0 bypasses the owner's bookkeeping"
 tdn="$(body_of "$ADP" 'void VpnConnectionTunnelControl::upstreamTunnelDown(bool endsSession)')"
 has "$tdn" 'm_upOwner.tunnelLost(' || bad "F4: a Disconnected nobody asked for must end the session at once (tunnelLost)"
-has "$(body_of "$FAC" 'void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s)')" 'upstreamTunnelDown(/*endsSession=*/false)' \
+has "$(body_of "$FAC" 'void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnStop)')" 'upstreamTunnelDown(/*endsSession=*/false)' \
     || bad "F4: the stale-event branch must not end the live session"
 has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::startRefused()')" 'm_upOwner.abortStart(' \
     || bad "F9: a start that never reached the native service must give its seat back (abortStart)"

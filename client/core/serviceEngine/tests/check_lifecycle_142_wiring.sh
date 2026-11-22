@@ -100,7 +100,10 @@ adapter="$(code "$FACADE" | awk '/^ScanNetFacts ScanEngineAdapter::network\(\) c
 has "$adapter" 'f.localKey = m_e->m_engine.network().local;' \
     || bad "(c): the Scanner's network facts must carry the path engine's physical network (its cache identity)"
 # Review E1/E2 of 18.11: the facade drops obsolete native events first and settles its operation in one place.
-for slot in 'void AvpnEngineQml::onConnectionStateChanged(' 'void AvpnEngineQml::onVpnProtocolError('; do
+# (android3: the native state slot forwards to applyNativeState, whose first statement is the stale check.)
+first="$(code "$FACADE" | awk -v s='void AvpnEngineQml::onConnectionStateChanged(' 'index($0,s)==1{f=1;n=0} f{n++; if(n>1 && $0 !~ /^[{[:space:]]*$/){print; exit}}')"
+has "$first" 'applyNativeState(s, /*confirmsOwnStop=*/false);' || bad "E2: the native state slot must go straight to applyNativeState"
+for slot in 'void AvpnEngineQml::applyNativeState(' 'void AvpnEngineQml::onVpnProtocolError('; do
     first="$(code "$FACADE" | awk -v s="$slot" 'index($0,s)==1{f=1;n=0} f{n++; if(n>1 && $0 !~ /^[{[:space:]]*$/){print; exit}}')"
     has "$first" 'm_engine.nativeEventStale(m_tunnel.nativeLegSeen())' || bad "E2: $slot must drop an obsolete native event first"
 done

@@ -4,6 +4,9 @@
 #include <QJniObject>
 #include <QPixmap>
 
+#include <QVariantMap> // AVPN (android2 P7)
+#include <atomic> // AVPN (android2 V2)
+
 #include "core/protocols/vpnProtocol.h"
 #include "core/serviceEngine/UpstreamStatusWire.h" // AVPN (upstream nodes, release C): status of the Xray service
 
@@ -14,6 +17,8 @@ class AndroidController : public QObject
     Q_OBJECT
 
 public:
+    // AVPN (android2 V2): the Kotlin half reports its builds (onTunnelBuild registered by initialize()).
+    static bool reportsTunnelBuild() { return s_reportsTunnelBuild.load(); }
     explicit AndroidController();
     static AndroidController *instance();
 
@@ -32,6 +37,9 @@ public:
 
     ErrorCode start(const QJsonObject &vpnConfig);
     void stop();
+    // AVPN (android3 runs a, f): ask the bound service for its status snapshot (STATUS -> status() /
+    // initConnectionState()), as after a bind - for a stop the engine gave up waiting for.
+    void requestStatus();
     void resetLastServer(int serverIndex);
     void saveFile(const QString &fileName, const QString &data);
     QString openFile(const QString &filter);
@@ -86,10 +94,14 @@ signals:
     // IosController::permissionPromptPending) and ends the attempt on 2. Optional native: see initialize().
     void vpnPermissionPrompt(int state);
     // AVPN (local build, emulator round 20.11): the VPN service builds the tunnel interface of a start (state 0, from
-    // the start command) or has built it (state 1: VpnService.Builder.establish() returned and the backend runs, or
-    // the start ended without it). `seq` numbers the service's starts: a "built" belongs to the "building" with the
-    // same number. The engine stops the leg's start clock in between (AttemptOwner.h "Local build"). Optional native.
-    void tunnelBuild(int state, int seq);
+    // the start command) or has built it (state 1: VpnService.Builder.establish() returned and the backend runs), or
+    // the start ended without a tunnel (state 2, android2 V2). `seq` numbers the service's starts: a "built" belongs to
+    // the "building" with the same number; `leg` is the engine leg the start config named (tribeStartLeg, 0 = none). The
+    // engine's leg is local until its own "built" (AttemptOwner.h "Local build"). Optional native.
+    void tunnelBuild(int state, int seq, quint64 leg);
+    // AVPN (android2 P7): the tribeSessionMetadata {node_id, proto, endpoint, ...} of the session the service runs
+    // (empty: none), emitted before the status() / vpnStateChanged() it came with. Optional native.
+    void sessionMetadata(const QVariantMap &metadata);
     void notificationStateChanged();
     void vpnStateChanged(ConnectionState state);
     void statisticsUpdated(quint64 rxBytes, quint64 txBytes);
@@ -120,6 +132,7 @@ private:
     avpn::UpstreamTunnelStatus m_lastUpstreamStatus; // AVPN (release C): the controller's thread only
     void applyUpstreamStatusEvent(const QByteArray &json); // AVPN (release C)
     void resetUpstreamStatus(); // AVPN (release C): a new session starts from "nothing seen"
+    static inline std::atomic<bool> s_reportsTunnelBuild{false}; // AVPN (android2 V2): reportsTunnelBuild()
 
     static jclass log;
     static jmethodID logDebug;
@@ -139,7 +152,8 @@ private:
     static void onServiceError(JNIEnv *env, jobject thiz);
     static void onVpnPermissionRejected(JNIEnv *env, jobject thiz);
     static void onVpnPermissionPrompt(JNIEnv *env, jobject thiz, jint state); // AVPN, optional native
-    static void onTunnelBuild(JNIEnv *env, jobject thiz, jint state, jint seq); // AVPN, optional native
+    static void onTunnelBuild(JNIEnv *env, jobject thiz, jint state, jint seq, jlong leg); // AVPN, optional native
+    static void onSessionMetadata(JNIEnv *env, jobject thiz, jstring json); // AVPN (android2 P7), optional native
     static void onNotificationStateChanged(JNIEnv *env, jobject thiz);
     static void onVpnStateChanged(JNIEnv *env, jobject thiz, jint stateCode);
     static void onStatisticsUpdate(JNIEnv *env, jobject thiz, jlong rxBytes, jlong txBytes,

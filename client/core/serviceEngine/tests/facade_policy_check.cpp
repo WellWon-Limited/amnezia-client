@@ -1223,6 +1223,143 @@ static void r20PhysicalLossDuringConnect()
     CHECK(afterFailure(false, false, false) == FailedAttemptIntent::Drop);
 }
 
+// android2 P5b (21.11): Wi-Fi off during connecting. The medium pick still said Wi-Fi with no subnet ("wifi:-", a usable
+// key) and the attempt walked four servers without a network. The observation now carries the authoritative uplink.
+static void p5bOfflineObservation()
+{
+    using namespace avpn::path;
+    NetworkObservation wifi;
+    wifi.medium = NetMedium::Wifi;
+    wifi.gateway = QStringLiteral("gw-a");
+    wifi.subnet = QStringLiteral("192.168.1.0/24");
+    NetworkObservation wifiNoFingerprint; // what the pick gave on the phone the moment Wi-Fi went off
+    wifiNoFingerprint.medium = NetMedium::Wifi;
+
+    // authoritative source, physical set empty: offline (empty key), whatever the medium pick says
+    CHECK(localNetworkKey(withPhysicalUplink(wifiNoFingerprint, /*authoritative=*/true, /*up=*/false)).isEmpty());
+    CHECK(withPhysicalUplink(wifi, true, false).medium == NetMedium::Offline);
+    CHECK(withPhysicalUplink(wifi, true, false).gateway.isEmpty());
+    // authoritative and up: the observation as the platform read it
+    CHECK(localNetworkKey(withPhysicalUplink(wifi, true, true)) == localNetworkKey(wifi));
+    // the fallback (QNetworkInformation: iOS, Windows, the NE build) says down on every own-tunnel teardown (D2):
+    // never "offline" from it - the observation is unchanged
+    CHECK(localNetworkKey(withPhysicalUplink(wifiNoFingerprint, /*authoritative=*/false, false)) == QLatin1String("wifi:-"));
+    CHECK(localNetworkKey(withPhysicalUplink(wifi, false, false)) == localNetworkKey(wifi));
+
+    // through the generation owner: Wi-Fi -> down -> the same Wi-Fi back = two network changes, the middle one unusable
+    NetworkTracker t;
+    CHECK(t.observe(withPhysicalUplink(wifi, true, true)) && t.current().usable());
+    const quint64 g = t.current().generation;
+    CHECK(t.observe(withPhysicalUplink(wifiNoFingerprint, true, false)) && !t.current().usable());
+    CHECK(!t.observe(withPhysicalUplink(wifiNoFingerprint, true, false))); // a repeated down changes nothing
+    CHECK(t.observe(withPhysicalUplink(wifi, true, true)) && t.current().usable() && t.current().generation == g + 2);
+}
+
+// android2 "P7 card after UI kill" (21.11): connected through Германия 1 with the choice Эстония 3 pinned; the UI process
+// restarted, the adopted session's identity was unknown, and the card named the pin.
+static void p7CardNeverNamesThePinForALiveSession()
+{
+    // live (connected / verifying), identity unknown, a pin: the session's own hint, never the pin
+    CHECK(cardNodeSource(/*live=*/true, false, false, /*idKnown=*/false, /*pinned=*/true) == CardNodeSource::Unknown);
+    CHECK(cardNodeSource(true, false, false, false, false) == CardNodeSource::Unknown);
+    // live and identified: the live node, pin or not (a failover away from the pin shows where the traffic goes)
+    CHECK(cardNodeSource(true, false, false, true, true) == CardNodeSource::Live);
+    // the attempt walks: the node being tried now; between legs (no node yet) the person's pick at once
+    CHECK(cardNodeSource(false, /*walking=*/true, false, true, true) == CardNodeSource::Live);
+    CHECK(cardNodeSource(false, true, false, false, true) == CardNodeSource::Pin);
+    // nothing live: the pin (the picker tap shows its server while connecting), else the old node of a switch, else none
+    CHECK(cardNodeSource(false, false, false, false, true) == CardNodeSource::Pin);
+    CHECK(cardNodeSource(false, false, /*switching=*/true, true, false) == CardNodeSource::Live);
+    CHECK(cardNodeSource(false, false, false, false, false) == CardNodeSource::None);
+}
+
+// Review F1 of the android2 lane (21.11): Connect tapped with no physical network. The observation is offline, the
+// attempt ends at once inside the start with NoNetwork; syncAttempt judges that result (failedAttemptIntent: keep the
+// request and wait for the uplink, «Нет сети — подключимся, когда она появится») - and guardedStart dropped the intent
+// right after it, so the uplink's return started nothing. The start's refusal adds nothing to a result already judged.
+static void f1StartRefusalJudgedByItsResult()
+{
+    // the start ended in a result of THIS attempt that syncAttempt judged: the result decides (intent, text)
+    CHECK(startRefusal(/*endedAttempt=*/7, /*judgedAttempt=*/7) == StartRefusal::JudgedByResult);
+    // the judged result kept the request: the uplink's return is what starts it
+    CHECK(failedAttemptIntent(/*serversWereJudged=*/true, /*uplinkUp=*/false, false) == FailedAttemptIntent::Wait);
+    // a refusal no result explains (no tunnel adapter, no subscription and no nodes: connect() never fed the owner)
+    CHECK(startRefusal(0, 0) == StartRefusal::DropIntent);
+    CHECK(startRefusal(0, 6) == StartRefusal::DropIntent); // an earlier attempt's judgement is not this start's
+    // a result syncAttempt did not judge (superseded by a newer intent): the start's own rule
+    CHECK(startRefusal(7, 6) == StartRefusal::DropIntent);
+}
+
+// Review F2 (21.11): after an offline observation (empty key) the network returned as a kind the app cannot name
+// (Bluetooth tethering: authoritative uplink up, medium Unknown). "Unknown is not a network change" kept the EMPTY key
+// and every start ended NoNetwork until the app restarted. Unknown keeps the last KNOWN network; with none it is the
+// usable placeholder "unknown".
+static void f2UnknownAfterOffline()
+{
+    using namespace avpn::path;
+    NetworkObservation wifi;
+    wifi.medium = NetMedium::Wifi;
+    wifi.gateway = QStringLiteral("gw-a");
+    wifi.subnet = QStringLiteral("192.168.1.0/24");
+    const NetworkObservation unknown; // medium Unknown
+    NetworkTracker t;
+    CHECK(t.observe(withPhysicalUplink(wifi, true, true)));
+    const QString wifiKey = t.current().local;
+    CHECK(t.observe(withPhysicalUplink(wifi, /*authoritative=*/true, /*up=*/false)) && !t.current().usable());
+    const quint64 offlineGen = t.current().generation;
+    // the uplink is back, its kind unknown: a usable network, a new generation
+    CHECK(t.observe(withPhysicalUplink(unknown, true, true)));
+    CHECK(t.current().usable() && t.current().local == QLatin1String("unknown") && t.current().generation == offlineGen + 1);
+    CHECK(!t.observe(withPhysicalUplink(unknown, true, true))); // a repeated unknown changes nothing
+    // the real kind becomes known: its own key, one more change
+    CHECK(t.observe(withPhysicalUplink(wifi, true, true)) && t.current().local == wifiKey
+          && t.current().generation == offlineGen + 2);
+    // Unknown with a known network (iOS under any VPN, the uplink up): the network is kept, no change - as before
+    CHECK(!t.observe(withPhysicalUplink(unknown, true, true)) && t.current().local == wifiKey);
+    CHECK(!t.observe(withPhysicalUplink(unknown, /*authoritative=*/false, false)) && t.current().local == wifiKey);
+}
+
+// android3 runs a, f (21.11): the owner's stop never reached the service and was given up (attempt_stop_unconfirmed); the
+// facade's view stayed "Disconnecting" - reconcile waits for a terminal there, so the uplink's return and a tap did
+// nothing. The service's next status snapshot resolves the view.
+static void android3StatusResolvesAGivenUpStop()
+{
+    using A = AndroidStatusAction;
+    const TeardownLatch none;
+    // the block, as it was: a transitional view is not actionable (reconcile waits for its terminal)
+    CHECK(!reconcileActionable(ObservedTunnel::Transitional, none));
+    // the service runs nothing: our own stop is over (not a loss) - and then a start is possible again
+    CHECK(androidStatusAction(false, /*serviceDisconnected=*/true, /*engineConnected=*/false, ObservedTunnel::Transitional,
+                              /*attemptRunning=*/false) == A::ConfirmOwnStop);
+    CHECK(reconcileActionable(ObservedTunnel::Disconnected, none));
+    // the service runs the tunnel (the orphan came up): adopted, as any live tunnel the engine does not hold
+    CHECK(androidStatusAction(/*serviceConnected=*/true, false, false, ObservedTunnel::Transitional, false) == A::Adopt);
+    // the existing rules stay: a session the service no longer runs; views that agree
+    CHECK(androidStatusAction(false, true, /*engineConnected=*/true, ObservedTunnel::Connected, false) == A::Disconnected);
+    CHECK(androidStatusAction(false, true, false, ObservedTunnel::Disconnected, false) == A::Nothing);
+    CHECK(androidStatusAction(true, false, true, ObservedTunnel::Connected, false) == A::Nothing);
+    // an attempt walks (its own legs resolve the view) or the snapshot is in between (its terminal comes as an event)
+    CHECK(androidStatusAction(false, true, false, ObservedTunnel::Transitional, /*attemptRunning=*/true) == A::Nothing);
+    CHECK(androidStatusAction(false, false, false, ObservedTunnel::Transitional, false) == A::Nothing);
+    // a stop that ends late is not a loss: the result's decision on the request stands
+    CHECK(classifyLoss(/*weAreOperating=*/true, QStringLiteral("error"), false, false, /*uplinkUp=*/true) == LossClass::Own);
+}
+
+// Review R2 (21.11): the person tapped Stop the moment the handshake completed; the CONNECTED already in flight came after
+// our stop and the Android adoption set the intent back on (the person's Stop overruled). The person's last will owns
+// the outcome: a late Connected after a stop of ours while the person wants the VPN off is stopped, never adopted.
+static void r2LateConnectedAfterThePersonsStop()
+{
+    using A = ObservedTunnelAdoption;
+    // the person's OFF, our stop still unconfirmed: the tunnel is stopped (reconcile), the intent stays off
+    CHECK(adoptObservedTunnel(/*ourStopPending=*/true, /*wantConnected=*/false) == A::StopIt);
+    // our stop was the engine's (no network, failover, a restart for another choice): the request is on - adopted
+    CHECK(adoptObservedTunnel(false, true) == A::Adopt);
+    CHECK(adoptObservedTunnel(true, true) == A::Adopt);
+    // no stop of ours pending (a session started outside the app after OFF - the tile): as before, adopted
+    CHECK(adoptObservedTunnel(false, false) == A::Adopt);
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1619,6 +1756,12 @@ static void nodeFigureOneRule()
 int main()
 {
     r20PhysicalLossDuringConnect();
+    p5bOfflineObservation();
+    p7CardNeverNamesThePinForALiveSession();
+    f1StartRefusalJudgedByItsResult();
+    f2UnknownAfterOffline();
+    android3StatusResolvesAGivenUpStop();
+    r2LateConnectedAfterThePersonsStop();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

@@ -1593,16 +1593,37 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     //  - факт Disconnected, мы «connected» -> честный Disconnected (туннель погас, пока были в фоне);
     //  - состояния согласованы -> НИЧЕГО (никаких пере-проб/вспышек при обычном возврате из фона).
     // Промежуточные снапшоты (Connecting/...) не трогаем -- терминал прилетит обычным путём.
+    // android2 P7 (21.11): the service returns the tribeSessionMetadata of the session it runs with every STATUS (before
+    // it); the adoption names that session's node like iOS does (restoreSessionMetadata -> adoptTunnelConnected with
+    // node_id / proto / endpoint). Without it the identity was unknown and the card named the pinned server.
+    connect(AndroidController::instance(), &AndroidController::sessionMetadata, this,
+            [this](const QVariantMap &metadata) { m_serviceSessionMeta = metadata; }, Qt::QueuedConnection);
     connect(AndroidController::instance(), &AndroidController::status, this,
             [this](AndroidController::ConnectionState st) {
                 const bool thinkConnected = (state() == QLatin1String("connected"));
-                if (st == AndroidController::ConnectionState::CONNECTED && !thinkConnected) {
+                const AndroidStatusAction action = androidStatusAction(
+                    st == AndroidController::ConnectionState::CONNECTED, st == AndroidController::ConnectionState::DISCONNECTED,
+                    thinkConnected, observedTunnelOf(m_lastTunnelState), m_engine.attemptRunning());
+                if (action == AndroidStatusAction::Adopt) {
                     m_wantConnected = true;
                     syncIntent(); // I7
-                    m_engine.adoptTunnelConnected();
+                    m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild()); // android2 V2: its failover legs
+                    m_engine.adoptTunnelConnected(m_serviceSessionMeta.value(QStringLiteral("node_id")).toString(),
+                                                  m_serviceSessionMeta.value(QStringLiteral("proto")).toString(),
+                                                  m_serviceSessionMeta.value(QStringLiteral("endpoint")).toString());
+                    reliabilityEvent(QStringLiteral("adopt_android node=%1 session_node=%2")
+                                         .arg(m_engine.currentNodeId().isEmpty() ? QStringLiteral("-") : m_engine.currentNodeId(),
+                                              m_serviceSessionMeta.value(QStringLiteral("node_id")).toString().isEmpty()
+                                                  ? QStringLiteral("-")
+                                                  : m_serviceSessionMeta.value(QStringLiteral("node_id")).toString()));
                     onConnectionStateChanged(Vpn::Connected);
-                } else if (st == AndroidController::ConnectionState::DISCONNECTED && thinkConnected) {
+                } else if (action == AndroidStatusAction::Disconnected) {
                     onConnectionStateChanged(Vpn::Disconnected);
+                } else if (action == AndroidStatusAction::ConfirmOwnStop) {
+                    // android3 runs a, f: the stop the owner gave up on is over - the facade's view leaves "Disconnecting"
+                    reliabilityEvent(QStringLiteral("native_status_confirms_stop native=%1").arg(int(m_lastTunnelState)));
+                    applyNativeState(Vpn::Disconnected, /*confirmsOwnStop=*/true);
+                    QTimer::singleShot(0, this, [this]() { reconcile(); });
                 }
             },
             Qt::QueuedConnection);
@@ -1629,12 +1650,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // and "built" when establish() returned and the backend runs (or the start ended without it); the owner's leg
     // clock stands in between and a build that never ends is a local outcome. A "built" carries the number of its
     // start: one of an older start (its stop was never confirmed) does not end the build of the leg in flight.
-    connect(AndroidController::instance(), &AndroidController::tunnelBuild, this, [this](int buildState, int seq) {
+    // android2 V2 (21.11): every report also names the engine leg of its start (the start config's tribeStartLeg,
+    // VpnConnectionTunnelControl), and a start the service ended without a tunnel says so (state 2) - the engine takes
+    // only the running leg's own reports, and its legs are local until their own "built" (setLocalBuildReported).
+    connect(AndroidController::instance(), &AndroidController::tunnelBuild, this, [this](int buildState, int seq, quint64 leg) {
         if (buildState == 0)
             m_tunnelBuildSeq = seq;
         else if (seq != m_tunnelBuildSeq)
             return;
-        m_engine.onLocalBuild(buildState == 0);
+        m_engine.onLocalBuild(buildState == 0   ? avpn::ServiceEngine::LocalBuildReport::Building
+                              : buildState == 1 ? avpn::ServiceEngine::LocalBuildReport::Built
+                                                : avpn::ServiceEngine::LocalBuildReport::NotStarted,
+                              leg);
         if (syncAttempt())
             QTimer::singleShot(0, this, [this]() { reconcile(); });
     }, Qt::QueuedConnection);
@@ -1846,6 +1873,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // (попытки старта без сети не считаются) — поднимаем туннель через 1,5 с (DHCP/DNS доседают).
     connect(avpn::UplinkMonitor::instance(), &avpn::UplinkMonitor::changed, this, [this](bool up) {
         reliabilityEvent(QStringLiteral("uplink %1").arg(up ? QStringLiteral("up") : QStringLiteral("down")));
+        // android2 P5b: the observation (scanNotifyNetwork, connected before this handler) may have ended the attempt
+        // with NoNetwork - its result is taken now, while the uplink is as this event says (Wait, not Drop). Only an
+        // authoritative source makes the observation offline (NetworkKey.h withPhysicalUplink): elsewhere (iOS,
+        // Windows, the NE build) nothing changes here.
+        if (avpn::UplinkMonitor::instance()->authoritative())
+            syncAttempt();
         if (!up || !m_wantConnected || !m_waitUplink)
             return;
         // F1: the pending look stays through the 1.5 s the network needs to settle: busy replaces "waiting", so the
@@ -2853,15 +2886,17 @@ QVariantMap AvpnEngineQml::currentNode() const
     QString showId;
     // AVPN awg31-xray-v1: в verifying туннель поднят на реальной ноде — показываем её (как connected).
     // R4 (device round 4): while the owner walks, the card shows the server being tried now (the choice stays in
-    // «Вы выбрали: …»), not the chosen one.
-    if ((connectedNow || s.state == QLatin1String("verifying")
-         || (m_engine.attemptRunning() && (s.state == QLatin1String("connecting") || s.state == QLatin1String("switching"))))
-        && !s.currentNodeId.isEmpty())
+    // «Вы выбрали: …»), not the chosen one. android2 P7: a live session of unknown identity is never shown as the pin
+    // (DebugSnapshot.h cardNodeSource).
+    const bool liveSession = connectedNow || s.state == QLatin1String("verifying");
+    const CardNodeSource source = cardNodeSource(
+        liveSession,
+        m_engine.attemptRunning() && (s.state == QLatin1String("connecting") || s.state == QLatin1String("switching")),
+        s.state == QLatin1String("switching"), !s.currentNodeId.isEmpty(), !pinned.isEmpty());
+    if (source == CardNodeSource::Live)
         showId = s.currentNodeId;
-    else if (!pinned.isEmpty())
+    else if (source == CardNodeSource::Pin)
         showId = pinned;
-    else if (s.state == QLatin1String("switching") && !s.currentNodeId.isEmpty())
-        showId = s.currentNodeId;
     const NodeDebugRow *pick = nullptr;
     if (!showId.isEmpty()) {
         for (const NodeDebugRow &r : s.pool)
@@ -2872,7 +2907,7 @@ QVariantMap AvpnEngineQml::currentNode() const
     // сервера» при работающем VPN. Показываем честный факт из подсказки сессии: ноду пула с тем же
     // id или хостом, иначе сам адрес. Identity движка (health/failover) это не меняет.
     QString hintOnlyEndpoint;
-    if (!pick && (connectedNow || s.state == QLatin1String("verifying")) && s.currentNodeId.isEmpty()) {
+    if (source == CardNodeSource::Unknown) {
         const ServiceEngine::SessionHint hint = m_engine.sessionHint();
         const int row = hintedPoolRow(s.pool, hint.nodeId, hint.endpoint);
         if (row >= 0)
@@ -2880,7 +2915,10 @@ QVariantMap AvpnEngineQml::currentNode() const
         else
             hintOnlyEndpoint = hint.endpoint;
     }
-    const bool hintOnly = !pick && !hintOnlyEndpoint.isEmpty();
+    // android2 P7: with a pin and no hint at all the card still says «Текущий сервер», not «Умный выбор сервера» (that
+    // names Auto, which the person did not choose); in Auto the old look stays.
+    const bool unknownLive = source == CardNodeSource::Unknown && !pick;
+    const bool hintOnly = !pick && (!hintOnlyEndpoint.isEmpty() || (unknownLive && !pinned.isEmpty()));
     // Owner test of 5.1.102: a listener without a label shows its location's label (the AWG
     // sibling), else the country name - never the region code (NodeRanking.h::pickerDisplay).
     QString pickName;
@@ -2966,7 +3004,8 @@ QVariantMap AvpnEngineQml::currentNode() const
             break;
         }
     }
-    bool choiceShown = choiceId.isEmpty();
+    // an unknown live server is not "another one than the choice": no «… в этой сети не отвечает» about the choice
+    bool choiceShown = choiceId.isEmpty() || unknownLive;
     if (!choiceShown && pick) {
         if (!choice.pathIds.isEmpty())
             choiceShown = choice.pathIds.contains(pick->nodeId); // an exact path or the preferred server's transports
@@ -3499,6 +3538,16 @@ bool AvpnEngineQml::syncAttempt()
     }
     // The owner asked for the data check again on the same tunnel: the running check is void at once (its late
     // answer is dropped by the epoch), the new one starts from the top of the event loop.
+    // android3 runs a, f: the owner gave a stop up - nothing will tell the facade how the platform's tunnel ended. With
+    // the attempt over, ask the service once (its snapshot resolves the view: AndroidStatusAction, restoreConnection).
+    if (m_engine.takeStopGivenUp()) {
+#ifdef Q_OS_ANDROID
+        if (!m_engine.attemptRunning()) {
+            reliabilityEvent(QStringLiteral("native_status_requested why=stop_unconfirmed native=%1").arg(int(m_lastTunnelState)));
+            AndroidController::instance()->requestStatus();
+        }
+#endif
+    }
     if (m_engine.takeCheckRerun()) {
         ++m_verifyEpoch;
         QTimer::singleShot(0, this, [this]() {
@@ -3537,6 +3586,7 @@ bool AvpnEngineQml::syncAttempt()
     const std::optional<avpn::path::AttemptResult> current = resultIsCurrent ? result : std::optional<avpn::path::AttemptResult>();
     if (const std::optional<avpn::path::AttemptResult> &r = current) {
         changedAny = true;
+        m_judgedAttempt = r->attempt; // this result decides the request (a start that ended with it adds nothing)
         if (m_exactReq.active() && r->reason != avpn::path::FailReason::StoppedByUser)
             endExactRowRequest(r->connected);
         if (!r->connected && r->reason != avpn::path::FailReason::StoppedByUser)
@@ -3670,7 +3720,10 @@ avpn::path::NetworkObservation AvpnEngineQml::currentNetworkObservation() const
     o.subnet = physicalSubnet(kind);
     o.carrier = avpn::carrierCode();
     o.radio = avpn::cellularGenerationForKind(kind, avpn::cellularGeneration());
-    return o;
+    // android2 P5b: the authoritative physical uplink decides "offline" (NetworkKey.h withPhysicalUplink); the down
+    // event itself reaches the engine through scanNotifyNetwork (UplinkMonitor::changed).
+    const avpn::UplinkMonitor *uplink = avpn::UplinkMonitor::instance();
+    return avpn::path::withPhysicalUplink(o, uplink->authoritative(), uplink->up());
 }
 
 void AvpnEngineQml::persistPin()
@@ -4174,11 +4227,12 @@ void AvpnEngineQml::adoptNativeIdentity()
 
 // Единая точка адопта наблюдённого живого туннеля (Connected от ОС, не наша операция).
 // true = движок принял факт «подключено» (адопт выполнен).
-bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
+bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
 {
     if (!avpn::TuningStore::flag(QStringLiteral("adopt_live_tunnel")))
         return false;
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
+    Q_UNUSED(ourStopPending) // iOS: the latch itself and the session generation decide (decideTunnelAdoption)
     const QVariantMap metadata = IosController::Instance()->sessionMetadata();
     // Ревью CL-A r2 (A4): сравниваем только однородные поколения (runtime↔runtime или конфигурации).
     const TunnelAdoption verdict = decideTunnelAdoption(
@@ -4228,9 +4282,24 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
     // Не-iOS платформы: поведение базы 3c8cc74e — адопт, если наша операция не в полёте.
     if (m_op != Op::None)
         return false;
+    // Review R2: after the person's Stop a late Connected of that session is stopped, not adopted (reconcile stops it)
+    if (adoptObservedTunnel(ourStopPending, m_wantConnected) == ObservedTunnelAdoption::StopIt) {
+        reliabilityEvent(QStringLiteral("adopt_refused why=%1 reason=person_stopped").arg(QLatin1String(why)));
+        QTimer::singleShot(0, this, [this]() { reconcile(); });
+        return false;
+    }
     m_wantConnected = true;
     syncIntent(); // I7
+#ifdef Q_OS_ANDROID
+    // android3 runs a, f: a session found running by a native Connected (not a STATUS) is named by the metadata the
+    // service sent with that state (android2 P7), as in the STATUS adoption
+    m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild());
+    const bool adopted = m_engine.adoptTunnelConnected(m_serviceSessionMeta.value(QStringLiteral("node_id")).toString(),
+                                                       m_serviceSessionMeta.value(QStringLiteral("proto")).toString(),
+                                                       m_serviceSessionMeta.value(QStringLiteral("endpoint")).toString());
+#else
     const bool adopted = m_engine.adoptTunnelConnected();
+#endif
     syncAttempt();
     return adopted;
 #endif
@@ -5801,6 +5870,11 @@ void AvpnEngineQml::clearBenchHistory()
 
 void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 {
+    applyNativeState(s, /*confirmsOwnStop=*/false);
+}
+
+void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnStop)
+{
     // Review E2 of 18.11: an event of an older leg (a duplicate error, a late answer) is dropped before any state
     // changes; a confirmed teardown of that older tunnel still frees what was held for its stop.
     if (m_engine.nativeEventStale(m_tunnel.nativeLegSeen())) {
@@ -5834,6 +5908,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).
     const QString engineStateBefore = m_engine.debugSnapshot().state;
+    bool ourStopPendingBefore = false; // review R2: a stop of ours awaited this state (latch before it is observed)
 #ifdef Q_OS_IOS
     // AVPN (iOS data watch, 141, stage 2): Reasserting (shown as Connecting) -> Connected of a session the
     // engine holds: the extension re-applied its network settings, as an in-place switch does. One fresh
@@ -5851,6 +5926,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // One mapping for both uses (audit of 137); Unknown and Transitional are the same no-op here.
         // With the state before it: an Error with no native attempt since the last terminal (a provider seat or
         // profile refused before the core started) proves nothing new and asks for no status (D4 of 16.11).
+        ourStopPendingBefore = m_latch.awaitingStopConfirm; // review R2: read before the state clears the latch
         observeTunnelState(m_latch, observedTunnelOf(m_lastTunnelState), observedTunnelOf(s), errorProvesTeardown);
         if (s == Vpn::Disconnected) {
             syncControlPlaneEdge(false);   // E10: the stored edge again before the release goes out directly
@@ -5897,7 +5973,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // (DebugSnapshot.h::decideTunnelAdoption): Error адопт не блокирует; OFF-намерение не
         // блокирует НОВУЮ сессию (Настройки/Shortcuts); стоп этой же сессии в пути — блокирует.
         if (!m_engine.onTunnelConnected() && !m_engine.isVerifying())
-            tryAdoptObservedTunnel("connected");
+            tryAdoptObservedTunnel("connected", ourStopPendingBefore);
         else
             identifyAdoptedSession();
 #if defined(AMNEZIA_DESKTOP) && !defined(MACOS_NE)
@@ -5989,7 +6065,8 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         reliabilityEvent(QStringLiteral("live_session_lost native=%1").arg(int(s)));
     if (s == Vpn::Disconnected || s == Vpn::Error) {
         const QString est = m_engine.debugSnapshot().state; // DebugSnapshot-структура (поле, не QVariantMap)
-        const bool weAreOperating = (m_op != Op::None) || liveSessionLost; // наш start/stop в полёте
+        const bool weAreOperating = (m_op != Op::None) || liveSessionLost // наш start/stop в полёте
+                                    || confirmsOwnStop; // android3: the end of the owner's own stop, seen late
         const bool engineStillSwitching = (s == Vpn::Disconnected && engineOwnTransitionState(est));
         const bool interrupted = m_engine.attemptRunning(); // the attempt owner walks on: our own operation
         // Волна-3 (2026-09-28): класс обрыва вместо «внешний / не внешний». Намерение снимает ТОЛЬКО
@@ -6826,6 +6903,9 @@ void AvpnEngineQml::guardedStart()
     // user's choice; the owner reads the ledger of that network.
     m_attemptOrigin = m_startOrigin;
     m_pathCheck.clear();
+#ifdef Q_OS_ANDROID
+    m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild()); // android2 V2 (read after initialize())
+#endif
     m_engine.observeNetwork(currentNetworkObservation());
     syncIntent();
     reliabilityEvent(QStringLiteral("attempt_start origin=%1 net=%2 net_gen=%3 choice=%4 mode=%5")
@@ -6846,16 +6926,28 @@ void AvpnEngineQml::guardedStart()
     // застекало второй loop.exec(). QScopedValueRollback гарантирует сброс даже при исключении.
     syncStandbyCandidates(); // upstream nodes: pack candidates against the pool in force (pure, no I/O)
     bool ok;
+    bool connectCalled; // review F1: only a connect() that ran can have ended in its own attempt's result
     {
         QScopedValueRollback<bool> syncGuard(m_inSyncNetCall, true);
         syncIntent(); // I1/I7: the value in force is read and pushed right before the attempt begins
-        ok = (m_engine.hasSubscription() || !m_engine.candidateNodes().isEmpty()) && m_engine.connect(err);
+        connectCalled = m_engine.hasSubscription() || !m_engine.candidateNodes().isEmpty();
+        ok = connectCalled && m_engine.connect(err);
     }
     if (!ok) {
         // Подъём не удался ДО туннеля (терминального колбэка не будет) — снимаем op-in-flight, считаем
         // попытку, показываем ошибку. Авто-ретрай не запускаем; орб станет «Connect».
+        // Review F1: an attempt that ended at once has a result, and syncAttempt judges it (the request kept for the
+        // uplink, or dropped with the result's own text) - that judgement stands (DebugSnapshot.h startRefusal).
         settleOperation("attempt_not_started");
+        const std::optional<avpn::path::AttemptResult> &ended = m_engine.pendingAttemptResult();
+        const quint64 endedAttempt = connectCalled && ended ? ended->attempt : 0;
         syncAttempt(); // the attempt's journal lines and its result (ended at once)
+        if (startRefusal(endedAttempt, m_judgedAttempt) == StartRefusal::JudgedByResult) {
+            reliabilityEvent(QStringLiteral("attempt_not_started judged_by_result attempt=%1 err=%2 want=%3")
+                                 .arg(endedAttempt).arg(err).arg(int(m_wantConnected)));
+            emit changed();
+            return;
+        }
         m_wantConnected = false;
         reliabilityEvent(QStringLiteral("intent_off why=attempt_not_started err=%1").arg(err));
         emit error(humanEngineError(err)); // AVPN awg31-xray-v1: no_transport/unsupported_proto → человеческий текст

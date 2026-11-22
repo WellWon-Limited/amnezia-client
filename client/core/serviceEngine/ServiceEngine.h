@@ -304,6 +304,11 @@ public:
     // The data check deadline of a leg (the facade's checks finish inside it).
     int dataCheckMs() const { return m_owner.timings().dataCheckMs; }
     std::optional<path::AttemptResult> takeAttemptResult() { return std::exchange(m_lastResult, std::nullopt); }
+    // android3 runs a, f: the owner gave a stop up (StopUnconfirmed) since the last look - the platform's view of the
+    // tunnel is unknown and only a fresh native status can tell it (the facade asks for one on Android).
+    bool takeStopGivenUp() { return std::exchange(m_stopGivenUp, false); }
+    // The result waiting to be taken, without taking it (review F1: the start that ended at once names its attempt).
+    const std::optional<path::AttemptResult> &pendingAttemptResult() const { return m_lastResult; }
     QStringList takeAttemptJournal() { return std::exchange(m_attemptJournal, QStringList()); }
     // Legs whose tunnel never came up (no handshake / no connect within the start deadline) since the last call -
     // the white-list detector's "the connect did not come up" input (DebugSnapshot.h::whitelistTriggerFromAttempt).
@@ -475,11 +480,21 @@ public:
     // The person refused the system's VPN permission dialog while the leg was starting (Android; the platform
     // reports the fact, the owner ends the ATTEMPT: nothing recorded, no other leg). true: the phase changed.
     bool onPermissionDenied();
-    // The platform builds the running leg's tunnel interface (`building`) or has built it (Android: the VPN service
-    // from the start command until VpnService.Builder.establish() returned and the backend runs). The leg's start
-    // clock stands in between - the device's own time is never evidence about the server (AttemptOwner.h "Local
-    // build"). Only a leg in Starting is affected. true: the phase changed.
-    bool onLocalBuild(bool building);
+    // The platform builds a leg's tunnel interface (Building) or has built it (Built) (Android: the VPN service from
+    // the start command until VpnService.Builder.establish() returned and the backend runs), or did not start that
+    // leg's tunnel at all (NotStarted: the service was busy with an earlier start, the config was refused locally). The
+    // leg's start clock stands until its own "built" - the device's own time is never evidence about the server
+    // (AttemptOwner.h "Local build"); NotStarted ends the leg with a local outcome (nothing recorded). `leg` is the leg
+    // number the start carried (VpnConnectionTunnelControl: tribeStartLeg in the start config, echoed by the service):
+    // a report of another leg (an earlier start that is still building, or ends late) changes nothing (android2 V2: a
+    // "built" of a start the service had refused was taken for the running leg and its server judged). Only a leg in
+    // Starting is affected. true: the phase changed.
+    enum class LocalBuildReport { Building, Built, NotStarted };
+    bool onLocalBuild(LocalBuildReport report, quint64 leg);
+    // The platform reports its builds with the leg numbers above (Android with the service's build events): a leg is
+    // local from its start command until its own "built" (AttemptOwner::setLocalBuildReported). Default off: iOS and
+    // desktop judge a leg from its start exactly as before.
+    void setLocalBuildReported(bool on) { m_owner.setLocalBuildReported(on); }
 
     // AVPN (Android-адопт): туннель ФАКТИЧЕСКИ жив (AndroidController::initConnectionState после
     // ре-байнда мессенджера/холодного старта), а движок — в терминале после фейкового Disconnected
@@ -688,6 +703,8 @@ private:
     int m_legStartFailures = 0;
     bool m_checkRerun = false;
     bool m_facadeStop = false;                 // the facade itself takes the tunnel down (user stop / restart)
+    bool m_stopGivenUp = false;                // takeStopGivenUp
+    quint64 m_legBuildBegun = 0;               // the leg whose own "building" was reported (onLocalBuild)
     std::optional<path::AttemptTimings> m_timingsForTest;
     QList<SubscriptionNode> m_packCandidates;  // upstream: synthesized from the standby pack
     QList<SubscriptionNode> m_merged;          // subscription nodes + pack candidates (the pick pool)

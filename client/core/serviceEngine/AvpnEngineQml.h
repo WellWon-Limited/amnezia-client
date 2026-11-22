@@ -1116,6 +1116,9 @@ private:
     // The network as the platform sees it with the tunnel down (the facade's one networkKind() source, the
     // physical interface's subnet, the macOS gateway hash, the cellular operator and generation).
     avpn::path::NetworkObservation currentNetworkObservation() const;
+    // A native tunnel state; confirmsOwnStop: it ends OUR teardown (android3 runs a, f: a status snapshot after the owner
+    // gave its stop up) - not a loss, the attempt's result already decided the request.
+    void applyNativeState(Vpn::ConnectionState s, bool confirmsOwnStop);
     // AVPN (фикс-волна 2026-09-22, A7): pinBefore — pin движка ДО применения тела подписки/reseed
     // (перенос явного pin на соседа сохраняется, неявный pin в памяти не персистится).
     void restorePin(const QString &pinBefore);
@@ -1156,7 +1159,8 @@ private:
     void syncJournal();
     void adoptNativeIdentity();
     // AVPN (фикс-волна 2026-09-22, A1/A4/A5/K3) — см. AvpnEngineQml.cpp.
-    bool tryAdoptObservedTunnel(const char *why);
+    // ourStopPending: a stop of ours was still unconfirmed when this fact came (read before the state cleared the latch)
+    bool tryAdoptObservedTunnel(const char *why, bool ourStopPending = false);
     void identifyAdoptedSession();
     bool awaitNativeStatus();
     void onStopRetryTimer();
@@ -1437,6 +1441,8 @@ private:
     // Ревью CL-A r2 (K3/C4): системный диалог «Разрешить VPN» в пути — сторож старта не рвёт коннект.
     bool                        m_permissionPromptPending = false;
     int                         m_tunnelBuildSeq = -1; // Android local build: the service's start being built (seq)
+    QVariantMap                 m_serviceSessionMeta;  // Android (android2 P7): the session the VPN service runs (STATUS)
+    quint64                     m_judgedAttempt = 0;   // the attempt whose result syncAttempt judged last (startRefusal)
     // K3: после liveSessionFound ждём реальный статус профиля ограниченно (без вечного m_busy);
     // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
     bool                        m_liveSessionPending = false;

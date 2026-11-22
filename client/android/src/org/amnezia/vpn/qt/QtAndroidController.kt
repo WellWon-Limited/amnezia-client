@@ -20,9 +20,13 @@ object QtAndroidController {
     // AVPN (Android permission prompt): 0 = the system "allow VPN configuration" dialog is on screen, 1 = closed and
     // granted, 2 = closed, denied or cancelled. Registered by AndroidController::initialize as an optional native.
     external fun onVpnPermissionPrompt(state: Int)
-    // AVPN (local build): the VPN service builds the tunnel interface of its start number `seq` (state 0) or has built
-    // it (1). Registered by AndroidController::initialize as an optional native.
-    external fun onTunnelBuild(state: Int, seq: Int)
+    // AVPN (local build): the VPN service builds the tunnel interface of its start number `seq` (state 0), has built it
+    // (1) or ended it without a tunnel (2); `leg` = the engine leg the start config named (0 = none). Registered by
+    // AndroidController::initialize as an optional native "(IIJ)V".
+    external fun onTunnelBuild(state: Int, seq: Int, leg: Long)
+    // AVPN (android2 P7): the tribeSessionMetadata JSON of the session the service runs ("" = none), before the STATUS /
+    // STATUS_CHANGED state it came with. Registered by AndroidController::initialize as an optional native.
+    external fun onSessionMetadata(json: String)
     external fun onNotificationStateChanged()
     external fun onVpnStateChanged(stateCode: Int)
     external fun onStatisticsUpdate(rxBytes: Long, txBytes: Long, lastHandshakeSec: Long) // AVPN: + handshake

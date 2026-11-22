@@ -1190,6 +1190,69 @@ static void scenarioLocalBuild()
     }
 }
 
+// android2 V2 (21.11, Redmi, «Доступ к сайтам РФ» on): the service builds one start at a time, 31-39 s each. A leg
+// that overran its local bound was stopped and the next leg's start sent - but the service took that start only after
+// the previous build ended (7.9 s later at 08:13:38-08:13:46), and the next leg's 4.5 s clock ran from the command:
+// "no handshake" recorded against a server whose tunnel build never began. With the platform's reports on, the time
+// from the start command to the leg's own "built" is the device's: bounded by the local bound, never a server verdict.
+static void scenarioLocalBuildQueued()
+{
+    const NetworkObservation home = wifi("192.168.4.1");
+    const QString k = key(home);
+    const AttemptTimings t;
+    for (const bool reported : { false, true }) {
+        World w;
+        for (const char *id : { "n16", "n17", "n15" })
+            w.set(k, QString::fromLatin1(id), Behaviour::works(700, 400, 100));
+        Sim s({ awg("n16", "RS"), awg("n17", "EE", false, 0.9), awg("n15", "FI", false, 0.8) }, w, home);
+        s.buildMs = 33000;
+        s.buildReachMs = 400;
+        s.serialBuilds = true;
+        s.owner.setLocalBuildReported(reported);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        if (!reported) {
+            // the defect, for contrast: the clock from the command judges the second leg while its build has not begun
+            row("V2 queued builds, clock from the command (the defect)", s, r, 0);
+            bool judged = false;
+            for (const OutcomeReport &rep : s.reports)
+                judged = judged || rep.outcome == PathOutcome::NoHandshake;
+            CHECK(judged);
+            continue;
+        }
+        // reported: every leg's time until its own "built" is local - no server is judged, nothing is recorded
+        row("V2 queued builds, local until built", s, r, 0);
+        CHECK(!r.connected && s.reports.isEmpty() && s.ledger.size() == 0);
+        CHECK(s.localOverruns >= 2 && s.legs.size() == 3); // the third leg is cut by the budget, also unrecorded
+        for (int i = 1; i < s.legs.size(); ++i) // each leg had the whole local bound from its start command
+            CHECK(s.legs[i].startedMs - s.legs[i - 1].startedMs >= t.localBuildMs);
+    }
+    {   // a fast build (0.3 s, reached after 0.4 s): the server is judged after its "built" with the full deadline
+        World w;
+        w.set(k, QStringLiteral("n17"), Behaviour::works(700, 400, 100));
+        Sim s({ awg("n16", "RS"), awg("n17", "EE", false, 0.9) }, w, home);
+        s.buildMs = 300;
+        s.buildReachMs = 400;
+        s.serialBuilds = true;
+        s.owner.setLocalBuildReported(true);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("reported fast build, n16 really dead", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("n17"));
+        CHECK(stateOf(s, awg("n16", "RS")) == PathState::Suspect); // judged - after its own build
+        CHECK(s.legs[1].startedMs >= 400 + 300 + t.awgStartMs);
+        CHECK(s.reports.last().connectMs == 700); // the server's part only
+    }
+    {   // a server that answers 4.4 s after its own "built", the start having waited 7.9 s in the service: connects
+        World w;
+        w.set(k, QStringLiteral("n17"), Behaviour::works(t.awgStartMs - 100, 400, 100));
+        Sim s({ awg("n17", "EE") }, w, home);
+        s.buildMs = 300;
+        s.buildReachMs = 7900;
+        s.owner.setLocalBuildReported(true);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        CHECK(r.connected && s.legs.size() == 1 && s.localOverruns == 0);
+    }
+}
+
 static void scenarioPreference()
 {
     const NetworkObservation home = wifi("192.168.7.1");
@@ -2545,6 +2608,7 @@ int main()
     scenarioSuspended();
     scenarioPermissionPrompt();
     scenarioLocalBuild();
+    scenarioLocalBuildQueued();
     scenarioPreference();
     scenarioModeBeatsPreference();
     scenarioRevision();

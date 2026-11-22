@@ -1,5 +1,6 @@
 #include <QJniEnvironment>
 #include <QJsonDocument>
+#include <QJsonObject> // AVPN (android2 P7)
 #include <QQmlFile>
 #include <QEventLoop>
 #include <QImage>
@@ -147,11 +148,24 @@ bool AndroidController::initialize()
     // engine's leg clock runs through the build, as before).
     {
         const JNINativeMethod buildMethods[] = {
-            {"onTunnelBuild", "(II)V", reinterpret_cast<void *>(onTunnelBuild)},
+            {"onTunnelBuild", "(IIJ)V", reinterpret_cast<void *>(onTunnelBuild)},
         };
         if (!env.registerNativeMethods(QT_ANDROID_CONTROLLER_CLASS, buildMethods, 1)) {
             env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent);
             qWarning() << "AndroidController: no onTunnelBuild in the Kotlin half - the leg clock runs through the build";
+        } else {
+            s_reportsTunnelBuild.store(true); // android2 V2: the engine's legs are local until their own "built"
+        }
+    }
+    // AVPN (android2 P7): the identity of the session the service runs, with every STATUS / STATUS_CHANGED; optional
+    // the same way (without it an adopted session's identity stays unknown, as before).
+    {
+        const JNINativeMethod sessionMethods[] = {
+            {"onSessionMetadata", "(Ljava/lang/String;)V", reinterpret_cast<void *>(onSessionMetadata)},
+        };
+        if (!env.registerNativeMethods(QT_ANDROID_CONTROLLER_CLASS, sessionMethods, 1)) {
+            env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent);
+            qWarning() << "AndroidController: no onSessionMetadata in the Kotlin half - an adopted session has no identity";
         }
     }
     // AVPN (Scanner, lane A3): the probe host's reply and state, optional the same way (without them the Scanner's
@@ -206,6 +220,14 @@ ErrorCode AndroidController::start(const QJsonObject &vpnConfig)
 void AndroidController::stop()
 {
     callActivityMethod("stop", "()V");
+}
+
+// AVPN (android3 runs a, f): the snapshot is taken like the one after a bind - initConnectionState() wires the protocol
+// back (VpnConnection::restoreConnection), the engine's status() handler resolves its own view.
+void AndroidController::requestStatus()
+{
+    isWaitingStatus = true;
+    callActivityMethod("requestStatus", "()V");
 }
 
 // AVPN (upstream nodes, release C): android-ipc-contract.md §2. The message carries the renew token: only the
@@ -660,12 +682,22 @@ void AndroidController::onVpnPermissionPrompt(JNIEnv *env, jobject thiz, jint st
 }
 
 // static
-void AndroidController::onTunnelBuild(JNIEnv *env, jobject thiz, jint state, jint seq)
+void AndroidController::onTunnelBuild(JNIEnv *env, jobject thiz, jint state, jint seq, jlong leg)
 {
     Q_UNUSED(env);
     Q_UNUSED(thiz);
 
-    emit AndroidController::instance()->tunnelBuild(int(state), int(seq));
+    emit AndroidController::instance()->tunnelBuild(int(state), int(seq), quint64(leg));
+}
+
+// static
+void AndroidController::onSessionMetadata(JNIEnv *env, jobject thiz, jstring json)
+{
+    Q_UNUSED(thiz);
+
+    const QString text = AndroidUtils::convertJString(env, json);
+    emit AndroidController::instance()->sessionMetadata(
+        QJsonDocument::fromJson(text.toUtf8()).object().toVariantMap());
 }
 
 // static

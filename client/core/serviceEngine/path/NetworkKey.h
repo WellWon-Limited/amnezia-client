@@ -19,8 +19,9 @@
 //  - cellular: "cell:<MCC-MNC>:<generation>" (design §3: operator and radio generation), "-" for an unknown part;
 //  - offline: empty local key - nothing is read or written, an attempt cannot run;
 //  - Unknown medium is NOT a network change: iOS reports it while any VPN is up (the "net" flip of the 17.11
-//    journal, SELECTION-MAP §2.4), so it keeps the current key and generation; as the FIRST observation it
-//    starts one usable network "unknown" (a platform that cannot tell the medium still connects);
+//    journal, SELECTION-MAP §2.4), so it keeps the current key and generation; as the FIRST observation, or after
+//    an offline (empty) key, it starts one usable network "unknown" (a platform that cannot tell the medium still
+//    connects);
 //  - coarse key: "<medium>:asn:<N>" when the ASN is known (the Scanner's format), else "cellular:<MCC-MNC>"
 //    for cellular, else empty. Learning the ASN later on the same local key is not a network change.
 #pragma once
@@ -59,6 +60,24 @@ inline QString shortHash(const QString &s)
 }
 inline QString orDash(const QString &s) { return s.trimmed().isEmpty() ? QStringLiteral("-") : s.trimmed(); }
 } // namespace detail
+
+// The physical uplink is part of the observation (android2 P5b, 21.11: Wi-Fi off during connecting, the medium was
+// still read as Wi-Fi with no subnet - "wifi:-", a usable key - and the attempt walked four servers with no network,
+// recording "no handshake" against three of them). When the platform's uplink source is AUTHORITATIVE (it sees only
+// the physical networks: UplinkMonitor::authoritative() - Android's NOT_VPN set, the macOS route-table monitor) and
+// says there is none, the device is offline whatever the medium pick says: the empty key (not usable). The attempt
+// owner then stops the leg in flight unrecorded and ends with NoNetwork; the facade keeps the request and starts again
+// when the uplink returns. A source that is NOT authoritative (QNetworkInformation: iOS, Windows, Linux, the macOS
+// Network Extension build) is never taken for "offline": it watches the default network, which is our own tunnel
+// while it exists, and reads every teardown of it as a loss (emulator round, D2) - its observation stays as it was.
+inline NetworkObservation withPhysicalUplink(const NetworkObservation &o, bool uplinkAuthoritative, bool uplinkUp)
+{
+    if (!uplinkAuthoritative || uplinkUp)
+        return o;
+    NetworkObservation offline;
+    offline.medium = NetMedium::Offline;
+    return offline;
+}
 
 inline QString localNetworkKey(const NetworkObservation &o)
 {
@@ -105,10 +124,15 @@ public:
     bool observe(const NetworkObservation &o)
     {
         if (o.medium == NetMedium::Unknown) {
-            if (m_started)
+            // Unknown keeps the last KNOWN network. An empty key (offline: the authoritative uplink said "none") is no
+            // network to keep - review F2 (21.11): the uplink returned as a kind the app cannot name (Bluetooth
+            // tethering) and every start ended NoNetwork until the app restarted. Unknown reaches here after an
+            // offline key only with the uplink up (withPhysicalUplink turns an authoritative "down" into Offline,
+            // and only an authoritative source ever empties the key), so it is a network whose kind is unknown.
+            if (m_started && m_key.usable())
                 return false;
-            // nothing known yet and the platform cannot tell: one usable "unknown" network (an attempt can
-            // run; its evidence stays apart from every identified network)
+            // nothing known (yet, or since the uplink came back) and the platform cannot tell: one usable "unknown"
+            // network (an attempt can run; its evidence stays apart from every identified network)
             m_started = true;
             m_key.local = QStringLiteral("unknown");
             m_key.coarse.clear();

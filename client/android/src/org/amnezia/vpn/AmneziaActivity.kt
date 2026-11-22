@@ -57,11 +57,13 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.amnezia.vpn.protocol.getStatistics
+import org.amnezia.vpn.protocol.ProtocolState
 import org.amnezia.vpn.protocol.getStatus
 import org.amnezia.vpn.qt.QtAndroidController
 import org.amnezia.vpn.util.LibraryLoader.loadSharedLibrary
 import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.Prefs
+import org.amnezia.vpn.util.ServiceCommandQueue
 import org.json.JSONException
 import org.json.JSONObject
 import org.qtproject.qt.android.bindings.QtActivity
@@ -90,6 +92,13 @@ class AmneziaActivity : QtActivity() {
     private var isWaitingStatus = true
     private var isServiceConnected = false
     private var isInBoundState = false
+    // AVPN (android3 runs a, f): the commands given while the service is not bound yet, delivered in order on the bind
+    // (ServiceCommandQueue) - a stop sent before the bind completed used to vanish and leave the start's tunnel running.
+    private sealed interface ServiceCommand {
+        object Disconnect : ServiceCommand
+        class Connect(val vpnConfig: String) : ServiceCommand
+    }
+    private val serviceCommands = ServiceCommandQueue<ServiceCommand>()
     private var notificationStateReceiver: BroadcastReceiver? = null
     private lateinit var vpnServiceMessenger: IpcMessenger
     private var pfd: ParcelFileDescriptor? = null
@@ -105,6 +114,16 @@ class AmneziaActivity : QtActivity() {
     private var openFileDeliveryScheduled = false
 
 
+    // AVPN (android2 P7): the identity of the session the service runs, to C++ BEFORE the state it comes with (the
+    // adoption of a live tunnel reads it). Guarded like the other optional natives.
+    private fun handSessionMetadata(data: Bundle) {
+        try {
+            QtAndroidController.onSessionMetadata(data.getString(MSG_SESSION_METADATA) ?: "")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w(TAG, "No native onSessionMetadata: $e")
+        }
+    }
+
     private val vpnServiceEventHandler: Handler by lazy(NONE) {
         object : Handler(Looper.getMainLooper()) {
             override fun handleMessage(msg: Message) {
@@ -112,6 +131,7 @@ class AmneziaActivity : QtActivity() {
                 Log.d(TAG, "Handle event: $event")
                 when (event) {
                     ServiceEvent.STATUS_CHANGED -> {
+                        msg.data?.let(::handSessionMetadata)
                         msg.data?.getStatus()?.let { (state) ->
                             Log.d(TAG, "Handle protocol state: $state")
                             QtAndroidController.onVpnStateChanged(state.ordinal)
@@ -121,6 +141,7 @@ class AmneziaActivity : QtActivity() {
                     ServiceEvent.STATUS -> {
                         if (isWaitingStatus) {
                             isWaitingStatus = false
+                            msg.data?.let(::handSessionMetadata)
                             msg.data?.getStatus()?.let { QtAndroidController.onStatus(it) }
                         }
                     }
@@ -157,7 +178,8 @@ class AmneziaActivity : QtActivity() {
                         // tunnel interface. Guarded like the permission prompt: without the native the clock just runs.
                         msg.data?.let { d ->
                             try {
-                                QtAndroidController.onTunnelBuild(d.getInt(MSG_TUNNEL_BUILD_STATE), d.getInt(MSG_TUNNEL_BUILD_SEQ))
+                                QtAndroidController.onTunnelBuild(d.getInt(MSG_TUNNEL_BUILD_STATE), d.getInt(MSG_TUNNEL_BUILD_SEQ),
+                                                                  d.getLong(MSG_TUNNEL_BUILD_LEG))
                             } catch (e: UnsatisfiedLinkError) {
                                 Log.w(TAG, "No native onTunnelBuild: $e")
                             }
@@ -195,6 +217,8 @@ class AmneziaActivity : QtActivity() {
                 if (isWaitingStatus) {
                     vpnServiceMessenger.send(Action.REQUEST_STATUS, replyTo = activityMessenger)
                 }
+                // AVPN (android3 runs a, f): what was given before the bind, in order
+                serviceCommands.onBound().forEach(::sendServiceCommand)
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
@@ -202,6 +226,7 @@ class AmneziaActivity : QtActivity() {
                 isServiceConnected = false
                 vpnServiceMessenger.reset()
                 isWaitingStatus = true
+                dropServiceCommands("the service went away")
                 QtAndroidController.onServiceDisconnected()
                 doBindService()
             }
@@ -571,15 +596,31 @@ class AmneziaActivity : QtActivity() {
     private fun doBindService() {
         Log.d(TAG, "Bind service")
         vpnProto?.let { proto ->
-            Intent(this, proto.serviceClass).also {
-                bindService(it, serviceConnection, BIND_ABOVE_CLIENT and BIND_AUTO_CREATE)
+            // AVPN (review R1): `or` - the flags combine (upstream's `and` gave 0: no BIND_AUTO_CREATE, a bind to a service
+            // that is not running waited for nothing); the bound state is what bindService answered
+            isInBoundState = Intent(this, proto.serviceClass).let {
+                bindService(it, serviceConnection, BIND_ABOVE_CLIENT or BIND_AUTO_CREATE)
             }
-            isInBoundState = true
+            if (!isInBoundState) {
+                Log.w(TAG, "Bind service: refused")
+                dropServiceCommands("the bind was refused")
+            }
         }
     }
 
+    // AVPN (review R1): the commands kept for a bind that is given up are moot (ServiceCommandQueue)
+    @MainThread
+    private fun dropServiceCommands(why: String) {
+        val dropped = serviceCommands.clear()
+        if (dropped.isNotEmpty())
+            Log.w(TAG, "Service commands dropped ($why): ${dropped.joinToString { it.javaClass.simpleName }}")
+    }
+
+    // Review R1: whatever the reason (the activity stops, the binding died, another protocol's service), the bind is given
+    // up - what was kept for it is dropped.
     @MainThread
     private fun doUnbindService() {
+        dropServiceCommands("unbind")
         if (isInBoundState) {
             Log.d(TAG, "Unbind service")
             isWaitingStatus = true
@@ -698,13 +739,20 @@ class AmneziaActivity : QtActivity() {
             if (isServiceConnected) {
                 if (proto.serviceClass == vpnProto?.serviceClass) {
                     vpnProto = proto
-                    connectToVpn(vpnConfig)
+                    giveServiceCommand(ServiceCommand.Connect(vpnConfig))
                     return
                 }
                 doUnbindService()
             }
             vpnProto = proto
             isWaitingStatus = false
+            // AVPN (android3 runs a, f): a stop given before the bind still waits - this start goes behind it, not as a
+            // second intent ahead of it
+            if (serviceCommands.startWaits(ServiceCommand.Connect(vpnConfig), bound = false,
+                                           binding = isInBoundState && !isServiceConnected)) {
+                Log.i(TAG, "Start VPN: waits behind a command given before the service was bound")
+                return
+            }
             startVpnService(vpnConfig, proto)
             doBindService()
         } ?: QtAndroidController.onServiceError()
@@ -755,7 +803,26 @@ class AmneziaActivity : QtActivity() {
     @MainThread
     private fun disconnectFromVpn() {
         Log.d(TAG, "Disconnect from VPN")
-        vpnServiceMessenger.send(Action.DISCONNECT)
+        giveServiceCommand(ServiceCommand.Disconnect)
+    }
+
+    // AVPN (android3 runs a, f): every messenger command of the start/stop protocol goes through the queue - sent now when
+    // bound and nothing waits ahead of it, kept for the bind in progress, or logged when there is no service to give it to.
+    @MainThread
+    private fun giveServiceCommand(command: ServiceCommand) {
+        when (serviceCommands.offer(command, bound = isServiceConnected, binding = isInBoundState && !isServiceConnected)) {
+            ServiceCommandQueue.Disposition.SEND -> sendServiceCommand(command)
+            ServiceCommandQueue.Disposition.QUEUED -> Log.i(TAG, "Service command ${command.javaClass.simpleName}: kept until the service is bound")
+            ServiceCommandQueue.Disposition.NO_SERVICE -> Log.w(TAG, "Service command ${command.javaClass.simpleName}: no service bound or binding - not sent")
+        }
+    }
+
+    @MainThread
+    private fun sendServiceCommand(command: ServiceCommand) {
+        when (command) {
+            is ServiceCommand.Disconnect -> vpnServiceMessenger.send(Action.DISCONNECT)
+            is ServiceCommand.Connect -> connectToVpn(command.vpnConfig)
+        }
     }
 
     /**
@@ -774,6 +841,24 @@ class AmneziaActivity : QtActivity() {
             checkVpnPermission {
                 checkNotificationPermission {
                     startVpn(vpnConfig)
+                }
+            }
+        }
+    }
+
+    // AVPN (android3 runs a, f): the service's status snapshot, as after a bind (the engine gave up waiting for a stop).
+    // Not bound yet: the bind in progress sends REQUEST_STATUS itself; no service at all: nothing of ours runs.
+    @Suppress("unused")
+    fun requestStatus() {
+        mainScope.launch {
+            isWaitingStatus = true
+            when {
+                isServiceConnected -> vpnServiceMessenger.send(Action.REQUEST_STATUS, replyTo = activityMessenger)
+                isInBoundState -> Log.i(TAG, "Request status: on the bind in progress")
+                vpnProto != null -> doBindService()
+                else -> {
+                    isWaitingStatus = false
+                    QtAndroidController.onStatus(ProtocolState.DISCONNECTED)
                 }
             }
         }

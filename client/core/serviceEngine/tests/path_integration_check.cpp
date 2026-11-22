@@ -6,6 +6,7 @@
 // the same node first, then without it), refused provider seats, the user's stop, an exact server, a network change,
 // an adopted session judged by its data check, a stop that is never confirmed, and that a user action clears no
 // evidence. Build/run: build_path_integration.sh. QtCore/QtNetwork, no event loop needed.
+#include "../DebugSnapshot.h" // startRefusal, failedAttemptIntent (review F1)
 #include "../ServiceEngine.h"
 #include "../SubscriptionParser.h"
 #include "../TuningStore.h"
@@ -1002,10 +1003,10 @@ int main(int argc, char **argv)
         Rig r(pool);
         QString err;
         CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
-        CHECK(r.eng.onLocalBuild(true) == false); // the phase stays Connecting
+        CHECK(r.eng.onLocalBuild(ServiceEngine::LocalBuildReport::Building, r.eng.attemptLeg()) == false); // the phase stays Connecting
         r.pass(8000);
         CHECK(r.tun.ups.size() == 1 && r.tun.downs == 0 && r.eng.attemptRunning()); // not judged while building
-        r.eng.onLocalBuild(false);
+        r.eng.onLocalBuild(ServiceEngine::LocalBuildReport::Built, r.eng.attemptLeg());
         r.pass(4000); // 4 s of the server's 4.5 s
         CHECK(r.tun.ups.size() == 1 && r.tun.downs == 0);
         r.up();
@@ -1023,7 +1024,7 @@ int main(int argc, char **argv)
         Rig r(pool);
         QString err;
         CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
-        r.eng.onLocalBuild(true);
+        r.eng.onLocalBuild(ServiceEngine::LocalBuildReport::Building, r.eng.attemptLeg());
         r.pass(19500);
         CHECK(r.tun.downs == 0 && r.tun.ups.size() == 1);
         r.pass(1000);
@@ -1037,6 +1038,213 @@ int main(int argc, char **argv)
         CHECK(plain.eng.connect(err) && plain.last() == QLatin1String("17"));
         plain.pass(4500);
         CHECK(plain.tun.downs == 1 && plain.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect"));
+    }
+    // android2 V2 (21.11): the service builds one start at a time and names the engine leg of every report. A leg is
+    // local from its start command until its own "built"; a report of another leg changes nothing; a start the service
+    // ended without a tunnel is a local outcome. Nothing is recorded against a server whose tunnel never began.
+    {
+        using LB = ServiceEngine::LocalBuildReport;
+        {   // the start waits in the service (busy with an earlier build): no "no handshake" at 4.5 s
+            Rig r(pool);
+            r.eng.setLocalBuildReported(true);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            const quint64 leg = r.eng.attemptLeg();
+            r.pass(8000);
+            CHECK(r.tun.downs == 0 && r.eng.attemptRunning()); // not judged: its build has not even begun
+            CHECK(r.eng.onLocalBuild(LB::Built, leg - 1) == false); // a late "built" of an earlier start: not this leg's
+            r.eng.onLocalBuild(LB::Building, leg + 1);              // nor a report of a later one
+            r.pass(4500);
+            CHECK(r.tun.downs == 0);
+            r.eng.onLocalBuild(LB::Building, leg); // its own build begins 12.5 s after the command
+            r.pass(7000);
+            CHECK(r.tun.downs == 0);
+            r.pass(1000);
+            CHECK(r.tun.downs == 1 && journalHas(r.journal, "leg_local_build_overrun leg=")); // the local bound, from the start
+            CHECK(journalHas(r.journal, "leg_build_other report=built") && journalHas(r.journal, "leg_build begin leg="));
+            r.confirmStop();
+            CHECK(r.last() == QLatin1String("16") && r.eng.attemptRunning());
+            CHECK(!journalHas(r.journal, "path_outcome") && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+        }
+        {   // the service did not start this leg's tunnel ("Tunnel build 7: end, not started"): a local outcome at once
+            Rig r(pool);
+            r.eng.setLocalBuildReported(true);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            const quint64 leg = r.eng.attemptLeg();
+            r.pass(500);
+            r.eng.onLocalBuild(LB::Building, leg);
+            r.eng.onLocalBuild(LB::NotStarted, leg);
+            r.pass(500);
+            CHECK(r.tun.downs == 1 && journalHas(r.journal, "leg_build not_started leg="));
+            r.confirmStop();
+            CHECK(r.last() == QLatin1String("16"));
+            r.pass(6000); // 16 is never built either: still not judged by the server deadline
+            CHECK(!journalHas(r.journal, "path_outcome"));
+        }
+        {   // its own "built": the server has the full deadline from then, and a server that does not answer is judged
+            Rig r(pool);
+            r.eng.setLocalBuildReported(true);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            const quint64 leg = r.eng.attemptLeg();
+            r.pass(1000);
+            r.eng.onLocalBuild(LB::Building, leg);
+            r.eng.onLocalBuild(LB::Built, leg);
+            r.pass(4000);
+            CHECK(r.tun.downs == 0);
+            r.pass(1000);
+            CHECK(r.tun.downs == 1 && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect"));
+            CHECK(journalHas(r.journal, "leg_build end leg="));
+        }
+    }
+    // android2 P5b (21.11): Wi-Fi off during connecting. The facade's observation carries the authoritative uplink
+    // (NetworkKey.h withPhysicalUplink, AvpnEngineQml::currentNetworkObservation): the medium pick still said Wi-Fi
+    // with no fingerprint, the uplink said "no physical network". The leg in flight is stopped unrecorded, the attempt
+    // ends NoNetwork once (the facade then waits for the uplink), and no further leg is raised without a network.
+    {
+        path::NetworkObservation pickedWifi; // what the medium pick gave the moment Wi-Fi went off
+        pickedWifi.medium = path::NetMedium::Wifi;
+        path::NetworkObservation home;
+        home.medium = path::NetMedium::Wifi;
+        home.gateway = QStringLiteral("192.168.1.1");
+        home.subnet = QStringLiteral("192.168.1.0/24");
+        path::NetworkObservation cell;
+        cell.medium = path::NetMedium::Cellular;
+        cell.carrier = QStringLiteral("250-01");
+        cell.radio = QStringLiteral("lte");
+        {
+            Rig r(pool);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            r.pass(500);
+            r.eng.observeNetwork(path::withPhysicalUplink(pickedWifi, /*authoritative=*/true, /*up=*/false));
+            CHECK(!r.eng.network().usable());
+            CHECK(r.tun.downs == 1); // the leg in flight goes down at once
+            r.confirmStop();
+            const path::AttemptResult res = r.result();
+            CHECK(!res.connected && res.reason == path::FailReason::NoNetwork && res.paths == 1);
+            r.pass(20000);
+            CHECK(r.tun.ups.size() == 1 && !r.eng.attemptRunning()); // no server walked without a network
+            CHECK(!journalHas(r.journal, "path_outcome")); // nothing written against any server
+            // the uplink returns: the network is usable again and the next start (the facade's reconcile) connects
+            r.eng.observeNetwork(path::withPhysicalUplink(home, true, true));
+            CHECK(r.eng.network().usable());
+            CHECK(r.eng.connect(err) && r.tun.ups.size() == 2);
+        }
+        {   // a gap shorter than the stop (a Wi-Fi -> cellular handover with an empty physical set for 300 ms): the
+            // attempt goes on on the new network - no NoNetwork result, the next leg starts after the stop
+            Rig r(pool);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            r.pass(500);
+            r.eng.observeNetwork(path::withPhysicalUplink(pickedWifi, true, false));
+            r.now += 300;
+            r.eng.observeNetwork(path::withPhysicalUplink(cell, true, true));
+            CHECK(r.eng.network().usable() && r.eng.attemptRunning());
+            r.confirmStop();
+            CHECK(r.tun.ups.size() == 2 && r.eng.attemptRunning());
+            CHECK(!r.eng.takeAttemptResult().has_value());
+            r.up();
+            CHECK(r.eng.verifySucceeded(300));
+            const path::AttemptResult res = r.result();
+            CHECK(res.connected && !journalHas(r.journal, "no_handshake"));
+        }
+        {   // a LIVE session is not ended by a down (the service's own reconnect handles it - android2 P5a passed)
+            Rig r(pool);
+            QString err;
+            CHECK(r.eng.connect(err));
+            r.up();
+            CHECK(r.eng.verifySucceeded(300));
+            CHECK(r.result().connected);
+            r.eng.observeNetwork(path::withPhysicalUplink(pickedWifi, true, false));
+            r.pass(25000);
+            CHECK(r.tun.downs == 0 && r.tun.ups.size() == 1 && r.eng.state() == EngineState::Connected);
+            r.eng.observeNetwork(path::withPhysicalUplink(home, true, true));
+            r.pass(1000);
+            CHECK(r.tun.downs == 0 && r.eng.state() == EngineState::Connected && !r.eng.attemptRunning());
+        }
+    }
+    // Review F1 (21.11): Connect tapped while the authoritative uplink says "no physical network". The start ends at
+    // once with a result of its own attempt (NoNetwork) - the facade's syncAttempt judges it (Wait: the request kept),
+    // and the start's refusal adds nothing (startRefusal). The uplink returns: the start (after the facade's 1.5 s
+    // rule) connects. Control: a refusal without a result (no tunnel adapter) is the start's own and drops the intent.
+    {
+        path::NetworkObservation home;
+        home.medium = path::NetMedium::Wifi;
+        home.gateway = QStringLiteral("192.168.1.1");
+        home.subnet = QStringLiteral("192.168.1.0/24");
+        Rig r(pool);
+        r.eng.observeNetwork(path::withPhysicalUplink(home, /*authoritative=*/true, /*up=*/false));
+        QString err;
+        CHECK(!r.eng.connect(err) && err == QLatin1String("no_network"));
+        const std::optional<path::AttemptResult> ended = r.eng.takeAttemptResult();
+        CHECK(ended.has_value() && ended->reason == path::FailReason::NoNetwork && r.tun.ups.isEmpty());
+        // the facade: syncAttempt judges this result (it serves the intent of the tap) and keeps the request
+        const quint64 judged = ended ? ended->attempt : 0;
+        CHECK(failedAttemptIntent(true, /*uplinkUp=*/false, r.eng.attemptAfterLiveLoss()) == FailedAttemptIntent::Wait);
+        CHECK(startRefusal(ended ? ended->attempt : 0, judged) == StartRefusal::JudgedByResult); // the intent stays
+        // the uplink returns; the facade's reconcile (1.5 s later) starts again
+        r.eng.observeNetwork(path::withPhysicalUplink(home, true, true));
+        r.now += 1500;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        r.up();
+        CHECK(r.eng.verifySucceeded(300));
+        CHECK(r.result().connected);
+
+        ServiceEngine bare; // no tunnel adapter: refused before any attempt - no result to judge
+        CHECK(!bare.connect(err) && !bare.takeAttemptResult().has_value());
+        CHECK(startRefusal(0, judged) == StartRefusal::DropIntent);
+    }
+    // Review F2 (21.11): offline, then the uplink returns as a kind the app cannot name (Bluetooth tethering). A start
+    // then is not refused with no_network: it runs on the placeholder network "unknown".
+    {
+        path::NetworkObservation home;
+        home.medium = path::NetMedium::Wifi;
+        home.gateway = QStringLiteral("192.168.1.1");
+        home.subnet = QStringLiteral("192.168.1.0/24");
+        Rig r(pool);
+        r.eng.observeNetwork(path::withPhysicalUplink(home, true, false));
+        CHECK(!r.eng.network().usable());
+        r.eng.observeNetwork(path::withPhysicalUplink(path::NetworkObservation{}, /*authoritative=*/true, /*up=*/true));
+        CHECK(r.eng.network().usable() && r.eng.network().local == QLatin1String("unknown"));
+        QString err;
+        CHECK(r.eng.connect(err) && err.isEmpty() && r.last() == QLatin1String("17"));
+        r.up();
+        CHECK(r.eng.verifySucceeded(300));
+        CHECK(r.result().connected);
+    }
+    // android3 runs a, f (21.11): the stop of the leg never reached the service (sent before its bind), the owner gave the
+    // stop up (attempt_stop_unconfirmed) and ended NoNetwork; later the service's tunnel came up by itself. That native
+    // Connected (VpnConnection now reports it, the facade adopts with the session's metadata) makes the session the
+    // owner's leg: one data check, then Connected on its real node - never left running behind «Connect».
+    {
+        path::NetworkObservation home;
+        home.medium = path::NetMedium::Wifi;
+        home.gateway = QStringLiteral("192.168.1.1");
+        home.subnet = QStringLiteral("192.168.1.0/24");
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        r.pass(1000);
+        r.eng.observeNetwork(path::withPhysicalUplink(home, true, false));
+        CHECK(r.tun.downs == 1);
+        r.pass(10500); // no Disconnected ever comes
+        CHECK(journalHas(r.journal, "attempt_stop_unconfirmed leg="));
+        const path::AttemptResult lost = r.result();
+        CHECK(!lost.connected && lost.reason == path::FailReason::NoNetwork && !r.eng.attemptRunning());
+        r.eng.observeNetwork(path::withPhysicalUplink(home, true, true));
+        // the orphan tunnel reports itself: adopted with its identity, judged by its data check
+        r.eng.adoptTunnelConnected(QStringLiteral("17"), QStringLiteral("awg"), QStringLiteral("1.1.1.17:585"));
+        CHECK(r.eng.isVerifying() && r.eng.currentNodeId() == QLatin1String("17"));
+        CHECK(r.eng.verifySucceeded(300));
+        const path::AttemptResult res = r.result();
+        CHECK(res.connected && res.path.id.id == QLatin1String("17") && r.tun.ups.size() == 1);
+        // review R2: the same fact delivered again (a second Connected of that session) adopts nothing new: no new
+        // attempt, no stop, the live session stays
+        CHECK(!r.eng.adoptTunnelConnected(QStringLiteral("17"), QStringLiteral("awg"), QStringLiteral("1.1.1.17:585")));
+        CHECK(!r.eng.attemptRunning() && r.eng.state() == EngineState::Connected && r.tun.downs == 1);
+        CHECK(!r.eng.takeAttemptResult().has_value());
     }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
