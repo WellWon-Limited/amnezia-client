@@ -10,6 +10,7 @@
 #include "dto/Subscription.h"
 
 #include <QHash>
+#include <QJsonObject>
 #include <QList>
 #include <QString>
 #include <QStringList>
@@ -73,6 +74,21 @@ inline QString protoOf(const SubscriptionNode &n)
 inline bool isXrayProto(const QString &proto)
 {
     return proto == QLatin1String("xray");
+}
+
+// tribeSessionMetadata of a session on one of our own nodes - ONE builder for every transport (AmneziaWG and Xray
+// alike). The platform keeps it with the session it runs (iOS / macOS NE: the tunnel's provider configuration;
+// Android: the VPN service) and hands it back to an app that comes back to the live tunnel; the adoption names the
+// node by node_id, else by endpoint + proto (ServiceEngine::adoptTunnelConnected / tryIdentifyCurrentNode).
+// D2 (release 141, device round air20 R5): only AmneziaWG starts wrote it - a relaunch over an own Xray session
+// adopted it with no identity and the card said «Умный выбор сервера». An upstream session has its own
+// (XrayConfigBuilder::upstreamSessionMetadata, upstream: 1); this one never says upstream.
+inline QJsonObject ownSessionMetadata(const SubscriptionNode &n)
+{
+    return QJsonObject{{QStringLiteral("schema_version"), 1},
+                       {QStringLiteral("node_id"), n.nodeId},
+                       {QStringLiteral("proto"), protoOf(n)},
+                       {QStringLiteral("endpoint"), n.endpoint}};
 }
 
 // AVPN awg31-xray-v1: умеет ли ЭТОТ клиент поднимать xray-туннель. Две опоры:

@@ -1274,6 +1274,10 @@ struct ScanRowAttempt {
     quint64 intentSerial = 0;
     QStringList reported;
     bool seenTapped = false; // R4: the engine raised the tapped row - nodes before it are the old session's
+    // D1 (release 141, device round air20 R3): the intent epoch the tap set (IntentEpoch). The engine's terminal state
+    // speaks for this chain only once an attempt begun under this epoch or a later one exists: a row tapped right
+    // after another row failed was marked «Не удалось» from that row's Error before its own attempt even began.
+    quint64 intentEpoch = 0;
 };
 struct ScanRowStep {
     QStringList failed;
@@ -1283,22 +1287,28 @@ struct ScanRowStep {
     bool superseded = false; // another action took the tunnel: the request is over without a failure (told once)
     QString supersededNode;
 };
-inline void scanRowAttemptBegin(ScanRowAttempt &a, const QString &nodeId, quint64 intentSerial)
+inline void scanRowAttemptBegin(ScanRowAttempt &a, const QString &nodeId, quint64 intentSerial, quint64 intentEpoch)
 {
     a = ScanRowAttempt();
     a.active = true;
     a.tapped = nodeId;
     a.lastNode = nodeId;
     a.intentSerial = intentSerial;
+    a.intentEpoch = intentEpoch;
 }
-// engineNode = the node the engine raises or carries now ("" = none); gaveUp = the chain cannot go on by
-// itself (intent off, the start backoff began, data-plane cap reached).
+// engineNode = the node the engine raises or carries now ("" = none); intentOff = the person's intent is off (the
+// chain cannot go on); attemptOver = the engine sits in its terminal Error with no attempt running; attemptEpoch = the
+// intent epoch the engine's newest attempt began under (ServiceEngine::lastAttemptIntentEpoch, 0 = none yet). An
+// attempt that ended is this chain's only when it began under the chain's epoch or later: the Error an older attempt
+// left (the row failed just before, a connect still running at the tap) ends no newer row and reports no outcome
+// for it - that attempt's own result already went to its own row.
 inline ScanRowStep scanRowAttemptObserve(ScanRowAttempt &a, quint64 intentSerial, const QString &engineNode,
-                                         bool dataFlowing, bool gaveUp)
+                                         bool dataFlowing, bool intentOff, bool attemptOver, quint64 attemptEpoch)
 {
     ScanRowStep st;
     if (!a.active)
         return st;
+    const bool gaveUp = intentOff || (attemptOver && attemptEpoch >= a.intentEpoch);
     if (intentSerial != a.intentSerial) { // another action took the tunnel: not this chain any more
         a.active = false;
         st.superseded = true;

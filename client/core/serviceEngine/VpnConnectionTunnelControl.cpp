@@ -437,6 +437,8 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
             xcfg.insert(QStringLiteral("directSplit"), QStringLiteral("1"));
 #endif
         m_lastConfigReport.insert(QStringLiteral("userspace_split"), xcfg.contains(QStringLiteral("directSplit")));
+        // D2 (release 141): the session's identity goes with every start, Xray as AmneziaWG (NodeRotation.h)
+        xcfg.insert(QStringLiteral("tribeSessionMetadata"), ownSessionMetadata(primary));
         m_lastUpProto = QStringLiteral("xray");
         // Свежая сессия: статистика xray-пути начинается с нуля (кумулятивы демона/NE — с подъёма).
         m_stats = TunnelStats{};
@@ -455,12 +457,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
 #endif
 
     QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys);
-    cfg.insert(QStringLiteral("tribeSessionMetadata"), QJsonObject {
-        {QStringLiteral("schema_version"), 1},
-        {QStringLiteral("node_id"), primary.nodeId},
-        {QStringLiteral("proto"), protoOf(primary)},
-        {QStringLiteral("endpoint"), primary.endpoint}
-    });
+    cfg.insert(QStringLiteral("tribeSessionMetadata"), ownSessionMetadata(primary));
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     // AVPN awg31-xray-v1 (инвариант волны §4.5 «незнакомый ключ не доезжает до NE»): awg-apple 3.1.4
     // (TunnelConfiguration+WgQuickConfig.swift) бросает interfaceHasUnrecognizedKey на любом
