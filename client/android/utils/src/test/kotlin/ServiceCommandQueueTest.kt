@@ -70,4 +70,28 @@ class ServiceCommandQueueTest {
         // bound: a start is the messenger's, never "waiting"
         assertFalse(q.startWaits(Start(4), bound = true, binding = false))
     }
+
+    // Review R3 (21.11): Connect (the start intent accepted by Android), Stop while the first bind is still in progress,
+    // the app to the background at once (onStop unbinds). A stop kept for the bind died with it and the tunnel came up.
+    // A stop that cancels an accepted start intent belongs to that start: it goes the same way, as an intent - never
+    // kept for a bind, so nothing of it outlives a bind (R1 stays fixed).
+    @Test
+    fun aStopAfterAnAcceptedStartIntentGoesAsAnIntent() {
+        val q = ServiceCommandQueue<Cmd>()
+        assertFalse(q.startWaits(Start(1), bound = false, binding = false)) // the start intent
+        assertEquals(ServiceCommandQueue.Disposition.AS_INTENT,
+                     q.offer(Stop, bound = false, binding = true, afterStartIntent = true))
+        assertEquals(0, q.waiting) // nothing kept: the unbind has nothing to drop
+        assertEquals(emptyList(), q.clear())
+        // a later start is not held behind it: it goes as the next intent, after the stop intent
+        assertFalse(q.startWaits(Start(2), bound = false, binding = true))
+        // not bound and no bind: the start intent is still the stop's way
+        assertEquals(ServiceCommandQueue.Disposition.AS_INTENT,
+                     q.offer(Stop, bound = false, binding = false, afterStartIntent = true))
+        // bound: the messenger, as before
+        assertEquals(ServiceCommandQueue.Disposition.SEND,
+                     q.offer(Stop, bound = true, binding = false, afterStartIntent = true))
+        // no start intent of ours: as before (kept for the bind in progress / nothing to send to)
+        assertEquals(ServiceCommandQueue.Disposition.NO_SERVICE, q.offer(Stop, bound = false, binding = false))
+    }
 }

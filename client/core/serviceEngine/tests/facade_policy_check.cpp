@@ -1360,6 +1360,31 @@ static void r2LateConnectedAfterThePersonsStop()
     CHECK(adoptObservedTunnel(false, false) == A::Adopt);
 }
 
+// Review R3 (21.11): Connect, Stop during the first bind, the app to the background; on return the service's STATUS said
+// "connected" and the STATUS entry adopted it - setting the intent on before the person's-will rule was asked. Both
+// entries (native state, STATUS) now decide by the same rule.
+static void r3StatusAdoptionObeysThePersonsStop()
+{
+    using A = AndroidStatusAction;
+    // STATUS connected, the person's OFF with our stop unconfirmed: stop it, the intent stays off
+    CHECK(androidStatusDecision(/*serviceConnected=*/true, false, /*engineConnected=*/false, ObservedTunnel::Transitional,
+                                false, /*ourStopPending=*/true, /*wantConnected=*/false) == A::StopIt);
+    // the stop was the engine's (no network: the request is kept on): adopted
+    CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Transitional, false, /*ourStopPending=*/false,
+                                /*wantConnected=*/true) == A::Adopt);
+    CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Transitional, false, true, true) == A::Adopt);
+    // found at launch, nothing of ours pending: adopted as before
+    CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Unknown, false, false, false) == A::Adopt);
+    // the other answers are androidStatusAction's, unchanged
+    CHECK(androidStatusDecision(false, true, false, ObservedTunnel::Transitional, false, true, false) == A::ConfirmOwnStop);
+    CHECK(androidStatusDecision(false, true, true, ObservedTunnel::Connected, false, false, true) == A::Disconnected);
+    // one rule for both entries: the STATUS StopIt is exactly the native entry's StopIt
+    for (const bool pending : { false, true })
+        for (const bool want : { false, true })
+            CHECK((androidStatusDecision(true, false, false, ObservedTunnel::Transitional, false, pending, want) == A::StopIt)
+                  == (adoptObservedTunnel(pending, want) == ObservedTunnelAdoption::StopIt));
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1762,6 +1787,7 @@ int main()
     f2UnknownAfterOffline();
     android3StatusResolvesAGivenUpStop();
     r2LateConnectedAfterThePersonsStop();
+    r3StatusAdoptionObeysThePersonsStop();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

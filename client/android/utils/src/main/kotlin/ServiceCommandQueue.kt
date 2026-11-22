@@ -20,15 +20,24 @@ package org.amnezia.vpn.util
 // kept commands are moot and dropped - a stop for a service that no longer exists has nothing to stop. A start with no
 // bind in progress therefore never waits: it goes as the start intent, which creates and starts the service. Before,
 // a stop kept across onStop made every later Connect wait behind it for a bind that never completed.
+//
+// A stop that cancels a start intent Android already accepted belongs to that start, not to a bind (review R3, 21.11):
+// Connect, Stop during the first bind, the app to the background at once - onStop gave the bind up, the kept stop was
+// dropped with it and the tunnel came up. Such a stop goes the way its start went: as a start-service intent with the
+// disconnect action (AmneziaVpnService.onStartCommand), ordered after the start intent by Android, whatever the
+// activity does next. It is never kept, so nothing of it outlives a bind (R1).
 class ServiceCommandQueue<T> {
-    enum class Disposition { SEND, QUEUED, NO_SERVICE }
+    enum class Disposition { SEND, QUEUED, AS_INTENT, NO_SERVICE }
 
     private val pending = ArrayDeque<T>()
 
     val waiting: Int get() = pending.size
 
-    // A messenger command. bound: the messenger is set; binding: a bind was asked and has not completed.
-    fun offer(command: T, bound: Boolean, binding: Boolean): Disposition = when {
+    // A messenger command. bound: the messenger is set; binding: a bind was asked and has not completed;
+    // afterStartIntent: the command is a stop and a start intent of ours was accepted with no bind completed since -
+    // unbound, it goes as an intent (AS_INTENT).
+    fun offer(command: T, bound: Boolean, binding: Boolean, afterStartIntent: Boolean = false): Disposition = when {
+        !bound && afterStartIntent -> Disposition.AS_INTENT
         bound && pending.isEmpty() -> Disposition.SEND
         bound || binding -> Disposition.QUEUED.also { pending.addLast(command) }
         else -> Disposition.NO_SERVICE

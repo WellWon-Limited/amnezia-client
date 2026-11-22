@@ -266,6 +266,20 @@ open class AmneziaVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // AVPN (review R3): the app's stop of a start it gave as an intent, sent the same way (AmneziaActivity.sendStopIntent)
+        // - after that start in Android's order, whether or not the app is bound. A start-service intent obliges the
+        // foreground start; with nothing running and no client the service ends at once.
+        if (intent?.action == ACTION_DISCONNECT) {
+            Log.d(TAG, "Stop service command")
+            ServiceCompat.startForeground(
+                this, NOTIFICATION_ID,
+                serviceNotification.buildNotification(serverName, vpnProto?.label, protocolState.value),
+                foregroundServiceTypeCompat
+            )
+            disconnect()
+            if ((isUnknown || isDisconnected) && !isServiceBound) stopService()
+            return START_NOT_STICKY
+        }
         val isAlwaysOn = intent != null && intent.action == SERVICE_INTERFACE
 
         if (isAlwaysOn) {

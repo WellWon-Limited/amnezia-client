@@ -1601,10 +1601,17 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(AndroidController::instance(), &AndroidController::status, this,
             [this](AndroidController::ConnectionState st) {
                 const bool thinkConnected = (state() == QLatin1String("connected"));
-                const AndroidStatusAction action = androidStatusAction(
+                // review R3: the STATUS entry asks the same person's-will rule as the native-state entry, before the intent
+                const AndroidStatusAction action = androidStatusDecision(
                     st == AndroidController::ConnectionState::CONNECTED, st == AndroidController::ConnectionState::DISCONNECTED,
-                    thinkConnected, observedTunnelOf(m_lastTunnelState), m_engine.attemptRunning());
-                if (action == AndroidStatusAction::Adopt) {
+                    thinkConnected, observedTunnelOf(m_lastTunnelState), m_engine.attemptRunning(),
+                    m_latch.awaitingStopConfirm, m_wantConnected);
+                if (action == AndroidStatusAction::StopIt) {
+                    // the person's Stop of a start that ran on anyway: the service is stopped, the intent stays off (the
+                    // stop the person asked for is still unconfirmed: its Disconnected ends it, VpnConnection's listener)
+                    reliabilityEvent(QStringLiteral("adopt_refused why=status reason=person_stopped"));
+                    AndroidController::instance()->stop();
+                } else if (action == AndroidStatusAction::Adopt) {
                     m_wantConnected = true;
                     syncIntent(); // I7
                     m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild()); // android2 V2: its failover legs

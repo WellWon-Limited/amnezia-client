@@ -227,7 +227,7 @@ inline ReconcileGate reconcileGate(const TeardownLatch &latch, ObservedTunnel s,
 //                   Before, the view stayed transitional forever: reconcile waited for a terminal, and both the uplink's
 //                   return and a tap did nothing;
 //  Nothing        - the views agree, or the snapshot is in between (its terminal state comes as an event).
-enum class AndroidStatusAction { Nothing, Adopt, Disconnected, ConfirmOwnStop };
+enum class AndroidStatusAction { Nothing, Adopt, Disconnected, ConfirmOwnStop, StopIt };
 inline AndroidStatusAction androidStatusAction(bool serviceConnected, bool serviceDisconnected, bool engineConnected,
                                                ObservedTunnel facadeView, bool attemptRunning)
 {
@@ -238,6 +238,21 @@ inline AndroidStatusAction androidStatusAction(bool serviceConnected, bool servi
     if (serviceDisconnected && facadeView == ObservedTunnel::Transitional && !attemptRunning)
         return AndroidStatusAction::ConfirmOwnStop;
     return AndroidStatusAction::Nothing;
+}
+
+// The STATUS entry's decision (review R3, 21.11): androidStatusAction, and an Adopt obeys the person's last will by the
+// SAME rule as the native-state entry (adoptObservedTunnel) - asked before anything touches the intent. Connect, Stop during
+// the first bind, the app to the background: on return STATUS said "connected" and the STATUS entry set the intent on
+// first; the person's cancel was lost and the VPN was on. StopIt: the tunnel is stopped, the intent stays off.
+inline AndroidStatusAction androidStatusDecision(bool serviceConnected, bool serviceDisconnected, bool engineConnected,
+                                                 ObservedTunnel facadeView, bool attemptRunning, bool ourStopPending,
+                                                 bool wantConnected)
+{
+    const AndroidStatusAction a =
+        androidStatusAction(serviceConnected, serviceDisconnected, engineConnected, facadeView, attemptRunning);
+    if (a == AndroidStatusAction::Adopt && adoptObservedTunnel(ourStopPending, wantConnected) == ObservedTunnelAdoption::StopIt)
+        return AndroidStatusAction::StopIt;
+    return a;
 }
 
 inline bool reconcileActionable(ObservedTunnel s, const TeardownLatch &latch)
