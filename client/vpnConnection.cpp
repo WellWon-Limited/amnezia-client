@@ -681,6 +681,16 @@ void VpnConnection::disconnectFromVpn()
                                   setConnectionState(Vpn::ConnectionState::Disconnected);
                                   disconnect(*connection);
                                   delete connection;
+                              } else if (state == AndroidController::ConnectionState::CONNECTED && m_vpnProtocol.isNull()) {
+                                  // AVPN (android3 runs a, f, 21.11): the service reports a running tunnel instead of the
+                                  // stop - the stop never reached it (or it brought the session up again). With the protocol
+                                  // gone this fact reached nobody: the tunnel ran behind a «Connect» screen and no later stop
+                                  // could reach the service. The protocol is wired back as for a live service found at start
+                                  // (restoreConnection) and the fact goes on: the engine adopts the session or stops it.
+                                  disconnect(*connection);
+                                  delete connection;
+                                  restoreConnection();
+                                  setConnectionState(Vpn::ConnectionState::Connected);
                               }
                           });
 #endif

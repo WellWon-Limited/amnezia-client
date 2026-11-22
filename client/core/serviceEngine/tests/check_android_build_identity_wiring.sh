@@ -59,8 +59,8 @@ fac="$(code "$FACADE")"
 has "$fac" '&AndroidController::tunnelBuild, this, [this](int buildState, int seq, quint64 leg) {' \
     || bad "B4: the facade must take the leg of a build report"
 has "$fac" ': avpn::ServiceEngine::LocalBuildReport::NotStarted,' || bad "B4: state 2 must be NotStarted"
-[ "$(count "$fac" 'm_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild());')" = "2" ] \
-    || bad "B4: the reported mode must be set at the attempt start and at the adoption"
+[ "$(count "$fac" 'm_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild());')" = "3" ] \
+    || bad "B4: the reported mode must be set at the attempt start and at both adoptions (STATUS, native Connected)"
 
 [ "$fail" = "0" ] && echo "check_android_build_identity_wiring: OK"
 exit "$fail"

@@ -1214,6 +1214,33 @@ int main(int argc, char **argv)
         CHECK(r.eng.verifySucceeded(300));
         CHECK(r.result().connected);
     }
+    // android3 runs a, f (21.11): the stop of the leg never reached the service (sent before its bind), the owner gave the
+    // stop up (attempt_stop_unconfirmed) and ended NoNetwork; later the service's tunnel came up by itself. That native
+    // Connected (VpnConnection now reports it, the facade adopts with the session's metadata) makes the session the
+    // owner's leg: one data check, then Connected on its real node - never left running behind «Connect».
+    {
+        path::NetworkObservation home;
+        home.medium = path::NetMedium::Wifi;
+        home.gateway = QStringLiteral("192.168.1.1");
+        home.subnet = QStringLiteral("192.168.1.0/24");
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        r.pass(1000);
+        r.eng.observeNetwork(path::withPhysicalUplink(home, true, false));
+        CHECK(r.tun.downs == 1);
+        r.pass(10500); // no Disconnected ever comes
+        CHECK(journalHas(r.journal, "attempt_stop_unconfirmed leg="));
+        const path::AttemptResult lost = r.result();
+        CHECK(!lost.connected && lost.reason == path::FailReason::NoNetwork && !r.eng.attemptRunning());
+        r.eng.observeNetwork(path::withPhysicalUplink(home, true, true));
+        // the orphan tunnel reports itself: adopted with its identity, judged by its data check
+        r.eng.adoptTunnelConnected(QStringLiteral("17"), QStringLiteral("awg"), QStringLiteral("1.1.1.17:585"));
+        CHECK(r.eng.isVerifying() && r.eng.currentNodeId() == QLatin1String("17"));
+        CHECK(r.eng.verifySucceeded(300));
+        const path::AttemptResult res = r.result();
+        CHECK(res.connected && res.path.id.id == QLatin1String("17") && r.tun.ups.size() == 1);
+    }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
 }

@@ -5,7 +5,9 @@
 # by behaviour (ServiceCommandQueue: client/android/utils src/test ServiceCommandQueueTest; the facade's status rule:
 # facade_policy_check). What is checked here is where they are wired - each line fails if its call site is reverted:
 #   Q1  the activity gives every start/stop messenger command through the queue and flushes it, in order, on the bind;
-#       a start behind a waiting command does not overtake it as a second intent.
+#       a start behind a waiting command does not overtake it as a second intent;
+#   Q2  a running tunnel reported after our stop (the stop did not take) is not lost with the stopped protocol: VpnConnection
+#       wires the protocol back (restoreConnection) and reports Connected; the facade adopts it with the session's identity.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -17,6 +19,9 @@ has() { printf '%s\n' "$1" | grep -F -- "$2" > /dev/null; }
 count() { printf '%s\n' "$1" | grep -cF -- "$2" || true; }
 
 ACT="$CLIENT/android/src/org/amnezia/vpn/AmneziaActivity.kt"
+VC="$CLIENT/vpnConnection.cpp"
+FACADE="$HERE/../AvpnEngineQml.cpp"
+body() { code "$1" | awk -v sig="$2" 'index($0, sig) == 1 { on = 1 } on { print } on && /^}$/ { exit }'; }
 
 # ---- Q1 ----
 act="$(code "$ACT")"
@@ -29,6 +34,18 @@ has "$act" 'if (serviceCommands.startWaits(ServiceCommand.Connect(vpnConfig), bo
     || bad "Q1: DISCONNECT may be sent only by sendServiceCommand"
 has "$act" 'serviceCommands.offer(command, bound = isServiceConnected, binding = isInBoundState && !isServiceConnected)' \
     || bad "Q1: the queue must know whether the service is bound or a bind is in progress"
+
+# ---- Q2 ----
+dis="$(body "$VC" 'void VpnConnection::disconnectFromVpn()')"
+has "$dis" '} else if (state == AndroidController::ConnectionState::CONNECTED && m_vpnProtocol.isNull()) {' \
+    || bad "Q2: a CONNECTED after our stop must not be dropped"
+cn="$(printf '%s\n' "$dis" | grep -nF 'CONNECTED && m_vpnProtocol.isNull()' | head -1 | cut -d: -f1)"
+printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 10 ))p" | grep -qF 'restoreConnection();' \
+    && printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 10 ))p" | grep -qF 'setConnectionState(Vpn::ConnectionState::Connected);' \
+    || bad "Q2: the protocol must be wired back and the running tunnel reported"
+adopt="$(body "$FACADE" 'bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)')"
+has "$adopt" 'const bool adopted = m_engine.adoptTunnelConnected(m_serviceSessionMeta.value(QStringLiteral("node_id")).toString(),' \
+    || bad "Q2: the Android adoption of a native Connected must name the session's node"
 
 [ "$fail" = "0" ] && echo "check_android_service_order_wiring: OK"
 exit "$fail"

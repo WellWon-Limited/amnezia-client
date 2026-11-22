@@ -4265,7 +4265,16 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
         return false;
     m_wantConnected = true;
     syncIntent(); // I7
+#ifdef Q_OS_ANDROID
+    // android3 runs a, f: a session found running by a native Connected (not a STATUS) is named by the metadata the
+    // service sent with that state (android2 P7), as in the STATUS adoption
+    m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild());
+    const bool adopted = m_engine.adoptTunnelConnected(m_serviceSessionMeta.value(QStringLiteral("node_id")).toString(),
+                                                       m_serviceSessionMeta.value(QStringLiteral("proto")).toString(),
+                                                       m_serviceSessionMeta.value(QStringLiteral("endpoint")).toString());
+#else
     const bool adopted = m_engine.adoptTunnelConnected();
+#endif
     syncAttempt();
     return adopted;
 #endif
