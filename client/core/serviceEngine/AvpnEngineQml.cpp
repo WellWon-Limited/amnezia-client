@@ -5909,8 +5909,13 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // DebugSnapshot.h::transitionNetAction, NetAwait.h::resetApiConnections.
     {
         const TransitionNetAction net = transitionNetAction(observedTunnelOf(m_lastTunnelState), observedTunnelOf(s));
-        if (m_nam && (net.clearCache || net.abortInFlight))
+        // android5 H1/H3: nothing of it runs here - the state and the screen come first (NetAwait.h resetApiConnections)
+        if (m_nam && (net.clearCache || net.abortInFlight)) {
+            reliabilityEvent(QStringLiteral("api_reset clear=%1 abort=%2 last_drop_ms=%3")
+                                 .arg(int(net.clearCache)).arg(int(net.abortInFlight))
+                                 .arg(m_nam->property(avpn::kCacheClearLastMs).toLongLong()));
             avpn::resetApiConnections(m_nam, net.clearCache, net.abortInFlight);
+        }
     }
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).

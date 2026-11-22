@@ -12,6 +12,7 @@
 // Дефолт 15 c: с запасом покрывает enroll/subscription/redeem на медленной мобильной сети,
 // но гарантированно разблокирует UI, если бэкенд не ответил.
 
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QList>
 #include <QNetworkAccessManager>
@@ -109,30 +110,64 @@ inline void watchFirstByte(QNetworkReply *reply, qint64 shareMs, std::function<v
     });
 }
 
-// Tunnel transition on the shared QNAM (DebugSnapshot.h::transitionNetAction): take the requests
-// running now (snapshot), drop the cached connections if asked (that strands those requests - Qt
-// destroys its HTTP thread), then abort the snapshot on the next event-loop turn (no finished-lambdas
-// inside the caller's state handler) so their owners re-issue them. Requests started later are not
-// touched. abortInFlight without clearCache: someone else (upstream) has just cleared the cache.
+// Tunnel transition on the shared QNAM (DebugSnapshot.h::transitionNetAction). android5 H1/H3 (21.11): the app's main
+// thread stood ~5 s right after the native state on a return from the background - with requests in flight,
+// clearConnectionCache() runs QNetworkAccessManagerPrivate::destroyThread on the CALLER's thread: the HTTP thread is told
+// to quit and waited for (up to 5 s) while it still serves them. Nothing here may wait, and nothing runs inside the
+// caller's state handler (the state and the screen come first): on the next event-loop turn the requests running at
+// the transition (snapshot) are aborted - their owners re-issue them over the new path - and the cached connections
+// (dead keep-alive ones of the old path) are dropped only once no request of this QNAM runs, re-asked whenever one
+// ends; a request started after the transition is therefore never stranded. One drop at a time: a transition while
+// one waits joins it. abortInFlight without clearCache: someone else asked the drop (upstream on Connected - which
+// goes through here too now).
+inline constexpr char kCacheClearPending[] = "avpnCacheClearPending";   // a drop waits for an idle QNAM
+inline constexpr char kCacheClearLastMs[] = "avpnCacheClearLastMs";     // how long the last drop took (journal)
+
+namespace detail {
+inline QList<QPointer<QNetworkReply>> runningReplies(QNetworkAccessManager *nam)
+{
+    QList<QPointer<QNetworkReply>> running;
+    const auto replies = nam->findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly);
+    for (QNetworkReply *r : replies)
+        if (r->isRunning())
+            running << r;
+    return running;
+}
+
+inline void clearCacheWhenIdle(QNetworkAccessManager *nam)
+{
+    if (!runningReplies(nam).isEmpty()) {
+        QObject::connect(
+            nam, &QNetworkAccessManager::finished, nam,
+            [nam](QNetworkReply *) { QTimer::singleShot(0, nam, [nam]() { clearCacheWhenIdle(nam); }); },
+            Qt::SingleShotConnection);
+        return;
+    }
+    QElapsedTimer took;
+    took.start();
+    nam->clearConnectionCache(); // idle: the HTTP thread serves nothing, its quit is immediate
+    nam->setProperty(kCacheClearLastMs, qint64(took.elapsed()));
+    nam->setProperty(kCacheClearPending, false);
+}
+} // namespace detail
+
 inline void resetApiConnections(QNetworkAccessManager *nam, bool clearCache, bool abortInFlight)
 {
     if (!nam)
         return;
-    QList<QPointer<QNetworkReply>> running;
-    if (abortInFlight) {
-        const auto replies = nam->findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly);
-        for (QNetworkReply *r : replies)
-            if (r->isRunning())
-                running << r;
-    }
-    if (clearCache)
-        nam->clearConnectionCache();
-    if (running.isEmpty())
+    const QList<QPointer<QNetworkReply>> running =
+        abortInFlight ? detail::runningReplies(nam) : QList<QPointer<QNetworkReply>>();
+    const bool startDrop = clearCache && !nam->property(kCacheClearPending).toBool();
+    if (startDrop)
+        nam->setProperty(kCacheClearPending, true);
+    if (running.isEmpty() && !startDrop)
         return;
-    QTimer::singleShot(0, nam, [running]() {
+    QTimer::singleShot(0, nam, [nam, running, startDrop]() {
         for (const QPointer<QNetworkReply> &r : running)
             if (r && r->isRunning())
                 r->abort();
+        if (startDrop)
+            detail::clearCacheWhenIdle(nam);
     });
 }
 } // namespace avpn

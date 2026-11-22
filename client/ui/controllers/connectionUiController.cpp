@@ -1,4 +1,5 @@
 #include "connectionUiController.h"
+#include "core/serviceEngine/NetAwait.h" // AVPN (android5 H3): resetApiConnections
 
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS) || defined(MACOS_NE)
     #include <QGuiApplication>
@@ -59,7 +60,10 @@ void ConnectionUiController::onConnectionStateChanged(Vpn::ConnectionState state
     m_connectionStateText = tr("Connecting...");
     switch (state) {
     case Vpn::ConnectionState::Connected: {
-        amnApp->networkManager()->clearConnectionCache();
+        // AVPN (android5 H3): the drop of cached connections never waits on this (main) thread for Qt's HTTP thread -
+        // with requests in flight clearConnectionCache() stood 5 s here, before the engine's adoption could run.
+        // Requests in flight are aborted (re-issued by their owners) and the cache is dropped once nothing runs.
+        avpn::resetApiConnections(amnApp->networkManager(), /*clearCache=*/true, /*abortInFlight=*/true);
 
         m_isConnectionInProgress = false;
         m_isConnected = true;

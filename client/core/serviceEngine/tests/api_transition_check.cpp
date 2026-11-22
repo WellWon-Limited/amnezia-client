@@ -140,5 +140,94 @@ private slots:
     }
 };
 
-QTEST_GUILESS_MAIN(ApiTransitionTest)
+// android5 H1/H3 (21.11): after a return from the background with requests in flight, the app's main thread stood ~5 s
+// right after the native state (native_state=1 ... nothing ... control_plane_edge 5.0 s later; the requests ended
+// net_error=5 at ~5.2 s; even "Application resumed" was 5.5 s late). The tunnel transition's clearConnectionCache()
+// runs QNetworkAccessManagerPrivate::destroyThread on the CALLER's thread: the HTTP thread is told to quit and waited
+// for, up to 5 s, while it still serves the requests. The state handler that calls resetApiConnections must never wait.
+class ApiTransitionNoWaitTest : public QObject {
+    Q_OBJECT
+    QTcpServer silent; // accepts, reads, never answers (a server behind a path that is gone)
+
+private slots:
+    void initTestCase() { QVERIFY(silent.listen(QHostAddress::LocalHost)); }
+
+    void theTransitionNeverWaitsForTheHttpThread()
+    {
+        QList<QTcpSocket *> held;
+        connect(&silent, &QTcpServer::newConnection, this, [&]() {
+            while (auto *s = silent.nextPendingConnection()) {
+                held << s;
+                connect(s, &QTcpSocket::readyRead, s, [s]() { s->readAll(); });
+            }
+        });
+        QNetworkAccessManager nam;
+        const QString base = QString("http://127.0.0.1:%1").arg(silent.serverPort());
+        QList<QNetworkReply *> replies;
+        for (const char *path : { "/v1/support/unread", "/v1/announcements", "/v1/journal" })
+            replies << nam.get(QNetworkRequest(QUrl(base + QLatin1String(path))));
+        QTRY_COMPARE(held.size(), 3);
+        QTest::qWait(200);
+        QElapsedTimer t;
+        t.start();
+        const TransitionNetAction a = transitionNetAction(ObservedTunnel::Connected, ObservedTunnel::Disconnected);
+        resetApiConnections(&nam, a.clearCache, a.abortInFlight);
+        const qint64 inHandler = t.elapsed();
+        qInfo("resetApiConnections returned after %lld ms", inHandler);
+        QVERIFY2(inHandler < 300, "the state handler waited for the network");
+        // nothing ran inside the handler: the requests are still running, the drop waits for a later turn
+        QVERIFY(std::all_of(replies.cbegin(), replies.cend(), [](QNetworkReply *r) { return r->isRunning(); }));
+        QCOMPARE(nam.property("avpnCacheClearPending").toBool(), true);
+        // the requests that were in flight end at once (their owners re-issue them), not by a timeout
+        QTRY_VERIFY_WITH_TIMEOUT(std::all_of(replies.cbegin(), replies.cend(), [](QNetworkReply *r) { return r->isFinished(); }), 1000);
+        for (QNetworkReply *r : replies)
+            QCOMPARE(r->error(), QNetworkReply::OperationCanceledError);
+        // and the dead keep-alive connections are dropped once nothing runs
+        QTRY_VERIFY_WITH_TIMEOUT(nam.property("avpnCacheClearPending").isValid()
+                                     && !nam.property("avpnCacheClearPending").toBool(), 6000);
+        qDeleteAll(replies);
+        qDeleteAll(held);
+    }
+
+    // A request started after the transition, while the drop still waits, is never stranded: the drop comes after it.
+    void aRequestStartedMeanwhileIsNotStranded()
+    {
+        QTcpServer slow;
+        QVERIFY(slow.listen(QHostAddress::LocalHost));
+        connect(&slow, &QTcpServer::newConnection, this, [&]() {
+            while (auto *s = slow.nextPendingConnection()) {
+                connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+                connect(s, &QTcpSocket::readyRead, s, [s]() {
+                    s->readAll();
+                    QTimer::singleShot(400, s, [s]() {
+                        s->write("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}");
+                        s->disconnectFromHost();
+                    });
+                });
+            }
+        });
+        QNetworkAccessManager nam;
+        const QString base = QString("http://127.0.0.1:%1").arg(slow.serverPort());
+        QNetworkReply *before = nam.get(QNetworkRequest(QUrl(base + "/v1/config")));
+        QTest::qWait(100);
+        resetApiConnections(&nam, /*clearCache=*/true, /*abortInFlight=*/false); // someone else's transition
+        QNetworkReply *after = nam.get(QNetworkRequest(QUrl(base + "/v1/edges")));
+        QTRY_VERIFY_WITH_TIMEOUT(before->isFinished() && after->isFinished(), 3000);
+        QCOMPARE(before->error(), QNetworkReply::NoError);
+        QCOMPARE(after->error(), QNetworkReply::NoError);
+        QTRY_COMPARE_WITH_TIMEOUT(nam.property("avpnCacheClearPending").toBool(), false, 3000);
+        delete before;
+        delete after;
+    }
+};
+
+int main(int argc, char **argv)
+{
+    QCoreApplication app(argc, argv);
+    ApiTransitionTest a;
+    ApiTransitionNoWaitTest b;
+    return QTest::qExec(&a, argc, argv) | QTest::qExec(&b, argc, argv);
+}
+
+// QTEST_GUILESS_MAIN(ApiTransitionTest)
 #include "api_transition_check.moc"
