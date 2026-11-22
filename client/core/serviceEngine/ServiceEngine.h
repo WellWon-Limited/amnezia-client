@@ -240,6 +240,9 @@ public:
     // H3: the facade's intent epoch (DebugSnapshot.h IntentEpoch); every attempt the owner begins is stamped with the
     // one in force at that moment and its result carries the stamp.
     void setIntentEpoch(quint64 e) { m_intentEpoch = e; }
+    // D1 (release 141): the intent epoch the newest attempt began under (0 = none began yet) - which intent the
+    // engine's terminal state speaks for (DebugSnapshot.h scanRowAttemptObserve).
+    quint64 lastAttemptIntentEpoch() const { return m_lastAttemptEpoch; }
     bool ownerHoldsNativeLeg() const { return m_owner.phase() != path::AttemptPhase::Idle; }
 
     // ---- Stage 2: the probe race in front of the owner (path/PathRace.h) ----
@@ -682,6 +685,7 @@ private:
     QList<path::AttemptEvent> m_ownerQueue;
     quint64 m_intentEpoch = 0;
     quint64 m_stampedAttempt = 0;                  // the highest attempt number already stamped
+    quint64 m_lastAttemptEpoch = 0;                // the intent epoch of the newest stamped attempt (D1)
     QHash<quint64, int> m_attemptModes;            // attempt number -> transport mode in force when it began (K1)
     QHash<quint64, quint64> m_attemptEpochs;       // attempt number -> intent epoch it was begun under
     bool m_inOwner = false;

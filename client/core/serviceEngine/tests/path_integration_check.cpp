@@ -438,6 +438,20 @@ int main(int argc, char **argv)
         q.confirmStop();
         CHECK(q.last() == QLatin1String("17") && q.eng.pathStateHere(QStringLiteral("16")) == QLatin1String("suspect"));
     }
+    // D1 (release 141, device round air20 R3): the engine says which intent its newest attempt serves. Between a Scanner
+    // row's tap (a new epoch) and the start of that row's attempt the engine's terminal state is the older attempt's.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.lastAttemptIntentEpoch() == 0); // nothing began yet
+        r.eng.setIntentEpoch(17);
+        CHECK(r.eng.connect(err) && r.eng.lastAttemptIntentEpoch() == 17);
+        r.eng.requestStop();
+        r.confirmStop();
+        r.eng.setIntentEpoch(21); // the tap: a newer intent, its attempt not begun yet
+        CHECK(r.eng.lastAttemptIntentEpoch() == 17);
+        CHECK(r.eng.connect(err) && r.eng.lastAttemptIntentEpoch() == 21);
+    }
 
     // 9. A stop that is never confirmed does not block the walk; nothing is recorded for it.
     {

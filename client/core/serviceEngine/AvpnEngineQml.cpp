@@ -7923,9 +7923,10 @@ void AvpnEngineQml::scanSyncState()
     // Seat first: the tapped provider row's chain has not touched the tunnel yet - the live node's data is not its.
     if (m_scanRow.active && !m_seatFirst.pending) {
         const QString engineNode = m_engine.currentNodeId();
-        const bool gaveUp = !m_wantConnected
-                            || (m_engine.state() == avpn::EngineState::Error && !m_engine.attemptRunning());
-        const ScanRowStep st = scanRowAttemptObserve(m_scanRow, m_intentSerial, engineNode, m_dataFlowing, gaveUp);
+        // D1 (release 141): the engine's Error speaks for the row only through the attempt it belongs to (its epoch)
+        const bool attemptOver = m_engine.state() == avpn::EngineState::Error && !m_engine.attemptRunning();
+        const ScanRowStep st = scanRowAttemptObserve(m_scanRow, m_intentSerial, engineNode, m_dataFlowing, !m_wantConnected,
+                                                     attemptOver, m_engine.lastAttemptIntentEpoch());
         if (st.superseded) {
             // The person's Stop or another action took the tunnel: the row's request is over (not a failure).
             // Every «in progress» state of the row ends with its request, whichever way it ends.
@@ -8076,7 +8077,7 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
     // right after its intent move (which ends an older request), before the start reads the choice
     pinAndReconnectImpl(nodeId, pinOriginPersists(PinOrigin::UserChoice), rc.forceConnect,
                         rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap, &pinBefore, &req);
-    scanRowAttemptBegin(m_scanRow, nodeId, m_intentSerial);
+    scanRowAttemptBegin(m_scanRow, nodeId, m_intentSerial, m_intentEpoch.epoch); // the epoch this tap's attempt serves
 }
 
 // StartReportCheck: «Проверить и отправить отчёт» (withConnection) or the empty state's «Отправить отчёт в

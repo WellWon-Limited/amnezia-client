@@ -374,6 +374,7 @@ void ServiceEngine::feedOwner(const path::AttemptEvent &ev)
         for (quint64 a = m_stampedAttempt + 1; a <= m_owner.attempt(); ++a) {
             m_attemptEpochs.insert(a, m_intentEpoch); // H3: an attempt begun by this event serves the intent in force
             m_attemptModes.insert(a, int(transportMode())); // K1: ... and began under the mode in force now
+            m_lastAttemptEpoch = m_intentEpoch;             // D1: the intent the newest attempt serves
         }
         m_stampedAttempt = qMax(m_stampedAttempt, m_owner.attempt());
         applyOwnerEffects(effects);

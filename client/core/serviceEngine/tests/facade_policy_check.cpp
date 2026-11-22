@@ -1256,45 +1256,109 @@ static void scannerCancelNeverDuringAppQuit()
 }
 
 // A row tap's chain as the coordinator sees it: the node the ladder left, the end, «Подключено».
+// The chain's own attempt as the engine reports it: the newest attempt began under the row's epoch (D1).
+static ScanRowStep observeOwnAttempt(ScanRowAttempt &a, quint64 intentSerial, const QString &engineNode, bool dataFlowing,
+                                     bool attemptOver)
+{
+    return scanRowAttemptObserve(a, intentSerial, engineNode, dataFlowing, /*intentOff=*/false, attemptOver, a.intentEpoch);
+}
+
 static void scannerRowChain()
 {
     ScanRowAttempt a;
-    CHECK(scanRowAttemptObserve(a, 1, QStringLiteral("9"), true, false).failed.isEmpty()); // inactive: silent
-    scanRowAttemptBegin(a, QStringLiteral("9"), 3);
-    ScanRowStep st = scanRowAttemptObserve(a, 3, QStringLiteral("9"), false, false);
+    CHECK(observeOwnAttempt(a, 1, QStringLiteral("9"), true, false).failed.isEmpty()); // inactive: silent
+    scanRowAttemptBegin(a, QStringLiteral("9"), 3, /*intentEpoch=*/30);
+    ScanRowStep st = observeOwnAttempt(a, 3, QStringLiteral("9"), false, false);
     CHECK(st.failed.isEmpty() && !st.connected && !st.ended);
-    st = scanRowAttemptObserve(a, 3, QStringLiteral("11"), false, false); // the ladder left 9 for 11
+    st = observeOwnAttempt(a, 3, QStringLiteral("11"), false, false); // the ladder left 9 for 11
     CHECK(st.failed == QStringList{QStringLiteral("9")});
-    st = scanRowAttemptObserve(a, 3, QStringLiteral("11"), false, false);
+    st = observeOwnAttempt(a, 3, QStringLiteral("11"), false, false);
     CHECK(st.failed.isEmpty()); // reported once
-    st = scanRowAttemptObserve(a, 3, QStringLiteral("11"), /*dataFlowing=*/true, false);
+    st = observeOwnAttempt(a, 3, QStringLiteral("11"), /*dataFlowing=*/true, false);
     CHECK(st.connected && st.connectedNode == QLatin1String("11"));
     CHECK(!a.active);
     // The chain gives up: the current node failed, the chain ends.
-    scanRowAttemptBegin(a, QStringLiteral("9"), 4);
-    st = scanRowAttemptObserve(a, 4, QStringLiteral("9"), false, /*gaveUp=*/true);
+    scanRowAttemptBegin(a, QStringLiteral("9"), 4, /*intentEpoch=*/40);
+    st = observeOwnAttempt(a, 4, QStringLiteral("9"), false, /*gaveUp=*/true);
     CHECK(st.ended && st.failed == QStringList{QStringLiteral("9")});
     // Another action took the tunnel (orb Stop, another tap): no failure is reported (the row did not fail), but the
     // request is over and the Scanner is told so (device round 13, C1: the row stayed «Подключение…» for good).
-    scanRowAttemptBegin(a, QStringLiteral("9"), 5);
-    st = scanRowAttemptObserve(a, /*intentSerial=*/6, QStringLiteral("10"), false, true);
+    scanRowAttemptBegin(a, QStringLiteral("9"), 5, /*intentEpoch=*/50);
+    st = observeOwnAttempt(a, /*intentSerial=*/6, QStringLiteral("10"), false, true);
     CHECK(st.failed.isEmpty() && !st.ended && !st.connected && !a.active);
     CHECK(st.superseded && st.supersededNode == QLatin1String("9"));
-    st = scanRowAttemptObserve(a, 6, QStringLiteral("10"), false, true); // told once
+    st = observeOwnAttempt(a, 6, QStringLiteral("10"), false, true); // told once
     CHECK(!st.superseded);
     // R4 (device round 4): the session before the tap (data on another node, the sibling «Эстония 3») is not a row
     // of this chain: nothing is reported for it, before or after the tapped row fails.
-    scanRowAttemptBegin(a, QStringLiteral("9"), 7);
-    st = scanRowAttemptObserve(a, 7, QStringLiteral("10"), true, false);
+    scanRowAttemptBegin(a, QStringLiteral("9"), 7, /*intentEpoch=*/70);
+    st = observeOwnAttempt(a, 7, QStringLiteral("10"), true, false);
     CHECK(!st.connected && st.failed.isEmpty() && a.active);
-    st = scanRowAttemptObserve(a, 7, QStringLiteral("9"), false, false);
+    st = observeOwnAttempt(a, 7, QStringLiteral("9"), false, false);
     CHECK(st.failed.isEmpty());
-    st = scanRowAttemptObserve(a, 7, QString(), false, /*gaveUp=*/true);
+    st = observeOwnAttempt(a, 7, QString(), false, /*gaveUp=*/true);
     CHECK(st.ended && st.failed == QStringList{QStringLiteral("9")});
     // the tapped row never came up and the chain gave up: only the tapped row
-    scanRowAttemptBegin(a, QStringLiteral("9"), 8);
-    st = scanRowAttemptObserve(a, 8, QStringLiteral("10"), false, /*gaveUp=*/true);
+    scanRowAttemptBegin(a, QStringLiteral("9"), 8, /*intentEpoch=*/80);
+    st = observeOwnAttempt(a, 8, QStringLiteral("10"), false, /*gaveUp=*/true);
     CHECK(st.ended && st.failed == QStringList{QStringLiteral("9")});
+}
+
+
+// D1 (release 141, device round air20 R3, 21.11 11:36:12): row A («Германия 4») failed; row B («Германия 3») tapped
+// right after. B was marked «Не удалось» 14 ms before its own attempt began (the engine still sat in the Error A's attempt
+// left), a failed outcome went for B, and B stayed failed while the VPN was connected through it. An attempt's end
+// belongs to the row whose epoch that attempt began under - in either order of the tap and A's result.
+static void scannerRowOutcomeBelongsToItsAttempt()
+{
+    const QString A = QStringLiteral("up:aaaa"), B = QStringLiteral("up:bbbb");
+    // (1) A's result lands first, then B is tapped while the engine still shows A's Error.
+    {
+        ScanRowAttempt row;
+        scanRowAttemptBegin(row, A, /*serial=*/1, /*epoch=*/15);
+        ScanRowStep st = scanRowAttemptObserve(row, 1, A, false, false, /*attemptOver=*/false, /*attemptEpoch=*/17);
+        CHECK(st.failed.isEmpty() && row.seenTapped);
+        st = scanRowAttemptObserve(row, 1, QString(), false, false, /*attemptOver=*/true, 17); // A's own attempt failed
+        CHECK(st.ended && st.failed == QStringList{A});                                         // the outcome names A
+        scanRowAttemptBegin(row, B, /*serial=*/2, /*epoch=*/21);
+        // the window between the tap and B's attempt: Error with nothing running, the newest attempt is A's (epoch 17)
+        st = scanRowAttemptObserve(row, 2, QString(), false, false, /*attemptOver=*/true, /*attemptEpoch=*/17);
+        CHECK(st.failed.isEmpty() && !st.ended && !st.connected && row.active);
+        st = scanRowAttemptObserve(row, 2, QString(), false, false, true, 17); // seen again: still nothing for B
+        CHECK(st.failed.isEmpty() && !st.ended && row.active);
+        // B's attempt begins (epoch 21) and comes up with data: «Подключено» on B, nothing failed
+        st = scanRowAttemptObserve(row, 2, B, false, false, false, 21);
+        CHECK(st.failed.isEmpty() && row.seenTapped);
+        st = scanRowAttemptObserve(row, 2, B, /*dataFlowing=*/true, false, false, 21);
+        CHECK(st.connected && st.connectedNode == B && st.failed.isEmpty() && !row.active);
+    }
+    // (2) B is tapped while A's attempt still runs; A's failure lands after the tap.
+    {
+        ScanRowAttempt row;
+        scanRowAttemptBegin(row, A, 1, 15);
+        ScanRowStep st = scanRowAttemptObserve(row, 1, A, false, false, false, 17);
+        CHECK(st.failed.isEmpty());
+        scanRowAttemptBegin(row, B, 2, 21); // the tap replaces A's request; A's attempt is still the newest
+        st = scanRowAttemptObserve(row, 2, A, false, false, false, 17); // A still carried: the session before B
+        CHECK(st.failed.isEmpty() && !st.ended);
+        st = scanRowAttemptObserve(row, 2, QString(), false, false, /*attemptOver=*/true, 17); // A's result lands
+        CHECK(st.failed.isEmpty() && !st.ended && row.active); // neither B nor A is reported by B's chain
+        st = scanRowAttemptObserve(row, 2, B, true, false, false, 21);
+        CHECK(st.connected && st.connectedNode == B && st.failed.isEmpty());
+    }
+    // (3) B's own attempt failing still ends B at once (its epoch or a later one), and an intent off ends it too.
+    {
+        ScanRowAttempt row;
+        scanRowAttemptBegin(row, B, 2, 21);
+        ScanRowStep st = scanRowAttemptObserve(row, 2, QString(), false, false, true, 17);
+        CHECK(st.failed.isEmpty());
+        st = scanRowAttemptObserve(row, 2, B, false, false, false, 21);
+        st = scanRowAttemptObserve(row, 2, QString(), false, false, /*attemptOver=*/true, /*attemptEpoch=*/22);
+        CHECK(st.ended && st.failed == QStringList{B});
+        scanRowAttemptBegin(row, B, 3, 23);
+        st = scanRowAttemptObserve(row, 3, QString(), false, /*intentOff=*/true, false, 17);
+        CHECK(st.ended && st.failed == QStringList{B}); // the person's intent off is this chain's, whatever ran before
+    }
 }
 
 // The live status: the live node and the target of an attempt in progress (never probed with its key).
@@ -1652,6 +1716,7 @@ int main()
     stopNothingNative();
     exactRowRequestObject();
     scannerRowChain();
+    scannerRowOutcomeBelongsToItsAttempt();
     scannerLiveView();
     scannerPhysicalNetworkKind();
     scannerKnownHostIps();
