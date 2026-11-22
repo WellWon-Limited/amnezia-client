@@ -4227,11 +4227,12 @@ void AvpnEngineQml::adoptNativeIdentity()
 
 // Единая точка адопта наблюдённого живого туннеля (Connected от ОС, не наша операция).
 // true = движок принял факт «подключено» (адопт выполнен).
-bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
+bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
 {
     if (!avpn::TuningStore::flag(QStringLiteral("adopt_live_tunnel")))
         return false;
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
+    Q_UNUSED(ourStopPending) // iOS: the latch itself and the session generation decide (decideTunnelAdoption)
     const QVariantMap metadata = IosController::Instance()->sessionMetadata();
     // Ревью CL-A r2 (A4): сравниваем только однородные поколения (runtime↔runtime или конфигурации).
     const TunnelAdoption verdict = decideTunnelAdoption(
@@ -4281,6 +4282,12 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
     // Не-iOS платформы: поведение базы 3c8cc74e — адопт, если наша операция не в полёте.
     if (m_op != Op::None)
         return false;
+    // Review R2: after the person's Stop a late Connected of that session is stopped, not adopted (reconcile stops it)
+    if (adoptObservedTunnel(ourStopPending, m_wantConnected) == ObservedTunnelAdoption::StopIt) {
+        reliabilityEvent(QStringLiteral("adopt_refused why=%1 reason=person_stopped").arg(QLatin1String(why)));
+        QTimer::singleShot(0, this, [this]() { reconcile(); });
+        return false;
+    }
     m_wantConnected = true;
     syncIntent(); // I7
 #ifdef Q_OS_ANDROID
@@ -5901,6 +5908,7 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).
     const QString engineStateBefore = m_engine.debugSnapshot().state;
+    bool ourStopPendingBefore = false; // review R2: a stop of ours awaited this state (latch before it is observed)
 #ifdef Q_OS_IOS
     // AVPN (iOS data watch, 141, stage 2): Reasserting (shown as Connecting) -> Connected of a session the
     // engine holds: the extension re-applied its network settings, as an in-place switch does. One fresh
@@ -5918,6 +5926,7 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
         // One mapping for both uses (audit of 137); Unknown and Transitional are the same no-op here.
         // With the state before it: an Error with no native attempt since the last terminal (a provider seat or
         // profile refused before the core started) proves nothing new and asks for no status (D4 of 16.11).
+        ourStopPendingBefore = m_latch.awaitingStopConfirm; // review R2: read before the state clears the latch
         observeTunnelState(m_latch, observedTunnelOf(m_lastTunnelState), observedTunnelOf(s), errorProvesTeardown);
         if (s == Vpn::Disconnected) {
             syncControlPlaneEdge(false);   // E10: the stored edge again before the release goes out directly
@@ -5964,7 +5973,7 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
         // (DebugSnapshot.h::decideTunnelAdoption): Error адопт не блокирует; OFF-намерение не
         // блокирует НОВУЮ сессию (Настройки/Shortcuts); стоп этой же сессии в пути — блокирует.
         if (!m_engine.onTunnelConnected() && !m_engine.isVerifying())
-            tryAdoptObservedTunnel("connected");
+            tryAdoptObservedTunnel("connected", ourStopPendingBefore);
         else
             identifyAdoptedSession();
 #if defined(AMNEZIA_DESKTOP) && !defined(MACOS_NE)

@@ -84,6 +84,21 @@ inline TunnelAdoption decideTunnelAdoption(bool connected, bool intentKnown, boo
                                 SessionGeneration{ observedGeneration, QString() });
 }
 
+// Non-iOS (Android, desktop): a live tunnel observed while the engine holds none (review R2, 21.11). The person tapped
+// Stop as the handshake completed; the Connected already in flight arrived after our stop and the adoption set the
+// intent back on - the person's Stop was overruled. The person's last will owns the outcome: with a stop of ours still
+// unconfirmed and the request off, the tunnel is stopped (reconcile: connected + intent off -> the stop again), never
+// adopted. A stop that was not the person's (no network, failover, a restart for another choice: the request is on)
+// and a session started outside the app while no stop of ours is pending are adopted as before. iOS decides the same
+// question with the session generation (decideTunnelAdoption: a stop of the SAME session blocks, a new session from
+// Settings is adopted after OFF); Android's service has no generation to compare, so a pending stop of ours with the
+// request off is taken as that same session.
+enum class ObservedTunnelAdoption { Adopt, StopIt };
+inline ObservedTunnelAdoption adoptObservedTunnel(bool ourStopPending, bool wantConnected)
+{
+    return ourStopPending && !wantConnected ? ObservedTunnelAdoption::StopIt : ObservedTunnelAdoption::Adopt;
+}
+
 // Native observations never override a pause, our own in-flight operation or a stop of the same
 // session that has not been confirmed yet. An OFF intent does NOT block a new session (A4).
 inline bool canAdoptObservedTunnel(bool connected, bool intentKnown, bool wantConnected,

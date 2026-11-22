@@ -50,11 +50,18 @@ has "$dis" '} else if (state == AndroidController::ConnectionState::CONNECTED &&
     || bad "Q2: a CONNECTED after our stop must not be dropped"
 cn="$(printf '%s\n' "$dis" | grep -nF 'CONNECTED && m_vpnProtocol.isNull()' | head -1 | cut -d: -f1)"
 printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 10 ))p" | grep -qF 'restoreConnection();' \
-    && printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 10 ))p" | grep -qF 'setConnectionState(Vpn::ConnectionState::Connected);' \
-    || bad "Q2: the protocol must be wired back and the running tunnel reported"
-adopt="$(body "$FACADE" 'bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)')"
+    && printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 14 ))p" | grep -qF 'm_vpnProtocol->setConnectionState(Vpn::ConnectionState::Connected);' \
+    || bad "Q2: the protocol must be wired back and the running tunnel reported through it (review R2: one Connected)"
+printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 14 ))p" | grep -qE '^[[:space:]]+setConnectionState\(Vpn::ConnectionState::Connected\);' \
+    && bad "R2: VpnConnection must not report the restored Connected itself (the protocol's copy would be a second one)"
+has "$(code "$FACADE")" 'tryAdoptObservedTunnel("connected", ourStopPendingBefore);' \
+    && has "$(code "$FACADE")" 'ourStopPendingBefore = m_latch.awaitingStopConfirm;' \
+    || bad "R2: the native Connected must tell the adoption whether our stop was pending (before the latch clears)"
+adopt="$(body "$FACADE" 'bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)')"
 has "$adopt" 'const bool adopted = m_engine.adoptTunnelConnected(m_serviceSessionMeta.value(QStringLiteral("node_id")).toString(),' \
     || bad "Q2: the Android adoption of a native Connected must name the session's node"
+has "$adopt" 'if (adoptObservedTunnel(ourStopPending, m_wantConnected) == ObservedTunnelAdoption::StopIt) {' \
+    || bad "R2: the non-iOS adoption must not overrule the person's Stop"
 
 # ---- Q3 ----
 SE="$HERE/../ServiceEngine.cpp"

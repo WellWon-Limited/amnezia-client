@@ -1240,6 +1240,11 @@ int main(int argc, char **argv)
         CHECK(r.eng.verifySucceeded(300));
         const path::AttemptResult res = r.result();
         CHECK(res.connected && res.path.id.id == QLatin1String("17") && r.tun.ups.size() == 1);
+        // review R2: the same fact delivered again (a second Connected of that session) adopts nothing new: no new
+        // attempt, no stop, the live session stays
+        CHECK(!r.eng.adoptTunnelConnected(QStringLiteral("17"), QStringLiteral("awg"), QStringLiteral("1.1.1.17:585")));
+        CHECK(!r.eng.attemptRunning() && r.eng.state() == EngineState::Connected && r.tun.downs == 1);
+        CHECK(!r.eng.takeAttemptResult().has_value());
     }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;

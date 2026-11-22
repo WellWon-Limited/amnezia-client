@@ -1345,6 +1345,21 @@ static void android3StatusResolvesAGivenUpStop()
     CHECK(classifyLoss(/*weAreOperating=*/true, QStringLiteral("error"), false, false, /*uplinkUp=*/true) == LossClass::Own);
 }
 
+// Review R2 (21.11): the person tapped Stop the moment the handshake completed; the CONNECTED already in flight came after
+// our stop and the Android adoption set the intent back on (the person's Stop overruled). The person's last will owns
+// the outcome: a late Connected after a stop of ours while the person wants the VPN off is stopped, never adopted.
+static void r2LateConnectedAfterThePersonsStop()
+{
+    using A = ObservedTunnelAdoption;
+    // the person's OFF, our stop still unconfirmed: the tunnel is stopped (reconcile), the intent stays off
+    CHECK(adoptObservedTunnel(/*ourStopPending=*/true, /*wantConnected=*/false) == A::StopIt);
+    // our stop was the engine's (no network, failover, a restart for another choice): the request is on - adopted
+    CHECK(adoptObservedTunnel(false, true) == A::Adopt);
+    CHECK(adoptObservedTunnel(true, true) == A::Adopt);
+    // no stop of ours pending (a session started outside the app after OFF - the tile): as before, adopted
+    CHECK(adoptObservedTunnel(false, false) == A::Adopt);
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1746,6 +1761,7 @@ int main()
     f1StartRefusalJudgedByItsResult();
     f2UnknownAfterOffline();
     android3StatusResolvesAGivenUpStop();
+    r2LateConnectedAfterThePersonsStop();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

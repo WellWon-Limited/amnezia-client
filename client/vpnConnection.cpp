@@ -687,10 +687,14 @@ void VpnConnection::disconnectFromVpn()
                                   // gone this fact reached nobody: the tunnel ran behind a «Connect» screen and no later stop
                                   // could reach the service. The protocol is wired back as for a live service found at start
                                   // (restoreConnection) and the fact goes on: the engine adopts the session or stops it.
+                                  // Review R2: through the restored protocol's own state, so the copy of this CONNECTED that
+                                  // AndroidController queues to that protocol (connectionStateChanged) is the same state and
+                                  // is dropped there - the facade sees one Connected, not two.
                                   disconnect(*connection);
                                   delete connection;
                                   restoreConnection();
-                                  setConnectionState(Vpn::ConnectionState::Connected);
+                                  if (m_vpnProtocol)
+                                      m_vpnProtocol->setConnectionState(Vpn::ConnectionState::Connected);
                               }
                           });
 #endif

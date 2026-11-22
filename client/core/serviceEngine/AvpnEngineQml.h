@@ -1159,7 +1159,8 @@ private:
     void syncJournal();
     void adoptNativeIdentity();
     // AVPN (фикс-волна 2026-09-22, A1/A4/A5/K3) — см. AvpnEngineQml.cpp.
-    bool tryAdoptObservedTunnel(const char *why);
+    // ourStopPending: a stop of ours was still unconfirmed when this fact came (read before the state cleared the latch)
+    bool tryAdoptObservedTunnel(const char *why, bool ourStopPending = false);
     void identifyAdoptedSession();
     bool awaitNativeStatus();
     void onStopRetryTimer();
