@@ -317,6 +317,57 @@ int main(int argc, char **argv)
 #endif
 
 #ifndef AVPN_ENGINE_OLD_API
+    // --- D2 (release 141, device round air20 R5): an own Xray session carries its node like an AmneziaWG one ---
+    // The app was killed while connected through «Германия 1 · Xray Reality» (12:xray) and opened again: adoption
+    // logged node= (empty) and the card said «Умный выбор сервера». The start envelope of an own Xray node had no
+    // tribeSessionMetadata at all (only AmneziaWG starts wrote it), so the platform had nothing to hand back.
+    {
+        setXray(true);
+        const Subscription sub = parse(subJson({ EE, US, XRAY_US }, 7));
+        const SubscriptionNode *xr = nullptr, *awg = nullptr;
+        for (const SubscriptionNode &n : sub.nodes) {
+            if (n.nodeId == QLatin1String("10x")) xr = &n;
+            if (n.nodeId == QLatin1String("10")) awg = &n;
+        }
+        CHECK(xr && awg);
+        if (xr && awg) {
+            // the metadata every start writes, whatever the transport
+            for (const SubscriptionNode *n : { xr, awg }) {
+                const QJsonObject md = ownSessionMetadata(*n);
+                CHECK(md.value(QStringLiteral("schema_version")).toInt() == 1); // the adoption path requires it
+                CHECK(md.value(QStringLiteral("node_id")).toString() == n->nodeId);
+                CHECK(md.value(QStringLiteral("proto")).toString() == protoOf(*n));
+                CHECK(md.value(QStringLiteral("endpoint")).toString() == n->endpoint);
+                CHECK(!md.contains(QStringLiteral("upstream"))); // an own node is never an upstream session
+            }
+            // a relaunched app adopts the live Xray session by that metadata: the node is known at once
+            const QJsonObject md = ownSessionMetadata(*xr);
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(subJson({ EE, US, XRAY_US }, 7), err));
+            CHECK(eng.adoptTunnelConnected(md.value(QStringLiteral("node_id")).toString(),
+                                           md.value(QStringLiteral("proto")).toString(),
+                                           md.value(QStringLiteral("endpoint")).toString()));
+            CHECK(eng.currentNodeId() == QLatin1String("10x")); // not its AmneziaWG sibling on the same host
+            CHECK(eng.verifySucceeded() && eng.state() == EngineState::Connected);
+            // the node id changed in a pool refresh (reissue): the endpoint + proto hint still names it
+            ServiceEngine eng2;
+            eng2.setTunnel(&tun);
+            CHECK(eng2.loadSubscription(subJson({ EE, US, XRAY_US }, 7), err));
+            CHECK(eng2.adoptTunnelConnected(QStringLiteral("old10x"), md.value(QStringLiteral("proto")).toString(),
+                                            md.value(QStringLiteral("endpoint")).toString()));
+            CHECK(eng2.verifySucceeded());
+            CHECK(eng2.tryIdentifyCurrentNode()); // the facade asks on every tick (identifyAdoptedSession)
+            CHECK(eng2.currentNodeId() == QLatin1String("10x"));
+        }
+        setXray(false);
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}}, {}, {});
+    }
+#endif
+
+#ifndef AVPN_ENGINE_OLD_API
     // --- B6/B7: rebind → отказ NE → следующий DEAD сразу переподъём; поздний ответ игнорируется ---
     {
         TuningStore::set({}, {}, {}, {});                          // rebind_heal по умолчанию ВКЛ
