@@ -60,9 +60,9 @@ void ConnectionUiController::onConnectionStateChanged(Vpn::ConnectionState state
     m_connectionStateText = tr("Connecting...");
     switch (state) {
     case Vpn::ConnectionState::Connected: {
-        // AVPN (android5 H3): the drop of cached connections never waits on this (main) thread for Qt's HTTP thread -
-        // with requests in flight clearConnectionCache() stood 5 s here, before the engine's adoption could run.
-        // Requests in flight are aborted (re-issued by their owners) and the cache is dropped once nothing runs.
+        // AVPN (android5 H3): never clearConnectionCache() here - it waits on this (GUI) thread for Qt's HTTP thread,
+        // which may be waiting for this thread (encrypted(), BlockingQueuedConnection): 5 s before the engine's adoption.
+        // A new connection generation begins instead; the requests in flight are aborted and re-issued (NetAwait.h).
         avpn::resetApiConnections(amnApp->networkManager(), /*clearCache=*/true, /*abortInFlight=*/true);
 
         m_isConnectionInProgress = false;

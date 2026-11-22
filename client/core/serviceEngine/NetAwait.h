@@ -12,11 +12,11 @@
 // Дефолт 15 c: с запасом покрывает enroll/subscription/redeem на медленной мобильной сети,
 // но гарантированно разблокирует UI, если бэкенд не ответил.
 
-#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPointer>
 #include <QDateTime>
 #include <QTimer>
@@ -110,64 +110,80 @@ inline void watchFirstByte(QNetworkReply *reply, qint64 shareMs, std::function<v
     });
 }
 
-// Tunnel transition on the shared QNAM (DebugSnapshot.h::transitionNetAction). android5 H1/H3 (21.11): the app's main
-// thread stood ~5 s right after the native state on a return from the background - with requests in flight,
-// clearConnectionCache() runs QNetworkAccessManagerPrivate::destroyThread on the CALLER's thread: the HTTP thread is told
-// to quit and waited for (up to 5 s) while it still serves them. Nothing here may wait, and nothing runs inside the
-// caller's state handler (the state and the screen come first): on the next event-loop turn the requests running at
-// the transition (snapshot) are aborted - their owners re-issue them over the new path - and the cached connections
-// (dead keep-alive ones of the old path) are dropped only once no request of this QNAM runs, re-asked whenever one
-// ends; a request started after the transition is therefore never stranded. One drop at a time: a transition while
-// one waits joins it. abortInFlight without clearCache: someone else asked the drop (upstream on Connected - which
-// goes through here too now).
-inline constexpr char kCacheClearPending[] = "avpnCacheClearPending";   // a drop waits for an idle QNAM
-inline constexpr char kCacheClearLastMs[] = "avpnCacheClearLastMs";     // how long the last drop took (journal)
+// Tunnel transitions on the shared QNAM - the GUI thread never waits for Qt's HTTP thread.
+//
+// android5 H1/H3 (21.11): the GUI thread stood 5 s after a tunnel transition on a return from the background. Qt 6.11.1:
+// QNetworkAccessManager::clearConnectionCache() -> QNetworkAccessManagerPrivate::destroyThread() quits the HTTP thread and
+// waits for it on the CALLER's thread (qnetworkaccessmanager.cpp:1731-1733, 1752-1757: thread->wait(QDeadlineTimer(5000))),
+// and ~QNetworkAccessManagerPrivate does the same (:1736-1739). The HTTP thread in turn reports a finished TLS handshake
+// to the GUI with Qt::BlockingQueuedConnection (qnetworkreplyhttpimpl.cpp:996-997, encrypted(); also sslErrors, auth): a
+// request mid-handshake at the transition (the resume's journal kick and pollers) makes the two threads wait for each
+// other until the 5 s deadline. No deferral fixes that (review of 0e31a2571): neither clearConnectionCache() nor deleting
+// a QNAM may happen on the GUI thread.
+//
+// What clearing was for - no request of a new tunnel generation over a socket of the old path - is kept by the
+// connection key instead. Qt reuses a pooled connection by "http-connection:" + scheme://host:port + proxy + ":" +
+// peerVerifyName (qhttpthreaddelegate.cpp:94-150, used at :303-311). Every request of the shared QNAM (TribeNetworkAccess
+// Manager::createRequest) carries:
+//  - the generation's parity as the key's discriminator: peerVerifyName = the URL's own host on odd generations, none on
+//    even ones. The name verified and sent as SNI is the same host either way (QSslSocketPrivate::isMatchingHostname
+//    lowercases it, qsslsocket.cpp:3012-3041), so nothing else changes - but a request after a transition never joins a
+//    connection opened before it (one still in use, with an idle keep-alive channel, would otherwise take it);
+//  - ConnectionCacheExpiryTimeoutSecondsAttribute = 0 (qnetworkaccesscache.cpp:217-221; qnetworkreplyhttpimpl.cpp:904-905):
+//    a connection is closed as soon as its last request is done, so nothing of a generation is still pooled when the
+//    parity comes back two transitions later. The cost: no keep-alive between sequential API calls (one TCP + TLS
+//    handshake per isolated call - our API rate is a few calls a minute); concurrent calls still share a connection.
+// resetApiConnections, for its two callers (the native-state handler, upstream's Connected): clearCache - the next
+// generation begins NOW (synchronously: requests issued later in the same handler already use the new key);
+// abortInFlight - the requests running at the transition are aborted on the next event-loop turn (no finished-lambdas
+// inside the caller's handler), their owners re-issue them on the new key; an aborted HTTP/1 request closes its socket
+// (qhttpnetworkconnection.cpp:975-978) and its connection then closes with its last request. Nothing waits.
+inline constexpr char kConnGeneration[] = "avpnConnGeneration"; // the shared QNAM's tunnel generation (parity = key)
 
-namespace detail {
-inline QList<QPointer<QNetworkReply>> runningReplies(QNetworkAccessManager *nam)
+// The connection policy of one request on generation `generation` (pure; TribeNetworkAccessManager::createRequest).
+// What the caller set itself stays.
+inline QNetworkRequest withConnectionPolicy(QNetworkRequest r, quint64 generation)
 {
-    QList<QPointer<QNetworkReply>> running;
-    const auto replies = nam->findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly);
-    for (QNetworkReply *r : replies)
-        if (r->isRunning())
-            running << r;
-    return running;
+    if (!r.attribute(QNetworkRequest::ConnectionCacheExpiryTimeoutSecondsAttribute).isValid())
+        r.setAttribute(QNetworkRequest::ConnectionCacheExpiryTimeoutSecondsAttribute, 0);
+    if (r.peerVerifyName().isEmpty() && (generation & 1) && !r.url().host().isEmpty())
+        r.setPeerVerifyName(r.url().host());
+    return r;
 }
 
-inline void clearCacheWhenIdle(QNetworkAccessManager *nam)
+// The shared QNAM of the app (amneziaApplication.cpp): every request gets the connection policy above.
+class TribeNetworkAccessManager : public QNetworkAccessManager
 {
-    if (!runningReplies(nam).isEmpty()) {
-        QObject::connect(
-            nam, &QNetworkAccessManager::finished, nam,
-            [nam](QNetworkReply *) { QTimer::singleShot(0, nam, [nam]() { clearCacheWhenIdle(nam); }); },
-            Qt::SingleShotConnection);
-        return;
+public:
+    using QNetworkAccessManager::QNetworkAccessManager;
+
+protected:
+    QNetworkReply *createRequest(Operation op, const QNetworkRequest &request, QIODevice *outgoingData = nullptr) override
+    {
+        return QNetworkAccessManager::createRequest(
+            op, withConnectionPolicy(request, property(kConnGeneration).toULongLong()), outgoingData);
     }
-    QElapsedTimer took;
-    took.start();
-    nam->clearConnectionCache(); // idle: the HTTP thread serves nothing, its quit is immediate
-    nam->setProperty(kCacheClearLastMs, qint64(took.elapsed()));
-    nam->setProperty(kCacheClearPending, false);
-}
-} // namespace detail
+};
 
 inline void resetApiConnections(QNetworkAccessManager *nam, bool clearCache, bool abortInFlight)
 {
     if (!nam)
         return;
-    const QList<QPointer<QNetworkReply>> running =
-        abortInFlight ? detail::runningReplies(nam) : QList<QPointer<QNetworkReply>>();
-    const bool startDrop = clearCache && !nam->property(kCacheClearPending).toBool();
-    if (startDrop)
-        nam->setProperty(kCacheClearPending, true);
-    if (running.isEmpty() && !startDrop)
+    if (clearCache)
+        nam->setProperty(kConnGeneration, nam->property(kConnGeneration).toULongLong() + 1);
+    if (!abortInFlight)
         return;
-    QTimer::singleShot(0, nam, [nam, running, startDrop]() {
+    QList<QPointer<QNetworkReply>> running;
+    const auto replies = nam->findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly);
+    for (QNetworkReply *r : replies)
+        if (r->isRunning())
+            running << r;
+    if (running.isEmpty())
+        return;
+    QTimer::singleShot(0, nam, [running]() {
         for (const QPointer<QNetworkReply> &r : running)
             if (r && r->isRunning())
                 r->abort();
-        if (startDrop)
-            detail::clearCacheWhenIdle(nam);
     });
 }
 } // namespace avpn

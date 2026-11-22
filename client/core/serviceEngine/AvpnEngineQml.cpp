@@ -5909,12 +5909,12 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // DebugSnapshot.h::transitionNetAction, NetAwait.h::resetApiConnections.
     {
         const TransitionNetAction net = transitionNetAction(observedTunnelOf(m_lastTunnelState), observedTunnelOf(s));
-        // android5 H1/H3: nothing of it runs here - the state and the screen come first (NetAwait.h resetApiConnections)
+        // android5 H1/H3: nothing here waits for Qt's HTTP thread (NetAwait.h resetApiConnections: a new connection key)
         if (m_nam && (net.clearCache || net.abortInFlight)) {
-            reliabilityEvent(QStringLiteral("api_reset clear=%1 abort=%2 last_drop_ms=%3")
-                                 .arg(int(net.clearCache)).arg(int(net.abortInFlight))
-                                 .arg(m_nam->property(avpn::kCacheClearLastMs).toLongLong()));
             avpn::resetApiConnections(m_nam, net.clearCache, net.abortInFlight);
+            reliabilityEvent(QStringLiteral("api_reset new_generation=%1 abort=%2 conn_gen=%3")
+                                 .arg(int(net.clearCache)).arg(int(net.abortInFlight))
+                                 .arg(m_nam->property(avpn::kConnGeneration).toULongLong()));
         }
     }
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди

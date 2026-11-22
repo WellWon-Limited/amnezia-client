@@ -14,4 +14,10 @@ clang++ -std=c++17 -fPIC -include arm_acle.h \
   "$HERE/api_transition_check.cpp" \
   -framework QtCore -framework QtNetwork -framework QtTest -framework Foundation \
   -Wl,-rpath,"$QT/lib" -o "$OUT/api_transition_check"
+# android5 H1/H3: a self-signed loopback certificate for the mid-handshake case (skipped without openssl)
+if command -v openssl >/dev/null 2>&1; then
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" \
+    -keyout "$OUT/tls.key" -out "$OUT/tls.crt" >/dev/null 2>&1 \
+    && export AVPN_TEST_TLS_CERT="$OUT/tls.crt" AVPN_TEST_TLS_KEY="$OUT/tls.key"
+fi
 WW_TEST=1 WW_TEST_ID=api-transition "$OUT/api_transition_check"
