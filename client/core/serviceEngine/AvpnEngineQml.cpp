@@ -5900,22 +5900,16 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // Волна «как апстрим» (2026-09-28): keep-alive соединения к API, открытые через туннель, после
     // его гашения мертвы, но QNAM их переиспользует — все запросы висели до таймаута 15 с (журнал
     // Mac: /v1/subscription, /v1/account, /v1/devices после каждой смены ноды). Апстрим чистит кэш на
-    // Connected (connectionUiController.cpp); чистим и на Disconnected — путь сменился в обе стороны.
-    // Owner test 06.11 (build 134): clearConnectionCache() strands the requests in flight (Qt destroys
-    // its HTTP thread; they ended only by the 15 s timeout - /v1/config included, Xray stayed frozen).
-    // So: our clear only on a real transition (not the first observed status, not a repeat); the
-    // requests in flight are aborted whenever the cache was cleared - by us, or by upstream on every
-    // Connected (adoption included) - and their owners re-issue them over the new path.
-    // DebugSnapshot.h::transitionNetAction, NetAwait.h::resetApiConnections.
-    {
-        const TransitionNetAction net = transitionNetAction(observedTunnelOf(m_lastTunnelState), observedTunnelOf(s));
-        // android5 H1/H3: nothing here waits for Qt's HTTP thread (NetAwait.h resetApiConnections: a new connection key)
-        if (m_nam && (net.clearCache || net.abortInFlight)) {
-            avpn::resetApiConnections(m_nam, net.clearCache, net.abortInFlight);
-            reliabilityEvent(QStringLiteral("api_reset new_generation=%1 abort=%2 conn_gen=%3")
-                                 .arg(int(net.clearCache)).arg(int(net.abortInFlight))
-                                 .arg(m_nam->property(avpn::kConnGeneration).toULongLong()));
-        }
+    // Connected (connectionUiController.cpp); мы - и на Disconnected: путь сменился в обе стороны.
+    // android5 H1/H3 + review R1 of 5c354b603: this handler is the ONE owner of "the API path changed" (upstream's
+    // clear runs only with AVPN_ENGINE=OFF). Nothing here waits for Qt's HTTP thread: later requests start on a new
+    // generation of the shared manager, the ones in flight are aborted on the next turn and re-issued by their owners
+    // (DebugSnapshot.h newApiGeneration, NetAwait.h TribeNetworkAccessManager).
+    if (m_nam && newApiGeneration(observedTunnelOf(m_lastTunnelState), observedTunnelOf(s))) {
+        avpn::resetApiConnections(m_nam);
+        const auto *api = avpn::TribeNetworkAccessManager::of(m_nam);
+        reliabilityEvent(QStringLiteral("api_reset generation=%1 retiring=%2")
+                             .arg(api ? api->generation() : 0).arg(api ? api->retiringGenerations() : -1));
     }
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).

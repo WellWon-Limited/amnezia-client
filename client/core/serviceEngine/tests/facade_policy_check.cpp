@@ -478,22 +478,19 @@ static void wave4UpstreamBehaviour()
     CHECK(classifyApiOutcome(0, true, true, now - 20000, now - 1000, -1, now) == ApiOutcome::Ignore); // начат до разморозки
     CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 3000, now) == ApiOutcome::Ignore); // рядом со своим переходом
     CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 9000, now) == ApiOutcome::Failure); // окно вышло
-    // Owner test 06.11: clearConnectionCache() strands requests in flight. Our clear - only on a real
-    // transition; abort whenever someone cleared: we, or upstream on EVERY Connected (adoption too).
+    // One owner of "the API path changed" (android5 H1/H3, review R1 of 5c354b603): a new API generation on a real
+    // transition and on every Connected (where upstream cleared); never on a first non-Connected status or a repeat.
     {
-        const auto act = [](ObservedTunnel p, ObservedTunnel n) {
-            const TransitionNetAction a = transitionNetAction(p, n);
-            return QByteArray(a.clearCache ? "C" : "-") + (a.abortInFlight ? "A" : "-");
-        };
-        CHECK(act(ObservedTunnel::Transitional, ObservedTunnel::Connected) == "CA");  // tunnel up
-        CHECK(act(ObservedTunnel::Disconnected, ObservedTunnel::Connected) == "CA");
-        CHECK(act(ObservedTunnel::Connected, ObservedTunnel::Disconnected) == "CA");  // tunnel down
-        CHECK(act(ObservedTunnel::Transitional, ObservedTunnel::Disconnected) == "CA");
-        CHECK(act(ObservedTunnel::Unknown, ObservedTunnel::Disconnected) == "--");    // cold start, tunnel off
-        CHECK(act(ObservedTunnel::Unknown, ObservedTunnel::Connected) == "-A");       // adoption: upstream cleared
-        CHECK(act(ObservedTunnel::Connected, ObservedTunnel::Connected) == "-A");     // repeat: upstream cleared
-        CHECK(act(ObservedTunnel::Connected, ObservedTunnel::Transitional) == "--");
-        CHECK(act(ObservedTunnel::Disconnected, ObservedTunnel::Disconnected) == "--");
+        const auto gen = [](ObservedTunnel p, ObservedTunnel n) { return newApiGeneration(p, n); };
+        CHECK(gen(ObservedTunnel::Transitional, ObservedTunnel::Connected));  // tunnel up
+        CHECK(gen(ObservedTunnel::Disconnected, ObservedTunnel::Connected));
+        CHECK(gen(ObservedTunnel::Connected, ObservedTunnel::Disconnected));  // tunnel down
+        CHECK(gen(ObservedTunnel::Transitional, ObservedTunnel::Disconnected));
+        CHECK(!gen(ObservedTunnel::Unknown, ObservedTunnel::Disconnected));   // cold start, tunnel off
+        CHECK(gen(ObservedTunnel::Unknown, ObservedTunnel::Connected));       // adoption
+        CHECK(gen(ObservedTunnel::Connected, ObservedTunnel::Connected));     // repeat
+        CHECK(!gen(ObservedTunnel::Connected, ObservedTunnel::Transitional));
+        CHECK(!gen(ObservedTunnel::Disconnected, ObservedTunnel::Disconnected));
     }
     CHECK(reissueAfterOwnAbort(true, false));   // our abort on a transition -> re-issue once
     CHECK(!reissueAfterOwnAbort(true, true));   // our 15 s timeout -> no

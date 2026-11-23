@@ -846,28 +846,20 @@ inline ApiOutcome classifyApiOutcome(int httpCode, bool canceled, bool timedOut,
     return ApiOutcome::Failure;
 }
 
-// QNetworkAccessManager::clearConnectionCache() strands every request in flight: Qt destroys its
-// HTTP thread and the reply never finishes - only our 15 s armTimeout ends it (measured on Qt 6.11.1;
-// owner's journal 06.11 10:31:21, build 134: /v1/config, /v1/edges, /v1/bypass-lists, support and
-// announcements started at launch all timed out at 15 s after the adoption of a live tunnel, so the
-// process stayed on the cached config with Xray frozen). Two parties clear the shared QNAM:
-//  - we, on a real tunnel transition to Connected/Disconnected (keep-alive connections of the old
-//    path are dead); not on the first status a process observes (Unknown -> X: no tunnel of ours
-//    carried them), not on a repeat of the same state;
-//  - upstream ConnectionUiController, on EVERY Connected (adoption and repeats included).
-// Whoever cleared, the requests in flight at that moment are aborted right away (their owners
-// re-issue them over the new path) instead of hanging for 15 s. Decision 2026-11-05 + owner test 06.11.
-struct TransitionNetAction {
-    bool clearCache = false;
-    bool abortInFlight = false;
-};
-inline TransitionNetAction transitionNetAction(ObservedTunnel previous, ObservedTunnel now)
+// Who decides that the API path changed (android5 H1/H3; review R1 of 5c354b603): ONE owner - the engine's native-state
+// handler (AvpnEngineQml::applyNativeState). Upstream ConnectionUiController's own clear on every Connected runs only in
+// the AVPN_ENGINE=OFF build. A new API generation (NetAwait.h TribeNetworkAccessManager: requests from now on on a manager
+// with no connection; the requests in flight aborted on the next turn and re-issued by their owners) on:
+//  - a real transition to Connected or Disconnected (keep-alive connections of the old path are dead);
+//  - every Connected - adoption (Unknown -> Connected) and repeats included - which is where upstream cleared;
+// not on the first status a process observes when it is not Connected (no tunnel of ours carried those requests; 133/134
+// stranded /v1/config here), not on a repeat of Disconnected, not on a transitional state. A double call is harmless: a
+// generation is never reused.
+inline bool newApiGeneration(ObservedTunnel previous, ObservedTunnel now)
 {
-    TransitionNetAction a;
-    a.clearCache = previous != ObservedTunnel::Unknown && previous != now
-                   && (now == ObservedTunnel::Connected || now == ObservedTunnel::Disconnected);
-    a.abortInFlight = a.clearCache || now == ObservedTunnel::Connected;
-    return a;
+    const bool realTransition = previous != ObservedTunnel::Unknown && previous != now
+                                && (now == ObservedTunnel::Connected || now == ObservedTunnel::Disconnected);
+    return realTransition || now == ObservedTunnel::Connected;
 }
 
 // A request we aborted ourselves (OperationCanceled without our timeout mark) is re-issued once by
