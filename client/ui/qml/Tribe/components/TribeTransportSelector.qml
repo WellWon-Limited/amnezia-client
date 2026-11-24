@@ -47,6 +47,23 @@ Rectangle {
         return root.autoAvailable
     }
 
+    // A segment's tap (one function, so every caller of the tap takes the same path): a mode the pool has no transport
+    // for says so, the selected one does nothing, else the mode is requested. Returns what the tap did.
+    function tapSegment(key) {
+        if (!root.interactive)
+            return "not_interactive"
+        if (!root.optionAvailable(key)) {
+            if (typeof PageController !== "undefined")
+                PageController.showNotificationMessage(root.unavailableReason)
+            return "unavailable"
+        }
+        if (root.mode === key)
+            return "selected"
+        Haptic.play("selection")
+        root.modeRequested(key)
+        return "requested"
+    }
+
     RowLayout {
         anchors.fill: parent
         anchors.margins: 3
@@ -72,17 +89,7 @@ Rectangle {
                 Accessible.name: segment.modelData.label
                 Accessible.checked: segment.selected
 
-                onClicked: {
-                    if (!segment.available) {
-                        if (typeof PageController !== "undefined")
-                            PageController.showNotificationMessage(root.unavailableReason)
-                        return
-                    }
-                    if (segment.selected)
-                        return
-                    Haptic.play("selection")
-                    root.modeRequested(segment.modelData.key)
-                }
+                onClicked: root.tapSegment(segment.modelData.key)
 
                 background: Rectangle {
                     radius: Theme.radius.sm

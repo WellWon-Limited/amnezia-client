@@ -262,6 +262,46 @@ PageType {
         onTriggered: if (nodeId !== "") root.pickNode(nodeId)
     }
 
+    // The page's taps, one function each (the row, the «Авто» card, a mode segment), so every caller of a tap takes
+    // the same path with the same guards. Each returns what the tap did.
+    // A row of `countries`: a row the mode cannot serve switches the mode to «Авто» first (device test of 142, second
+    // round: never a dead end), a grey row says why, the chosen row only goes back, else the host pins it.
+    function tapRow(entry) {
+        if (entry.modeOnly) {
+            root.pageNotice(qsTr("Режим соединения — «Авто»: у этого сервера нет транспорта %1")
+                                .arg(root.transportMode === "xray" ? "Xray" : "Amnezia"))
+            Haptic.play("selection"); Haptic.arm()
+            modePick.nodeId = entry.nodeId
+            root.pickTransport("auto")
+            modePick.restart()
+            return "mode_auto_then_pick"
+        }
+        // AVPN awg31-xray-v1: серая локация (клиент не умеет транспорт) — честный тост
+        if (entry.disabled) {
+            if (typeof PageController !== "undefined")
+                PageController.showNotificationMessage(entry.reason)
+            return "disabled"
+        }
+        // уже выбрана вручную — no-op (не дёргаем реконнект)
+        if (entry.isChosen && !root.autoMode) { root.back(); return "already_chosen" }
+        Haptic.play("selection"); Haptic.arm() // AVPN (haptics): итог реконнекта отыграет PageConnectTribe
+        root.pickNode(entry.nodeId)
+        return "picked"
+    }
+    // AVPN (девайс-приёмка 2026-09-02): уже в авто — НИЧЕГО не делаем и остаёмся на экране. Раньше повторный тап
+    // уводил на главный, что читалось как «кнопка выключила авто».
+    function tapAuto() {
+        if (root.autoMode) return "already_auto"
+        Haptic.play("selection"); Haptic.arm() // AVPN (haptics): итог реконнекта отыграет PageConnectTribe
+        root.pickAuto()
+        return "picked"
+    }
+    // a segment of the mode selector, only while the selector is shown
+    function tapMode(key) {
+        if (!root.showTransportSelector) return "hidden"
+        return transportSelector.tapSegment(key)
+    }
+
     onQueryChanged: rebuildCountries()
     onTransportModeChanged: rebuildCountries()   // AVPN awg31-xray-v1: смена режима меняет серые строки
     Connections {
@@ -443,14 +483,7 @@ PageType {
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                    // AVPN (девайс-приёмка 2026-09-02): уже в авто — НИЧЕГО не делаем и остаёмся
-                    // на экране. Раньше повторный тап уводил на главный, что читалось как
-                    // «кнопка выключила авто».
-                    if (root.autoMode) return
-                    Haptic.play("selection"); Haptic.arm() // AVPN (haptics): итог реконнекта отыграет PageConnectTribe
-                    root.pickAuto()
-                }
+                onClicked: root.tapAuto()
             }
         }
 
@@ -471,6 +504,7 @@ PageType {
         }
 
         TribeTransportSelector {
+            id: transportSelector
             visible: root.showTransportSelector
             Layout.fillWidth: true
             Layout.leftMargin: Theme.space.xl
@@ -668,30 +702,7 @@ PageType {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            // Device test of 142 (second round), owner: a row the mode cannot serve is not a dead
-                            // end. The tap switches the mode to «Авто» on this page first - the selector above moves,
-                            // the rows lose their grey, a short notice says why - then selects the server.
-                            if (row.modelData.modeOnly) {
-                                root.pageNotice(qsTr("Режим соединения — «Авто»: у этого сервера нет транспорта %1")
-                                                    .arg(root.transportMode === "xray" ? "Xray" : "Amnezia"))
-                                Haptic.play("selection"); Haptic.arm()
-                                modePick.nodeId = row.modelData.nodeId
-                                root.pickTransport("auto")
-                                modePick.restart()
-                                return
-                            }
-                            // AVPN awg31-xray-v1: серая локация (клиент не умеет транспорт) — честный тост
-                            if (row.modelData.disabled) {
-                                if (typeof PageController !== "undefined")
-                                    PageController.showNotificationMessage(row.modelData.reason)
-                                return
-                            }
-                            // уже выбрана вручную — no-op (не дёргаем реконнект)
-                            if (row.modelData.isChosen && !root.autoMode) { root.back(); return }
-                            Haptic.play("selection"); Haptic.arm() // AVPN (haptics): итог реконнекта отыграет PageConnectTribe
-                            root.pickNode(row.modelData.nodeId)
-                        }
+                        onClicked: root.tapRow(row.modelData)
                     }
                 }
             }
