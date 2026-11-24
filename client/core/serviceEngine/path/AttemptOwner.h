@@ -27,7 +27,8 @@
 // Between them the start deadline does not run; from "built" the leg has its full start deadline for the server's
 // part. A build that does not finish within localBuildMs ends the leg with a LOCAL outcome (LocalBuildOverrun,
 // Inconclusive: nothing recorded against the path), and the next candidate is tried. The local time is not part of
-// the leg's connect time either. A platform that does not report builds (iOS, desktop) behaves exactly as before.
+// the leg's connect time either. A platform that does not report builds (desktop) behaves exactly as before; iOS
+// reports only a parked start (below).
 // A platform that reports builds (setLocalBuildReported(true): Android with the service's build events) has the leg in
 // LOCAL time from the start command on: between "start sent" and the service's "building" the start may still wait in
 // the service, behind a previous build (android2 V2, 21.11: the service took a start 7.9 s after it was sent, the 4.5 s
@@ -35,6 +36,13 @@
 // begins only at this leg's own "built"; until then the local bound applies (from the start), and a leg that never
 // reports "built" ends with a LOCAL outcome. Which leg a report belongs to is the platform layer's business (it
 // carries the leg number through the start and back: ServiceEngine::onLocalBuild) - the owner takes the stamp.
+// iOS reports one local phase the same way: a start the native PARKS because the previous tunnel session is still
+// tearing down (IosController::startAwaitsTeardown: "building" when it parks, "built" when the start goes out after the
+// teardown). One tunnel session at a time: until then the start has not left the device (device round air-B 24.11:
+// a leg sent after a stop that took 25 s was parked for 15 s, its 5 s clock wrote "no handshake" against a path the
+// race had just proven). iOS reports only that phase; every other iOS leg is judged from its start as before.
+// Invariant: a "no handshake" verdict needs a start that left the device - a leg in its local phase is never recorded
+// no_handshake (report()), whatever ends it.
 //
 // Course of an attempt (stage 1, design §4 "no probe host": candidates one at a time with a short deadline):
 //   UserStart -> select (PathSelect.h, ledger of the current network) -> StartPath(leg, start timeout)
@@ -451,7 +459,8 @@ public:
     // New numbers (the server may tune them): they apply from the next deadline that is set.
     void setTimings(const AttemptTimings &t) { m_t = t; }
     // The platform reports its builds (see "Local build" in the header): from the next leg on, a leg is local until
-    // its own "built". false (default: iOS, desktop): exactly as before.
+    // its own "built". false (default: iOS, desktop): a leg is judged from its start unless a "building" of its own
+    // arrives (iOS: a start parked behind a teardown).
     void setLocalBuildReported(bool on) { m_localBuildReported = on; }
     bool localBuildReported() const { return m_localBuildReported; }
 
@@ -615,6 +624,11 @@ private:
 
     void report(PathOutcome o, int connectMs, int ttfbMs, QList<AttemptEffect> &out) const
     {
+        // A server's silence is evidence only after a start that left the device: a leg the platform still holds in
+        // its local phase ("Local build": building, parked behind the previous session's teardown) is never judged
+        // no_handshake (device round air-B 24.11).
+        if (o == PathOutcome::NoHandshake && m_leg.buildSince >= 0)
+            o = PathOutcome::Inconclusive;
         if (!isAttributable(o))
             return;
         AttemptEffect e = effect(EffectType::Report);

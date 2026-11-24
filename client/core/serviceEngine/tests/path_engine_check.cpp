@@ -1375,6 +1375,203 @@ static void scenarioLocalBuildQueued()
     }
 }
 
+// Device round air-B 24.11 (iPhone Air, Wi-Fi, first Auto tap after a cold launch, no memory of the network, race on).
+// Times from the tap (19:51:51.942 UTC): the race waits 2.75 s and the owner starts its first choice BLIND at 2.804 s
+// (12:xray); at 3.038 s the race proves 11:xray and the blind leg yields while its start is still running; the
+// extension takes 25.03 s to tear that session down (Disconnected 19:52:20.009). At 13.038 s the owner gives the stop
+// up (attempt_stop_unconfirmed) and sends leg 2 (11:xray, the proof's lead); the native PARKS it behind the teardown
+// (one tunnel session at a time); at 18.038 s its 5 s clock writes no_handshake/suspect against the path the race
+// had just proven; leg 3 (11 AmneziaWG, probe-proven at 8.222 s) starts with the real Disconnected and carries data.
+// The device: tap -> verified 30.0 s, attempt_result ms=27193 paths=3. The race itself is not simulated: its two
+// proofs enter the ledger and the owner at the device's times.
+struct AirBRun {
+    AttemptResult result;
+    qint64 tapMs = -1;      // tap -> the attempt's result
+    QStringList legs;
+    QList<OutcomeReport> reports;
+    int parked = 0;
+    PathState proven = PathState::Unknown; // 11:xray in the ledger at the end
+    bool falseMark = false;                // a no_handshake against a leg that never left the device
+};
+
+static AirBRun runAirB2411(bool parkReported, int stopStartingMs)
+{
+    const NetworkObservation home = wifi("192.168.24.1");
+    const QString k = key(home);
+    const PathCandidate x12 = xray("12:xray", "DE", false, 2.0), x11 = xray("11:xray", "FI"), a11 = awg("11", "FI", true);
+    World w;
+    w.set(k, x12.id.id, Behaviour::works(1340, 900, 400));
+    w.set(k, x11.id.id, Behaviour::works(1350, 1000, 400)); // 11:xray verified 1.32-1.35 s after its start later that round
+    w.set(k, a11.id.id, Behaviour::works(1400, 400, 383));
+    Sim s({ x12, x11, a11 }, w, home);
+    s.ios.on = true;
+    s.ios.parkReported = parkReported;
+    s.ios.stopStartingMs = stopStartingMs;
+    s.ios.stopUpMs = 500;
+    s.at(2804, [&s] { // race_owner_start why=hedge lead=-
+        s.deliver(AttemptEvent::userStart(s.now, UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));
+    });
+    s.at(3038, [&s, k, x11] { // path_outcome 11:xray probe_ok source=race, then the proof reaches the owner
+        s.ledger.record(k, x11.id, PathOutcome::ProbeOk, s.wall(), 2738);
+        s.deliver(AttemptEvent::proofReady(s.now, false, x11.id.id));
+    });
+    s.at(8222, [&s, k, a11] { s.ledger.record(k, a11.id, PathOutcome::ProbeOk, s.wall(), 597); }); // 11 probe_ok
+    s.run([&s] { return !s.results.isEmpty(); }, 90000);
+    AirBRun out;
+    if (!s.results.isEmpty()) {
+        out.result = s.results.last();
+        out.tapMs = s.now;
+    }
+    out.legs = legPaths(s);
+    out.reports = s.reports;
+    out.parked = s.parkedStarts;
+    out.proven = stateOf(s, x11);
+    for (const OutcomeReport &rep : s.reports)
+        out.falseMark = out.falseMark || (rep.path.id == x11.id.id && rep.outcome == PathOutcome::NoHandshake);
+    return out;
+}
+
+static void scenarioTraceAirB2411()
+{
+    const auto put = [](const char *name, const AirBRun &t) {
+        g_rows.append({ QString::fromLatin1(name),
+                        t.result.connected ? QStringLiteral("connected ") + t.result.path.id.id : QStringLiteral("failed"),
+                        t.tapMs, t.result.paths, t.legs.join(QLatin1Char(' ')) });
+    };
+    const AirBRun before = runAirB2411(/*parkReported=*/false, 25030);
+    const AirBRun after = runAirB2411(/*parkReported=*/true, 25030);
+    const AirBRun prompt = runAirB2411(/*parkReported=*/true, 1000);
+    put("air-B 24.11 first tap, before (park unreported)", before);
+    put("air-B 24.11 first tap, park reported", after);
+    put("air-B 24.11 first tap, park reported, 1 s stop", prompt);
+    // Before: the emulation reproduces the device - leg 2 parked and judged, three legs, ~30 s to data on 11 AWG.
+    CHECK(before.result.connected && before.result.path.id.id == QLatin1String("11"));
+    CHECK(before.legs == QStringList({ "12:xray", "11:xray", "11" }) && before.parked == 1);
+    CHECK(before.falseMark && before.proven == PathState::Suspect);
+    CHECK(before.tapMs >= 29000 && before.tapMs <= 31000);                       // device: 30.0 s
+    CHECK(before.result.elapsedMs >= 26500 && before.result.elapsedMs <= 28000); // device: ms=27193
+    // Park reported: the proven path's start waits for the real teardown, nothing is judged for the wait, the proof
+    // is honoured (11:xray carries data) - the time is bounded by the teardown plus one start and its check.
+    CHECK(after.result.connected && after.result.path.id.id == QLatin1String("11:xray"));
+    CHECK(after.legs == QStringList({ "12:xray", "11:xray" }) && after.parked == 1 && !after.falseMark);
+    CHECK(after.proven == PathState::Working && after.reports.size() == 1
+          && after.reports[0].outcome == PathOutcome::DataOk);
+    CHECK(after.reports[0].connectMs == 1350); // the server's part only: the park is not the path's connect time
+    CHECK(after.tapMs >= 3038 + 25030 && after.tapMs <= 3038 + 25030 + 1350 + 1000 + 200);
+    // The stop of a starting leg answered in ~1 s (the extension side of the fix): no park at all, data in ~6.4 s.
+    CHECK(prompt.result.connected && prompt.result.path.id.id == QLatin1String("11:xray") && prompt.parked == 0);
+    CHECK(!prompt.falseMark && prompt.tapMs <= 3038 + 1000 + 1350 + 1000 + 200);
+}
+
+// The same platform outside the race (path_race off, the sequential walk): a person's Stop 0.3 s into a start and a
+// leg whose own start never finishes (its setTunnelNetworkSettings never calls back). The stop of a starting session
+// takes 25 s (the build of 24.11) or 1 s (the extension answers a running start itself); a start sent meanwhile is
+// parked. Reported park: the next leg is never judged for the wait.
+static void scenarioIosStopDuringStart()
+{
+    const NetworkObservation home = wifi("192.168.25.1");
+    const QString k = key(home);
+    const PathCandidate a1 = awg("a1", "FI"), a2 = awg("a2", "EE", false, 0.5);
+    // 1. Stop 0.3 s into a start, Connect again 1.7 s later.
+    for (const int stopStartingMs : { 25030, 1000 }) {
+        for (const bool parkReported : { false, true }) {
+            World w;
+            w.set(k, a1.id.id, Behaviour::works(1400, 400, 120));
+            w.set(k, a2.id.id, Behaviour::works(1400, 400, 120));
+            Sim s({ a1, a2 }, w, home);
+            s.ios.on = true;
+            s.ios.parkReported = parkReported;
+            s.ios.stopStartingMs = stopStartingMs;
+            s.deliver(AttemptEvent::userStart(s.now, UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));
+            const quint64 first = s.owner.attempt();
+            s.at(300, [&s] { s.deliver(AttemptEvent::userStop(s.now)); });
+            // the person taps Connect again 1.7 s after the Stop, whether or not the stop is over by then
+            s.at(2000, [&s] {
+                s.deliver(AttemptEvent::userStart(s.now, UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));
+            });
+            // Disconnected = the stop confirmed: the first attempt's result before the second tap
+            qint64 stoppedAt = -1;
+            s.run([&] { return !s.results.isEmpty(); }, 1990);
+            if (!s.results.isEmpty())
+                stoppedAt = s.now;
+            const int from = int(s.legs.size());
+            s.run([&] { return !s.results.isEmpty() && s.results.last().attempt > first; }, 90000);
+            CHECK(!s.results.isEmpty() && s.results.first().reason == FailReason::StoppedByUser);
+            const AttemptResult r = s.results.last();
+            bool judged = false;
+            for (const OutcomeReport &rep : s.reports)
+                judged = judged || rep.outcome == PathOutcome::NoHandshake;
+            const char *name = stopStartingMs > 2000
+                ? (parkReported ? "iOS Stop 0.3 s into a start (25 s stop), park reported"
+                                : "iOS Stop 0.3 s into a start (25 s stop), before")
+                : (parkReported ? "iOS Stop 0.3 s into a start (1 s stop), park reported"
+                                : "iOS Stop 0.3 s into a start (1 s stop), before");
+            // ms = the second tap -> its result
+            g_rows.append({ QString::fromLatin1(name), r.connected ? QStringLiteral("connected ") + r.path.id.id
+                                                                   : QStringLiteral("failed"),
+                            s.now - 2000, r.paths, legPaths(s, from).join(QLatin1Char(' ')) });
+            CHECK(r.connected);
+            if (stopStartingMs <= 2000) {
+                // the extension answers the stop of a starting session: Disconnected ~1.3 s after the first tap, the
+                // next Connect starts at once and nothing is judged, whatever the park report
+                CHECK(stoppedAt > 0 && stoppedAt <= 300 + stopStartingMs + 200 && !judged && s.parkedStarts == 0);
+                CHECK(r.path.id.id == QLatin1String("a1") && r.paths == 1 && s.now - 2000 <= 1400 + 400 + 200);
+            } else if (parkReported) {
+                // the 25 s stop: the next Connect waits for it (parked, the owner gave the stop up) - never blamed
+                CHECK(stoppedAt < 0 && !judged && s.parkedStarts == 1 && r.path.id.id == QLatin1String("a1"));
+                CHECK(stateOf(s, a1) == PathState::Working);
+            } else {
+                // before: the parked start of the next Connect is judged no_handshake against a working server
+                CHECK(judged && stateOf(s, a1) == PathState::Suspect && r.path.id.id == QLatin1String("a2"));
+            }
+        }
+    }
+    // 2. A leg whose own start never finishes: its deadline judges it as before (its start left the device); its stop
+    //    is the stop of a starting session; the next leg, sent after the stop was given up, is parked.
+    for (const int stopStartingMs : { 25030, 1000 }) {
+        for (const bool parkReported : { false, true }) {
+            World w;
+            w.set(k, a1.id.id, Behaviour::noHandshake());
+            w.set(k, a2.id.id, Behaviour::works(1400, 400, 120));
+            Sim s({ a1, a2 }, w, home);
+            s.ios.on = true;
+            s.ios.parkReported = parkReported;
+            s.ios.stopStartingMs = stopStartingMs;
+            s.ios.extStartMsFor.insert(a1.id.id, Sim::kBuildNever);
+            const AttemptResult r = s.tap(UserChoice::automatic());
+            const char *name = stopStartingMs > 2000
+                ? (parkReported ? "iOS leg timeout during its start (25 s stop), park reported"
+                                : "iOS leg timeout during its start (25 s stop), before")
+                : (parkReported ? "iOS leg timeout during its start (1 s stop), park reported"
+                                : "iOS leg timeout during its start (1 s stop), before");
+            row(name, s, r, 0);
+            CHECK(legPaths(s) == QStringList({ "a1", "a2" }) && stateOf(s, a1) == PathState::Suspect);
+            if (stopStartingMs <= 2000) {
+                CHECK(r.connected && r.path.id.id == QLatin1String("a2") && s.parkedStarts == 0);
+                CHECK(s.lastTapWallMs() <= 4500 + 1000 + 1400 + 400 + 200);
+            } else if (parkReported) {
+                // a2 waits for the real teardown, then carries data; only a1's own verdict is in the ledger
+                CHECK(r.connected && r.path.id.id == QLatin1String("a2") && s.parkedStarts == 1);
+                CHECK(stateOf(s, a2) == PathState::Working && s.lastTapWallMs() >= 4500 + 25030);
+            } else {
+                // before: a2 is judged for the park and the attempt ends with nothing proven
+                CHECK(!r.connected && stateOf(s, a2) == PathState::Suspect);
+            }
+        }
+    }
+    // 3. A "no handshake" that reaches a leg in its local phase is never recorded (the invariant in report()).
+    {
+        World w;
+        w.set(k, a1.id.id, Behaviour::works(1400, 400, 120));
+        Sim s({ a1 }, w, home);
+        s.deliver(AttemptEvent::userStart(s.now, UserChoice::exactPath(a1.id.id), TransportMode::Auto, s.tracker.current()));
+        s.deliver(AttemptEvent::localBuild(s.now, s.owner.currentLeg(), true));
+        s.at(200, [&s] { s.deliver(AttemptEvent::pathFailed(s.now, s.owner.currentLeg(), PathOutcome::NoHandshake)); });
+        s.run([&s] { return !s.results.isEmpty(); }, 30000);
+        CHECK(!s.results.isEmpty() && s.reports.isEmpty() && s.ledger.size() == 0);
+    }
+}
+
 static void scenarioPreference()
 {
     const NetworkObservation home = wifi("192.168.7.1");
@@ -2732,6 +2929,8 @@ int main()
     scenarioPermissionPrompt();
     scenarioLocalBuild();
     scenarioLocalBuildQueued();
+    scenarioTraceAirB2411();
+    scenarioIosStopDuringStart();
     scenarioPreference();
     scenarioModeBeatsPreference();
     scenarioRevision();

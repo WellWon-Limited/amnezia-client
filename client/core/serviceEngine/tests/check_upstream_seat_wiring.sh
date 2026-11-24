@@ -294,6 +294,26 @@ ask="$(body_of "$SE/ConfigService.cpp" 'void ConfigService::askDirectOnce()')"
 has "$ask" 'const bool proofOwed = m_proofOwedFn && m_proofOwedFn();' && has "$ask" 'm_askLater.start(int(kAskSpacingMs));' \
     || bad "answer lost: askDirectOnce must consult the owed proof and come back after the spacing while it is owed"
 
+# H1 (device round air-C 24.11: 12 release tries to one silent API host, the seat freed 68 s after the Stop): ONE host rule for the
+# lease requests on the direct route (UpstreamLeaseWire.h::upstreamDirectBase, tested by upstream_lease_check hostRule and
+# upstream_engine_check releaseHostFallback). Checked here: the facade gives the client the walk's next edge; every direct request
+# takes its base by the rule; the end of every acquire, renewal and release (and the acquire's full wait) feeds the mark, and a
+# release notes it BEFORE it schedules its resend.
+has "$fac_nc" 'lease->setNextDirectBase([this](const QString &base) { return m_configSvc ? m_configSvc->nextEdgeAfter(base) : QString(); });' \
+    || bad "H1: the facade must give the lease client the walk's next edge (setNextDirectBase -> ConfigService::nextEdgeAfter)"
+bf="$(body_of "$CLI" 'QString UpstreamLeaseClient::baseFor(')"
+has "$bf" 'return upstreamDirectBase(trimmedBase(walk), trimmedBase(next), m_edgeMark, QDateTime::currentMSecsSinceEpoch());' \
+    || bad "H1: a lease request on the direct route must take its base by upstreamDirectBase"
+has "$acq" 'noteHostOutcome(base, route, r);' && has "$acq" 'noteHostSilent(base, route);' \
+    || bad "H1: an acquire's end and its full wait must feed the host mark"
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::renew(')" 'noteHostOutcome(base, route, r);' \
+    || bad "H1: a renewal's end must feed the host mark"
+srl="$(body_of "$CLI" 'void UpstreamLeaseClient::sendRelease(')"
+h1="$(first_line "$srl" 'noteHostOutcome(base, route, r);')"
+h2="$(first_line "$srl" 'const SeatReleaseNext next = seatReleaseNext(')"
+{ [ -n "$h1" ] && [ -n "$h2" ] && [ "$h1" -lt "$h2" ]; } \
+    || bad "H1: a release must note its host's outcome before it decides the resend (the resend then goes to the other host)"
+
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"
     exit 1

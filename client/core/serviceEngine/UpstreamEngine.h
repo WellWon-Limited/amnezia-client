@@ -402,6 +402,9 @@ struct UpstreamLeaseRecord {
     qint64 revision = 0;
     MeterScope scope = MeterScope::Tunnel;
     QStringList meterTags;    // the lease's meter_tags (proxy scope sums exactly these)
+    // The order of the start that holds the lease (UpstreamLeaseWire.h::UpstreamSessionOrder; -1 = not known, an older
+    // record). iOS matches the record to THE session the extension runs by it (upstreamHandedOverRecordMatches); not a secret.
+    qint64 sessionOrder = -1;
 
     bool valid() const
     {
@@ -423,7 +426,8 @@ struct UpstreamLeaseRecord {
                                          {QStringLiteral("started_wall_ms"), double(startedWallMs)},
                                          {QStringLiteral("revision"), double(revision)},
                                          {QStringLiteral("meter_scope"), meterScopeName(scope)},
-                                         {QStringLiteral("meter_tags"), QJsonArray::fromStringList(meterTags)}})
+                                         {QStringLiteral("meter_tags"), QJsonArray::fromStringList(meterTags)},
+                                         {QStringLiteral("session_order"), double(sessionOrder)}})
             .toJson(QJsonDocument::Compact);
     }
     static UpstreamLeaseRecord fromJson(const QByteArray &json)
@@ -444,6 +448,7 @@ struct UpstreamLeaseRecord {
         parseUpstreamMeterTags(o.value(QLatin1String("meter_tags")), r.meterTags);
         if (r.meterTags.isEmpty())
             r.scope = MeterScope::Tunnel;
+        r.sessionOrder = qint64(o.value(QLatin1String("session_order")).toDouble(-1));
         return r;
     }
 };
@@ -474,6 +479,41 @@ inline bool upstreamRecordMatchesSession(const UpstreamLeaseRecord &r, qint64 da
 inline qint64 upstreamAdoptConfirmBudgetMs(const UpstreamLeaseRecord &r, qint64 nowWallMs)
 {
     return qBound<qint64>(60000, r.expiresWallMs - nowWallMs, qint64(kUpstreamLeaseTtlMaxS) * 1000);
+}
+
+// --- iOS: the record of a session handed over to the tunnel owner (device round 24.11, case C3) ----------------------
+// The app acquires the seat and hands the lease to the extension, which renews it; a force-quit app came back, adopted the
+// live tunnel and, with no owner of the seat, sent no release at the Stop - the seat stayed held until its TTL. The app now
+// keeps the same record as the macOS GUI owner (no token) and, on adoption, restores the owner in the handed-over state
+// (UpstreamLeaseOwner::adoptHandedOver). The record names the start by its order; the order rides in the session's
+// tribeSessionMetadata (iOS only, VpnConnectionTunnelControl::bringUpUpstream), which the extension keeps in its provider
+// configuration and returns with every status reply - so the relaunched app reads back which start is running.
+inline constexpr const char *kUpstreamSessionOrderMetaKey = "session_order";
+
+// The start order in a session's metadata; -1 = absent or not a valid order (a session started before this rule).
+inline qint64 upstreamSessionOrderOf(const QJsonObject &metadata)
+{
+    const QJsonValue v = metadata.value(QLatin1String(kUpstreamSessionOrderMetaKey));
+    if (!v.isDouble())
+        return -1;
+    const double d = v.toDouble();
+    if (!(d >= 1 && d <= double(kUpstreamSessionOrderMax)) || d != std::floor(d))
+        return -1;
+    return qint64(d);
+}
+
+// The record names THE session the extension runs: the same node and the same start order as the live session's metadata, a
+// lease id a release can name, not older than kUpstreamRecordMaxAgeMs. Anything else - another start, another node, a record
+// without an order, a broken one - is not adopted: that seat stays the extension's to release, as before. A lease id belongs to
+// one start (contract 1.19.0: another start gets a NEW lease id), so the release this enables can only ever end that start's
+// lease - never a seat a newer start holds.
+inline bool upstreamHandedOverRecordMatches(const UpstreamLeaseRecord &r, const QString &liveNodeId, qint64 liveSessionOrder,
+                                            qint64 nowWallMs)
+{
+    static const QRegularExpression idRe(QStringLiteral("^[A-Za-z0-9_-]{1,64}$"));
+    return idRe.match(r.profileId).hasMatch() && r.nodeId == upstreamNodeIdFor(r.profileId) && r.nodeId == liveNodeId
+           && upstreamLeaseIdValid(r.leaseId) && r.sessionOrder > 0 && r.sessionOrder == liveSessionOrder && r.savedWallMs > 0
+           && nowWallMs >= r.savedWallMs - 60000 && nowWallMs - r.savedWallMs < kUpstreamRecordMaxAgeMs;
 }
 
 // --- the standby pack at rest -----------------------------------------------------------------------------

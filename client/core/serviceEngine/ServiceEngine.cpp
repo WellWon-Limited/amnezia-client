@@ -1522,9 +1522,13 @@ bool ServiceEngine::feedProbeResult(bool ok)
             return false;
     } else {
         const qint64 nowEpoch = QDateTime::currentSecsSinceEpoch();
+        // tribe.16 (device round 24.11 B1): the extension's "no inbound data for N s" corroborates too; -1 on every
+        // platform but iOS with a tribe.16 extension (TunnelStats::dataQuietSec), where this is the rule of 141.
+        const qint64 dataQuietSec = m_tunnel ? m_tunnel->readStats().dataQuietSec : -1;
         if (!HealthLoop::probeDeadCorroborated(m_probeFailStreak, awgProbeFailCyclesTuned(),
                                                m_health.inNetworkGrace(nowEpoch), m_health.latestHandshakeEpoch(),
-                                               nowEpoch, awgProbeDeadHandshakeAgeSTuned()))
+                                               nowEpoch, awgProbeDeadHandshakeAgeSTuned(), dataQuietSec,
+                                               awgProbeDeadQuietSTuned()))
             return false;
     }
     m_probeFailStreak = 0;

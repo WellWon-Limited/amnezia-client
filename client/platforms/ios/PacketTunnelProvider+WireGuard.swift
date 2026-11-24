@@ -223,6 +223,12 @@ extension PacketTunnelProvider {
                     "last_handshake_time_sec": lastHandshake,
                     "roam": counters.asDictionary.mapValues { Int(clamping: $0) }
                 ]
+                // AVPN (awg-apple tribe.16, device round 24.11 B1): how long inbound data has not proved the
+                // path (TribeDataFlow: no handshake bytes, no echo of a repair step) - the app's failover rule
+                // reads the same judgment the stall ladder acts on. Top level, not in `roam`: it changes every
+                // second and `roam` is logged and journaled on every change. Absent = unknown (older apps
+                // ignore the key).
+                if counters.dataQuietSeconds >= 0 { response["data_quiet_s"] = counters.dataQuietSeconds }
 
                 // AVPN (build 141, data watch): the `watch` block. With the watch off there is no
                 // block and the reply is the one of build 139.

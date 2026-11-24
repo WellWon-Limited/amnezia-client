@@ -413,6 +413,35 @@ int main(int argc, char **argv)
         CHECK(!HealthLoop::probeDeadCorroborated(3, 4, false, 1000, 1000 + 140, 135));  // not enough failures yet
         CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 0, 1000 + 140, 135));     // handshake time unknown
         CHECK(!HealthLoop::probeDeadCorroborated(9, 0, false, 1000, 1000 + 999, 135));  // switched off
+        // Device round 24.11 (B1, awg-apple tribe.16): handshakes complete, no data comes back. The extension's
+        // `data_quiet_s` (no inbound DATA for N s) corroborates the failing probe; the grace still vetoes.
+        CHECK(HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 10, 135, 45, 45));    // fresh hs, 45 s quiet
+        CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 10, 135, 44, 45));   // not quiet long enough
+        CHECK(!HealthLoop::probeDeadCorroborated(4, 4, true, 1000, 1000 + 10, 135, 600, 45));   // network change: grace
+        CHECK(!HealthLoop::probeDeadCorroborated(3, 4, false, 1000, 1000 + 10, 135, 600, 45));  // 3 of 4 failures
+        CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 10, 135, 600, 0));   // switched off: 141
+        CHECK(HealthLoop::probeDeadCorroborated(4, 4, false, 0, 1000, 135, 50, 45));           // no hs time, quiet
+        // Unchanged where the field is unknown (-1: Android, desktop, an extension before tribe.16): the rule of 141.
+        {
+            const auto rule141 = [](int fail, int cycles, bool grace, qint64 hs, qint64 now, int age) {
+                if (cycles <= 0 || fail < cycles || grace || hs <= 0)
+                    return false;
+                return now - hs > age;
+            };
+            int same = 0, total = 0;
+            for (int fail = 0; fail <= 6; ++fail)
+                for (int cycles = 0; cycles <= 5; ++cycles)
+                    for (int grace = 0; grace <= 1; ++grace)
+                        for (qint64 hs : {qint64(0), qint64(-5), qint64(1000)})
+                            for (qint64 age = 0; age <= 400; age += 20)
+                                for (int minQuiet : {0, 20, 45, 600}) {
+                                    ++total;
+                                    same += HealthLoop::probeDeadCorroborated(fail, cycles, grace, hs, 1000 + age, 135, -1,
+                                                                              minQuiet)
+                                         == rule141(fail, cycles, grace, hs, 1000 + age, 135);
+                                }
+            CHECK(same == total);
+        }
         CHECK(!h.feed(mkStats(0, 100, 500), 1021));                // первый плохой после окна
         CHECK(h.feed(mkStats(0, 100, 600), 1025));                 // второй → DEAD
         h.reset();
@@ -436,6 +465,63 @@ int main(int argc, char **argv)
         CHECK(!feedDead(eng, tun, 1001, 0));
         CHECK(eng.state() == EngineState::Connected);
         CHECK(tun.downCalls == 0);
+    }
+    // --- Device round 24.11 (B1, awg-apple tribe.16): the AmneziaWG probe failover through the engine. The roam is at
+    // R (noteNetworkChange), the in-tunnel probe fails every 4 s, handshakes stay fresh, the extension says how long no
+    // data came in. 141: never (the handshake never ages); now: the first failure with 4 in a row, outside the grace
+    // window and 45 s of quiet - the probe at R+48. Within the grace window, or with data coming in: nothing.
+    {
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}}, {}, {});
+        struct Run { bool failedOver = false; qint64 at = -1; int downs = 0; };
+        const auto run = [&](qint64 quietFromRoam /* -1 = an extension without the field */, bool dataFlows) {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(subJson({ EE, US }, 7), err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+            CHECK(eng.connect(err));
+            CHECK(upConnected(eng));
+            Run r;
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            // R = 60 s ago: the grace window (20 s) and the probe streak of the roam are behind us; replay the probes.
+            const qint64 roam = now - 60;
+            eng.noteNetworkChange(roam);
+            for (qint64 t = 4; t <= 60 && !r.failedOver; t += 4) {
+                tun.st = mkStats(now - 5, 1000 + (dataFlows ? t * 1000 : 0), 5000 + t * 1500); // a fresh handshake
+                tun.st.dataQuietSec = quietFromRoam < 0 ? -1 : (dataFlows ? 0 : quietFromRoam + t);
+                if (eng.feedProbeResult(false)) { r.failedOver = true; r.at = t; }
+            }
+            r.downs = tun.downCalls;
+            return r;
+        };
+        const Run b1 = run(0, false);
+        CHECK(b1.failedOver && b1.at == 48);       // quiet 48 s >= 45 at the 12th failed probe (the 4th of 4 at 16 s)
+        const Run oldExt = run(-1, false);
+        CHECK(!oldExt.failedOver);                 // an extension before tribe.16: the rule of 141 (fresh handshake)
+        const Run flowing = run(0, true);
+        CHECK(!flowing.failedOver);                // probe addresses down, data flows: never torn down
+        // During the grace window of a network change: no failover however quiet (the extension heals the roam).
+        {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(subJson({ EE, US }, 7), err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+            CHECK(eng.connect(err));
+            CHECK(upConnected(eng));
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            eng.noteNetworkChange(now); // the roam right now: 20 s of grace
+            bool failedOver = false;
+            for (int i = 0; i < 8; ++i) {
+                tun.st = mkStats(now - 5, 1000, 5000 + i * 6000);
+                tun.st.dataQuietSec = 600;
+                failedOver = failedOver || eng.feedProbeResult(false);
+            }
+            CHECK(!failedOver);
+            CHECK(eng.state() == EngineState::Connected);
+        }
     }
 #endif
 

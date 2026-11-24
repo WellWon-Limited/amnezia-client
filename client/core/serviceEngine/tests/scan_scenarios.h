@@ -545,7 +545,7 @@ inline QList<Scenario> scenarios()
 
     // 1. Wi-Fi, everything works, parallel legs (macOS host): 10 rows quickly, done (no step checks the connection).
     l << Scenario{QStringLiteral("wifi_all_works_legs"),
-                  {QStringLiteral("stop at scan_stop_works"), QStringLiteral("list cap 10"), QStringLiteral("shade scan_found"),
+                  {QStringLiteral("stop at scan_stop_works"), QStringLiteral("list cap 10"), QStringLiteral("no found shade: the rings say the count"),
                    QStringLiteral("no tunnel action")},
                   [] {
                       World w = baseWorld("wifi_all_works_legs", hostMac(), ScanNetKind::Wifi);
@@ -559,7 +559,7 @@ inline QList<Scenario> scenarios()
                       f.check(phaseOf(v) == QLatin1String("done"), QStringLiteral("phase done"));
                       f.check(v.value(QLatin1String("verified")).toInt() == 10, QStringLiteral("10 verified rows"));
                       f.check(countActions(d, ScanActionKind::StopHostScan) == 1, QStringLiteral("host stopped once"));
-                      f.check(shadeCount(d, "scan_found") == 1, QStringLiteral("one found shade"));
+                      f.check(shadeCount(d, "scan_found") == 0, QStringLiteral("no found shade (owner 24.11: the rings say the count)"));
                       f.check(!v.contains(QLatin1String("card")), QStringLiteral("no connection card in the Scanner"));
                       f.check(rowOf(v, QStringLiteral("1")).value(QLatin1String("state")).toString() == QLatin1String("connected"),
                               QStringLiteral("current row connected"));

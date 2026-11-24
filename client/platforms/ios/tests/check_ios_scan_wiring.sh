@@ -98,7 +98,8 @@ before(stop_tunnel, "tribeScanStopAllIfUsed(", "switch protoType", "stopTunnel: 
 check(re.search(r"tribeScanStopAllIfUsed\(reason: \"[a-z_]+\", close: true\)", stop_tunnel) is not None,
       "stopTunnel: the stop-all closes the host")
 start_tunnel = body(provider, "override func startTunnel(") or ""
-before(start_tunnel, "let completionHandler = tribeScanReopenOnSuccess(completionHandler)", "switch protoType",
+# (air-B 24.11: the reopen wrapper sits inside the one-answer slot, tribeStartSlot.begin(...), on the same line)
+before(start_tunnel, "let completionHandler = tribeStartSlot.begin(tribeScanReopenOnSuccess(completionHandler))", "switch protoType",
        "startTunnel: a successful start reopens the host (its completion wrapped before any start path)")
 xray = code(read(f"{ios}/PacketTunnelProvider+Xray.swift"))
 stop_xray = body(xray, "func stopXray(") or ""

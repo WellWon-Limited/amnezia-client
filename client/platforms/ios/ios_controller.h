@@ -182,6 +182,10 @@ signals:
     // (HealthLoop). Значение уже парсится в checkStatus из UAPI last_handshake_time_sec; здесь лишь
     // отдаём его наружу (раньше использовалось только для подтверждения коннекта). См. VpnConnectionTunnelControl.
     void handshakeChanged(qint64 lastHandshakeEpochSec);
+    // AVPN (awg-apple tribe.16, device round 24.11 B1): the extension's `data_quiet_s` - seconds since inbound DATA
+    // last proved the path (no handshake bytes, no echo of a repair step); -1 = the reply has none (an extension
+    // before tribe.16, an Xray session, a stale watchdog). Feeds the AmneziaWG probe failover (HealthLoop).
+    void dataQuietChanged(qint64 seconds);
     // AVPN (floor 19.11): the awaited AmneziaWG handshake was seen - awaitedMs from the NE's Connected to this
     // status reply (the stage between "extension Connected" and the app's Connected; journal ios_handshake_seen).
     void handshakeConfirmed(qint64 awaitedMs);
@@ -214,6 +218,15 @@ signals:
     // (сохранили/ошибка/отмена). ОБЯЗАТЕЛЕН для фасада (ревью REV-1): пока true, его сторож старта
     // не должен звать down() — disconnectVpn сменит поколение операции, и поздний save отбросится.
     void permissionPromptPending(bool pending);
+    // AVPN (device round air-B 24.11, iOS only): true - the current connect is PARKED: the previous tunnel session is
+    // still tearing down (Disconnecting), one session at a time, so its start has not left the device; false - that
+    // session is down and the parked start goes out now (configureSelectedTunnel). Emitted once per park, in this
+    // order, only for the current operation. A park that ends otherwise (the app's stop, the deadline, a live session
+    // found) emits no false: those end the start themselves. The facade passes both to the attempt owner as the leg's
+    // local phase (ServiceEngine::onLocalBuild: Building / Built) - the leg's clock stands and its path is never judged
+    // for it. While parked the connect deadline is the long ceiling (permissionPromptCapMs: the owner bounds the wait),
+    // the start that follows gets the whole connectDeadlineMs.
+    void startAwaitsTeardown(bool waiting);
 
     void finished();
 

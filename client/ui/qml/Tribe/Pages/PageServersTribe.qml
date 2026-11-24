@@ -7,6 +7,7 @@ import QtQuick.Shapes
 import ".."              // Theme
 import "../components"
 import "../../Controls2" // PageType
+import "../ServerListOrder.js" as ServerListOrder
 
 // AVPN (server picker 2026-07-10): полноэкранный выбор сервера — замена шторки TribeNodeSheet.
 // Поиск, «Авто (быстрейший)», строки локаций (флаг + бейджи транспортов + RTT + бары). Одна
@@ -54,8 +55,9 @@ PageType {
     readonly property bool autoMode: hasChoice ? choiceId === "" : !cur.pinned
     // ONLINE у строки текущей страны — то же свойство движка, что бейдж ONLINE на главной (5.1.108):
     // данные идут через туннель (живая проба или whoami works), от флага node_scan не зависит.
+    // Device round of 142 (B2): no ONLINE while the device is known to have no network (the home says «Нет сети»).
     readonly property bool onlineNow: hasEngine && TribeEngine.state === "connected"
-                                      && TribeEngine.dataFlowing === true
+                                      && TribeEngine.dataFlowing === true && TribeEngine.tunnelUpNoUplink !== true
     property string query: ""
 
     // AVPN awg31-xray-v1: режим транспорта — факт из движка (=== undefined на старом бинаре ⇒ "auto").
@@ -85,35 +87,83 @@ PageType {
     // МЕМОИЗАЦИЯ (ревью 2026-07-10): движок эмитит общий changed() часто (тик ~4с, RTT-ответы по
     // одной ноде), а реассайн model новым JS-массивом = полный reset ListView (пересоздание
     // делегатов, сброс скролла). Пересобираем массив ТОЛЬКО при реальном изменении содержимого.
-    property var countries: []
-    property string countriesKey: ""
-    // Device test of 142: the list re-sorted and jumped under the finger - every RTT answer or health tick
-    // (changed(), ~4 s) reassigned the model, which resets the ListView to the top and re-sorts the rows. While the
-    // list is being touched an update waits (rebuildPending) and is applied when the movement ends; an applied
-    // update keeps the scroll position.
-    property bool rebuildPending: false
-    readonly property bool listTouched: list.moving || list.dragging
+    // Device round of 142 (A4, iPhone Air): between a look at the list and the tap the rows re-sorted on a latency
+    // update (changed(), ~4 s) and a tap aimed at «Финляндия 1» selected «Эстония 2». A look cannot be detected, so the
+    // order is not tied to touches: it is taken when the page opens and kept while the page is on screen
+    // (ServerListOrder.js). Leaving the page and coming back opens it anew - a fresh sort; so does the person's own
+    // change of the transport mode (it greys rows; grey rows go down). Every update refreshes only the rows' values
+    // (rowsByKey) in place: the model (shownKeys) stays the same array, the delegates live on, and a press and its tap
+    // stay on one row. A server that leaves or joins changes the order (dropped / appended at the end) - not while the
+    // list is moving or a row is pressed: that waits for the release.
+    property var rowsByKey: ({})        // location key -> its row (values: figure, badges, choice, ONLINE ...)
+    property string rowsKey: ""
+    property var orderKeys: []          // every location in the order taken at open (the search filters it)
+    property var shownKeys: []          // the ListView's model: orderKeys that match the search
+    property bool orderPending: false
+    property bool resortPending: false
+    property string pressedKey: ""      // the row under a finger (its press -> release)
+    readonly property bool listTouched: list.moving || list.dragging || pressedKey !== ""
+    readonly property var emptyRow: ({ key: "", cc: "", name: "", nodeId: "", region: "", rtt: -1, bars: -1, upstream: false,
+                                       group: 0, badges: [], disabled: false, modeOnly: false, reason: "",
+                                       attemptFailed: false, isCurrent: false, isChosen: false })
 
-    function rebuildCountries() {
+    function matchesQuery(r, q) {
+        return q === "" || r.name.toLowerCase().includes(q) || r.cc.toLowerCase().includes(q)
+               || r.region.toLowerCase().includes(q)
+    }
+    // resort: take the sort order now (the page opens, the transport mode changed); else keep the order on screen
+    function rebuildCountries(resort) {
+        if (resort === true)
+            root.resortPending = true
+        const next = computeCountries()
+        const byKey = {}
+        const sortedKeys = []
+        for (let i = 0; i < next.length; ++i) {
+            byKey[next[i].key] = next[i]
+            sortedKeys.push(next[i].key)
+        }
         if (root.listTouched) {
-            root.rebuildPending = true
+            // a row still on screen keeps its last values until the order follows (never an empty row under a finger)
+            for (let j = 0; j < root.orderKeys.length; ++j)
+                if (byKey[root.orderKeys[j]] === undefined && root.rowsByKey[root.orderKeys[j]] !== undefined)
+                    byKey[root.orderKeys[j]] = root.rowsByKey[root.orderKeys[j]]
+        }
+        const key = JSON.stringify(byKey)
+        if (key !== root.rowsKey) {
+            root.rowsKey = key
+            root.rowsByKey = byKey            // values in place: same model, same delegates
+        }
+        if (root.listTouched) {
+            root.orderPending = true
             return
         }
-        root.rebuildPending = false
-        const next = computeCountries()
-        const key = JSON.stringify(next)
-        if (key === root.countriesKey) return
-        root.countriesKey = key
+        root.orderPending = false
+        const order = root.resortPending ? sortedKeys : ServerListOrder.keepShownOrder(root.orderKeys, sortedKeys)
+        root.resortPending = false
+        if (!ServerListOrder.sameOrder(order, root.orderKeys))
+            root.orderKeys = order
+        applyQuery()
+    }
+    function applyQuery() {
+        const q = root.query.trim().toLowerCase()
+        const shown = []
+        for (let i = 0; i < root.orderKeys.length; ++i) {
+            const r = root.rowsByKey[root.orderKeys[i]]
+            if (r !== undefined && root.matchesQuery(r, q))
+                shown.push(root.orderKeys[i])
+        }
+        if (ServerListOrder.sameOrder(shown, root.shownKeys))
+            return
         const top = list.originY - list.topMargin
         const offset = list.contentY - top
-        root.countries = next
+        root.shownKeys = shown
         if (offset > 0) {
             // a new array resets the view to the top: put it back where the person left it (clamped to the end)
             const end = Math.max(0, list.contentHeight + list.topMargin + list.bottomMargin - list.height)
             list.contentY = list.originY - list.topMargin + Math.min(offset, end)
         }
     }
-    onListTouchedChanged: if (!listTouched && rebuildPending) rebuildCountries()
+    onListTouchedChanged: if (!listTouched && orderPending) rebuildCountries(false)
 
     // AVPN awg31-xray-v1: ключ строки — движковый `location` (host_id, фолбэк country_code+region);
     // старый бинарь поля не отдаёт ⇒ фолбэк на страну, поведение как раньше.
@@ -148,7 +198,6 @@ PageType {
             if (!byLoc[key]) { byLoc[key] = []; firstAt[key] = i }
             byLoc[key].push(n)
         }
-        const q = query.trim().toLowerCase()
         const mode = root.transportMode
         const out = []
         for (const key in byLoc) {
@@ -177,10 +226,7 @@ PageType {
             // Имя локации: движок отдаёт подпись самой ноды, иначе подпись соседа по хосту (AWG),
             // иначе название страны (nodePool, pickerDisplay) — код региона («ee») не показываем.
             // A provider row always has the engine's name (upstreamRowName).
-            const name = best.name || cc
-            if (q && !(name.toLowerCase().includes(q) || cc.toLowerCase().includes(q)
-                       || String(best.region || "").toLowerCase().includes(q)))
-                continue
+            const name = String(best.name || cc)
             let isCur = false, isChosen = false
             for (let k = 0; k < nodes.length; ++k) {
                 if (cur.nodeId && nodes[k].nodeId === cur.nodeId) isCur = true
@@ -215,6 +261,7 @@ PageType {
                 for (let f = 0; f < nodes.length; ++f)
                     if (nodes[f].measuredRttMs >= 0) { figure = nodes[f]; break }
             out.push({ key: key, cc: cc, name: name, nodeId: best.nodeId,
+                       region: String(best.region || ""),   // the search matches it (applyQuery)
                        rtt: figure.measuredRttMs,
                        // -1 = no measurement (own: no ICMP answer yet; provider: no Scanner result on this
                        // network): the idle track, never the server's health drawn as five green bars
@@ -264,8 +311,9 @@ PageType {
 
     // The page's taps, one function each (the row, the «Авто» card, a mode segment), so every caller of a tap takes
     // the same path with the same guards. Each returns what the tap did.
-    // A row of `countries`: a row the mode cannot serve switches the mode to «Авто» first (device test of 142, second
-    // round: never a dead end), a grey row says why, the chosen row only goes back, else the host pins it.
+    // A row (its values: rowsByKey of its location key): a row the mode cannot serve switches the mode to «Авто» first
+    // (device test of 142, second round: never a dead end), a grey row says why, the chosen row only goes back, else
+    // the host pins it.
     function tapRow(entry) {
         if (entry.modeOnly) {
             root.pageNotice(qsTr("Режим соединения — «Авто»: у этого сервера нет транспорта %1")
@@ -302,12 +350,13 @@ PageType {
         return transportSelector.tapSegment(key)
     }
 
-    onQueryChanged: rebuildCountries()
-    onTransportModeChanged: rebuildCountries()   // AVPN awg31-xray-v1: смена режима меняет серые строки
+    onQueryChanged: applyQuery()                  // the search filters the order on screen, never re-sorts it
+    // AVPN awg31-xray-v1: смена режима меняет серые строки - the person's own act: a fresh sort (grey rows go down)
+    onTransportModeChanged: rebuildCountries(true)
     Connections {
         target: root.hasEngine ? TribeEngine : null
         ignoreUnknownSignals: true
-        function onChanged() { root.rebuildCountries() }
+        function onChanged() { root.rebuildCountries(false) }
     }
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
@@ -335,7 +384,7 @@ PageType {
 
     // Замер RTT всех нод при открытии (async ICMP; при connected — no-op, показываем кэш).
     Component.onCompleted: {
-        rebuildCountries()
+        rebuildCountries(true)   // the page opens: the order is taken here and kept while it is on screen
         if (hasEngine) TribeEngine.probeNodeRtt()
     }
     // refreshPool — СИНХРОННЫЙ nested-loop → ТОЛЬКО отложенно, не из кадра показа (как в шторке).
@@ -358,7 +407,7 @@ PageType {
             onBackClicked: root.back()
             rightItem: Text {
                 anchors.verticalCenter: parent.verticalCenter
-                text: qsTr("Локаций: %1").arg(root.countries.length)
+                text: qsTr("Локаций: %1").arg(root.shownKeys.length)
                 color: Theme.color.text3
                 font.family: Theme.font.body
                 font.pixelSize: Theme.font.caption
@@ -566,20 +615,22 @@ PageType {
                 // AVPN (Scanner): air under the last row inside the scroll, above the pinned button
                 bottomMargin: ScanSwitches.scanner ? Theme.space.lg : 0
                 spacing: Theme.space.sm
-                model: root.countries
+                // the order on screen (location keys); a row's values come from root.rowsByKey in place
+                model: root.shownKeys
                 boundsBehavior: Flickable.StopAtBounds
 
                 delegate: Rectangle {
                     id: row
-                    required property var modelData
+                    required property string modelData   // the location key
+                    readonly property var d: root.rowsByKey[row.modelData] || root.emptyRow
                     width: ListView.view.width
                     implicitHeight: 66
                     radius: Theme.radius.lg
                     // AVPN awg31-xray-v1: локация без транспорта под текущий режим — серая
-                    opacity: row.modelData.disabled ? 0.5 : 1.0
-                    color: row.modelData.isChosen ? Theme.color.chipSelected : Theme.color.surface1
+                    opacity: row.d.disabled ? 0.5 : 1.0
+                    color: row.d.isChosen ? Theme.color.chipSelected : Theme.color.surface1
                     border.width: 1
-                    border.color: row.modelData.isChosen ? Theme.color.accent : Theme.color.border
+                    border.color: row.d.isChosen ? Theme.color.accent : Theme.color.border
                     Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
                     Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
 
@@ -592,11 +643,11 @@ PageType {
                         TribeFlag {
                             Layout.preferredWidth: 38
                             Layout.preferredHeight: 38
-                            code: row.modelData.cc
+                            code: row.d.cc
                             // AVPN upstream nodes: a provider row without a country - the kit's globe on a
                             // flag tile (own rows keep their previous look)
-                            fallback: row.modelData.upstream ? globeTile : null
-                            whitelist: row.modelData.group === 2   // a white-list profile: the white disc with a black globe
+                            fallback: row.d.upstream ? globeTile : null
+                            whitelist: row.d.group === 2   // a white-list profile: the white disc with a black globe
                         }
 
                         ColumnLayout {
@@ -604,7 +655,7 @@ PageType {
                             spacing: 3
                             Text {
                                 Layout.fillWidth: true
-                                text: row.modelData.name
+                                text: row.d.name
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
                                 color: Theme.color.text1
@@ -620,9 +671,9 @@ PageType {
                             RowLayout {
                                 Layout.alignment: Qt.AlignLeft
                                 spacing: Theme.space.xs
-                                visible: row.modelData.badges.length > 0
+                                visible: row.d.badges.length > 0
                                 Repeater {
-                                    model: row.modelData.badges
+                                    model: row.d.badges
                                     delegate: TribeTransportBadge {
                                         required property var modelData
                                         transport: modelData.proto
@@ -638,7 +689,7 @@ PageType {
                                 // главной (малый вариант), только у строки, где поднят туннель
                                 // (владелец, тест 5.1.102).
                                 TribeLabelBadge {
-                                    visible: row.modelData.isCurrent && root.onlineNow
+                                    visible: row.d.isCurrent && root.onlineNow
                                     small: true
                                     label: qsTr("ONLINE")
                                     fg: Theme.color.connected
@@ -648,9 +699,9 @@ PageType {
 
                             // серая строка: транспорта под текущий режим тут нет (или клиент его не умеет)
                             Text {
-                                visible: row.modelData.disabled
+                                visible: row.d.disabled
                                 Layout.fillWidth: true
-                                text: row.modelData.reason
+                                text: row.d.reason
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
                                 color: Theme.color.text3
@@ -667,19 +718,19 @@ PageType {
                             spacing: 3
                             // one rule with the Connect card (TribeEngine.nodeFigure): the row carrying the tunnel -
                             // own: the live probe, provider: its Scanner figure or none; other rows their figure
-                            readonly property bool currentLive: row.modelData.isCurrent && root.hasEngine
+                            readonly property bool currentLive: row.d.isCurrent && root.hasEngine
                                                                 && TribeEngine.state === "connected"
                             // a row whose last attempt on this network failed shows no figure (an ICMP answer is not
                             // a working path: device test of 142, «~34 мс» green on a node that never handshook)
                             // a row the mode cannot serve (greyed) or whose last attempt here failed: no figure
-                            readonly property var fig: ((row.modelData.attemptFailed || row.modelData.disabled) && !sigCol.currentLive)
+                            readonly property var fig: ((row.d.attemptFailed || row.d.disabled) && !sigCol.currentLive)
                                 ? ({ ms: -1, bars: -1, failed: false })
                                 : root.hasEngine
-                                ? TribeEngine.nodeFigure(row.modelData.upstream === true, sigCol.currentLive,
+                                ? TribeEngine.nodeFigure(row.d.upstream === true, sigCol.currentLive,
                                                          TribeEngine.liveReachable === true, TribeEngine.liveDead === true,
                                                          Number(TribeEngine.liveRttMs), Number(TribeEngine.liveBars),
-                                                         Number(row.modelData.rtt))
-                                : ({ ms: Number(row.modelData.rtt), bars: Number(row.modelData.bars), failed: false })
+                                                         Number(row.d.rtt))
+                                : ({ ms: Number(row.d.rtt), bars: Number(row.d.bars), failed: false })
                             LoadBars {
                                 Layout.alignment: Qt.AlignHCenter
                                 scale: 0.9
@@ -702,7 +753,16 @@ PageType {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.tapRow(row.modelData)
+                        // a pressed row holds the order (root.listTouched): the delegate under the finger lives until
+                        // the release, so the tap acts on the row of the press (row.d = that location's values now)
+                        onPressedChanged: {
+                            if (pressed)
+                                root.pressedKey = row.modelData
+                            else if (root.pressedKey === row.modelData)
+                                root.pressedKey = ""
+                        }
+                        Component.onDestruction: if (root.pressedKey === row.modelData) root.pressedKey = ""
+                        onClicked: root.tapRow(row.d)
                     }
                 }
             }

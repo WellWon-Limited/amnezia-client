@@ -67,13 +67,46 @@ bool UpstreamLeaseClient::configured() const
     return m_nam && m_directBase && m_token && !m_pubKeyHex.isEmpty();
 }
 
+static QString trimmedBase(QString b)
+{
+    while (b.endsWith(QLatin1Char('/')))
+        b.chop(1);
+    return b;
+}
+
 QString UpstreamLeaseClient::baseFor(const LeaseRoute &route) const
 {
-    const QString b = route.apiBase.isEmpty() ? (m_directBase ? m_directBase() : QString()) : route.apiBase;
-    QString out = b;
-    while (out.endsWith(QLatin1Char('/')))
-        out.chop(1);
-    return out;
+    if (!route.apiBase.isEmpty())
+        return trimmedBase(route.apiBase); // through the tunnel: never redirected
+    // The direct route: ONE host rule for every lease request (UpstreamLeaseWire.h::upstreamDirectBase).
+    const QString walk = m_directBase ? m_directBase() : QString();
+    const QString next = (m_nextDirectBase && !walk.isEmpty()) ? m_nextDirectBase(walk) : QString();
+    return upstreamDirectBase(trimmedBase(walk), trimmedBase(next), m_edgeMark, QDateTime::currentMSecsSinceEpoch());
+}
+
+void UpstreamLeaseClient::noteHostOutcome(const QString &base, const LeaseRoute &route, QNetworkReply *reply)
+{
+    if (!route.apiBase.isEmpty() || !reply)
+        return;
+    const QVariant code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+    const UpstreamHostOutcome o = upstreamHostOutcome(code.isValid() ? code.toInt() : 0,
+                                                      upstreamFromTribeApi(reply->rawHeader(QByteArray(kUpstreamTribeApiHeader))),
+                                                      reply->error() == QNetworkReply::OperationCanceledError,
+                                                      reply->property("avpn_timed_out").toBool());
+    const UpstreamEdgeMark before = m_edgeMark;
+    m_edgeMark = upstreamEdgeMarkAfter(m_edgeMark, base, o, QDateTime::currentMSecsSinceEpoch());
+    if (m_edgeMark.base != before.base && !m_edgeMark.base.isEmpty())
+        qInfo() << "avpn upstream: an API host left a lease request without an answer - the next lease request goes to the other host";
+}
+
+void UpstreamLeaseClient::noteHostSilent(const QString &base, const LeaseRoute &route)
+{
+    if (!route.apiBase.isEmpty())
+        return;
+    const UpstreamEdgeMark before = m_edgeMark;
+    m_edgeMark = upstreamEdgeMarkAfter(m_edgeMark, base, UpstreamHostOutcome::Silent, QDateTime::currentMSecsSinceEpoch());
+    if (m_edgeMark.base != before.base)
+        qInfo() << "avpn upstream: an API host gave a seat request no answer within the attempt's wait - the next lease request goes to the other host";
 }
 
 QNetworkReply *UpstreamLeaseClient::post(const QString &url, const QByteArray &body, const QString &bearer,
@@ -120,18 +153,23 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
     }
     auto answered = std::make_shared<bool>(false);
     m_acquiresOut.insert(requestId, profileId); // until its HTTP request ends (it outlives the attempt's wait)
-    QTimer::singleShot(waitMs, r, [this, requestId, answered, waitMs]() {
+    QTimer::singleShot(waitMs, r, [this, requestId, answered, waitMs, hedged, base, route]() {
         if (*answered)
             return;
         *answered = true; // the attempt stops waiting; the request goes on (a late grant is released below)
         qWarning() << "avpn upstream: lease answer later than" << waitMs
                    << "ms - the attempt moves on, a late grant will be released";
+        // The host rule: the attempt's FULL wait with no answer is a silent host - the next leg's request goes to the other one
+        // (a hedge is a short wait by design and proves nothing about the host).
+        if (!hedged)
+            noteHostSilent(base, route);
         if (onAcquire)
             onAcquire(requestId, classifyAcquireReply(0, {}, {}, m_pubKeyHex));
     });
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId, answered, route, profileId]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, answered, route, profileId, base]() {
         r->deleteLater();
         m_acquiresOut.remove(requestId);
+        noteHostOutcome(base, route, r); // the host rule (UpstreamLeaseWire.h::upstreamDirectBase)
         const int status = answerStatus(r); // 0 = no complete HTTP answer (transport, timeout)
         const QByteArray body = r->read(kMaxLeaseAnswerBytes);
         const QByteArray sig = r->rawHeader(QByteArrayLiteral("X-Tribe-Sig"));
@@ -208,8 +246,9 @@ void UpstreamLeaseClient::renew(quint64 requestId, const QString &leaseId, const
         });
         return;
     }
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, base, route]() {
         r->deleteLater();
+        noteHostOutcome(base, route, r); // the host rule (direct route only: a renewal through the tunnel is never redirected)
         const int status = answerStatus(r);
         if (onRenew)
             onRenew(requestId, classifyRenewReply(status, r->read(kMaxLeaseAnswerBytes)));
@@ -305,8 +344,11 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         });
         return;
     }
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt, spacedMs, bgKey]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt, spacedMs, bgKey, base]() {
         r->deleteLater();
+        // The host rule first: a resend below takes its base at its own send, so after a silent try it goes to the other host
+        // within this same budget (device round air-C 24.11: 12 tries to one silent host, the seat freed 68 s after the Stop).
+        noteHostOutcome(base, route, r);
         // The release goes out just before the tunnel transition it belongs to, and that transition aborts every
         // API request in flight (owner's iPhone 16.11: "net_error 5" within 40-80 ms); an API restart answers 502
         // (device round 19.11). seatReleaseNext - the one rule of every seat release: no answer or 5xx is sent again
@@ -379,9 +421,10 @@ bool UpstreamLeaseClient::fetchStandby(const QString &networkKey,
     QNetworkReply *r = m_nam->get(req);
     armTimeout(r);
     m_standbyReply = r;
-    connect(r, &QNetworkReply::finished, this, [this, r, done]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, done, base]() {
         r->deleteLater();
         m_standbyReply.clear();
+        noteHostOutcome(base, LeaseRoute(), r); // the same host rule as the lease requests (a direct request)
         const QVariant code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute);
         const int status = code.isValid() ? code.toInt() : 0;
         const QByteArray body = r->read(kStandbyMaxBodyBytes + 1);

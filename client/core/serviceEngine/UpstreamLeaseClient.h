@@ -42,6 +42,10 @@ public:
     // token = the device subscription token at the moment of the call.
     void configure(QNetworkAccessManager *nam, std::function<QString()> directBase, const QString &pubKeyHex,
                    std::function<QString()> token);
+    // The edge walk's next edge after a given one (ConfigService::nextEdgeAfter; "" = none): where a lease request on the direct
+    // route goes when the last lease request to the walk's edge ended silent - ONE rule for acquire, renew and release
+    // (UpstreamLeaseWire.h::upstreamDirectBase, device round air-C 24.11). Unset = the walk's edge only (a bare client).
+    void setNextDirectBase(std::function<QString(const QString &)> next) { m_nextDirectBase = std::move(next); }
     bool configured() const;
     QString publicKeyHex() const { return m_pubKeyHex; }
 
@@ -132,6 +136,9 @@ public:
 
 private:
     QString baseFor(const LeaseRoute &route) const;
+    // A lease request to `base` ended (route as it was sent): the host rule's mark follows its outcome (direct route only).
+    void noteHostOutcome(const QString &base, const LeaseRoute &route, QNetworkReply *reply);
+    void noteHostSilent(const QString &base, const LeaseRoute &route); // the attempt's full wait passed with no answer
     void sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route,
                      int attempt, qint64 spacedMs = 0, quint64 bgKey = 0);
     void reportLateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route, quint64 acquireId);
@@ -140,6 +147,8 @@ private:
 
     QPointer<QNetworkAccessManager> m_nam;
     std::function<QString()> m_directBase;
+    std::function<QString(const QString &)> m_nextDirectBase;
+    UpstreamEdgeMark m_edgeMark; // the direct edge whose last lease request ended silent (UpstreamLeaseWire.h host rule)
     std::function<QString()> m_token;
     QString m_pubKeyHex;
     quint64 m_lastReleaseId = 0;

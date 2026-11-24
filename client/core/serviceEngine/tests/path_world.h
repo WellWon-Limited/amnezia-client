@@ -193,6 +193,24 @@ public:
     int buildReachMs = 0;
     bool serialBuilds = false;
     int localOverruns = 0; // LocalBuildOverrun effects
+    // The iOS native (IosController + the extension; device round air-B 24.11): ONE tunnel session at a time. With `on`
+    // a stop tears the session down for stopUpMs when the extension's start of that leg had finished (the path's
+    // tunnel up, or extStartMs after the start for a path that never comes up), and for stopStartingMs when the stop
+    // came while that start was still running (24.11: 25 s for an Xray leg stopped 0.2 s into its start; 0.4-1.0 s for
+    // a leg already up). A start sent while a teardown runs is PARKED until it ends - the path's behaviour counts from
+    // there; a stop of a parked start joins the teardown (its one Disconnected confirms both, as on the device). With
+    // `parkReported` the native says so (IosController::startAwaitsTeardown -> LocalBuild building at the park, built
+    // when the start goes out); without it, the build before the fix.
+    struct IosNative {
+        bool on = false;
+        bool parkReported = false;
+        int stopUpMs = 500;
+        int stopStartingMs = 500;
+        int extStartMs = 1300;            // the extension's own start of a path that never comes up
+        QHash<QString, int> extStartMsFor; // per path; kBuildNever = that start never finishes (settings never call back)
+    };
+    IosNative ios;
+    int parkedStarts = 0;
 
     // --- driving --------------------------------------------------------------------------------------------
     void deliver(const AttemptEvent &ev) { apply(owner.handle(ev, ctx())); }
@@ -375,6 +393,21 @@ private:
                     m_serviceFreeAt = base;
                     schedule(base, AttemptEvent::localBuild(0, e.stamp, false));
                 }
+                if (ios.on) {
+                    if (m_teardownEnd > now) { // parked behind the previous session's teardown
+                        ++parkedStarts;
+                        base = m_teardownEnd;
+                        if (ios.parkReported) {
+                            schedule(now, AttemptEvent::localBuild(0, e.stamp, true));
+                            schedule(base, AttemptEvent::localBuild(0, e.stamp, false));
+                        }
+                    }
+                    m_legGoesOut.insert(e.stamp.leg, base);
+                    const bool comesUp = b.kind == Behaviour::Kind::Works || b.kind == Behaviour::Kind::NoData
+                        || b.kind == Behaviour::Kind::Silent || b.kind == Behaviour::Kind::ControlPlane;
+                    const int ext = ios.extStartMsFor.value(e.path.id.id, comesUp ? b.upMs : ios.extStartMs);
+                    m_legExtStarted.insert(e.stamp.leg, ext == kBuildNever ? std::numeric_limits<qint64>::max() : base + ext);
+                }
                 switch (b.kind) {
                 case Behaviour::Kind::Works:
                 case Behaviour::Kind::NoData:
@@ -442,6 +475,15 @@ private:
             case EffectType::StopPath:
                 if (systemAsleep)
                     ++stopsAsleep;
+                if (ios.on) {
+                    // a parked start that has not gone out: nothing of it runs, its stop joins the running teardown
+                    if (m_legGoesOut.value(e.stamp.leg, 0) <= now) {
+                        const bool starting = now < m_legExtStarted.value(e.stamp.leg, 0);
+                        m_teardownEnd = std::max(m_teardownEnd, now + (starting ? ios.stopStartingMs : ios.stopUpMs));
+                    }
+                    schedule(std::max(m_teardownEnd, now), AttemptEvent::stopConfirmed(0, e.stamp));
+                    break;
+                }
                 schedule(now + stopMs, AttemptEvent::stopConfirmed(0, e.stamp));
                 break;
             case EffectType::Report:
@@ -475,6 +517,9 @@ private:
     QList<std::pair<qint64, qint64>> m_suspend;
     QHash<quint64, Behaviour> m_legBehaviour;
     qint64 m_serviceFreeAt = 0; // serialBuilds: the end of the build in progress
+    qint64 m_teardownEnd = -1;            // ios: the end of the teardown in progress
+    QHash<quint64, qint64> m_legGoesOut;  // ios: when the leg's start left the device (after a park)
+    QHash<quint64, qint64> m_legExtStarted; // ios: when the extension's own start of the leg finished
     QHash<quint64, int> m_checkGen;
     UserChoice m_raceChoice;
     TransportMode m_raceMode = TransportMode::Auto;

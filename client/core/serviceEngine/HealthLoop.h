@@ -115,10 +115,20 @@ public:
     // rekeys are failing), and no network change opened the grace window (the extension is healing the path).
     // An unknown handshake time cannot corroborate anything: no verdict. rx/tx are NOT used here - every handshake
     // the server starts adds bytes to rx, which is what kept a dead session "alive" for the byte-based rule.
+    // Device round 24.11 (case B1, LTE -> Wi-Fi): handshakes kept completing while no data came back for 8 minutes, so
+    // the handshake never aged and the rule waited. The extension (awg-apple tribe.16) now reports how long inbound
+    // DATA has not proved the path (`dataQuietSec`: no handshake bytes, no echo of its own repair step - the judgment
+    // its stall ladder acts on); `minDataQuietSec` or more of that corroborates the failing probe as well. -1 / 0 =
+    // unknown / off: the handshake age alone, as before (every platform but iOS, an extension before tribe.16).
     static bool probeDeadCorroborated(int failStreak, int cycles, bool inGrace, qint64 latestHandshakeEpoch,
-                                      qint64 nowEpoch, int maxHandshakeAgeSec)
+                                      qint64 nowEpoch, int maxHandshakeAgeSec, qint64 dataQuietSec = -1,
+                                      int minDataQuietSec = 0)
     {
-        if (cycles <= 0 || failStreak < cycles || inGrace || latestHandshakeEpoch <= 0)
+        if (cycles <= 0 || failStreak < cycles || inGrace)
+            return false;
+        if (minDataQuietSec > 0 && dataQuietSec >= minDataQuietSec)
+            return true;
+        if (latestHandshakeEpoch <= 0)
             return false;
         return nowEpoch - latestHandshakeEpoch > maxHandshakeAgeSec;
     }

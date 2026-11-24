@@ -23,9 +23,54 @@
 // long outage got 3 s before the soft restart); an `.episode` refusal below stage 3 re-syncs the
 // tracker with the budget instead of asking forever.
 //
+// tribe.16 (device round 24.11, case B1: LTE -> Wi-Fi with an AmneziaWG session): after the roam fresh
+// port the path passed about 1 s of data after every new port and then nothing, for 8 minutes. That
+// burst (and every completed handshake) reset the ladder to its first step, so it rebound the port 17
+// times and never restarted the engine. One definition of "data is flowing" now (TribeDataFlow):
+// inbound DATA bytes (a handshake's bytes deducted) that still arrive a full second stage after the
+// last repair step. The burst right after a step is the echo of that step: it restarts the stall
+// clock but keeps the escalation, so a fresh port that does not restore lasting data is followed by
+// the soft restart. The same judgment is what the app's failover reads (`dataQuietSeconds`).
+//
 // This file has NO NetworkExtension/Go dependency: the conan recipe compiles it together with
 // tests/TribeRoamingTests.swift under plain swiftc, so the package cannot ship with broken logic.
 import Foundation
+
+/// tribe.16: what "data is flowing" means for the stall ladder, its recovery budget and the app's
+/// failover (the extension exports the age of the last such data as `data_quiet_s`).
+public enum TribeDataFlow {
+    /// A handshake message is counted in rx_bytes and is not data: a response is exactly 92 B, an
+    /// initiation the server starts (it re-keys) 148 B (amneziawg-go v3.1.20260828 device/receive.go
+    /// `peer.rxBytes.Add(len(elem.packet))`). The data watch deducts the same amount
+    /// (`TribeDataWatchPolicy.handshakeRxAllowanceBytes`, pinned to this value by its ladder test:
+    /// the data watch file is compiled alone in its own gates).
+    public static let handshakeRxBytes: UInt64 = 148
+    /// What a completed handshake costs outbound (special packets, junk, padding and the 148-byte
+    /// initiation, device/send.go SendHandshakeInitiation): not demand. Same value as
+    /// `TribeDataWatchPolicy.handshakeTxAllowanceBytes` (pinned by the same test).
+    public static let handshakeTxBytes: UInt64 = 1024
+
+    /// Inbound data of one sample: the rx growth, minus one handshake when the handshake time moved.
+    public static func dataBytes(rxDelta: UInt64, handshakeChanged: Bool) -> UInt64 {
+        guard handshakeChanged else { return rxDelta }
+        return rxDelta > handshakeRxBytes ? rxDelta - handshakeRxBytes : 0
+    }
+
+    /// Outbound demand of `txDelta` bytes, minus one handshake when the handshake time moved.
+    public static func demandBytes(txDelta: UInt64, handshakeChanged: Bool) -> UInt64 {
+        guard handshakeChanged else { return txDelta }
+        return txDelta > handshakeTxBytes ? txDelta - handshakeTxBytes : 0
+    }
+
+    /// Inbound data proves the path only when it still arrives `window` seconds after the last repair
+    /// step (fresh port, soft restart; watchdog, GUI or roam): the burst right after a step is the
+    /// echo of that step (the server learns the new port and flushes what it had), not a repaired
+    /// path. No step yet (`lastRepairAt` nil) or `window` 0: every data byte counts, as before.
+    public static func provesFlow(dataAt: TimeInterval, lastRepairAt: TimeInterval?, window: TimeInterval) -> Bool {
+        guard let repair = lastRepairAt, window > 0 else { return true }
+        return dataAt - repair >= window
+    }
+}
 
 public struct TribeRoamingPolicy: Equatable {
     /// true: `.unsatisfied` never turns the device off (rebind-on-return only).
@@ -169,9 +214,12 @@ public enum TribeRecoveryKind: Equatable {
     case softRestart
 }
 
-/// Stall watchdog on top of the device's own counters. Inbound progress = rx bytes grew OR a newer
-/// handshake (handshake responses are not counted in rx_bytes, so an idle-but-healthy tunnel that
-/// keeps re-keying must not look stalled).
+/// Stall watchdog on top of the device's own counters. tribe.16: inbound progress = DATA bytes
+/// (TribeDataFlow: a handshake's bytes deducted); a handshake alone is not progress. It only proves
+/// an idle tunnel: a handshake while less than the stall's demand went out since the last baseline
+/// starts the demand count over (the stall clock keeps running), so re-keying of an idle-but-healthy
+/// tunnel never adds up to a stall. Data within a second stage after a repair step is the echo of
+/// that step: it restarts the stall clock, the stage stays; data after that ends the episode.
 ///
 /// tribe.9 ladder: stage 0 armed -> (stalled `stallProbeSeconds`, demand `stallMinTxBytes`)
 /// FRESH PORT -> stage 2 -> (stalled `stallProbeSeconds + stallRebindSeconds`, demand x2) SOFT
@@ -196,6 +244,12 @@ public struct TribeStallTracker: Equatable {
     /// gap, the stage-3 backoff and its demand evidence count from here.
     private var lastStepAt: TimeInterval?
     private var txAtLastStep: UInt64 = 0
+    /// tribe.16: time of the last repair step of any origin (also a roam fresh port the stage-3 cycle
+    /// does not count): inbound data closer to it than a second stage is its echo (TribeDataFlow).
+    private var lastRepairAt: TimeInterval?
+    /// tribe.16: the sample that just ran proved the path (TribeDataFlow); the arbiter keeps its time
+    /// for `dataQuietSeconds` (the budget judges the same sample by the same rule itself).
+    public private(set) var flowProvedNow = false
 
     /// Stage-3 order after the soft restart (persistentSteps = 1 -> index 1 = fresh port first).
     public static let persistentSequence: [TribeStallAction] = [.softRestart, .rebindPort]
@@ -237,6 +291,7 @@ public struct TribeStallTracker: Equatable {
     /// cooldown would otherwise refuse the watchdog's fresh port forever on a flapping path and the
     /// soft restart would never come), and is ignored when the next step is the soft restart.
     public mutating func noteExternalStep(_ kind: TribeRecoveryKind, at: TimeInterval, tx: UInt64) {
+        if kind != .bump { lastRepairAt = at } // tribe.16: its echo is not data, whatever the cycle does with it
         switch kind {
         case .bump:
             return
@@ -286,35 +341,59 @@ public struct TribeStallTracker: Equatable {
     private mutating func step(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy,
                                minGapAfterStep: TimeInterval, persistent: Bool,
                                permit: (TribeStallAction) -> Bool) -> TribeStallAction {
-        let progressed = sample.rxBytes > lastRx
-            || sample.lastHandshakeSec > lastHandshake
-            || sample.txBytes < txAtProgress // counters reset = backend restarted, not a stall
+        flowProvedNow = false
+        // Without a first handshake, let AWG's built-in retries run for at least 12 seconds.
+        // Handshake-only traffic is smaller than data traffic; still require evidence of demand.
+        let bootstrap = sample.lastHandshakeSec == 0 && sample.rxBytes == 0
+        let requiredTx = bootstrap ? UInt64(256) : policy.stallMinTxBytes
+        // counters reset = backend restarted (not announced through rebaseCounters), not a stall
+        let countersReset = sample.txBytes < txAtProgress || sample.rxBytes < lastRx
+        let handshakeChanged = sample.lastHandshakeSec > lastHandshake
+        let data = countersReset ? 0 : TribeDataFlow.dataBytes(rxDelta: sample.rxBytes - lastRx,
+                                                                handshakeChanged: handshakeChanged)
         lastRx = sample.rxBytes
         lastHandshake = sample.lastHandshakeSec
-        if progressed {
+        if countersReset || (data > 0 && TribeDataFlow.provesFlow(dataAt: sample.at, lastRepairAt: lastRepairAt,
+                                                                   window: policy.stallRebindSeconds)) {
+            // tribe.16: data is flowing (or a new device): the episode is over.
             lastProgressAt = sample.at
             txAtProgress = sample.txBytes
             stage = 0
             persistentSteps = 0
             lastStepAt = nil
+            lastRepairAt = nil
             txAtLastStep = sample.txBytes
+            flowProvedNow = !countersReset
             return .none
+        }
+        if data > 0 {
+            // tribe.16: the echo of the last repair step. The stall clock and the demand count start
+            // again from here; the stage, the stage-3 backoff and the last step stay, so a stall that
+            // returns goes on with the NEXT step instead of repeating the first one.
+            lastProgressAt = sample.at
+            txAtProgress = sample.txBytes
+            return .none
+        }
+        if handshakeChanged
+            && TribeDataFlow.demandBytes(txDelta: sample.txBytes - txAtProgress, handshakeChanged: true) < requiredTx {
+            // tribe.16: a re-key of an idle tunnel (less than a stall's demand went out, the re-key's own
+            // bytes not counted): not data, but the demand count starts over, so keepalives and re-keys
+            // never add up to a stall (below a stall's demand per re-key the ladder stays as still as in
+            // tribe.15; the data watch judges such paths).
+            txAtProgress = sample.txBytes
         }
         guard pathSatisfied, policy.stallProbeSeconds > 0 else { return .none }
         let stalledFor = sample.at - lastProgressAt
         let txSince = sample.txBytes - txAtProgress
-        // Without a first handshake, let AWG's built-in retries run for at least 12 seconds.
-        // Handshake-only traffic is smaller than data traffic; still require evidence of demand.
-        let bootstrap = sample.lastHandshakeSec == 0 && sample.rxBytes == 0
         let probeSeconds = bootstrap ? max(12, policy.stallProbeSeconds) : policy.stallProbeSeconds
         let rebindSeconds = bootstrap ? max(18, policy.stallRebindSeconds) : policy.stallRebindSeconds
-        let requiredTx = bootstrap ? UInt64(256) : policy.stallMinTxBytes
         switch stage {
         case 0, 1:
             if stalledFor >= probeSeconds && txSince >= requiredTx, permit(.rebindPort) {
                 stage = 2
                 persistentSteps = 0
                 lastStepAt = sample.at
+                lastRepairAt = sample.at
                 txAtLastStep = sample.txBytes
                 return .rebindPort
             }
@@ -325,6 +404,7 @@ public struct TribeStallTracker: Equatable {
                 stage = 3
                 persistentSteps = 1
                 lastStepAt = sample.at
+                lastRepairAt = sample.at
                 txAtLastStep = sample.txBytes
                 return .softRestart
             }
@@ -334,13 +414,16 @@ public struct TribeStallTracker: Equatable {
             guard persistent, policy.stallRebindSeconds > 0, let last = lastStepAt else { return .none }
             let sinceStep = sample.at - last
             let txSinceStep = sample.txBytes >= txAtLastStep ? sample.txBytes - txAtLastStep : 0
-            guard sinceStep >= TribeStallTracker.persistentBackoff(persistentSteps - 1), txSinceStep >= requiredTx else {
+            // tribe.16: and a stall NOW (the echo of the previous step may have moved the clock).
+            guard sinceStep >= TribeStallTracker.persistentBackoff(persistentSteps - 1), txSinceStep >= requiredTx,
+                  stalledFor >= probeSeconds else {
                 return .none
             }
             let next = TribeStallTracker.persistentSequence[persistentSteps % TribeStallTracker.persistentSequence.count]
             if permit(next) {
                 persistentSteps += 1
                 lastStepAt = sample.at
+                lastRepairAt = sample.at
                 txAtLastStep = sample.txBytes
                 return next
             }
@@ -384,14 +467,26 @@ public struct TribeRecoveryBudget: Equatable {
     /// tribe.8: counters that go DOWN belong to a new device (soft restart, resume): rebase them
     /// without calling it progress. tribe.7 kept the old rx and saw no progress on the new device
     /// until it had moved more bytes than the old one.
-    public mutating func observe(_ sample: TribeStallSample) {
+    /// tribe.16: the episode re-arms on DATA (TribeDataFlow: a handshake's bytes deducted) and only
+    /// when it is not the echo of this budget's own last repair (`proofWindow` after it, the
+    /// arbiter passes its policy's second stage); a handshake alone no longer re-arms it.
+    public mutating func observe(_ sample: TribeStallSample, proofWindow: TimeInterval = 0) {
         let countersReset = sample.rxBytes < lastRx || sample.txBytes < lastTx
-        if !countersReset && (sample.rxBytes > lastRx || sample.lastHandshakeSec > lastHandshake) {
-            resetEpisode()
+        if !countersReset {
+            let data = TribeDataFlow.dataBytes(rxDelta: sample.rxBytes - lastRx,
+                                               handshakeChanged: sample.lastHandshakeSec > lastHandshake)
+            if data > 0 && TribeDataFlow.provesFlow(dataAt: sample.at, lastRepairAt: lastRepairAt, window: proofWindow) {
+                resetEpisode()
+            }
         }
         lastRx = sample.rxBytes
         lastTx = sample.txBytes
         lastHandshake = sample.lastHandshakeSec
+    }
+
+    /// tribe.16: the newest repair this budget committed or was told about (bumps are not repairs).
+    private var lastRepairAt: TimeInterval? {
+        [lastFreshPortAt, lastSoftRestartAt].compactMap { $0 }.max()
     }
 
     /// Re-arm the episode (inbound progress, or a resumed backend after a long-offline pause).
@@ -549,15 +644,37 @@ public struct TribeRecoveryArbiter: Equatable {
     public private(set) var tracker: TribeStallTracker?
     /// Steps after the first fresh port (soft restart, then the stage-3 cycle). false = fresh port only.
     public let persistentHeal: Bool
+    /// tribe.16: the second stage of the last policy seen by `tick` (the echo window of TribeDataFlow
+    /// for the budget's samples outside the tick).
+    private var proofWindow: TimeInterval = TribeRoamingPolicy.seamless.stallRebindSeconds
+    /// tribe.16: when inbound data last proved the path (TribeDataFlow), and the first and the last
+    /// sample seen; survives tracker resets (watchdog restart, resume), not the adapter.
+    private var lastFlowAt: TimeInterval?
+    private var firstSampleAt: TimeInterval?
+    private var lastSampleAt: TimeInterval?
 
     public init(jitter: TimeInterval = 0, persistentHeal: Bool = true) {
         budget = TribeRecoveryBudget(jitter: jitter)
         self.persistentHeal = persistentHeal
     }
 
+    /// tribe.16: samples older than this make `dataQuietSeconds` unknown (the watchdog ticks every
+    /// 1 s, every 5 s while idle or offline; a paused backend or a stopped watchdog sends none).
+    public static let quietSampleMaxAgeSeconds: TimeInterval = 12
+
+    /// tribe.16: seconds since inbound data last proved the path (TribeDataFlow: not a handshake, not
+    /// the echo of a repair step), counted from the first sample if none has yet; -1 = unknown (no
+    /// sample yet, or the last one is older than `quietSampleMaxAgeSeconds`). Exported to the app as
+    /// `data_quiet_s`: its failover rule reads the same judgment the ladder acts on.
+    public func dataQuietSeconds(at now: TimeInterval) -> Int64 {
+        guard let last = lastSampleAt, now - last <= TribeRecoveryArbiter.quietSampleMaxAgeSeconds,
+              let since = lastFlowAt ?? firstSampleAt else { return -1 }
+        return Int64(Swift.max(0, now - since).rounded(.down))
+    }
+
     /// tribe.8: the backend was restarted in place and its counters start from zero.
     public mutating func rebaseAfterBackendRestart(_ sample: TribeStallSample) {
-        budget.observe(sample)
+        budget.observe(sample, proofWindow: proofWindow)
         tracker?.rebaseCounters(sample)
     }
 
@@ -577,7 +694,7 @@ public struct TribeRecoveryArbiter: Equatable {
     /// same-port bump (path event without a loss) is not a ladder step. Neither touches the stall
     /// clock (tribe.4-8 `rearmAfterRoam` restarted it on every path event and starved the ladder).
     public mutating func noteRoamRebind(_ sample: TribeStallSample, freshPort: Bool) {
-        budget.observe(sample)
+        budget.observe(sample, proofWindow: proofWindow)
         if tracker == nil {
             tracker = TribeStallTracker(first: sample)
         }
@@ -588,7 +705,10 @@ public struct TribeRecoveryArbiter: Equatable {
     }
 
     public mutating func tick(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy) -> TribeWatchdogOutcome {
-        budget.observe(sample)
+        proofWindow = policy.stallRebindSeconds
+        budget.observe(sample, proofWindow: proofWindow)
+        if firstSampleAt == nil { firstSampleAt = sample.at }
+        lastSampleAt = sample.at
         guard var current = tracker else {
             tracker = TribeStallTracker(first: sample)
             return .none
@@ -605,6 +725,7 @@ public struct TribeRecoveryArbiter: Equatable {
             return denial == nil
         }
         self.budget = budget
+        if current.flowProvedNow { lastFlowAt = sample.at }
         if action == .none, let denial, denial == .episode, current.stage < 3 {
             // tribe.10: the budget already spent this step (counters dropped without a rebase reset
             // the tracker to stage 0): re-sync so the ladder continues instead of asking forever.
@@ -629,7 +750,7 @@ public struct TribeRecoveryArbiter: Equatable {
     public mutating func requestFreshPort(_ sample: TribeStallSample?, pathSatisfied: Bool) -> TribeRebindResult {
         guard pathSatisfied else { return .offline }
         guard let sample else { return .notStarted }
-        budget.observe(sample)
+        budget.observe(sample, proofWindow: proofWindow)
         if let denial = budget.request(at: sample.at, kind: .freshPort) { return .budget(denial) }
         if tracker == nil { tracker = TribeStallTracker(first: sample) }
         tracker?.noteExternalStep(.freshPort, at: sample.at, tx: sample.txBytes)
@@ -642,7 +763,7 @@ public struct TribeRecoveryArbiter: Equatable {
     public mutating func requestSoftRestart(_ sample: TribeStallSample?, pathSatisfied: Bool) -> TribeSoftRestartResult {
         guard pathSatisfied else { return .offline }
         guard let sample else { return .notStarted }
-        budget.observe(sample)
+        budget.observe(sample, proofWindow: proofWindow)
         if let denial = budget.request(at: sample.at, kind: .softRestart) { return .budget(denial) }
         if tracker == nil { tracker = TribeStallTracker(first: sample) }
         tracker?.noteExternalStep(.softRestart, at: sample.at, tx: sample.txBytes)
@@ -657,7 +778,7 @@ public struct TribeRecoveryArbiter: Equatable {
     public mutating func requestPeerSwitch(_ sample: TribeStallSample?, pathSatisfied: Bool) -> TribeSoftRestartResult {
         guard pathSatisfied else { return .offline }
         guard let sample else { return .notStarted }
-        budget.observe(sample)
+        budget.observe(sample, proofWindow: proofWindow)
         if let denial = budget.request(at: sample.at, kind: .softRestart, persistent: true) { return .budget(denial) }
         return .performed
     }
@@ -679,6 +800,9 @@ public struct TribeRoamingCounters: Equatable {
     /// tribe.8: stage-3 watchdog steps (U9) and in-place backend restarts (U6, NE or GUI).
     public var stallPersistent: UInt64 = 0
     public var softRestarts: UInt64 = 0
+    /// tribe.16: `TribeRecoveryArbiter.dataQuietSeconds` at the moment of the read (-1 = unknown).
+    /// A reading, not a counter: never in `asDictionary` / `summary` (they are journaled on change).
+    public var dataQuietSeconds: Int64 = -1
 
     public init() {}
 

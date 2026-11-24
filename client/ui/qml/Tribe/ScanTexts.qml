@@ -14,13 +14,13 @@ QtObject {
     readonly property string title: qsTr("Сканер")
     readonly property string netWifi: qsTr("Wi‑Fi")
     readonly property string netCellular: qsTr("Сотовая")
-    // the last-check chip in the radar block's top-left corner (owner 18.11, replaces «Проверено …» under the title)
+    // the last check: the line under the rings once a result is shown («Проверено: только что»)
     readonly property string agoNow: qsTr("только что")
     readonly property string agoMin: qsTr("%1 мин назад")
     readonly property string agoHours: qsTr("%1 ч назад")
     readonly property string agoYesterday: qsTr("вчера")
     readonly property string agoDays: qsTr("%1 дн. назад")
-    readonly property string agoName: qsTr("Проверено: %1")      // screen reader name of the chip
+    readonly property string agoName: qsTr("Проверено: %1")      // the line under the rings of a result
     // the network chip in the top-right corner: the radio of a mobile network when the engine reports it
     readonly property string netLte: qsTr("LTE")
     readonly property string net5g: qsTr("5G")
@@ -31,11 +31,10 @@ QtObject {
     readonly property string stageReach: qsTr("Проверяем доступность · %1 из %2")
     readonly property string stageReachShort: qsTr("Проверяем доступность")
     readonly property string stageData: qsTr("Проверяем передачу данных · доступно %1 из %2")
-    readonly property string waitRows: qsTr("Рабочие ноды появятся здесь")
+    readonly property string waitRows: qsTr("Доступные серверы появятся здесь")
     readonly property string waitMore: qsTr("Ищем ещё… до %1 с")
     readonly property string legend: qsTr("работает у других в вашей сети — по обезличенным отчётам устройств того же оператора")
     readonly property string crowdName: qsTr("Работает у других в вашей сети")
-    readonly property string markName: qsTr("Скан завершён")
 
     // ── rows ──
     readonly property string rowWorks: qsTr("Доступно")   // owner, device test of 142 (was «Работает»)
@@ -63,10 +62,6 @@ QtObject {
     readonly property string reportSending: qsTr("Отправляем отчёт…")
 
     // ── shades (ShadeQueue text keys) ──
-    readonly property string foundOne: qsTr("Найдена 1 доступная нода")
-    readonly property string foundFormOne: qsTr("Найдена %1 доступная нода")
-    readonly property string foundFormFew: qsTr("Найдено %1 доступные ноды")
-    readonly property string foundFormMany: qsTr("Найдено %1 доступных нод")
     readonly property string seatsBusy: qsTr("Сейчас все места заняты — подключаем следующую")
     readonly property string connectFailedNext: qsTr("Не удалось подключиться — подключаем следующую")
     readonly property string connectFailedLater: qsTr("Не удалось подключиться — проверьте снова через минуту")
@@ -88,7 +83,7 @@ QtObject {
     readonly property string engineText: qsTr("Попробуйте ещё раз через минуту.")          // text, state 23
     readonly property string serviceTitle: qsTr("Служба Tribe VPN не запущена")            // title, state 24 (Mac, Windows)
     readonly property string sectionLast: qsTr("ПРОШЛЫЙ РЕЗУЛЬТАТ")                         // caption over the last result, 20-28
-    readonly property string fallbackHint: qsTr("VPN выключен — чтобы проверить ноды, нужно подключиться") // hint over the button, state 20
+    readonly property string fallbackHint: qsTr("VPN выключен — чтобы проверить серверы, нужно подключиться") // hint over the button, state 20
     readonly property string connectAndScan: qsTr("Подключиться и проверить")              // button, state 20
     readonly property string networkChanged: qsTr("Сеть сменилась — проверяем заново")      // shade, info
     readonly property string queueFull: qsTr("Отчёты ждут связи: %1. Новая проверка — после отправки") // shade, warning
@@ -96,10 +91,10 @@ QtObject {
     readonly property string serviceUpdateTitle: qsTr("Службу Tribe VPN нужно обновить")    // title, state 25 service_old / service_mismatch (16.11)
     // states 24 / 25: the body = the reason's lead + the action's sentence; the button = what the tap really does
     // (TribeEngine.scannerServiceAction(): install | start | update | none | unsupported), 16.11
-    readonly property string serviceLeadOff: qsTr("Сканер проверяет ноды через службу приложения, а она сейчас не запущена.") // text, state 24: action none / unsupported / unknown
-    readonly property string serviceLeadMissing: qsTr("Сканер проверяет ноды через службу приложения, а она не установлена.") // text, state 24: action install
-    readonly property string serviceLeadStopped: qsTr("Сканер проверяет ноды через службу приложения, а она остановлена.") // text, state 24: action start
-    readonly property string serviceLeadOutdated: qsTr("Сканер проверяет ноды через службу приложения, а она устарела.") // text, state 24: action update
+    readonly property string serviceLeadOff: qsTr("Сканер проверяет серверы через службу приложения, а она сейчас не запущена.") // text, state 24: action none / unsupported / unknown
+    readonly property string serviceLeadMissing: qsTr("Сканер проверяет серверы через службу приложения, а она не установлена.") // text, state 24: action install
+    readonly property string serviceLeadStopped: qsTr("Сканер проверяет серверы через службу приложения, а она остановлена.") // text, state 24: action start
+    readonly property string serviceLeadOutdated: qsTr("Сканер проверяет серверы через службу приложения, а она устарела.") // text, state 24: action update
     readonly property string serviceLeadOld: qsTr("Подключаться к VPN можно как обычно, а Сканеру нужна обновлённая служба.") // text, state 25 (every action)
     readonly property string servicePassword: qsTr("Система спросит пароль администратора.")  // added after the lead: actions install / update only
     readonly property string serviceReinstall: qsTr("Переустановите приложение его установщиком — служба установится вместе с ним.") // added after the lead: state 24, action unsupported (Windows), no button
@@ -127,7 +122,7 @@ QtObject {
     readonly property string more: qsTr("Найти ещё")                                       // button under the list, a finished scan
     readonly property string moreRunning: qsTr("Ищем ещё…")                                // the same button while the next batch runs
     readonly property string moreInMin: qsTr("Найти ещё через %1 мин")                     // the same button, disabled: the cellular hour's limit (view.more.blocked "budget"; the bar says hourLimit)
-    readonly property string moreExhausted: qsTr("Больше доступных нод в этой сети нет")   // replaces the button: nothing left to check
+    readonly property string moreExhausted: qsTr("Больше доступных серверов в этой сети нет") // replaces the button: nothing left to check
     readonly property string scanScope: qsTr("Сканировать")                               // THE Scan button (owner 19.11: one button, one meaning - scan the chosen scope)
     readonly property string scanInS: qsTr("Сканировать через %1 с")                      // the same button during the 30 s pause between scans
     readonly property string scanInMin: qsTr("Сканировать через %1 мин")                  // the same button while the cellular hour's budget is spent
@@ -141,7 +136,7 @@ QtObject {
     readonly property string startText: qsTr("Нажмите «Сканировать» — проверим серверы в этой сети.")
     readonly property string moreExhaustedScope: qsTr("%1: проверены все серверы")        // «Найти ещё» has nothing left in a country scope
     readonly property string moreExhaustedUnshown: qsTr("%1: проверены все серверы. Не ответили: %2") // the same, when the menu counted more servers than the list shows (%2 = how many)
-    readonly property string emptyScopeTitle: qsTr("%1: доступных нод сейчас нет")         // empty result of a country scan (%1 = the country)
+    readonly property string emptyScopeTitle: qsTr("%1: доступных серверов сейчас нет")    // empty result of a country scan (%1 = the country)
     readonly property string emptyScopeText: qsTr("Попробуйте другую страну или проверьте все.") // text, the same state (owner 24.11)
     // variant B (owner decision 18.11): the check with the report lives in Support - the bar under the chat header
     readonly property string supportCheck: qsTr("Проверить подключение и отправить отчёт") // Support bar, idle
@@ -150,14 +145,28 @@ QtObject {
     readonly property string supportSending: qsTr("Отправляем отчёт…")                    // the bar: no connection, the report alone / the last stage
     readonly property string supportCheckingSub: qsTr("До 20 секунд — отчёт сам придёт в чат") // its second line while running
     readonly property string whitelists: qsTr("Белые списки")  // the country menu's white-list scope (rows without a country), «Белые списки · N»
-    // owner 24.11: the Scanner opens on its country choice («Выбор»), a tap shows that country's result or scans it
+    // owner 24.11: the Scanner opens on its country choice («Выбор»); one screen (owner 24.11, evening): a row tap only
+    // SELECTS a scope («Все страны» by default), the one button under the list acts on it
     readonly property string chooseCaption: qsTr("ВЫБЕРИТЕ СТРАНУ")                        // caption over the choice list
     readonly property string liveCaption: qsTr("ВАШЕ ПОДКЛЮЧЕНИЕ")                         // caption over the live row on the choice list
-    readonly property string scanAll: qsTr("Сканировать все страны")                        // the choice's pinned button; the empty country state's first button
+    readonly property string scanAll: qsTr("Сканировать все страны")                        // the empty country state's first button
     readonly property string chooseOther: qsTr("Выбрать другую страну")                     // the empty country state's second button: back to the choice
     readonly property string scanAgain: qsTr("Сканировать снова")                           // the result's Scan button once a result is on the screen
-    readonly property string rescanInS: qsTr("Повторный скан — через %1 с")                 // hint over the choice's button during the 30 s pause
-    readonly property string slotWorks: qsTr("%1 доступно")                                 // a choice row with a fresh result, right side over its age («3 мин назад»)
+    readonly property string rescanInS: qsTr("Повторный скан — через %1 с")                 // hint over the choice's «Показать результат» during the 30 s pause
+    // a choice row with a fresh result, right side over its age («3 мин назад»); three forms for the languages whose
+    // word changes with the number (Spanish «1 disponible», «3 disponibles»), see plural()
+    readonly property string slotWorksOne: qsTr("%1 доступно", "a choice row's fresh result: the one form")
+    readonly property string slotWorksFew: qsTr("%1 доступно", "a choice row's fresh result: the few form")
+    readonly property string slotWorksMany: qsTr("%1 доступно", "a choice row's fresh result: the many form")
+    readonly property string slotStopped: qsTr("остановлен · %1")                            // under it, a stopped scan's result (%1 = its age), review F5
+    readonly property string showResult: qsTr("Показать результат")                         // the choice's button: the selected scope has a fresh result and no scan can run now
+    // under the found count in the rings' core, by the number (see plural())
+    readonly property string ringAvailableOne: qsTr("доступно", "under the number in the rings: the one form")
+    readonly property string ringAvailableFew: qsTr("доступно", "under the number in the rings: the few form")
+    readonly property string ringAvailableMany: qsTr("доступно", "under the number in the rings: the many form")
+    readonly property string ringName: qsTr("Доступно серверов: %1")                         // screen reader name of the rings with a result
+    readonly property string stoppedLine: qsTr("Скан остановлен")                           // the line under the rings after «Остановить» (what was found stays)
+    readonly property string stoppedAgo: qsTr("Скан остановлен · %1")                     // the same with the result's age («только что», «3 мин назад»)
     readonly property string poolWait: qsTr("Список стран пока не загружен — можно проверить все страны сразу.") // the choice before the pool answers (NO FRAME)
     // ELSEWHERE: «Не удалось сохранить отчёт на устройстве — он не отправлен» - chat toast, TribeSupportChat.cpp (queue lane)
     // NO FRAME, existing texts reused (no new wording; listed so the owner sees every fallback):
@@ -245,14 +254,18 @@ QtObject {
     }
 
     // ── helpers (read the properties above, so bindings follow a retranslation) ──
+    // The plural rule of the shown language, translated with the strings: "ru" = one / few / many by the last digits
+    // (1, 21 сервер; 2 сервера; 5, 11 серверов); "en" = one only for 1 (English, Spanish: 1 server, 21 servers).
+    readonly property string pluralRule: qsTr("ru", "plural rule of this translation: ru (one/few/many) or en (one/other)")
     function plural(n, one, few, many) {
+        if (t.pluralRule !== "ru")
+            return n === 1 ? one : many
         const a = n % 10, b = n % 100
         return a === 1 && b !== 11 ? one : ((a >= 2 && a <= 4 && (b < 12 || b > 14)) ? few : many)
     }
     function servers(n) { return t.plural(n, t.serverOne, t.serverFew, t.serverMany).arg(n) }
-    function found(n) {
-        return n === 1 ? t.foundOne : t.plural(n, t.foundFormOne, t.foundFormFew, t.foundFormMany).arg(n)
-    }
+    function available(n) { return t.plural(n, t.ringAvailableOne, t.ringAvailableFew, t.ringAvailableMany) }
+    function slotAvailable(n) { return t.plural(n, t.slotWorksOne, t.slotWorksFew, t.slotWorksMany).arg(n) }
     // radio: the engine's view.net_radio ("5g" | "lte" | "3g" | "2g"; not sent yet) - without it «Сотовая»
     function netCaption(net, radio) {
         if (net === "wifi") return t.netWifi
@@ -279,7 +292,6 @@ QtObject {
     function shadeText(key, args, reportsPending) {
         const a = args || []
         switch (key) {
-        case "scan_found": return t.found(Number(a[0] || 0))
         case "connect_failed_next": return t.connectFailedNext
         case "connect_failed_later": return t.connectFailedLater
         case "report_sent": return t.reportSent

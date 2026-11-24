@@ -54,7 +54,7 @@ inline ShadeTone shadeToneFrom(const QString &s)
 
 struct ShadeRequest {
     ShadeTone tone = ShadeTone::Info;
-    QString textKey;      // e.g. "scan_found"
+    QString textKey;      // e.g. "connect_failed_next"
     QStringList args;     // e.g. {"10"}
     QString key;          // coalescing key; empty = tone + textKey + args
 

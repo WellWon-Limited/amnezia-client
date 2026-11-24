@@ -9,21 +9,25 @@ import ".."   // Theme
 // state: "off" | "connecting" | "connected" | "switching" | "scanning". UI-DESIGN.md §2/§6.1.
 // "scanning" (the Scanner, plan scanner-client-plan.md §4, artboard vpn-scanner-kit.js scanRings): rings in
 // the accent, breathing, two outward waves 80 -> 250, the Connect orb's 28-segment tapered arc on the 200
-// ring and a radar glyph in the core. `compact` = the 18 px header mark after the scan (rings .22/.45/.90).
-// Reduce Motion: static rings, no waves, no arc.
+// ring and a radar glyph in the core. Reduce Motion: static rings, no waves, no arc.
 Item {
     id: root
-    implicitWidth: compact ? Theme.scan.mark : 250
-    implicitHeight: compact ? Theme.scan.mark : 250
+    implicitWidth: 250
+    implicitHeight: 250
 
     property string ringState: "off"
-    property bool compact: false
+    // the Scanner (owner 24.11: the rings never disappear): `still` = the same rings stopped (no breathing, waves or
+    // arc) - before a scan, after it, stopped, failed; `showGlyph` false = the core without its glyph (the page draws
+    // the found count or the reason's icon there); `tappable` false = the core is no button
+    property bool still: false
+    property bool showGlyph: true
+    property bool tappable: true
     signal coreClicked()
 
     readonly property bool isOff: ringState === "off"
     readonly property bool scanning: ringState === "scanning"
     readonly property bool busy: ringState === "connecting" || ringState === "switching"
-    readonly property bool motion: !Theme.motion.reduceMotion && root.visible
+    readonly property bool motion: !Theme.motion.reduceMotion && root.visible && !root.still
     readonly property bool animated: (ringState === "connected" || scanning) && motion
 
     // accent колец/свечения = состояние; в OFF — приглушённый серо-синий, чтобы было ясно «выключено»
@@ -41,24 +45,9 @@ Item {
         : Theme.color.ringCoreBottom
     readonly property color glyphColor: scanning ? Theme.color.accent : (isOff ? Theme.color.text2 : "white")
 
-    // ── compact header mark (18): three rings, outer .22 / middle .45 / inner .90 ──
-    Repeater {
-        model: root.compact ? [ { d: 18, o: 0.22 }, { d: 12, o: 0.45 }, { d: 6, o: 0.90 } ] : []
-        delegate: Rectangle {
-            required property var modelData
-            anchors.centerIn: parent
-            width: modelData.d
-            height: modelData.d
-            radius: width / 2
-            color: "transparent"
-            border.width: 1
-            border.color: Qt.alpha(Theme.color.accent, modelData.o)
-        }
-    }
-
     // ── concentric rings (80 / 140 / 200 / 250) ──────────────────────────────
     Repeater {
-        model: root.compact ? [] : [
+        model: [
             { d: 80,  o: 0.90 },
             { d: 140, o: 0.45 },
             { d: 200, o: 0.22 },
@@ -75,6 +64,9 @@ Item {
             border.width: 1
             border.color: root.stateColor
             opacity: modelData.o
+            // stopped mid-breath: back to the ring's own size
+            readonly property bool breathing: root.animated
+            onBreathingChanged: if (!breathing) scale = 1
             // "breathing" when connected / scanning
             SequentialAnimation on scale {
                 running: root.animated
@@ -88,7 +80,7 @@ Item {
 
     // ── scanning: two outward waves 80 -> 250 (scale 3.125), .45 -> 0, 1800 ms, the second +900 ms ──
     Repeater {
-        model: (root.scanning && !root.compact) ? 2 : 0
+        model: root.scanning ? 2 : 0
         delegate: Rectangle {
             id: wave
             required property int index
@@ -124,7 +116,7 @@ Item {
         id: sweep
         anchors.centerIn: parent
         width: 250; height: 250
-        visible: root.scanning && !root.compact && root.motion
+        visible: root.scanning && root.motion
         opacity: 0.7
         // the arc is one stroke at 70 %: composite the overlapping segments first (CSS opacity on the svg group)
         layer.enabled: visible
@@ -159,7 +151,6 @@ Item {
     // ── core button (96) ─────────────────────────────────────────────────────
     Rectangle {
         id: core
-        visible: !root.compact
         anchors.centerIn: parent
         width: 96; height: 96; radius: 48
         gradient: Gradient {
@@ -186,7 +177,7 @@ Item {
             width: 24; height: 24
             scale: 1.45
             preferredRendererType: Shape.CurveRenderer
-            visible: !root.busy && !root.scanning
+            visible: !root.busy && !root.scanning && root.showGlyph
             ShapePath {
                 strokeColor: root.glyphColor; fillColor: "transparent"; strokeWidth: 1.7
                 capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
@@ -204,7 +195,7 @@ Item {
             anchors.centerIn: parent
             width: 24; height: 24
             scale: 1.45
-            visible: root.scanning
+            visible: root.scanning && root.showGlyph
             icon: "radar"
             tint: root.glyphColor
             weight: 1.7
@@ -221,7 +212,7 @@ Item {
         MouseArea {
             id: coreMa
             anchors.fill: parent
-            enabled: !root.scanning
+            enabled: !root.scanning && root.tappable
             cursorShape: Qt.PointingHandCursor
             onClicked: root.coreClicked()
         }

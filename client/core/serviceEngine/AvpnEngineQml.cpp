@@ -1176,6 +1176,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->activeBaseUrl() : m_baseUrl; },
                                kConfigPubKeyHex,
                                [this]() { return authToken(); });
+    // Device round air-C 24.11: a lease request whose last try on the walk's edge got no answer goes to the walk's next edge -
+    // ONE host rule for acquire, renew and release (UpstreamLeaseWire.h::upstreamDirectBase); the walk itself is not moved.
+    if (avpn::UpstreamLeaseClient *lease = m_tunnel.upstreamClient())
+        lease->setNextDirectBase([this](const QString &base) { return m_configSvc ? m_configSvc->nextEdgeAfter(base) : QString(); });
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
     // уже вырезает каждый вход, поэтому смена edge не требует перезапуска туннеля.
     resolveApiCarveHosts(avpn::edgeHosts(avpn::edgeCandidates(avpn::ConfigStore::loadEdges(), kBakedEdges)));
@@ -1474,6 +1478,26 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // The attempt owner's clock does not run while the dialog is open (the transition timer skips its
         // tick); the first tick after it counts at most clockJumpMs.
     });
+    // Device round air-B 24.11 (iPhone Air, first Auto tap, empty ledger): the stop of a blind leg still starting took
+    // 25 s; the owner gave it up after 10 s and sent the proven path, the native PARKED that start behind the teardown
+    // (one session at a time) and its 5 s clock wrote "no handshake" against the path the race had just proven. The
+    // native says when a start is parked and when it goes out; that is the leg's local phase, one mechanism with
+    // Android's build reports (AttemptOwner.h "Local build", ServiceEngine::onLocalBuild): the clock stands, nothing is
+    // judged for it, the start's own deadline runs from "goes out". The leg is the one the native stream is at (review
+    // E2: the park is reported for the controller's current operation only, which is the newest start sent).
+#ifdef Q_OS_IOS
+    connect(IosController::Instance(), &IosController::startAwaitsTeardown, this, [this](bool waiting) {
+        const quint64 leg = m_tunnel.nativeLegSeen();
+        reliabilityEvent(QStringLiteral("ios_start_%1 leg=%2 attempt_leg=%3")
+                             .arg(waiting ? QStringLiteral("parked") : QStringLiteral("resumed"))
+                             .arg(leg).arg(m_engine.attemptLeg()));
+        m_engine.onLocalBuild(waiting ? avpn::ServiceEngine::LocalBuildReport::Building
+                                      : avpn::ServiceEngine::LocalBuildReport::Built,
+                              leg);
+        if (syncAttempt())
+            QTimer::singleShot(0, this, [this]() { reconcile(); });
+    }, Qt::QueuedConnection);
+#endif
     // The physical path for the native's journal of a session that never completed a handshake (an input of the
     // line only: the attempt owner decides about such a session, review of 18.11).
     IosController::Instance()->setUplinkProbe([] { return avpn::UplinkMonitor::instance()->physicalUp(); });
@@ -4293,6 +4317,7 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
         reliabilityEvent(QStringLiteral("adopt_identity_pending"));
     }
     identifyAdoptedSession();
+    m_tunnel.adoptUpstreamSession(); // C3 of 24.11 (iOS): the seat of an adopted provider session is this app's again
     reliabilityEvent(QStringLiteral("adopt_%1 verdict=%2 node=%3")
                          .arg(QLatin1String(why)).arg(int(verdict)).arg(m_engine.currentNodeId()));
     syncAttempt();
@@ -4343,8 +4368,10 @@ void AvpnEngineQml::identifyAdoptedSession()
     m_engine.adoptTunnelConnected(metadata.value(QStringLiteral("node_id")).toString(), proto, endpoint);
     if (!m_engine.currentIdentityKnown())
         m_engine.tryIdentifyCurrentNode(); // по endpoint-подсказке сессии (K5/B3)
-    if (m_engine.currentIdentityKnown())
+    if (m_engine.currentIdentityKnown()) {
         reliabilityEvent(QStringLiteral("adopt_identity_resolved node=%1").arg(m_engine.currentNodeId()));
+        m_tunnel.adoptUpstreamSession(); // C3 of 24.11: the metadata came after the adoption
+    }
 #endif
 }
 
@@ -4356,6 +4383,9 @@ void AvpnEngineQml::onTick()
         m_engine.resetHealthSampling();
         return;
     }
+    // round 142 (B2): the iOS app path monitor tells no event without the Scanner's hook. Read right after the sleep
+    // gate: the gate is a constant false on iOS, and on macOS the fact also comes with every network notice.
+    noteUplinkFact();
     // S2 (device round 5): the identity of an adopted session is looked for on every tick until it is known - after a
     // relaunch the session metadata often arrives after the first Connected (the card had no server name, the
     // Scanner showed «VPN не подключён»).
@@ -8179,6 +8209,38 @@ void AvpnEngineQml::finishScannerSvc(bool ok, const QString &err)
 void AvpnEngineQml::scanNotifyNetwork()
 {
     m_scanNotifier.notice();
+    noteUplinkFact();
+}
+
+// Device round of 142 (B2): the fact behind tunnelUpNoUplink - the device is known to have no physical network
+// (UplinkMonitor.h physicalUplinkKnownDown). Read on every network notice (scanNotifyNetwork: the uplink monitor's
+// events; the iOS app path monitor's while the Scanner hooks it) and on every tick (iOS without that hook) - no timer
+// or probe of its own. A move voids the live verdict: what the probe said before (red bars, «трафик не проходит») is
+// not about the network now - measured again from scratch, as after a tunnel change. The session's data proof
+// (m_liveProven) and the chips stay.
+void AvpnEngineQml::noteUplinkFact()
+{
+    const avpn::UplinkMonitor *uplink = avpn::UplinkMonitor::instance();
+    avpn::AppPathFact appPath = avpn::AppPathFact::None;
+#ifdef Q_OS_IOS
+    ScanNetSource seen;
+    if (IosScanHost::appGeneration(seen))
+        appPath = IosScanHost::appBindInterfaceIndex() > 0 ? avpn::AppPathFact::Physical : avpn::AppPathFact::NoPhysical;
+#endif
+    const bool down = avpn::physicalUplinkKnownDown(uplink->authoritative(), uplink->up(), appPath);
+    if (down == m_uplinkKnownDown)
+        return;
+    m_uplinkKnownDown = down;
+    reliabilityEvent(QStringLiteral("uplink_known_down %1 tunnel=%2")
+                         .arg(int(down)).arg(int(m_lastTunnelState == Vpn::Connected)));
+    m_signal.reset();
+    m_liveBars = 0;
+    m_liveRtt = -1;
+    m_liveReachable = false;
+    m_liveDead = false;
+    m_liveFailStreak = 0;
+    emit liveQualityChanged();
+    emit changed();
 }
 
 // The live status for the coordinator (deduplicated), the own connect's «Подключено» latch and a row tap's
