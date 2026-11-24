@@ -48,6 +48,7 @@ void IpcServerProcess::start()
     if (const int ended = avpn::OwnedChildren::service().endOthersOf(m_program, m_process.data()))
         qDebug() << "IpcServerProcess ended the previous instance(s):" << ended;
     m_control.onStarted();
+    m_xrayGeneration = avpn::XraySessionLedger::service().generation; // AVPN (review F2)
 #endif
     m_process->start();
     qDebug() << "IpcServerProcess started, " << m_process->program() << m_process->arguments();

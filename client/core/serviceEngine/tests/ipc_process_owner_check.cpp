@@ -7,8 +7,11 @@
 //   P2  a previous instance that ignores SIGTERM is killed after the grace; the call is bounded;
 //   P3  endChildLater never blocks: SIGTERM at once, SIGKILL after the grace when SIGTERM is ignored;
 //   P4  the controller rule: the last controller gone while the child runs ends it - Abandoned when no
-//       controller asked for the end; another controller left, or the child not running -> Keep.
-// The old start (pkill <full path>, which matched nothing) fails P1. Run by build_ipc_process_owner.sh.
+//       controller asked for the end; another controller left, or the child not running -> Keep;
+//   P5  (review F2) a lost client's tun2socks ends the Xray session only when it was started in the session
+//       that is still open: a newer client's session started first is never touched, the current one is ended.
+// The old start (pkill <full path>, which matched nothing) fails P1; the previous lost-client rule (any
+// abandoned tun2socks ends the session) fails P5. Run by build_ipc_process_owner.sh.
 #include "ipcprocessowner.h"
 
 #include <QCoreApplication>
@@ -167,10 +170,101 @@ static void controllerRule()
     CHECK(restarted.onControllerLost(true) == ControllerLoss::Abandoned);
 }
 
+// The shared Xray state of the service, driven the way IpcServer drives it: xrayStart/xrayStop move the ledger,
+// a tun2socks start tags the child with the generation (IpcServerProcess::start), and a lost controller acts on
+// decideLostController (IpcServer::onProcessControllerLost; its teardown ends with xrayStop).
+struct ServiceModel
+{
+    XraySessionLedger ledger;
+    QString core; // whose core runs, empty = none
+    bool killSwitch = false;
+    int teardowns = 0;
+
+    void xrayStart(const char *client)
+    {
+        ledger.onCoreStart();
+        core = QString::fromLatin1(client);
+        killSwitch = true; // setupRouting of that client
+    }
+    void xrayStop()
+    {
+        ledger.onCoreStop();
+        core.clear();
+        killSwitch = false;
+    }
+    quint64 tun2socksStarted() const { return ledger.generation; }
+    LostControllerStep lost(ControllerLoss loss, bool tun2socks, quint64 childGeneration)
+    {
+        const LostControllerStep step = decideLostController(loss, tun2socks, childGeneration, ledger);
+        if (step == LostControllerStep::EndSessionThenChild) {
+            ++teardowns;
+            killSwitch = false;
+            xrayStop();
+        }
+        return step;
+    }
+};
+
+static void sessionIdentity()
+{
+    using L = LostControllerStep;
+    { // client A lost; client B's xrayStart was handled before A's disconnect
+        ServiceModel svc;
+        svc.xrayStart("A");
+        const quint64 childA = svc.tun2socksStarted();
+        svc.xrayStart("B");
+        const quint64 childB = svc.tun2socksStarted();
+        CHECK(svc.lost(ControllerLoss::Abandoned, true, childA) == L::EndChild);
+        CHECK(svc.core == QLatin1String("B") && svc.killSwitch && svc.teardowns == 0); // B untouched
+        CHECK(svc.lost(ControllerLoss::Abandoned, true, childB) == L::EndSessionThenChild); // B lost too
+        CHECK(svc.core.isEmpty() && !svc.killSwitch && svc.teardowns == 1);
+        std::fprintf(stderr, "P5 older client's child after a newer session: %s; newer session's own child: ended it\n",
+                     svc.teardowns == 1 ? "child only, newer session kept" : "TOUCHED the newer session");
+    }
+    { // the reverse order: A's disconnect first, then B starts on a closed generation
+        ServiceModel svc;
+        svc.xrayStart("A");
+        const quint64 childA = svc.tun2socksStarted();
+        CHECK(svc.lost(ControllerLoss::Abandoned, true, childA) == L::EndSessionThenChild);
+        CHECK(svc.core.isEmpty() && !svc.killSwitch);
+        svc.xrayStart("B");
+        CHECK(svc.ledger.isCurrentOpen(svc.tun2socksStarted()) && !svc.ledger.isCurrentOpen(childA));
+        CHECK(svc.lost(ControllerLoss::Abandoned, true, childA) == L::EndChild); // never B's session
+        CHECK(svc.core == QLatin1String("B") && svc.killSwitch);
+    }
+    { // A stopped its core itself, its end request for tun2socks never left: child only, no second teardown
+        ServiceModel svc;
+        svc.xrayStart("A");
+        const quint64 childA = svc.tun2socksStarted();
+        svc.xrayStop();
+        CHECK(svc.lost(ControllerLoss::Abandoned, true, childA) == L::EndChild);
+        CHECK(svc.teardowns == 0);
+    }
+    { // a resource-busy retry inside one session: the second tun2socks belongs to the same session
+        ServiceModel svc;
+        svc.xrayStart("A");
+        const quint64 first = svc.tun2socksStarted();
+        const quint64 retry = svc.tun2socksStarted();
+        CHECK(first == retry);
+        CHECK(svc.lost(ControllerLoss::Abandoned, true, retry) == L::EndSessionThenChild);
+    }
+    { // never a session for other programs, a requested end or a child still controlled
+        ServiceModel svc;
+        svc.xrayStart("A");
+        const quint64 g = svc.tun2socksStarted();
+        CHECK(svc.lost(ControllerLoss::Abandoned, false, g) == L::EndChild);
+        CHECK(svc.lost(ControllerLoss::End, true, g) == L::EndChild);
+        CHECK(svc.lost(ControllerLoss::Keep, true, g) == L::Nothing);
+        CHECK(svc.core == QLatin1String("A") && svc.killSwitch && svc.teardowns == 0);
+    }
+    CHECK(XraySessionLedger::service().generation == 0 && !XraySessionLedger::service().open); // untouched here
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     controllerRule();
+    sessionIdentity();
     previousInstanceEnded();
     stubbornPreviousKilled();
     endLaterNeverBlocks();

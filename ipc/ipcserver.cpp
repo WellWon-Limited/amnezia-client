@@ -102,11 +102,14 @@ void IpcServer::onProcessControllerLost(IpcServerProcess *process)
 {
     if (m_closing)
         return;
-    const avpn::ControllerLoss loss = process->controllerLost();
-    if (loss == avpn::ControllerLoss::Keep)
+    // AVPN (review F2): only a child of the session that is still open ends it; an older client's child (a newer
+    // xrayStart came first) is ended alone and never touches the newer session's state.
+    const avpn::LostControllerStep step = avpn::decideLostController(
+            process->controllerLost(), process->program() == amnezia::PermittedProcess::Tun2Socks,
+            process->xrayGeneration(), avpn::XraySessionLedger::service());
+    if (step == avpn::LostControllerStep::Nothing)
         return;
-    const bool xraySession =
-            loss == avpn::ControllerLoss::Abandoned && process->program() == amnezia::PermittedProcess::Tun2Socks;
+    const bool xraySession = step == avpn::LostControllerStep::EndSessionThenChild;
     if (xraySession) {
         qWarning() << "IpcServer: tun2socks lost its client without a stop - ending its Xray session";
         disableKillSwitch();
@@ -384,6 +387,9 @@ bool IpcServer::xrayStart(const QString& cfg)
 #endif
 
     m_scanHost.stopAllBeforeTunnelChange("xray_start"); // AVPN (Scanner)
+#ifndef Q_OS_WIN
+    avpn::XraySessionLedger::service().onCoreStart(); // AVPN (review F2): a new session from here on
+#endif
     return Xray::getInstance().startXray(cfg);
 }
 
@@ -394,6 +400,9 @@ bool IpcServer::xrayStop()
 #endif
 
     m_scanHost.stopAllBeforeTunnelChange("xray_stop"); // AVPN (Scanner)
+#ifndef Q_OS_WIN
+    avpn::XraySessionLedger::service().onCoreStop(); // AVPN (review F2): the session is over
+#endif
     return Xray::getInstance().stopXray();
 }
 

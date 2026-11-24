@@ -53,6 +53,58 @@ struct ChildControl
     }
 };
 
+// AVPN (review F2): the service's Xray session by identity. Every xrayStart opens a new generation, every
+// xrayStop closes the current one with a new generation too; a tun2socks child carries the generation it was
+// started in. Shared state - the core, kill switch, resolvers, routes, the TUN device - belongs to the open
+// generation, so a lost client's child may end that state only when it was started in it: a newer client's
+// xrayStart that the service handled before the lost client's disconnect makes the child an older one.
+// All of it lives on the service's main thread: QtRO slots (xrayStart/xrayStop, the child's start) and the
+// sockets' disconnected signals are delivered there one at a time. The teardown that ends a session runs no
+// event loop (Router/KillSwitch/Xray block on QProcess::waitForFinished or call the core directly), so no
+// xrayStart can land inside it - one that comes later sees a closed generation and starts a fresh one. (The
+// AmneziaWG daemon's UAPI waits do pump events, so a handler may run nested inside one; each still runs to its
+// end without pumping, and the generation is read when it runs.)
+struct XraySessionLedger
+{
+    quint64 generation = 0;
+    bool open = false;
+
+    static XraySessionLedger &service()
+    {
+        static XraySessionLedger ledger;
+        return ledger;
+    }
+
+    void onCoreStart()
+    {
+        ++generation;
+        open = true;
+    }
+    void onCoreStop()
+    {
+        ++generation;
+        open = false;
+    }
+    bool isCurrentOpen(quint64 childGeneration) const { return open && childGeneration == generation; }
+};
+
+// What the service does when a controlling connection of a child closes.
+enum class LostControllerStep {
+    Nothing,          // the child is still controlled, or not running
+    EndChild,         // end the child only (its end was requested, or its session is not the open one)
+    EndSessionThenChild, // a tun2socks of the open session lost its client: end that session, then the child
+};
+
+inline LostControllerStep decideLostController(ControllerLoss loss, bool isTun2Socks, quint64 childGeneration,
+                                               const XraySessionLedger &ledger)
+{
+    if (loss == ControllerLoss::Keep)
+        return LostControllerStep::Nothing;
+    if (loss == ControllerLoss::Abandoned && isTun2Socks && ledger.isCurrentOpen(childGeneration))
+        return LostControllerStep::EndSessionThenChild;
+    return LostControllerStep::EndChild;
+}
+
 inline constexpr int kChildTermGraceMs = 1000; // SIGTERM first; SIGKILL if it still runs after this
 inline constexpr int kChildKillWaitMs = 1000;
 

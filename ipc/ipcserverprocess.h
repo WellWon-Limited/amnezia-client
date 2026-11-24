@@ -49,6 +49,8 @@ public:
     amnezia::PermittedProcess program() const { return m_program; }
     // The device of a tun2socks child ("-device tun://utun22" -> "utun22"); empty for other programs.
     QString tunDevice() const;
+    // The service's Xray session generation this child was started in (XraySessionLedger).
+    quint64 xrayGeneration() const { return m_xrayGeneration; }
 #endif
 
 signals:
@@ -58,6 +60,7 @@ private:
     QSharedPointer<QProcess> m_process;
 #ifndef Q_OS_WIN
     avpn::ChildControl m_control; // AVPN
+    quint64 m_xrayGeneration = 0; // AVPN (review F2)
 #endif
 };
 
