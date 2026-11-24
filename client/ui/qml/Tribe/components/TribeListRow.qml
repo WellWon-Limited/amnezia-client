@@ -11,6 +11,7 @@ Rectangle {
     property alias rightItem: rightSlot.data
     property alias leftItem: leftSlot.data
     property bool interactive: true
+    property bool monoSubtitle: true    // false: the subtitle in the body font (words, not an endpoint - the Scanner's choice)
     signal clicked()
 
     implicitHeight: 60
@@ -56,7 +57,7 @@ Rectangle {
                 visible: rowRoot.subtitle !== ""
                 text: rowRoot.subtitle
                 color: Theme.color.text3
-                font.family: Theme.font.mono
+                font.family: rowRoot.monoSubtitle ? Theme.font.mono : Theme.font.body
                 font.pixelSize: Theme.font.caption
                 elide: Text.ElideRight
                 width: parent.width

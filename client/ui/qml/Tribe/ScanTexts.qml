@@ -142,7 +142,7 @@ QtObject {
     readonly property string moreExhaustedScope: qsTr("%1: проверены все серверы")        // «Найти ещё» has nothing left in a country scope
     readonly property string moreExhaustedUnshown: qsTr("%1: проверены все серверы. Не ответили: %2") // the same, when the menu counted more servers than the list shows (%2 = how many)
     readonly property string emptyScopeTitle: qsTr("%1: доступных нод сейчас нет")         // empty result of a country scan (%1 = the country)
-    readonly property string emptyScopeText: qsTr("Попробуйте другую страну или проверьте все страны.") // text, the same state
+    readonly property string emptyScopeText: qsTr("Попробуйте другую страну или проверьте все.") // text, the same state (owner 24.11)
     // variant B (owner decision 18.11): the check with the report lives in Support - the bar under the chat header
     readonly property string supportCheck: qsTr("Проверить подключение и отправить отчёт") // Support bar, idle
     readonly property string supportCheckSub: qsTr("Отчёт придёт сюда, в чат") // its second line
@@ -150,6 +150,15 @@ QtObject {
     readonly property string supportSending: qsTr("Отправляем отчёт…")                    // the bar: no connection, the report alone / the last stage
     readonly property string supportCheckingSub: qsTr("До 20 секунд — отчёт сам придёт в чат") // its second line while running
     readonly property string whitelists: qsTr("Белые списки")  // the country menu's white-list scope (rows without a country), «Белые списки · N»
+    // owner 24.11: the Scanner opens on its country choice («Выбор»), a tap shows that country's result or scans it
+    readonly property string chooseCaption: qsTr("ВЫБЕРИТЕ СТРАНУ")                        // caption over the choice list
+    readonly property string liveCaption: qsTr("ВАШЕ ПОДКЛЮЧЕНИЕ")                         // caption over the live row on the choice list
+    readonly property string scanAll: qsTr("Сканировать все страны")                        // the choice's pinned button; the empty country state's first button
+    readonly property string chooseOther: qsTr("Выбрать другую страну")                     // the empty country state's second button: back to the choice
+    readonly property string scanAgain: qsTr("Сканировать снова")                           // the result's Scan button once a result is on the screen
+    readonly property string rescanInS: qsTr("Повторный скан — через %1 с")                 // hint over the choice's button during the 30 s pause
+    readonly property string slotWorks: qsTr("%1 доступно")                                 // a choice row with a fresh result, right side over its age («3 мин назад»)
+    readonly property string poolWait: qsTr("Список стран пока не загружен — можно проверить все страны сразу.") // the choice before the pool answers (NO FRAME)
     // ELSEWHERE: «Не удалось сохранить отчёт на устройстве — он не отправлен» - chat toast, TribeSupportChat.cpp (queue lane)
     // NO FRAME, existing texts reused (no new wording; listed so the owner sees every fallback):
     //  - stage «preparing» (manifest requested): stageReachShort without the counts + an indeterminate bar

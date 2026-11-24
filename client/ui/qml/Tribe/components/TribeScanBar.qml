@@ -3,50 +3,34 @@ import QtQuick.Layouts
 
 import ".."   // Theme, ScanTexts, Haptic
 
-// AVPN: the Scanner's pinned bottom bar (artboard vpn-scanner-kit.js scanFoot, plan §1.2/§1.3): the hint line,
-// then the country menu LEFT of the action button. `bar` is the ScanView bar JSON (ScanMachine.h): menu_visible,
-// menu_enabled, selected, countries, total, button stop | retry | retry_in_s | retry_in_min | connect_and_scan,
-// button_enabled, button_value, hint none | cellular_budget_hour.
-// Owner 18.11: no «Скан потратит до N МБ» line (the machine no longer computes it); only the hourly limit
-// (cellular_budget_hour) and the VPN-off hint keep a line. The budget rule is unchanged.
-// The countdown lives INSIDE the button: a 1 s Timer rewrites only the button text from the end time
-// (the view's cooldown_ends_at_ms against its now_ms; minutes and a view without them: now + button_value at
-// arrival), so the screen is not rebuilt every second; at zero the button turns into «Повторить» (the machine
-// re-checks the cooldown).
+// AVPN: the Scanner's pinned bottom bar (artboard vpn-scanner-kit.js scanFoot, plan §1.2/§1.3): the hint line, then
+// ONE full-width action button. `bar` is the ScanView bar JSON (ScanMachine.h): button stop | retry | retry_in_s |
+// retry_in_min | connect_and_scan, button_enabled, button_value, hint none | cellular_budget_hour, scope_countries.
+// Owner 24.11: the country menu left of the button is gone - the Scanner opens on its country choice (the page's
+// «Выбор»), so the bar serves both views of the page:
+//  - choosing: «Сканировать все страны» (primary); during the 30 s pause or the cellular hour it is disabled and the
+//    hint line says why («Повторный скан — через N с», «Лимит сканов в мобильной сети на этот час");
+//  - the result: «Остановить» while scanning, then «Сканировать снова» / its countdown, «Подключиться и проверить».
+// The countdown lives INSIDE the bar: a 1 s Timer rewrites only the texts from the end time (the view's
+// cooldown_ends_at_ms against its now_ms; minutes and a view without them: now + button_value at arrival), so the
+// screen is not rebuilt every second; at zero the button is enabled again (the machine re-checks the cooldown).
 Item {
     id: root
 
     property var bar: ({})
-    readonly property bool menuOpen: menu.opened
+    property bool choosing: false        // the page's country choice: the button scans every country
+    property bool again: false           // a result is on the screen: «Сканировать снова» instead of «Сканировать»
     signal stopTapped()
     signal retryTapped()
     signal connectAndScanTapped()
-    signal countryChosen(string cc)
+    signal scanAllTapped()
 
     readonly property string kind: bar.button || "retry"
     readonly property bool countdown: kind === "retry_in_s" || kind === "retry_in_min"
-    readonly property bool fallback: kind === "connect_and_scan"
-    readonly property string hintText: fallback ? ScanTexts.fallbackHint
-        : bar.hint === "cellular_budget_hour" ? ScanTexts.hourLimit
-        : ""
-    // Country = the scan's SCOPE over the whole pool (owner 18.11, 19.11). bar.scope_countries [{cc, count, name}] =
-    // every country of the pool (GET /v1/scan/pool: own servers + provider profiles, count = own + provider; before
-    // the pool answers - the countries this device's manifest can probe), bar.scope = the chosen scope of the next
-    // scan, bar.scanned_scope = the scope the shown result covers ("" = all). The menu shows and changes the SCOPE;
-    // a choice starts nothing. Without scope_countries (an older engine) the menu stays the filter of found rows.
-    readonly property bool scopeMode: Array.isArray(bar.scope_countries) && bar.scope_countries.length > 0
-    readonly property var menuCountries: scopeMode ? bar.scope_countries : (bar.countries || [])
-    readonly property int menuTotal: {
-        if (!scopeMode) return Number(bar.total || 0)
-        let n = 0
-        for (let i = 0; i < bar.scope_countries.length; ++i) n += Number(bar.scope_countries[i].count || 0)
-        return n
-    }
-    // the menu's mark: the scope (an engine without bar.scope: the filter, as before)
-    readonly property string chosen: (scopeMode && bar.scope !== undefined) ? String(bar.scope || "") : String(bar.selected || "")
-    // the whole pool is a choice even with one country («Все страны» + it); the scan locks it (menu_enabled false)
-    readonly property bool showMenu: !fallback && (scopeMode ? bar.scope_countries.length >= 1 : bar.menu_visible === true)
+    readonly property bool fallback: kind === "connect_and_scan" && !choosing
     function countryName(cc) {
+        if (cc === "")
+            return ScanTexts.allCountries
         if (cc === "whitelist")
             return ScanTexts.whitelists
         const lists = [bar.scope_countries || [], bar.countries || []]
@@ -79,20 +63,29 @@ Item {
     Timer {
         interval: 1000
         repeat: true
-        running: root.countdown && root.remaining > 0   // also drives the empty / blocked buttons of the page
+        running: root.countdown && root.remaining > 0   // also drives the page's choice rows and empty / blocked buttons
         onTriggered: root.nowMs = Date.now()
     }
     readonly property int remaining: !countdown ? 0
         : Math.max(0, Math.ceil((endsAtMs - nowMs) / (kind === "retry_in_min" ? 60000 : 1000)))
     readonly property bool counting: countdown && remaining > 0
-    // ONE Scan button, one meaning (owner 19.11): «Сканировать» scans the chosen scope; its countdown says the same
-    // («Сканировать через N с|мин»). The page's empty and blocked states reuse it.
+    // a tap that would start a scan now is refused by the machine (retryTapped ignores it silently): the page never
+    // offers it - the choice rows without a result, «Сканировать все страны» and the empty state's buttons
+    readonly property bool gated: counting
+    // the gate said in words, the hint style of the bar (the choice view and the empty state of a country)
+    readonly property string gateText: !counting ? ""
+        : kind === "retry_in_min" ? ScanTexts.hourLimit
+        : ScanTexts.rescanInS.arg(remaining)
+    readonly property string hintText: choosing ? gateText
+        : fallback ? ScanTexts.fallbackHint
+        : bar.hint === "cellular_budget_hour" ? ScanTexts.hourLimit
+        : ""
+    // The result's Scan button (owner 19.11: one button, one meaning - it scans the chosen scope); its countdown says
+    // the same («Сканировать через N с|мин»). The page's empty and blocked states reuse it.
     readonly property string retryText: counting ? (kind === "retry_in_min" ? ScanTexts.scanInMin.arg(remaining)
                                                                             : ScanTexts.scanInS.arg(remaining))
-                                                 : ScanTexts.scanScope
+                                                 : (again ? ScanTexts.scanAgain : ScanTexts.scanScope)
     readonly property bool retryEnabled: countdown ? !counting : bar.button_enabled !== false
-
-    function closeMenu() { menu.close() }
 
     implicitHeight: col.implicitHeight + Theme.space.sm + Theme.space.lg
 
@@ -120,51 +113,28 @@ Item {
             lineHeightMode: Text.FixedHeight
         }
 
-        RowLayout {
-            id: barRow
+        TribeButton {
+            id: actionButton
             Layout.fillWidth: true
-            spacing: Theme.space.md
-
-            TribeCountryMenu {
-                id: menu
-                visible: root.showMenu
-                enabled: root.bar.menu_enabled === true
-                Layout.preferredWidth: implicitWidth
-                Layout.preferredHeight: Theme.scan.barHeight
-                countries: root.menuCountries
-                total: root.menuTotal
-                whitelist: root.scopeMode ? Number(root.bar.scope_whitelist || 0) : 0
-                selected: root.chosen
-                // menu bottom = 4 px under the bar's top edge (artboard .mn bottom: calc(100% - 4px))
-                menuLift: barRow.y + Theme.space.sm - 4
-                // up to Theme.scan.menuButtonMax, but never squeezing the action button below its own text (360 px phones)
-                maxButtonWidth: Math.max(Theme.scan.barHeight * 2,
-                                         Math.min(Theme.scan.menuButtonMax,
-                                                  root.width - 2 * Theme.space.xl - barRow.spacing - actionButton.textNeed))
-                onChosen: (cc) => root.countryChosen(cc)
-            }
-
-            TribeButton {
-                id: actionButton
-                // the label plus 12 px a side (implicitWidth carries TribeButton's own 24 a side)
-                readonly property real textNeed: Math.ceil(implicitWidth - 2 * Theme.space.xl + 2 * Theme.space.md)
-                Layout.fillWidth: true
-                Layout.minimumWidth: 0
-                Layout.preferredHeight: Theme.scan.barHeight
-                padding: 0
-                leftPadding: Theme.space.lg
-                rightPadding: Theme.space.lg
-                variant: root.kind === "stop" ? "ghost" : (root.fallback ? "primary" : "glass")
-                text: root.kind === "stop" ? ScanTexts.stop
-                      : root.fallback ? ScanTexts.connectAndScan
-                      : root.retryText
-                enabled: (root.kind === "stop" || root.fallback) ? root.bar.button_enabled !== false : root.retryEnabled
-                onClicked: {
-                    Haptic.play("light")
-                    if (root.kind === "stop") root.stopTapped()
-                    else if (root.fallback) root.connectAndScanTapped()
-                    else root.retryTapped()
-                }
+            Layout.minimumWidth: 0
+            Layout.preferredHeight: Theme.scan.barHeight
+            padding: 0
+            leftPadding: Theme.space.lg
+            rightPadding: Theme.space.lg
+            variant: root.choosing ? "primary"
+                     : root.kind === "stop" ? "ghost" : (root.fallback ? "primary" : "glass")
+            text: root.choosing ? ScanTexts.scanAll
+                  : root.kind === "stop" ? ScanTexts.stop
+                  : root.fallback ? ScanTexts.connectAndScan
+                  : root.retryText
+            enabled: root.choosing ? (!root.gated && root.kind !== "stop")
+                     : (root.kind === "stop" || root.fallback) ? root.bar.button_enabled !== false : root.retryEnabled
+            onClicked: {
+                Haptic.play("light")
+                if (root.choosing) root.scanAllTapped()
+                else if (root.kind === "stop") root.stopTapped()
+                else if (root.fallback) root.connectAndScanTapped()
+                else root.retryTapped()
             }
         }
     }

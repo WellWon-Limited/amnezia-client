@@ -47,6 +47,7 @@ Item {
         "check-mark": "M5 12.5L9.5 17L19 7",   // the «Авто» card's check (PageServersTribe)
         "chevron-down": "M6 9l6 6 6-6",
         "chevron-up": "M6 15l6-6 6 6",
+        "chevron-right": "M9 18l6-6-6-6",   // the Scanner's country choice rows (owner 24.11), app only like the keys above
         "info-circle": "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z M12 16v-4 M12 8h.01",
         "check-circle": "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z M9 12l2 2 4-4",
         "alert-triangle": "M21.73 18l-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z M12 9v4 M12 17h.01",
