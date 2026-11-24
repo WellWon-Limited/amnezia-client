@@ -90,6 +90,13 @@ Item {
     // what a tap of the button does now (F1: the press keeps its own)
     function action() { return choosing ? "scan_all" : kind === "stop" ? "stop" : fallback ? "connect" : "retry" }
     property string pressAction: ""
+    function fire(a) {
+        Haptic.play("light")
+        if (a === "scan_all") root.scanAllTapped()
+        else if (a === "stop") root.stopTapped()
+        else if (a === "connect") root.connectAndScanTapped()
+        else root.retryTapped()
+    }
 
     implicitHeight: col.implicitHeight + Theme.space.sm + Theme.space.lg
 
@@ -133,23 +140,25 @@ Item {
                   : root.retryText
             enabled: root.choosing ? (!root.gated && root.kind !== "stop")
                      : (root.kind === "stop" || root.fallback) ? root.bar.button_enabled !== false : root.retryEnabled
-            // Review round 36, F1: this one button changes its action when it is tapped («Остановить» -> the choice's
-            // «Сканировать все страны», «Сканировать все страны» -> «Остановить»). The action never changes under the
-            // finger: a press fires only the action it began with, and the second tap of a double tap (Qt's own
-            // double-tap recognition of this button, doubleClicked) is absorbed - a double tap on «Остановить» only
-            // stops, it never starts a scan of every country.
+            // Review round 36, F1 + round 37, F5: this one button changes its action when it is tapped («Остановить» ->
+            // the choice's «Сканировать все страны», «Сканировать все страны» -> «Остановить»). The rule is asymmetric:
+            //  - a tap never STARTS anything it did not mean when the finger went down: a press fires only the action it
+            //    began with (none if the button changed its meaning while pressed), and the second tap of a double tap
+            //    (Qt's own double-tap recognition of this button, doubleClicked) starts nothing - a double tap on
+            //    «Остановить» only stops, it never scans every country;
+            //  - a STOP is always delivered: a press that began as «Остановить» on a button that still means it stops,
+            //    also as the second tap of a double tap («Сканировать все страны», then «Остановить» at once).
             onPressed: root.pressAction = root.action()
             onCanceled: root.pressAction = ""
-            onDoubleClicked: root.pressAction = ""
+            onDoubleClicked: {
+                const a = root.pressAction
+                root.pressAction = ""
+                if (a === "stop" && root.action() === "stop") root.fire("stop")
+            }
             onClicked: {
                 const a = root.pressAction !== "" ? root.pressAction : root.action()
                 root.pressAction = ""
-                if (a !== root.action()) return    // the button changed its meaning while pressed: nothing
-                Haptic.play("light")
-                if (a === "scan_all") root.scanAllTapped()
-                else if (a === "stop") root.stopTapped()
-                else if (a === "connect") root.connectAndScanTapped()
-                else root.retryTapped()
+                if (a === root.action()) root.fire(a)    // the button changed its meaning while pressed: nothing
             }
         }
     }
