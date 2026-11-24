@@ -21,9 +21,12 @@
 // under a foreign NE VPN with a live en0). So iOS keeps the QNetworkInformation fallback, and the
 // question "physical path known to exist" (physicalUp) is answered strictly: unknown = no. up() keeps
 // its old lenient meaning (unknown = up: never block a start or pause health on an unknown state).
+#include <QByteArray>
+#include <QCryptographicHash>
 #include <QList>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 namespace avpn {
 
@@ -105,6 +108,77 @@ inline QString uplinkPhysicalKind(const QList<UplinkRouteIface> &ifaces)
     return QString();
 }
 
+// Round mac-B (test Mac 25.11, build 141): every AmneziaWG connect looped - one leg every 1.3 s. The facts of the
+// physical network (the path engine's network key, the Scanner's generation and fingerprint) came from the
+// nw_path_monitor with the virtual interface type prohibited, and that path is NOT a physical fact: the same monitor
+// reads, measured on the test Mac (netfacts, hashes only):
+//   own Xray (tun2socks utun, split routes 1/8..128/1)   status 1 (satisfied), interfaces en0, gateways = the router
+//   own AmneziaWG (utun, 0/1 + 128/1)                     status 2 (unsatisfied), interfaces utun4 + en0, NO gateway
+// so the key moved from wifi:<router|subnet> to wifi:<|subnet> the moment our own tunnel came up, the attempt owner
+// took it for a new network, restarted the leg, the tunnel went down and the key came back. A foreign VPN's tunnel
+// does the same to that path (28.09: "unsatisfied reason 0" under an NE VPN with a live en0).
+// The rule: the facts are read only from sources that describe the physical network and that no tunnel - ours of
+// any transport or another app's - writes:
+//  - the routers of the physical network services (SystemConfiguration State:/Network/Service/<id>/IPv4: Router
+//    with its InterfaceName, a physical interface only): the configuration the physical network gave the Mac
+//    (DHCP or manual). Neither our daemon nor tun2socks registers a service; another app's VPN service has a
+//    virtual interface (utun, ipsec, ppp) and is left out. Measured unchanged while AmneziaWG and Xray were up;
+//  - the physical default routes of the route table (interface names only: the same interface keeps a default
+//    route under our tunnel, scoped or not);
+//  - the kind: the path's physical interface type when it names one, else the route table's (uplinkPhysicalKind).
+// The path's status, its interface list and its gateways are not read: they follow the tunnel.
+// Raw values never leave the device: the facts are hashes (gatewayHash: 16 hex of the sorted "ifname=router").
+// A virtual interface (a VPN's or a system tunnel's) - never a physical network (the prefixes of UplinkMonitor.mm and
+// the service's route monitor).
+inline bool uplinkIfnameVirtual(const QString &name)
+{
+    static const char *const prefixes[] = {"utun", "ipsec", "ppp", "gif", "stf", "bridge", "awdl", "llw"};
+    for (const char *p : prefixes)
+        if (name.startsWith(QLatin1String(p)))
+            return true;
+    return false;
+}
+
+struct UplinkReading {
+    QString pathKind;                   // "wifi" | "ethernet" | "cellular" | "" (nw_path_uses_interface_type)
+    QList<UplinkRouteIface> routeIfaces; // the route table's physical default routes, their medium
+    QStringList serviceRouters;          // "ifname=router" of every network service with a router (virtual ones too)
+    // tunnel-dependent, NOT read by uplinkPhysicalFacts (kept in the reading so the tests can feed what the path
+    // really said under each tunnel)
+    int pathStatus = 0;                  // nw_path_get_status
+    QStringList pathInterfaces;          // nw_path_enumerate_interfaces (physical names, "en0/1/<index>")
+    QStringList pathGateways;            // nw_path_enumerate_gateways (hex of the sockaddr)
+};
+
+struct UplinkPhysicalFacts {
+    QByteArray hash;     // the local identity of the physical network (the Scanner's "app" generation element)
+    QString kind;        // "wifi" | "ethernet" | "cellular" | ""
+    QString gatewayHash; // 16 hex of the physical routers, "" = none known
+};
+
+inline UplinkPhysicalFacts uplinkPhysicalFacts(const UplinkReading &r)
+{
+    UplinkPhysicalFacts f;
+    f.kind = !r.pathKind.isEmpty() ? r.pathKind : uplinkPhysicalKind(r.routeIfaces);
+    QStringList routeIfnames;
+    for (const UplinkRouteIface &i : r.routeIfaces)
+        if (!routeIfnames.contains(i.name))
+            routeIfnames << i.name;
+    routeIfnames.sort();
+    QStringList routers;
+    for (const QString &sr : r.serviceRouters)
+        if (!uplinkIfnameVirtual(sr.section(QLatin1Char('='), 0, 0)) && !routers.contains(sr))
+            routers << sr; // another app's VPN service (utun, ipsec, ppp) is not the physical network
+    routers.sort();
+    const QString in = f.kind + QLatin1Char('|') + routeIfnames.join(QLatin1Char(',')) + QLatin1Char('|')
+                       + routers.join(QLatin1Char(','));
+    f.hash = QCryptographicHash::hash(in.toUtf8(), QCryptographicHash::Sha256);
+    if (!routers.isEmpty())
+        f.gatewayHash = QString::fromLatin1(
+            QCryptographicHash::hash(routers.join(QLatin1Char(',')).toUtf8(), QCryptographicHash::Sha256).toHex().left(16));
+    return f;
+}
+
 class UplinkMonitor : public QObject
 {
     Q_OBJECT
@@ -123,9 +197,10 @@ public:
     // AVPN Scanner (plan scanner-client-plan.md §2.11a): the app's element of the strict local network
     // generation tuple ({"app", epoch, counter} of ScanNetworkGeneration.h). pathEpoch() = a random id chosen
     // when this monitor started (0 = no source: the fallback .cpp has none); pathCounter() grows by one on
-    // every change of the physical path (status, interface set, gateway set - compared as a local hash).
+    // every change of the physical network (uplinkPhysicalFacts: kind, physical default-route interfaces, physical
+    // routers - compared as a local hash; never the path's status, interfaces or gateways, which follow the tunnel).
     // pathKind() "wifi" | "ethernet" | "cellular" | "" and pathGatewayHash() (16 hex, "" unknown) feed the
-    // weak fingerprint. Never sent anywhere.
+    // weak fingerprint and the path engine's network key. Never sent anywhere.
     quint64 pathEpoch() const { return m_pathEpoch; }
     qint64 pathCounter() const { return m_pathCounter; }
     QString pathKind() const { return m_pathKind; }
@@ -154,7 +229,8 @@ private:
     bool m_authoritative = false;
     bool m_physicalUp = false; // fallback only: fallbackPhysicalUp() of the last reading
     // AVPN Scanner: the generation source (set only by the authoritative macOS monitor).
-    void setPath(const QByteArray &hash, const QString &kind, const QString &gatewayHash);
+    void setPath(const QByteArray &hash, const QString &kind, const QString &gatewayHash, const UplinkReading &reading);
+    QString m_pathSeen; // the last journal line of what the path said (round mac-B)
     quint64 m_pathEpoch = 0;
     qint64 m_pathCounter = 0;
     QByteArray m_pathHash;

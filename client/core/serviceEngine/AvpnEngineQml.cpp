@@ -3763,7 +3763,7 @@ avpn::path::NetworkObservation AvpnEngineQml::currentNetworkObservation() const
     else if (kind == QLatin1String("cellular"))
         o.medium = avpn::path::NetMedium::Cellular;
     // nothing known: Unknown keeps the last network (never "offline" from a guess - a leg's own deadline judges)
-    o.gateway = netKindInputs().gatewayHash; // the macOS path monitor; "" elsewhere
+    o.gateway = netKindInputs().gatewayHash; // macOS: the physical routers (UplinkMonitor.h uplinkPhysicalFacts); "" elsewhere
     o.subnet = physicalSubnet(kind);
     o.carrier = avpn::carrierCode();
     o.radio = avpn::cellularGenerationForKind(kind, avpn::cellularGeneration());
