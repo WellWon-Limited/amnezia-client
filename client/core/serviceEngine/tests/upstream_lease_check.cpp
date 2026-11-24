@@ -1262,7 +1262,10 @@ static void hostRule()
     CHECK(upstreamDirectBase(P, F, m, t + kUpstreamEdgeMarkMs) == P);   // a mark is only so old
     CHECK(upstreamDirectBase(P, F, m, t - 1) == P);                     // a clock that went back: no mark
     CHECK(upstreamDirectBase(F, P, m, t + 10) == F);                    // the walk moved on: its new edge is not marked
-    CHECK(upstreamEdgeMarkAfter(m, F, O::Answered, t + 2000).base == P); // an answer elsewhere keeps the mark
+    // An answer of the OTHER host keeps the mark (review round 44 Q5(b), the accepted cost): for up to kUpstreamEdgeMarkMs direct lease
+    // requests keep going to F although P may have recovered; when F is the worse host (from Russia it can stall a large acquire
+    // answer, EdgeWalk.h R1a) that costs one acquire's bounded wait, after which F is marked and the next request goes back to P.
+    CHECK(upstreamEdgeMarkAfter(m, F, O::Answered, t + 2000).base == P);
     const UpstreamEdgeMark cleared = upstreamEdgeMarkAfter(m, P, O::Answered, t + 2000);
     CHECK(cleared.base.isEmpty() && upstreamDirectBase(P, F, cleared, t + 2001) == P); // the marked host answered: its turn again
     const UpstreamEdgeMark kept = upstreamEdgeMarkAfter(m, P, O::NoVerdict, t + 2000);
@@ -1270,6 +1273,28 @@ static void hostRule()
     const UpstreamEdgeMark other = upstreamEdgeMarkAfter(m, F, O::Silent, t + 3000); // the other host silent too:
     CHECK(other.base == F && upstreamDirectBase(P, F, other, t + 3300) == P);        // the tries alternate
     CHECK(upstreamEdgeMarkAfter(m, QString(), O::Silent, t + 5).base == P);
+
+    // Review round 44 F2: THE one definition of an answer - a reply received to its end, any status (QNetworkReply error codes:
+    // 0 none, 2 remote host closed, 5 operation canceled, 203 content not found, 204 authentication required, 206 content conflict,
+    // 401 internal server error, 499 unknown server error, 399 protocol failure, 101 proxy refused).
+    CHECK(upstreamCompleteStatus(200, 0) == 200 && upstreamCompleteStatus(204, 0) == 204);
+    CHECK(upstreamCompleteStatus(200, 2) == 0 && upstreamCompleteStatus(200, 5) == 0); // a 200 cut by a reset / by its own bound
+    CHECK(upstreamCompleteStatus(409, 206) == 409 && upstreamCompleteStatus(404, 203) == 404 && upstreamCompleteStatus(401, 204) == 401);
+    CHECK(upstreamCompleteStatus(502, 499) == 502 && upstreamCompleteStatus(500, 401) == 500); // a complete 5xx of the API
+    CHECK(upstreamCompleteStatus(409, 2) == 0 && upstreamCompleteStatus(502, 5) == 0);    // an error answer cut half way
+    CHECK(upstreamCompleteStatus(200, 399) == 0 && upstreamCompleteStatus(200, 101) == 0 && upstreamCompleteStatus(0, 0) == 0);
+    CHECK(upstreamHostOutcome(upstreamCompleteStatus(200, 2), true, false, false) == O::Silent);  // cut 200 of the API: silent
+    CHECK(upstreamHostOutcome(upstreamCompleteStatus(200, 5), true, true, true) == O::Silent);    // stalled 200 cut by its bound
+    CHECK(upstreamHostOutcome(upstreamCompleteStatus(200, 5), true, true, false) == O::NoVerdict); // the app's own abort mid-body
+    CHECK(upstreamHostOutcome(upstreamCompleteStatus(409, 206), true, false, false) == O::Answered);
+
+    // Review round 44 F1: the ACTUAL path of a request decides; only a direct one marks and may be redirected.
+    using R = UpstreamRequestPath;
+    CHECK(upstreamRequestPath(true, false, true, false) == R::Tunnel);   // names the lease's tunnel_api_base
+    CHECK(upstreamRequestPath(false, true, false, false) == R::Tunnel);  // the client was told a tunnel starts / runs / is stopping
+    CHECK(upstreamRequestPath(false, false, false, true) == R::Tunnel);  // a tunnel the client never heard of (adopted at startup)
+    CHECK(upstreamRequestPath(false, false, true, true) == R::Direct);   // the stop is confirmed, the app's state not moved yet (flush)
+    CHECK(upstreamRequestPath(false, false, false, false) == R::Direct && upstreamRequestPath(false, false, true, false) == R::Direct);
 }
 
 int main(int argc, char **argv)

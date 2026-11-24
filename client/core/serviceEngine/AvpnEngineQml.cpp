@@ -1174,8 +1174,15 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                                [this]() { return authToken(); });
     // Device round air-C 24.11: a lease request whose last try on the walk's edge got no answer goes to the walk's next edge -
     // ONE host rule for acquire, renew and release (UpstreamLeaseWire.h::upstreamDirectBase); the walk itself is not moved.
-    if (avpn::UpstreamLeaseClient *lease = m_tunnel.upstreamClient())
+    if (avpn::UpstreamLeaseClient *lease = m_tunnel.upstreamClient()) {
         lease->setNextDirectBase([this](const QString &base) { return m_configSvc ? m_configSvc->nextEdgeAfter(base) : QString(); });
+        // Review round 44 F1: the rule applies only to a request that really goes direct - a tunnel of ours carries the app's
+        // requests in these states (the same fact ConfigService reads: setTunnelUpSource below).
+        lease->setTunnelUpSource([this]() {
+            return m_lastTunnelState == Vpn::Connecting || m_lastTunnelState == Vpn::Connected
+                || m_lastTunnelState == Vpn::Reconnecting || m_lastTunnelState == Vpn::Disconnecting;
+        });
+    }
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
     // уже вырезает каждый вход, поэтому смена edge не требует перезапуска туннеля.
     resolveApiCarveHosts(avpn::edgeHosts(avpn::edgeCandidates(avpn::ConfigStore::loadEdges(), kBakedEdges)));
