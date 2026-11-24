@@ -925,6 +925,28 @@ public:
         return s;
     }
 
+    // The engine's path ledger on the Scanner's rows (S6, device round 5; ServiceEngine::failedInTunnelHere): the ids
+    // whose real tunnel came up on this network and carried no data, with no data ok since. Such a row reads «Не удалось»
+    // and is not counted (rowViewOf, slotWorks) - unless the result proved it through its own full path: the ledger's
+    // rule that a light probe never clears a tunnel no-data (PathLedger.h stage 2) stays; a handshake + data download of
+    // the same path is no light probe. The coordinator hands the set over whenever it changes.
+    ScanStep tunnelNoDataHere(const QStringList &ids, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        m_tunnelNoData = QSet<QString>(ids.begin(), ids.end());
+        finishStep(s, now);
+        return s;
+    }
+    // Every row the machine holds (fresh, cached, the live one): what the coordinator asks the ledger about.
+    QStringList rowIds() const
+    {
+        QStringList out;
+        for (const Row &r : m_rows)
+            out << r.id;
+        return out;
+    }
+
     ScanStep vpnState(const ScanCurrent &c, qint64 now)
     {
         now = clock(now);
@@ -2077,11 +2099,15 @@ private:
         QString generation;        // strict local generation of a FRESH row (current evidence, F10)
         QString fingerprint;       // weak local fingerprint of a CACHED row's network
         QString evidence;          // "exclusion" when proven by exclusion (plan v2.2)
+        bool fullProof = false;    // proven through its own full path: AWG mini / Xray full profile (a handshake and a
+                                   // data download of the server's own path), not a light probe (Xray leg, reach)
         quint64 arrival = 0;
         int batch = 0;             // the batch of this series («Найти ещё») that made the row fresh; 0 = none yet
     };
 
     bool rowVerified(const Row &r) const { return !r.fromLive || r.liveVerified; }
+    // The row's path itself carried this result's data: a full-path probe, or the live tunnel's sized download.
+    static bool fullProofOf(const Row &r) { return r.fullProof || (r.fromLive && r.liveVerified); }
 
     // A row becomes fresh evidence of this scan: its arrival and the batch of the series it joins.
     void stampArrival(Row &r)
@@ -2322,6 +2348,7 @@ private:
             r.batch = cr.batch;
             r.cachedAt = cached.savedAtMs;
             r.crowdWorks = cr.crowdWorks;
+            r.fullProof = cr.fullProof;
             r.fingerprint = cached.fingerprint;
             m_rows << r;
         }
@@ -2346,13 +2373,15 @@ private:
         const qint64 age = now - c.savedAtMs;
         return age >= -60000 && age <= slotFreshMs();
     }
-    // The result's working rows of its own scope (view.slots works, «M доступно»).
-    static int slotWorks(const ScanCachedResult &c)
+    // The result's working rows of its own scope (view.slots works, «M доступно»): the rows it shows as available -
+    // a row whose real tunnel carried nothing here is not one unless the result proved it through its full path.
+    int slotWorks(const ScanCachedResult &c) const
     {
         const QString scope = scanScopeOf(c.scope);
         int n = 0;
         for (const ScanCachedRow &r : c.rows)
-            n += (scanClassWorking(r.cls) && scanRowInScope(r.countryCode, scope)) ? 1 : 0;
+            n += (scanClassWorking(r.cls) && scanRowInScope(r.countryCode, scope)
+                  && !(m_tunnelNoData.contains(r.id) && !r.fullProof)) ? 1 : 0;
         return n;
     }
     qint64 slotFreshMs() const { return qMin(kScanCacheShowMaxMs, qint64(m_t.cacheWorksTtlS) * 1000); }
@@ -3206,6 +3235,8 @@ private:
             r.fromLive = false;
             r.liveVerified = false;
             r.crowdWorks = c.c.crowdWorks;
+            r.fullProof = isFollowUp ? c.fu.kind == ScanProbeKind::XrayFull
+                                     : (c.c.kind == ScanProbeKind::AwgMini || c.c.kind == ScanProbeKind::XrayFull);
             r.generation = m_scanNet.generation();
             r.fingerprint = m_scanNet.fingerprint;
             if (r.cached || ri < 0)
@@ -3894,6 +3925,7 @@ private:
             r.fromLive = false;
             r.cached = false;
             r.crowdWorks = c.c.crowdWorks;
+            r.fullProof = false; // proven by exclusion: no probe of its own path carried the data
             r.generation = m_scanNet.generation();
             r.fingerprint = m_scanNet.fingerprint;
             r.evidence = QStringLiteral("exclusion");
@@ -3995,6 +4027,7 @@ private:
             cr.speed = x.speed;
             cr.ms = x.sortMs;
             cr.crowdWorks = x.crowdWorks;
+            cr.fullProof = fullProofOf(x);
             cr.batch = rowBatch(x);
             if (cache.rows.size() < kScanCacheRowsMax)
                 cache.rows << cr;
@@ -4126,6 +4159,11 @@ private:
         v.crowdWorks = r.crowdWorks;
         v.state = r.base == ScanClass::Slow ? ScanRowState::Slow : ScanRowState::Works;
         const bool isCurrent = isCurrentId(r.id);
+        // S6 (device round 5) in the one verdict of the row: its real tunnel carried no data on this network and nothing
+        // proved it through its own full path since - «Не удалось», never «Доступно» on a light probe (PathLedger stage
+        // 2). This network's handshake + data download of the same path outranks the older mark (device round air-C, D1).
+        if (!isCurrent && m_tunnelNoData.contains(r.id) && !fullProofOf(r))
+            v.state = ScanRowState::Failed;
         if (isCurrent) {
             v.state = ScanRowState::Connected;
             v.current = true;
@@ -4636,6 +4674,7 @@ private:
     bool m_startedVpn = false;
     bool m_checkAfterScan = false;
     QString m_stopReason;
+    QSet<QString> m_tunnelNoData; // rows whose real tunnel carried no data on this network (tunnelNoDataHere)
     bool m_userStopped = false;   // «Остановить» ended this scan keeping what it found (stopTapped)
     bool m_scopeRefused = false;  // the last scope choice was refused: no scan until a choice is taken (review F2)
     bool m_resultPartial = false; // the finished result on the screen is a stopped scan's (view.partial)

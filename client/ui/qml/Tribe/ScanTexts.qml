@@ -38,7 +38,6 @@ QtObject {
 
     // ── rows ──
     readonly property string rowWorks: qsTr("Доступно")   // owner, device test of 142 (was «Работает»)
-    readonly property string rowSlow: qsTr("Медленно")
     readonly property string rowNotVerified: qsTr("Не проверено")
     readonly property string rowConnecting: qsTr("Подключение…")
     readonly property string rowConnected: qsTr("Подключено")

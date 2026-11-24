@@ -2024,12 +2024,12 @@ You can attach a photo or video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+58"/>
+        <location line="+57"/>
         <source>Сканер</source>
         <translation>Scanner</translation>
     </message>
     <message>
-        <location line="-57"/>
+        <location line="-56"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2070,11 +2070,6 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+4"/>
-        <source>Медленно</source>
-        <translation>Slow</translation>
-    </message>
-    <message>
-        <location line="+1"/>
         <source>Не проверено</source>
         <translation>Not checked</translation>
     </message>
@@ -2497,7 +2492,7 @@ You can attach a photo or video.</translation>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-85"/>
+        <location line="-84"/>
         <source>только что</source>
         <translation>just now</translation>
     </message>
@@ -2567,7 +2562,7 @@ You can attach a photo or video.</translation>
         <translation>Available</translation>
     </message>
     <message>
-        <location line="+16"/>
+        <location line="+15"/>
         <source>Подключитесь к Wi‑Fi — через него VPN обычно работает. Потом откройте Сканер и нажмите «Сканировать».</source>
         <translation>Connect to Wi‑Fi — VPN usually works through it. Then open the Scanner and tap “Scan”.</translation>
     </message>

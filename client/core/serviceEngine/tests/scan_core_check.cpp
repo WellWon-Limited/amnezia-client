@@ -4842,6 +4842,65 @@ static void refusedScopeNeverScansAnother()
     CHECK(m.retryTapped(kT0 + 60).has(ScanActionKind::RequestManifest));
 }
 
+// D1 (device round air-C, iPhone Air, 24.11): one verdict per row - the number in the rings is the rows the list shows
+// as available. The journal: «21:43:06.255 app_probe id=12 kind=awg_mini hs_ok=true http=200 bytes_rx=65536 sha_ok=true
+// rtt_ms=89», then «21:43:08.376 path_outcome node=12 outcome=probe_ok source=scanner state=suspect» (an older failed
+// connect on this network); rings «10 доступно», rows 9 «Доступно» + node 12 «Не удалось». Here: own AWG "1" proven by
+// awg_mini (handshake + 64 KiB, sha ok, 89 ms) and own Xray "4:xray" proven by a light leg probe, both with the ledger's
+// «real tunnel carried no data here» mark. The full-path proof wins on the row; the light one never outranks the mark
+// (PathLedger stage 2): «Не удалось», not counted - the rings, the rows and the choice row («M доступно») agree.
+static void oneVerdictPerRow()
+{
+    World w = baseWorld("one_verdict", hostMac(), ScanNetKind::Wifi);
+    w.awgMini = true;
+    w.numbers.insert(QStringLiteral("scan_awg_concurrency"), 2);
+    w.out[QStringLiteral("1")].rtt = 89;
+    w.script << qMakePair(qint64(0), at("tunnel_no_data", {{QStringLiteral("ids"), QJsonArray{QStringLiteral("1"), QStringLiteral("4:xray")}}}));
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+    w.runMs = 12000;
+    Driver d(w);
+    d.run();
+    const QJsonObject v = lastView(d);
+    const QString st1 = rowOf(v, QStringLiteral("1")).value(QLatin1String("state")).toString();
+    const QString st4 = rowOf(v, QStringLiteral("4:xray")).value(QLatin1String("state")).toString();
+    CHECK(phaseOf(v) == QLatin1String("done"));
+    CHECK(st1 == QLatin1String("works") || st1 == QLatin1String("slow")); // the scan's handshake + data proof wins
+    CHECK(st4 == QLatin1String("failed"));                                // a light probe never outranks the mark
+    const int shown = rowsInState(v, "works") + rowsInState(v, "slow");
+    CHECK(v.value(QLatin1String("available")).toInt() == shown);
+    const QJsonArray sl = v.value(QLatin1String("slots")).toArray();
+    CHECK(sl.size() == 1 && sl.at(0).toObject().value(QLatin1String("works")).toInt() == shown);
+    // the stored result keeps the proof's strength: restored later, the same verdicts and the same count
+    const ScanAction *p = lastAction(d, ScanActionKind::PersistResults);
+    CHECK(p != nullptr);
+    if (!p)
+        return;
+    const ScanCachedResult stored = scanCachedResultFromJson(scanCachedResultToJson(p->cached));
+    bool full1 = false, full4 = true;
+    for (const ScanCachedRow &r : stored.rows) {
+        if (r.id == QLatin1String("1"))
+            full1 = r.fullProof;
+        if (r.id == QLatin1String("4:xray"))
+            full4 = r.fullProof;
+    }
+    CHECK(full1 && !full4);
+    ScanOpen o = openOf(w, QString(), false);
+    o.cached = stored;
+    ScanMachine m(w.caps);
+    const qint64 t = stored.savedAtMs + 60000;
+    m.tunnelNoDataHere({QStringLiteral("1"), QStringLiteral("4:xray")}, t);
+    m.shown(o, t);
+    const QJsonObject r = viewJson(m, t);
+    CHECK(rowOf(r, QStringLiteral("4:xray")).value(QLatin1String("state")).toString() == QLatin1String("failed"));
+    CHECK(r.value(QLatin1String("available")).toInt() == rowsInState(r, "works") + rowsInState(r, "slow")
+          && r.value(QLatin1String("available")).toInt() == shown);
+    const QJsonArray rs = r.value(QLatin1String("slots")).toArray();
+    CHECK(!rs.isEmpty() && rs.at(0).toObject().value(QLatin1String("works")).toInt() == shown);
+    // a data ok through the real tunnel since (the mark gone): the row is available again
+    m.tunnelNoDataHere({}, t + 10);
+    CHECK(rowOf(viewJson(m, t + 10), QStringLiteral("4:xray")).value(QLatin1String("state")).toString() == QLatin1String("works"));
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -5379,6 +5438,7 @@ int main(int argc, char **argv)
     secondRowTapTakesOver();
     stoppedResultStaysHonest();
     refusedScopeNeverScansAnother();
+    oneVerdictPerRow();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();

@@ -288,8 +288,29 @@ void TribeScanner::dispatch(const ScanStep &s)
 
 void TribeScanner::afterStep()
 {
+    syncTunnelFacts();
     refreshView();
     driveRecords(); // a step may have settled, handed over or untracked a host scan; re-arms the timer
+}
+
+// S6 in the machine's one verdict per row (device round air-C, D1: the facade turned a row «Не удалось» after the
+// machine had counted it - the rings said 10, the list showed 9): the ids of the machine's rows whose real tunnel
+// carried no data on this network (the engine's path ledger), handed over only when they change.
+void TribeScanner::syncTunnelFacts()
+{
+    if (m_syncingTunnelFacts)
+        return;
+    QStringList ids;
+    for (const QString &id : m_m.rowIds())
+        if (!ids.contains(id) && m_engine->rowFailedInTunnelHere(id))
+            ids << id;
+    ids.sort();
+    if (ids == m_tunnelNoData)
+        return;
+    m_tunnelNoData = ids;
+    m_syncingTunnelFacts = true;
+    dispatch(m_m.tunnelNoDataHere(ids, now()));
+    m_syncingTunnelFacts = false;
 }
 
 void TribeScanner::execute(const ScanAction &a)
@@ -449,9 +470,6 @@ void TribeScanner::refreshView()
     for (int i = 0; i < rows.size() && i < v.rows.size(); ++i) {
         QJsonObject r = rows.at(i).toObject();
         r.insert(QStringLiteral("version"), v.rows.at(i).transportVersion);
-        const QString st = r.value(QLatin1String("state")).toString();
-        if ((st == QLatin1String("works") || st == QLatin1String("slow")) && m_engine->rowFailedInTunnelHere(v.rows.at(i).id))
-            r.insert(QStringLiteral("state"), QStringLiteral("failed")); // a tunnel no-data outranks the probe
         const QString name = m_engine->rowDisplayName(v.rows.at(i).id);
         if (!name.isEmpty())
             r.insert(QStringLiteral("label"), name);
