@@ -3,6 +3,7 @@
 #include "AvpnEngineQml.h"
 #include "DevControlApp.h"
 #include "TribeJournal.h"
+#include "version.h" // APP_VERSION
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -25,9 +26,7 @@ Server *install(QQmlEngine *qml, QObject *parent)
     };
     // the directory of the app's log and journal (~/Library/Application Support/AVPN.ORG/AVPN on macOS)
     env.dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-#ifdef APP_VERSION
     env.version = QStringLiteral(APP_VERSION);
-#endif
 #ifdef GIT_COMMIT_HASH
     env.commit = QStringLiteral(GIT_COMMIT_HASH);
 #endif
