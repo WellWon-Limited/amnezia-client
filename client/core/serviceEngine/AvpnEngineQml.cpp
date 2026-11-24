@@ -7242,7 +7242,7 @@ void AvpnEngineQml::wakeLivenessProbe(int epoch)
         // Мёртв → штатный рестарт ЧЕРЕЗ reconcile (спека §2.1 шаг 3, паттерн pinAndReconcile):
         // m_needsRestart → guardedStop→Disconnected→guardedStart; m_op взведён → §13-гард
         // weAreOperating держит намерение; сторож — движковый клампованный, не жёсткие 20с.
-        qInfo() << "[wake] tunnel dead after sleep — restarting (our operation)";
+        qInfo() << "[wake] tunnel dead after a wake or a network change — restarting (our operation)";
         m_wakeRestartPending = true;
         m_wakeTries = 1;
         m_needsRestart = true;
