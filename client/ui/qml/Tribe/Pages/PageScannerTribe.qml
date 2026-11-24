@@ -118,12 +118,17 @@ PageType {
     function slotAgo(slot) {
         return slot ? ScanTexts.ago(Number(slot.ago_min || 0), Number(view.now_ms || Date.now())) : ""
     }
-    // a scope tapped on the choice: its fresh result is shown as it is, else that scope is scanned at once
+    // a scope tapped on the choice: its fresh result is shown as it is (showSlot: also out of a failed re-scan of the
+    // same scope - review round 36, F3), else that scope is scanned at once
     function pick(sc) {
         if (!hasScanner) return
         const fresh = slotOf(sc) !== null
         if (!fresh && scanGated) return
         showResult()
+        if (fresh && typeof TribeScanner.showSlot === "function") {
+            TribeScanner.showSlot(sc)
+            return
+        }
         TribeScanner.chooseCountry(sc)
         if (!fresh) TribeScanner.retry()
     }

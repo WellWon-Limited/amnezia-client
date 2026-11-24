@@ -847,6 +847,35 @@ public:
         return s;
     }
 
+    // The country choice opens a scope's advertised fresh result (view.slots; review round 36, F3): its rows on a list
+    // built again, whatever the screen showed before - a failed re-scan of the same scope (NoScan), an empty result,
+    // another scope's result (it stays in its slot). Never a scan. A finished result of this scope that is still on
+    // the screen is that slot: it stays as it is. Nothing while a scan runs, or without a fresh result of the scope.
+    ScanStep slotChosen(const QString &cc, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        const QString scope = scanScopeOf(cc);
+        if (!scanPhaseScanning(m_phase) && slotShown(scope, now)) {
+            const bool onScreen = m_completed && m_phase == ScanPhase::Done && m_scannedScope == scope;
+            m_scope = scope;
+            m_filter.clear();
+            if (!onScreen) {
+                if (m_completed)
+                    retireResult(now); // the finished result of another scope stays in its slot
+                m_completed = false;
+                if (m_phase == ScanPhase::NoScan || m_phase == ScanPhase::Done || m_phase == ScanPhase::Empty)
+                    m_phase = ScanPhase::Idle;
+                m_noScanReason.clear();
+                m_emptyReason.clear();
+                showCachedScope(scope, now);
+            }
+            m_listRebuild = true;
+        }
+        finishStep(s, now);
+        return s;
+    }
+
     // --- environment ------------------------------------------------------------------------------------------
     ScanStep networkChanged(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now)
     {

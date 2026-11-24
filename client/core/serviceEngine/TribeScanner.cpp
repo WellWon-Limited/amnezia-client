@@ -2117,6 +2117,7 @@ void TribeScanner::connectAndScan()
 }
 void TribeScanner::gotIt() { dispatch(m_m.gotItTapped(now())); }
 void TribeScanner::chooseCountry(const QString &cc) { dispatch(m_m.filterChosen(cc, now())); }
+void TribeScanner::showSlot(const QString &cc) { dispatch(m_m.slotChosen(cc, now())); }
 void TribeScanner::findMore(const QString &country)
 {
     if (!m_enabled || m_serverOff)

@@ -4305,6 +4305,40 @@ static void caseChoiceSlotsAndStop()
     CHECK(!w.s->screenOpen());
 }
 
+// Review round 36, F3: after a failed re-scan (HTTP 503 -> NoScan) the choice opens the same scope's fresh result
+// (showSlot): its rows, out of the error state, without a request.
+static void caseShowSlotAfterFailedRescan()
+{
+    g_case = QStringLiteral("show_slot_after_failed_rescan");
+    World w;
+    w.liveOn(QStringLiteral("4:xray"));
+    w.start();
+    w.s->show();
+    w.s->retry();
+    w.run(12000);
+    CHECK_EQ(w.phase(), QStringLiteral("done"));
+    const int rowsDone = w.rows().size();
+    // the finished result on the screen is its own slot: showing it changes nothing
+    w.s->showSlot(QString());
+    w.run(200);
+    CHECK_EQ(w.phase(), QStringLiteral("done"));
+    CHECK_EQ(w.rows().size(), rowsDone);
+    w.clock.t += 31000; // past the pause
+    w.server.manifestStatus = 503;
+    w.s->retry();
+    w.run(3000);
+    CHECK_EQ(w.phase(), QStringLiteral("no_scan"));
+    CHECK_EQ(w.s->viewJson().value(QStringLiteral("slots")).toArray().size(), 1);
+    const int manifests = w.http.count("/v1/scan/manifest");
+    w.s->showSlot(QString());
+    w.run(500);
+    CHECK_EQ(w.phase(), QStringLiteral("idle"));
+    CHECK(w.s->viewJson().value(QStringLiteral("empty")).toObject().value(QStringLiteral("reason")).toString().isEmpty());
+    CHECK(w.rows().size() >= 2);                                  // the live row and the cached result
+    CHECK_EQ(w.http.count("/v1/scan/manifest"), manifests);       // never a scan
+    w.s->close();
+}
+
 static void caseServerScope()
 {
     g_case = QStringLiteral("server_scope");
@@ -4446,6 +4480,7 @@ int main(int argc, char **argv)
     caseFullProbeProfileRule();
     caseServerScope();
     caseChoiceSlotsAndStop();
+    caseShowSlotAfterFailedRescan();
     caseLiveDigest();
     caseManifest304();
     caseManifestSignature();

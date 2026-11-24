@@ -4391,6 +4391,48 @@ static void slotCountsOnlyItsScope()
     CHECK(!frRow);
 }
 
+// Review round 36, F3: choosing a scope's advertised fresh result shows it - also after a failed re-scan of the same
+// scope (NoScan manifest_unavailable): an explicit action (slotChosen), not a side effect of a scope change.
+static void slotChosenLeavesTheError()
+{
+    World w = baseWorld("slot_chosen", hostMac(), ScanNetKind::Wifi);
+    ScanOpen o = openOf(w, QString(), false);
+    ScanCachedResult de;
+    de.networkKey = o.network.key;
+    de.fingerprint = o.network.fingerprint;
+    de.savedAtMs = kT0 - 2 * 60000;
+    de.scope = QStringLiteral("DE");
+    de.rows << choiceRow(QStringLiteral("up:cccccccccccccc01"), QStringLiteral("DE"), ScanClass::Works)
+            << choiceRow(QStringLiteral("up:cccccccccccccc02"), QStringLiteral("DE"), ScanClass::Works);
+    o.cached = de;
+    ScanMachine m(w.caps);
+    m.shown(o, kT0);
+    CHECK(m.view(kT0).bar.scope == QLatin1String("DE") && m.view(kT0).rows.size() == 2);
+    CHECK(m.retryTapped(kT0 + 100).has(ScanActionKind::RequestManifest)); // «Сканировать снова»
+    m.manifestUnavailable(QStringLiteral("manifest_unavailable"), kT0 + 300); // HTTP 503
+    const ScanView err = m.view(kT0 + 300);
+    CHECK(err.phase == ScanPhase::NoScan && err.rows.isEmpty() && err.scopeSlots.size() == 1);
+    // the old path: the same scope chosen again is no change - the error stays (why the explicit action exists)
+    m.filterChosen(QStringLiteral("DE"), kT0 + 400);
+    CHECK(m.view(kT0 + 400).phase == ScanPhase::NoScan);
+    // a scope without a fresh result, and a running scan: slotChosen changes nothing
+    m.slotChosen(QStringLiteral("NL"), kT0 + 450);
+    CHECK(m.view(kT0 + 450).phase == ScanPhase::NoScan && m.view(kT0 + 450).bar.scope == QLatin1String("DE"));
+    const quint64 build = m.view(kT0 + 450).listBuild;
+    const ScanStep s = m.slotChosen(QStringLiteral("DE"), kT0 + 500);
+    const ScanView v = m.view(kT0 + 500);
+    CHECK(s.actions.isEmpty() || !s.has(ScanActionKind::RequestManifest)); // never a scan
+    CHECK(v.phase == ScanPhase::Idle && v.empty.reason.isEmpty() && v.empty.variant == ScanEmptyVariant::None);
+    CHECK(v.rows.size() == 2 && v.rows.at(0).fromCache && v.bar.scope == QLatin1String("DE") && v.listBuild != build);
+    CHECK(v.checkedAgoMin == 2);
+    // while a scan runs the choice never reaches it (the page stops the scan first); the machine ignores it
+    ScanMachine r(w.caps);
+    r.shown(o, kT0);
+    r.retryTapped(kT0 + 100);
+    r.slotChosen(QStringLiteral("DE"), kT0 + 200);
+    CHECK(r.view(kT0 + 200).scanning);
+}
+
 static void choiceSlotsAndStopStays()
 {
     World w = baseWorld("choice", hostMac(), ScanNetKind::Wifi);
@@ -5016,6 +5058,7 @@ int main(int argc, char **argv)
     countrylessRows();
     choiceSlotsAndStopStays();
     slotCountsOnlyItsScope();
+    slotChosenLeavesTheError();
     refusedEndsScope();
     liveProofHasAnEnd();
     listFullPerBatch();
