@@ -4,15 +4,18 @@
 # mac_pf_session_check.cpp (build_mac_pf_session.sh); each line below fails if a call site is reverted.
 #   K1  no caller enables a session anchor (macospfanchors.h: SessionRule / ScanRule) with the load-if-empty
 #       call (setAnchorEnabled(<it>, true) / enableAnchor(<it>)): the kernel copy is an earlier session's;
-#   K2  both macOS kill switches write their session through MacOSFirewall::applySessionRules and name no
-#       anchor themselves: AmneziaWG with its own utun and 400.allowPIA off, Xray with the tun it brought up;
-#   K3  the tun of a service-routed session is the one IpcServer::createTun brought up, forgotten at deleteTun;
-#       the client gives the same name to createTun and to tun2socks, and the service keeps no copy of it
-#       for pf;
-#   K4  a stop: KillSwitch::disableKillSwitch -> applyStrictBlock (strict) or uninstall; the AWG stop
-#       (deleteInterface) reaches it; disableAllTraffic (and so the service start with strict on) ->
-#       applyStrictBlock; the service start without strict -> disableKillSwitch;
-#   K5  uninstall flushes every sub-anchor after the main ruleset dropped them; install starts with uninstall.
+#   K2  both macOS kill switches open a KillSwitch session and write it through MacOSFirewall::applySessionRules,
+#       naming no anchor themselves: AmneziaWG (openTunnelSession) with its own utun and 400.allowPIA off, Xray
+#       (enableKillSwitch) with the tun created for it;
+#   K3  the tun of a service-routed session: IpcServer::createTun records it (tunnelCreated, its only caller),
+#       enableKillSwitch takes it, a stop or an AmneziaWG open drops it; IpcServer::deleteTun never touches the
+#       kill switch; the client gives the same name to createTun and to tun2socks; no hard-coded tun in pf code;
+#   K4  a stop (disableKillSwitch) closes the session and drops the created tun, then applyStrictBlock (strict)
+#       or uninstall; the AWG stop (deleteInterface) reaches it; disableAllTraffic: a session up ->
+#       addBlockToSession, none -> applyStrictBlock; refresh: strict on -> disableAllTraffic, off ->
+#       disableKillSwitch; the service start: strict -> disableAllTraffic, else disableKillSwitch;
+#   K5  uninstall flushes every sub-anchor after the main ruleset dropped them; install starts with uninstall;
+#       the strict block is reloaded before the flush; the block over a live session never installs.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -54,29 +57,46 @@ has "$(body "$FW" 'void MacOSFirewall::enableAnchor(const QString& anchor)')" 'i
 
 # ---- K2 ------------------------------------------------------------------------------------------------------
 ksEnable="$(macblock "$(body "$KS" 'bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIndex) {')")"
-has "$ksEnable" 'MacOSFirewall::applySessionRules(params, m_tunnelIfname);' || bad "K2: the Xray kill switch does not write its session through applySessionRules with its tun"
+took=$(at "$ksEnable" 'const QString tunnel = m_createdTun;')
+dropped=$(at "$ksEnable" 'm_createdTun.clear();')
+xapply=$(at "$ksEnable" 'MacOSFirewall::applySessionRules(params, tunnel);')
+xopen=$(at "$ksEnable" 'm_sessionOpen = true;')
+[ "${took:-0}" -gt 0 ] && [ "${dropped:-0}" -gt "${took:-0}" ] && [ "${xapply:-0}" -gt "${dropped:-0}" ] \
+  || bad "K2: the Xray kill switch does not take the tun created for it (and clear it) before writing its session"
+[ "${xopen:-0}" -gt "${xapply:-0}" ] || bad "K2: the Xray kill switch does not open the session"
 has "$ksEnable" 'params.allowPIA = true;' || bad "K2: the Xray kill switch does not pass the service's sockets (400.allowPIA)"
 [ "$(count "$ksEnable" 'MacOSFirewall::setAnchor')" = "0" ] || bad "K2: the Xray kill switch writes an anchor itself"
 [ "$(count "$ksEnable" 'MacOSFirewall::enableAnchor')" = "0" ] || bad "K2: the Xray kill switch enables an anchor itself"
+ksOpen="$(body "$KS" 'void KillSwitch::openTunnelSession(const FirewallParams &params, const QString &tunnelIfname)')"
+odrop=$(at "$ksOpen" 'm_createdTun.clear();')
+oapply=$(at "$ksOpen" 'MacOSFirewall::applySessionRules(params, tunnelIfname);')
+oopen=$(at "$ksOpen" 'm_sessionOpen = true;')
+[ "${odrop:-0}" -gt 0 ] && [ "${oapply:-0}" -gt "${odrop:-0}" ] && [ "${oopen:-0}" -gt "${oapply:-0}" ] \
+  || bad "K2: openTunnelSession does not drop a created tun, write the session and open it"
 wgApply="$(body "$WG" 'void WireguardUtilsMacos::applyFirewallRules(FirewallParams& params)')"
 pia=$(at "$wgApply" 'params.allowPIA = false;')
-apply=$(at "$wgApply" 'MacOSFirewall::applySessionRules(params, m_ifname);')
-[ "${apply:-0}" -gt 0 ] || bad "K2: the AmneziaWG kill switch does not write its session through applySessionRules with its utun"
+apply=$(at "$wgApply" 'KillSwitch::instance()->openTunnelSession(params, m_ifname);')
+[ "${apply:-0}" -gt 0 ] || bad "K2: the AmneziaWG kill switch does not open its session with its utun"
 [ "${pia:-0}" -gt 0 ] && [ "${apply:-0}" -gt "${pia:-0}" ] || bad "K2: the AmneziaWG kill switch does not set 400.allowPIA off before applying"
-[ "$(count "$wgApply" 'MacOSFirewall::setAnchor')" = "0" ] || bad "K2: the AmneziaWG kill switch writes an anchor itself"
-[ "$(count "$(code "$WG")" 'MacOSFirewall::')" = "1" ] || bad "K2: wireguardutilsmacos.cpp calls MacOSFirewall outside applyFirewallRules"
+[ "$(count "$(code "$WG")" 'MacOSFirewall::')" = "0" ] || bad "K2: wireguardutilsmacos.cpp writes pf itself"
 has "$(body "$WG" 'bool WireguardUtilsMacos::addInterface(const InterfaceConfig& config) {')" 'applyFirewallRules(params);' \
   || bad "K2: addInterface no longer applies the AmneziaWG kill switch"
 
 # ---- K3 ------------------------------------------------------------------------------------------------------
 create="$(body "$IPC" 'bool IpcServer::createTun(const QString &dev, const QString &subnet)')"
 made=$(at "$create" 'const bool created = Router::createTun(dev, subnet);')
-noted=$(at "$create" 'KillSwitch::instance()->setTunnelInterface(dev);')
+noted=$(at "$create" 'KillSwitch::instance()->tunnelCreated(dev);')
 gate=$(at "$create" 'if (created)')
 [ "${made:-0}" -gt 0 ] && [ "${gate:-0}" -gt "${made:-0}" ] && [ "${noted:-0}" -gt "${gate:-0}" ] \
   || bad "K3: createTun does not record the tun it brought up (after a successful Router::createTun)"
-has "$(body "$IPC" 'bool IpcServer::deleteTun(const QString &dev)')" 'KillSwitch::instance()->clearTunnelInterface(dev);' \
-  || bad "K3: deleteTun does not forget the session's tun"
+if has "$(body "$IPC" 'bool IpcServer::deleteTun(const QString &dev)')" 'KillSwitch'; then
+  bad "K3: deleteTun touches the kill switch (a late delete would change a newer session)"
+fi
+callers=$(printf '%s\n' "$sources" | while read -r f; do if code "$f" | grep -qF 'tunnelCreated('; then echo "$f"; fi; done)
+[ "$(printf '%s\n' "$callers" | grep -cv 'killswitch.h$')" = "1" ] && printf '%s\n' "$callers" | grep -q 'ipc/ipcserver.cpp$' \
+  || bad "K3: tunnelCreated is not called from IpcServer::createTun alone (callers: ${callers:-none})"
+[ "$(code "$ROOT/service/server/killswitch.h" | grep -cF 'm_createdTun = ')" = "1" ] && [ "$(code "$KS" | grep -cF 'm_createdTun = ')" = "0" ] \
+  || bad "K3: the created tun is set outside tunnelCreated"
 xr="$(code "$XRAY")"
 has "$xr" 'iface->createTun(tunName, ' || bad "K3: the client does not create the Xray tun by tunName"
 has "$xr" 'QString("tun://%1").arg(tunName)' || bad "K3: tun2socks does not run on the tun the client creates"
@@ -86,14 +106,25 @@ done
 
 # ---- K4 ------------------------------------------------------------------------------------------------------
 ksDisable="$(macblock "$(body "$KS" 'bool KillSwitch::disableKillSwitch() {')")"
+closed=$(at "$ksDisable" 'm_sessionOpen = false;')
+cdrop=$(at "$ksDisable" 'm_createdTun.clear();')
 strict=$(at "$ksDisable" 'if (isStrictKillSwitchEnabled()) {')
 block=$(at "$ksDisable" 'MacOSFirewall::applyStrictBlock();')
 uninst=$(at "$ksDisable" 'MacOSFirewall::uninstall();')
+[ "${closed:-0}" -gt 0 ] && [ "${cdrop:-0}" -gt 0 ] && [ "${strict:-0}" -gt "${closed:-0}" ] && [ "${strict:-0}" -gt "${cdrop:-0}" ] \
+  || bad "K4: disableKillSwitch does not close the session and drop the created tun first"
 [ "${strict:-0}" -gt 0 ] && [ "${block:-0}" -gt "${strict:-0}" ] && [ "${uninst:-0}" -gt "${block:-0}" ] \
   || bad "K4: disableKillSwitch does not end the session with applyStrictBlock (strict) / uninstall"
 [ "$(count "$ksDisable" 'MacOSFirewall::setAnchor')" = "0" ] || bad "K4: disableKillSwitch writes an anchor itself"
-has "$(macblock "$(body "$KS" 'bool KillSwitch::disableAllTraffic() {')")" 'MacOSFirewall::applyStrictBlock();' \
-  || bad "K4: disableAllTraffic does not apply the strict block"
+ksAll="$(macblock "$(body "$KS" 'bool KillSwitch::disableAllTraffic() {')")"
+live=$(at "$ksAll" 'if (m_sessionOpen)')
+addb=$(at "$ksAll" 'MacOSFirewall::addBlockToSession();')
+alone=$(at "$ksAll" 'MacOSFirewall::applyStrictBlock();')
+[ "${live:-0}" -gt 0 ] && [ "${addb:-0}" -gt "${live:-0}" ] && [ "${alone:-0}" -gt "${addb:-0}" ] \
+  || bad "K4: disableAllTraffic does not keep a live session's rules (addBlockToSession) / block alone without one"
+refresh="$(body "$KS" 'bool KillSwitch::refresh(bool enabled)')"
+has "$refresh" 'return disableAllTraffic();' && has "$refresh" 'return disableKillSwitch();' \
+  || bad "K4: refresh does not go through disableAllTraffic (strict on) / disableKillSwitch (off)"
 init="$(body "$KS" 'bool KillSwitch::init()')"
 has "$init" 'return disableAllTraffic();' || bad "K4: the service start with strict on does not apply the strict block"
 has "$init" 'return disableKillSwitch();' || bad "K4: the service start does not flush what a previous process left"
@@ -111,6 +142,10 @@ rl=$(at "$st" 'reloadAnchor(anchor);')
 sf=$(at "$st" 'flushAnchors(avpn::pf::strictFlushList());')
 [ "${rl:-0}" -gt 0 ] && [ "${sf:-0}" -gt "${rl:-0}" ] || bad "K5: the strict block is not reloaded before the session anchors are flushed"
 has "$fwtext" 'static MacOSFirewall::CommandRunner s_commandRunner = nullptr;' || bad "K5: the command seam is not off by default"
+ab="$(body "$FW" 'void MacOSFirewall::addBlockToSession()')"
+has "$ab" 'enableAnchor(anchor);' || bad "K5: the block over a live session does not switch the block anchors on"
+if has "$ab" 'install();'; then bad "K5: the block over a live session installs (flushes the session's anchors)"; fi
+if has "$ab" 'flushAnchors('; then bad "K5: the block over a live session flushes anchors"; fi
 
 [ "$fail" = "0" ] && echo "check_mac_pf_session_wiring: ok"
 exit "$fail"

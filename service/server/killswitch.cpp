@@ -135,8 +135,11 @@ bool KillSwitch::disableKillSwitch() {
 #endif
 
 #ifdef Q_OS_MACOS
-    // AVPN (pf state ownership, macospfanchors.h): a stop leaves no session pf state. Strict: the block
-    // stays and every anchor of the session is flushed; otherwise every tribe/* anchor is flushed.
+    // AVPN (pf state ownership, macospfanchors.h): a stop ends the kill-switch session and leaves no session
+    // pf state. Strict: the block stays and every anchor of the session is flushed; otherwise every tribe/*
+    // anchor is flushed. The session's tun goes with it (killswitch.h).
+    m_sessionOpen = false;
+    m_createdTun.clear();
     if (isStrictKillSwitchEnabled()) {
         MacOSFirewall::applyStrictBlock();
     } else {
@@ -169,9 +172,14 @@ bool KillSwitch::disableAllTraffic() {
     LinuxFirewall::setAnchorEnabled(LinuxFirewall::IPv6, QStringLiteral("250.blockIPv6"), true);
 #endif
 #ifdef Q_OS_MACOS
-    // AVPN (pf state ownership): the block with no tunnel; also flushes what a previous session or service
-    // process left (this is the service start with strict on, KillSwitch::init).
-    MacOSFirewall::applyStrictBlock();
+    // AVPN (pf state ownership): callers - KillSwitch::init (the service start with strict on: never a
+    // session), refresh(true) (strict turned on), the IPC slot. A tunnel session up: its own anchors stay and
+    // the block is added; it outlives the session (its stop applies the strict block). No session: the block
+    // alone, which also flushes what a previous session or service process left.
+    if (m_sessionOpen)
+        MacOSFirewall::addBlockToSession();
+    else
+        MacOSFirewall::applyStrictBlock();
 #endif
     m_allowedRanges.clear();
     return true;
@@ -410,10 +418,25 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
     params.blockAddrs = blocknets;
     params.dnsServers = dnsServers;
     params.allowPIA = true;
-    MacOSFirewall::applySessionRules(params, m_tunnelIfname);
+    // The tun brought up for this session (IpcServer::createTun) is taken: it is this session's from here on.
+    const QString tunnel = m_createdTun;
+    m_createdTun.clear();
+    MacOSFirewall::applySessionRules(params, tunnel);
+    m_sessionOpen = true;
     // AVPN (diag): what the kill switch lets out - the server and the resolvers of this session.
     qDebug().noquote() << "[killswitch] split" << splitTunnelType << "allownets:" << allownets.join(QStringLiteral(", "))
                        << "| dnsaddr:" << dnsServers.join(QStringLiteral(", "));
 #endif
     return true;
 }
+
+#ifdef Q_OS_MACOS
+// AVPN (pf state ownership): the AmneziaWG kill switch of its own utun opens the session
+// (WireguardUtilsMacos::applyFirewallRules); a tun created for another session being built is not this one's.
+void KillSwitch::openTunnelSession(const FirewallParams &params, const QString &tunnelIfname)
+{
+    m_createdTun.clear();
+    MacOSFirewall::applySessionRules(params, tunnelIfname);
+    m_sessionOpen = true;
+}
+#endif

@@ -534,10 +534,11 @@ QString WireguardUtilsMacos::waitForTunnelName(const QString& filename) {
 
 void WireguardUtilsMacos::applyFirewallRules(FirewallParams& params)
 {
-  // AVPN (pf state ownership, macospfanchors.h): every tribe/* anchor of this session is written by one
-  // call. 200.allowVPN passes only this tunnel's utun (wave 3: the static file passed utun0-utun30, so
-  // traffic routed into a foreign VPN was not caught). The AmneziaWG kill switch never passes the
-  // service's group (400.allowPIA off): an earlier Xray session's pass is not inherited.
+  // AVPN (pf state ownership, macospfanchors.h): the kill-switch session of this tunnel - opened in
+  // KillSwitch (closed by deleteInterface -> disableKillSwitch), every tribe/* anchor written by one call.
+  // 200.allowVPN passes only this tunnel's utun (wave 3: the static file passed utun0-utun30, so traffic
+  // routed into a foreign VPN was not caught). The AmneziaWG kill switch never passes the service's group
+  // (400.allowPIA off): an earlier Xray session's pass is not inherited.
   params.allowPIA = false;
-  MacOSFirewall::applySessionRules(params, m_ifname);
+  KillSwitch::instance()->openTunnelSession(params, m_ifname);
 }

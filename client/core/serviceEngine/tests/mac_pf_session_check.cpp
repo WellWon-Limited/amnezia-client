@@ -1,42 +1,67 @@
-// AVPN (macOS pf state ownership, 2026-11-24): the real MacOSFirewall (client/platforms/macos/daemon/
-// macosfirewall.cpp) runs against a model of the pf kernel state instead of /bin/bash: its command seam
-// (MacOSFirewall::setCommandRunner) hands every command to the model, which keeps the rules and tables of
-// the root anchor "tribe" and of each sub-anchor, the main ruleset's reference and our pf token, and
-// reads the real anchor files (deploy/data/macos/pf). Nothing is executed: an unmodelled command fails
-// the check. pfctl is never run.
+// AVPN (macOS pf state ownership, 2026-11-24): the real KillSwitch (service/server/killswitch.cpp) and the real
+// MacOSFirewall (client/platforms/macos/daemon/macosfirewall.cpp) run against a model of the pf kernel state
+// instead of /bin/bash: the firewall's command seam (MacOSFirewall::setCommandRunner) hands every command to the
+// model, which keeps the rules and tables of the root anchor "tribe" and of each sub-anchor, the main ruleset's
+// reference and our pf token, and reads the real anchor files (deploy/data/macos/pf). Nothing is executed: an
+// unmodelled command fails the check. pfctl is never run. Tables follow pf.conf(5), TABLES (macOS 27):
+//   "persist  The persist flag forces the kernel to keep the table even when no rules refer to it.  If the
+//    flag is not set, the kernel will automatically remove the table when the last rule referring to it is
+//    flushed."
+//   "manually  Persistent tables can be manually created with the add or replace option of pfctl(8)"
+//   "The contents of a pre-existing table defined without a list of addresses to initialize it is not altered
+//    when pf.conf is loaded.  A table initialized with the empty list, { }, will be cleared on load."
+// and pfctl(8): "-T kill  Kill a table.", "-T replace  Replace the addresses of the table.  Automatically create
+// a nonexisting table.", "-F Tables  Flush the tables." (-F all = all of the -F modifiers). Not in the man
+// pages, modelled conservatively: -T replace keeps the flags of an existing table; a file's definition sets
+// the flags of the table it defines.
 //
-// Sequences (the kill switch of each session = MacOSFirewall::applySessionRules with the params its
-// caller builds: WireguardUtilsMacos::applyFirewallRules for AmneziaWG, KillSwitch::enableKillSwitch for
-// Xray; a stop = MacOSFirewall::uninstall, or applyStrictBlock with the strict kill switch; the call
-// sites are checked by check_mac_pf_session_wiring.sh):
+// Every session is driven through the service's own entry points, in the order its callers use them:
+//   AmneziaWG start = KillSwitch::openTunnelSession(params, utun) (WireguardUtilsMacos::applyFirewallRules,
+//                     params as WireguardUtilsMacos::addInterface builds them), stop = disableKillSwitch
+//                     (WireguardUtilsMacos::deleteInterface);
+//   Xray start      = KillSwitch::tunnelCreated(tun) (IpcServer::createTun after Router::createTun) then
+//                     enableKillSwitch(config) (XrayProtocol::setupRouting), stop = disableKillSwitch then
+//                     IpcServer::deleteTun (XrayProtocol::stop; the lost-client teardown of fix/mac-xray-quit
+//                     uses the same order); OpenVPN = enableKillSwitch with no createTun;
+//   service start   = a new KillSwitch + init() (LocalServer); strict on/off = refresh(bool) (refreshKillSwitch).
+// The call sites themselves are checked by check_mac_pf_session_wiring.sh.
 //   P1  reboot -> AWG(utunA): installed, 200.allowVPN passes utunA only, 400.allowPIA empty
 //   P2  AWG -> stop: every tribe/* anchor (rules and tables), the root anchor and the token are gone
 //   P3  AWG(utunA) -> stop -> Xray(utun22): 200.allowVPN passes exactly utun22 (the field defect, 24.11)
 //   P4  Xray -> stop -> AWG(utunB): 200.allowVPN = utunB, 400.allowPIA empty
 //   P5  AWG(utunA) -> AWG(utunB), with and without a stop: 200.allowVPN = utunB only
-//   P6  Xray -> (client lost, no stop) -> AWG: 400.allowPIA of the Xray session is not inherited
-//   P7  a session whose tun the service does not know (OpenVPN) gets the static file, not the old rule
-//   P8  strict kill switch: the block stays, every session anchor is flushed; the next Xray is right
+//   P6  client lost (no stop, no deleteTun): the next session's 200/400 are its own
+//   P7  a session with no tun of its own (OpenVPN) gets the static file - also after a lost Xray client
+//   P8  strict kill switch with no session: the block stays, every session anchor is flushed
 //   P9  strict keeps the scan's own 160.allowScan; a full stop flushes it
-//   P10 first start, previous process died with pf installed (AWG session, scan, retired anchor)
-//   P11 first start after an older build stopped with the root-only flush (pf not ours, anchors left)
-//   P12 first start with strict on and stale anchors: only the block, from the current files
+//   P10 service start after a process died with pf installed (AWG session, scan, retired anchor)
+//   P11 a session after an older build stopped with the root-only flush (pf not ours, anchors left)
+//   P12 service start with strict on and stale anchors: only the block, from the current files
 //   P13 enableAnchor never keeps the kernel copy of a session anchor; keeps a static one
 //   P14 tunnel interface names
 //   P15 the ownership table matches tribe.conf and the files
-// Build and run: tests/build_mac_pf_session.sh <deploy/data/macos/pf>.
+//   P16 a late deleteTun of an older session does not change the newer session's tun
+//   P17 a createTun no session takes is dropped by the next session opened or by a stop
+//   P18 strict turned on over a live session keeps its rules; the block outlives it; strict off = no pf
+//   P19 the table model itself (the man page lines above)
+// Build and run: tests/build_mac_pf_session.sh. PF_CHECK_API_57F10A133 builds the same sequences against the
+// entry points of commit 57f10a133 (setTunnelInterface / clearTunnelInterface, AWG through applySessionRules).
 #include "platforms/macos/daemon/macosfirewall.h"
 #include "platforms/macos/daemon/macospfanchors.h"
+#include "killswitch.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonObject>
 #include <QMap>
 #include <QRegularExpression>
 #include <QStringList>
 
 #include <cstdio>
+
+extern KillSwitch *s_instance; // killswitch.cpp: the singleton; a new one = a new service process
 
 static int g_checks = 0;
 static int g_failed = 0;
@@ -63,9 +88,15 @@ static const char *g_case = "";
 
 // ---- the anchor files ---------------------------------------------------------------------------------------------
 
+struct PfTableDef {
+    QStringList addrs;
+    bool hasList = false; // "{ ... }" given (an empty list clears the table on load)
+    bool persist = false;
+};
+
 struct PfFile {
     QStringList rules;
-    QMap<QString, QStringList> tables;
+    QMap<QString, PfTableDef> tables;
     bool exists = false;
 };
 
@@ -79,8 +110,8 @@ static QStringList splitItems(const QString &list)
     return out;
 }
 
-// The subset of pf.conf the bundled files use: comments, backslash continuations, string macros, tables,
-// "set" options (not rules), everything else a rule with $macros expanded and whitespace collapsed.
+// The subset of pf.conf the bundled files use: comments, backslash continuations, macros, tables (persist,
+// const, an address list), "set" options (not rules), everything else a rule with $macros expanded.
 static PfFile parsePf(const QString &text)
 {
     PfFile f;
@@ -103,7 +134,8 @@ static PfFile parsePf(const QString &text)
     }
     QMap<QString, QString> macros;
     static const QRegularExpression macroRe(QStringLiteral("^([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(?:\"(.*)\"|(\\S+))$"));
-    static const QRegularExpression tableRe(QStringLiteral("^table <([^>]+)>\\s*\\{(.*)\\}$"));
+    static const QRegularExpression tableRe(
+        QStringLiteral("^table <([^>]+)>((?:\\s+(?:persist|const))*)\\s*(?:\\{(.*)\\})?$"));
     for (QString line : logical) {
         const auto m = macroRe.match(line);
         if (m.hasMatch()) {
@@ -112,7 +144,11 @@ static PfFile parsePf(const QString &text)
         }
         const auto t = tableRe.match(line);
         if (t.hasMatch()) {
-            f.tables.insert(t.captured(1), splitItems(t.captured(2)));
+            PfTableDef d;
+            d.persist = t.captured(2).contains(QLatin1String("persist"));
+            d.hasList = t.capturedStart(3) >= 0;
+            d.addrs = splitItems(t.captured(3));
+            f.tables.insert(t.captured(1), d);
             continue;
         }
         if (line.startsWith(QLatin1String("set ")))
@@ -143,10 +179,33 @@ static QStringList g_unmodelled; // over every case: a command the model does no
 static int g_commands = 0;
 static bool g_installedOnce = false;
 
+struct Table {
+    QStringList addrs;
+    bool persist = false;
+};
+
 struct Anchor {
     QStringList rules;
-    QMap<QString, QStringList> tables;
+    QMap<QString, Table> tables;
     bool empty() const { return rules.isEmpty() && tables.isEmpty(); }
+    bool referenced(const QString &table) const
+    {
+        for (const QString &r : rules) {
+            if (r.contains(QLatin1Char('<') + table + QLatin1Char('>')))
+                return true;
+        }
+        return false;
+    }
+    // pf.conf(5): a table without persist goes when the last rule referring to it is flushed.
+    void collect()
+    {
+        for (auto it = tables.begin(); it != tables.end();) {
+            if (!it.value().persist && !referenced(it.key()))
+                it = tables.erase(it);
+            else
+                ++it;
+        }
+    }
 };
 
 struct Kernel {
@@ -155,7 +214,21 @@ struct Kernel {
     QMap<QString, Anchor> anchors; // "tribe" and "tribe/<sub>"
 
     void clear(const QString &path) { anchors.remove(path); }
-    void loadFile(const QString &path, const QString &file, bool replaceAll)
+    void settle(const QString &path)
+    {
+        if (!anchors.contains(path))
+            return;
+        anchors[path].collect();
+        if (anchors[path].empty())
+            anchors.remove(path);
+    }
+    void setRules(const QString &path, const QStringList &rules)
+    {
+        anchors[path].rules = rules;
+        settle(path);
+    }
+    // pfctl -a <path> -f <file>: the file's rules replace the anchor's; its tables are defined as written.
+    void loadFile(const QString &path, const QString &file)
     {
         const PfFile f = readPfFile(QFileInfo(file).fileName());
         if (!f.exists) {
@@ -163,13 +236,14 @@ struct Kernel {
             return;
         }
         Anchor &a = anchors[path];
-        if (replaceAll)
-            a = Anchor();
         a.rules = f.rules;
-        for (auto it = f.tables.cbegin(); it != f.tables.cend(); ++it)
-            a.tables.insert(it.key(), it.value());
-        if (a.empty())
-            anchors.remove(path);
+        for (auto it = f.tables.cbegin(); it != f.tables.cend(); ++it) {
+            Table &t = a.tables[it.key()];
+            t.persist = it.value().persist;
+            if (it.value().hasList)
+                t.addrs = it.value().addrs;
+        }
+        settle(path);
     }
 };
 
@@ -202,7 +276,8 @@ static int model(const QString &command)
     if ((m = enableRe.match(command)).hasMatch()) {
         if (!g_k.anchors.value(sub(m)).rules.isEmpty())
             return 0;
-        g_k.loadFile(sub(m), m.captured(2), true);
+        g_k.clear(sub(m)); // -F all
+        g_k.loadFile(sub(m), m.captured(2));
         return 0;
     }
     if ((m = disableRe.match(command)).hasMatch()) {
@@ -213,36 +288,33 @@ static int model(const QString &command)
     if ((m = hasRulesRe.match(command)).hasMatch())
         return g_k.anchors.value(sub(m)).rules.isEmpty() ? 1 : 0;
     if ((m = replaceRe.match(command)).hasMatch()) {
-        g_k.anchors[sub(m)].tables.insert(m.captured(2), splitItems(m.captured(3)));
+        Anchor &a = g_k.anchors[sub(m)];
+        if (!a.tables.contains(m.captured(2)))
+            a.tables[m.captured(2)].persist = true; // "Automatically create a nonexisting table" - persistent
+        a.tables[m.captured(2)].addrs = splitItems(m.captured(3));
         return 0;
     }
     if ((m = killRe.match(command)).hasMatch()) {
         if (g_k.anchors.contains(sub(m))) {
             g_k.anchors[sub(m)].tables.remove(m.captured(2));
-            if (g_k.anchors[sub(m)].empty())
-                g_k.clear(sub(m));
+            g_k.settle(sub(m));
         }
         return 0;
     }
     if ((m = flushRulesRe.match(command)).hasMatch()) {
-        if (g_k.anchors.contains(sub(m))) {
-            g_k.anchors[sub(m)].rules.clear();
-            if (g_k.anchors[sub(m)].empty())
-                g_k.clear(sub(m));
-        }
+        if (g_k.anchors.contains(sub(m)))
+            g_k.setRules(sub(m), {});
         return 0;
     }
     if ((m = loadStdinRe.match(command)).hasMatch()) {
-        Anchor &a = g_k.anchors[QStringLiteral("tribe/") + m.captured(2)];
-        a.rules.clear();
+        QStringList rules;
         for (const QString &line : m.captured(1).split(QLatin1Char('\n'), Qt::SkipEmptyParts))
-            a.rules << line.simplified();
-        if (a.empty())
-            g_k.clear(QStringLiteral("tribe/") + m.captured(2));
+            rules << line.simplified();
+        g_k.setRules(QStringLiteral("tribe/") + m.captured(2), rules);
         return 0;
     }
     if ((m = reloadRe.match(command)).hasMatch()) {
-        g_k.loadFile(sub(m), m.captured(2), false);
+        g_k.loadFile(sub(m), m.captured(2));
         return 0;
     }
     if (command.contains(QLatin1String(" -F all 2> /dev/null"))) {
@@ -256,10 +328,7 @@ static int model(const QString &command)
     }
     if ((m = rootLoadRe.match(command)).hasMatch()) {
         g_k.mainRefsTribe = true;
-        Anchor root;
-        for (const QString &rule : readPfFile(QFileInfo(m.captured(1)).fileName()).rules)
-            root.rules << rule;
-        g_k.anchors.insert(QStringLiteral("tribe"), root);
+        g_k.setRules(QStringLiteral("tribe"), readPfFile(QFileInfo(m.captured(1)).fileName()).rules);
         g_installedOnce = true;
         return 0;
     }
@@ -301,7 +370,7 @@ static int model(const QString &command)
 static QStringList rulesOf(const QString &anchor) { return g_k.anchors.value(QStringLiteral("tribe/") + anchor).rules; }
 static QStringList tableOf(const QString &anchor, const QString &table)
 {
-    return g_k.anchors.value(QStringLiteral("tribe/") + anchor).tables.value(table);
+    return g_k.anchors.value(QStringLiteral("tribe/") + anchor).tables.value(table).addrs;
 }
 static bool hasTable(const QString &anchor, const QString &table)
 {
@@ -325,8 +394,44 @@ static const QString kXrayServer = QStringLiteral("203.0.113.20");
 static const QString kXrayDns1 = QStringLiteral("198.51.100.1");
 static const QString kXrayDns2 = QStringLiteral("198.51.100.2");
 
-// As WireguardUtilsMacos::addInterface + applyFirewallRules build them (full tunnel, the peer excluded).
-static void awgSession(const QString &utun)
+// ---- the service's entry points -----------------------------------------------------------------------------------
+
+static KillSwitch *ks() { return KillSwitch::instance(); }
+
+// A new service process: LocalServer creates the kill switch and runs init().
+static void serviceStart()
+{
+    delete s_instance;
+    s_instance = nullptr;
+    ks()->init();
+}
+static void reboot()
+{
+    g_k = Kernel();
+    serviceStart();
+}
+static void setStrict(bool on) { ks()->refresh(on); } // IpcServer::refreshKillSwitch
+
+// IpcServer::createTun after a successful Router::createTun / IpcServer::deleteTun, as each commit wires them.
+static void ipcCreateTun(const QString &dev)
+{
+#ifdef PF_CHECK_API_57F10A133
+    ks()->setTunnelInterface(dev);
+#else
+    ks()->tunnelCreated(dev);
+#endif
+}
+static void ipcDeleteTun(const QString &dev)
+{
+#ifdef PF_CHECK_API_57F10A133
+    ks()->clearTunnelInterface(dev);
+#else
+    (void)dev; // IpcServer::deleteTun does not touch the kill switch (checked by the wiring check)
+#endif
+}
+
+// WireguardUtilsMacos::addInterface (full tunnel, the peer excluded) -> applyFirewallRules.
+static void awgStart(const QString &utun)
 {
     FirewallParams p {};
     p.dnsServers = { kAwgDns };
@@ -334,23 +439,35 @@ static void awgSession(const QString &utun)
     p.allowNets = true;
     p.allowAddrs = { kAwgPeer };
     p.allowPIA = false;
+#ifdef PF_CHECK_API_57F10A133
     MacOSFirewall::applySessionRules(p, utun);
+#else
+    ks()->openTunnelSession(p, utun);
+#endif
 }
+static void awgStop() { ks()->disableKillSwitch(); } // WireguardUtilsMacos::deleteInterface
 
-// As KillSwitch::enableKillSwitch builds them (splitTunnelType 0: blockAll + the server; dns1, dns2).
-static void xraySession(const QString &tun)
+// XrayProtocol::setupRouting (splitTunnelType 0: blockAll + the server; dns1, dns2); createTun first.
+static QJsonObject xrayConfig()
 {
-    FirewallParams p {};
-    p.blockAll = true;
-    p.allowNets = true;
-    p.allowAddrs = { kXrayServer };
-    p.dnsServers = { kXrayDns1, kXrayDns2 };
-    p.allowPIA = true;
-    MacOSFirewall::applySessionRules(p, tun);
+    QJsonObject c;
+    c.insert(QStringLiteral("splitTunnelType"), 0);
+    c.insert(QStringLiteral("vpnServer"), kXrayServer);
+    c.insert(QStringLiteral("dns1"), kXrayDns1);
+    c.insert(QStringLiteral("dns2"), kXrayDns2);
+    return c;
 }
-
-static void stop() { MacOSFirewall::uninstall(); }
-static void reboot() { g_k = Kernel(); }
+static void xrayStart(const QString &tun)
+{
+    ipcCreateTun(tun);
+    CHECK(ks()->enableKillSwitch(xrayConfig(), 0));
+}
+static void xrayStop(const QString &tun) // XrayProtocol::stop: disableKillSwitch ... deleteTun
+{
+    ks()->disableKillSwitch();
+    ipcDeleteTun(tun);
+}
+static void openVpnStart() { CHECK(ks()->enableKillSwitch(xrayConfig(), 0)); } // no createTun: tun unknown
 
 static void checkAllGone()
 {
@@ -380,7 +497,7 @@ static void checkAwg(const QString &utun)
     CHECK(g_k.tokenHeld && g_k.mainRefsTribe);
 }
 
-// Only the strict block, from the current files.
+// Only the strict block, from the current files (and the scan's anchor when a scan armed it).
 static void checkStrictBlockOnly(bool scanArmed)
 {
     QStringList expected;
@@ -404,22 +521,32 @@ static void plantStale(bool pfOurs)
     g_k.tokenHeld = pfOurs;
     if (pfOurs)
         g_k.anchors[QStringLiteral("tribe")].rules = readPfFile(QStringLiteral("tribe.conf")).rules;
-    g_k.anchors[QStringLiteral("tribe/000.allowLoopback")].rules = fileRules(QStringLiteral("000.allowLoopback"));
-    g_k.anchors[QStringLiteral("tribe/100.blockAll")].rules = { QStringLiteral("block out all flags any no state # older build") };
-    g_k.anchors[QStringLiteral("tribe/110.allowNets")].rules = fileRules(QStringLiteral("110.allowNets"));
-    g_k.anchors[QStringLiteral("tribe/110.allowNets")].tables[QStringLiteral("allownets")] = { kAwgPeer };
-    g_k.anchors[QStringLiteral("tribe/160.allowScan")].rules = { QStringLiteral("pass out quick on en0 proto { tcp, udp } group { tribevpn } flags any no state") };
-    g_k.anchors[QStringLiteral("tribe/200.allowVPN")].rules = pass(QStringLiteral("utun4"));
-    g_k.anchors[QStringLiteral("tribe/310.blockDNS")].rules = fileRules(QStringLiteral("310.blockDNS"));
-    g_k.anchors[QStringLiteral("tribe/310.blockDNS")].tables[QStringLiteral("dnsaddr")] = { kAwgDns };
-    g_k.anchors[QStringLiteral("tribe/400.allowPIA")].rules = { QStringLiteral("pass out proto { tcp, udp } user { root } flags any no state") };
-    g_k.anchors[QStringLiteral("tribe/999.quarantine")].rules = { QStringLiteral("block drop quick all flags any no state") };
+    auto put = [](const QString &a, const QStringList &rules) { g_k.anchors[QStringLiteral("tribe/") + a].rules = rules; };
+    put(QStringLiteral("000.allowLoopback"), fileRules(QStringLiteral("000.allowLoopback")));
+    put(QStringLiteral("100.blockAll"), { QStringLiteral("block out all flags any no state # older build") });
+    put(QStringLiteral("110.allowNets"), fileRules(QStringLiteral("110.allowNets")));
+    g_k.anchors[QStringLiteral("tribe/110.allowNets")].tables[QStringLiteral("allownets")].addrs = { kAwgPeer };
+    put(QStringLiteral("160.allowScan"), { QStringLiteral("pass out quick on en0 proto { tcp, udp } group { tribevpn } flags any no state") });
+    put(QStringLiteral("200.allowVPN"), pass(QStringLiteral("utun4")));
+    put(QStringLiteral("310.blockDNS"), fileRules(QStringLiteral("310.blockDNS")));
+    g_k.anchors[QStringLiteral("tribe/310.blockDNS")].tables[QStringLiteral("dnsaddr")].addrs = { kAwgDns };
+    // a Debug build's identity (CMakeLists.txt AMN_PF_RULE_IDENTITY)
+    put(QStringLiteral("400.allowPIA"), { QStringLiteral("pass out proto { tcp, udp } user { root } flags any no state") });
+    put(QStringLiteral("999.quarantine"), { QStringLiteral("block drop quick all flags any no state") });
+}
+
+// The kill switch's qDebug diagnostics: only with PF_CHECK_VERBOSE=1.
+static void quietMessages(QtMsgType type, const QMessageLogContext &, const QString &msg)
+{
+    if (type != QtDebugMsg || qEnvironmentVariableIsSet("PF_CHECK_VERBOSE"))
+        std::fprintf(stderr, "  [qt] %s\n", qPrintable(msg));
 }
 
 int main(int argc, char **argv)
 {
     // The seam first: no MacOSFirewall call may reach /bin/bash.
     MacOSFirewall::setCommandRunner(&model);
+    qInstallMessageHandler(&quietMessages);
     QCoreApplication app(argc, argv); // ResourceDir = applicationDirPath() + "/pf": the model reads the real files
     if (argc < 2) {
         std::printf("usage: mac_pf_session_check <deploy/data/macos/pf>\n");
@@ -431,130 +558,153 @@ int main(int argc, char **argv)
         return 2;
     }
     const QString tA = QStringLiteral("utun4"), tB = QStringLiteral("utun5"), xray = QStringLiteral("utun22");
+    reboot();
+    setStrict(false);
 
     g_case = "P1 reboot -> AWG";
     reboot();
-    awgSession(tA);
+    awgStart(tA);
     checkAwg(tA);
 
     g_case = "P2 AWG -> stop";
-    stop();
+    awgStop();
     checkAllGone();
 
     g_case = "P3 AWG -> stop -> Xray";
     reboot();
-    awgSession(tA);
-    stop();
-    xraySession(xray);
+    awgStart(tA);
+    awgStop();
+    xrayStart(xray);
     checkXray(xray);
+    g_case = "P3 ... -> Xray stop";
+    xrayStop(xray);
+    checkAllGone();
 
     g_case = "P4 Xray -> stop -> AWG";
     reboot();
-    xraySession(xray);
-    stop();
-    awgSession(tB);
+    xrayStart(xray);
+    xrayStop(xray);
+    awgStart(tB);
     checkAwg(tB);
 
     g_case = "P5 AWG(utunA) -> stop -> AWG(utunB)";
     reboot();
-    awgSession(tA);
-    stop();
-    awgSession(tB);
+    awgStart(tA);
+    awgStop();
+    awgStart(tB);
     checkAwg(tB);
     g_case = "P5 AWG(utunA) -> AWG(utunB) over a live pf";
     reboot();
-    awgSession(tA);
-    awgSession(tB);
+    awgStart(tA);
+    awgStart(tB);
     checkAwg(tB);
 
-    g_case = "P6 Xray -> client lost (no stop) -> AWG";
+    g_case = "P6 Xray -> client lost (no stop, no deleteTun) -> AWG";
     reboot();
-    xraySession(xray);
-    awgSession(tB);
+    xrayStart(xray);
+    awgStart(tB);
     checkAwg(tB);
-    g_case = "P6 AWG -> client lost (no stop) -> Xray";
+    g_case = "P6 AWG -> client lost -> Xray";
     reboot();
-    awgSession(tA);
-    xraySession(xray);
+    awgStart(tA);
+    xrayStart(xray);
     checkXray(xray);
 
-    g_case = "P7 unknown tun after AWG";
+    g_case = "P7 OpenVPN (no createTun) after AWG";
     reboot();
-    awgSession(tA);
-    xraySession(QString());
+    awgStart(tA);
+    awgStop();
+    openVpnStart();
     CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), fileRules(QStringLiteral("200.allowVPN")));
     CHECK(fileRules(QStringLiteral("200.allowVPN")).size() == 1
           && fileRules(QStringLiteral("200.allowVPN")).first().startsWith(QLatin1String("pass out on { utun0, utun1,")));
-    xraySession(QStringLiteral("en0")); // not a tun name: never a pass on the uplink
+    g_case = "P7 Xray -> client lost (no stop, no deleteTun) -> OpenVPN";
+    reboot();
+    xrayStart(xray);
+    openVpnStart(); // the lost session's tun is not this session's
+    CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), fileRules(QStringLiteral("200.allowVPN")));
+    g_case = "P7 a createTun of a non-tun name";
+    reboot();
+    xrayStart(QStringLiteral("en0")); // never a pass on the uplink
     CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), fileRules(QStringLiteral("200.allowVPN")));
 
-    g_case = "P8 strict: AWG -> strict stop";
+    g_case = "P8 strict, no session: AWG -> strict stop";
     reboot();
-    awgSession(tA);
-    MacOSFirewall::applyStrictBlock();
+    setStrict(true);
     checkStrictBlockOnly(false);
-    g_case = "P8 strict: Xray -> strict stop -> Xray";
-    reboot();
-    xraySession(xray);
-    MacOSFirewall::applyStrictBlock();
+    awgStart(tA);
+    checkAwg(tA);
+    awgStop();
     checkStrictBlockOnly(false);
-    awgSession(tA);
-    MacOSFirewall::applyStrictBlock();
-    xraySession(xray);
+    g_case = "P8 strict: Xray -> strict stop -> AWG -> strict stop -> Xray";
+    xrayStart(xray);
     checkXray(xray);
-    g_case = "P8 strict: block without pf installed installs it";
-    reboot();
-    MacOSFirewall::applyStrictBlock();
+    xrayStop(xray);
     checkStrictBlockOnly(false);
+    awgStart(tA);
+    awgStop();
+    xrayStart(xray);
+    checkXray(xray);
+    xrayStop(xray);
+    g_case = "P8 strict: the service start with pf not installed installs the block";
+    reboot();
+    checkStrictBlockOnly(false);
+    setStrict(false);
+    checkAllGone();
 
     g_case = "P9 strict keeps the scan's anchor";
     reboot();
-    xraySession(xray);
+    setStrict(true);
+    xrayStart(xray);
     CHECK(MacOSFirewall::setScanExemption(QStringLiteral("en0")) == 1);
-    MacOSFirewall::applyStrictBlock();
+    xrayStop(xray);
     checkStrictBlockOnly(true);
     CHECK_EQ(rulesOf(QStringLiteral("160.allowScan")), MacOSFirewall::scanExemptionRules(QStringLiteral("en0")));
-    MacOSFirewall::clearScanExemption();
+    MacOSFirewall::clearScanExemption(); // the probe host, at the end of its scan
     checkStrictBlockOnly(false);
+    setStrict(false);
     g_case = "P9 a full stop flushes the scan's anchor";
     reboot();
-    awgSession(tA);
+    awgStart(tA);
     CHECK(MacOSFirewall::setScanExemption(QStringLiteral("en0")) == 1);
-    stop();
+    awgStop();
     checkAllGone();
 
-    g_case = "P10 first start: previous process died with pf installed";
+    g_case = "P10 service start: previous process died with pf installed";
     plantStale(true);
     CHECK(MacOSFirewall::isInstalled());
-    stop(); // KillSwitch::init -> disableKillSwitch -> uninstall
+    serviceStart();
     checkAllGone();
-    xraySession(xray);
+    xrayStart(xray);
     checkXray(xray);
     CHECK_EQ(rulesOf(QStringLiteral("999.quarantine")), QStringList());
 
-    g_case = "P11 first session after an older build's root-only stop";
+    g_case = "P11 a session after an older build's root-only stop";
+    reboot();
     plantStale(false);
     CHECK(!MacOSFirewall::isInstalled());
-    xraySession(xray); // install() starts from a clean state
+    xrayStart(xray); // install() starts from a clean state
     checkXray(xray);
     CHECK_EQ(rulesOf(QStringLiteral("999.quarantine")), QStringList());
     CHECK_EQ(rulesOf(QStringLiteral("160.allowScan")), QStringList());
     g_case = "P11 ... and the same for AWG";
+    xrayStop(xray);
     plantStale(false);
-    awgSession(tB);
+    awgStart(tB);
     checkAwg(tB);
 
-    g_case = "P12 first start with strict on, stale anchors";
+    g_case = "P12 service start with strict on, stale anchors";
+    setStrict(true);
     plantStale(true);
-    MacOSFirewall::applyStrictBlock(); // KillSwitch::init -> disableAllTraffic
-    // The scan's anchor is the probe host's: it flushes a dead process's copy at its own start (tribe_scan.cpp).
-    CHECK(rulesOf(QStringLiteral("160.allowScan")).size() == 1);
-    MacOSFirewall::clearScanExemption();
-    checkStrictBlockOnly(false);
+    serviceStart(); // KillSwitch::init -> disableAllTraffic, no session in a new process
+    // The kill switch never writes the scan's anchor (it is the probe host's, which clears a dead process's
+    // copy itself - not covered here); everything else is only the block, from the current files.
+    checkStrictBlockOnly(true);
+    setStrict(false);
 
     g_case = "P13 enableAnchor and the kernel copy";
     reboot();
-    awgSession(tA);
+    awgStart(tA);
     MacOSFirewall::enableAnchor(QStringLiteral("200.allowVPN"));
     CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), fileRules(QStringLiteral("200.allowVPN")));
     g_k.anchors[QStringLiteral("tribe/100.blockAll")].rules = { QStringLiteral("block out all flags any no state # kernel copy") };
@@ -593,12 +743,13 @@ int main(int argc, char **argv)
                 continue;
             const PfFile f = readPfFile(QStringLiteral("tribe.%1.conf").arg(QString::fromLatin1(a.name)));
             CHECK(f.exists);
-            // A table the file declares empty is filled at run time: the session's table (written explicitly).
+            // A table the file declares with an empty list is filled at run time: the session's table.
             bool emptyTable = false;
-            for (const QStringList &items : f.tables)
-                emptyTable = emptyTable || items.isEmpty();
+            for (const PfTableDef &d : f.tables)
+                emptyTable = emptyTable || (d.hasList && d.addrs.isEmpty());
             CHECK(emptyTable == (a.kind == avpn::pf::AnchorKind::StaticRuleSessionTable));
-            // A file without rules is set at run time (or never): not a static anchor.
+            for (const PfTableDef &d : f.tables)
+                CHECK(!d.persist); // every bundled table lives only while its rule does (P19)
             if (f.rules.isEmpty())
                 CHECK(a.kind == avpn::pf::AnchorKind::ScanRule || a.kind == avpn::pf::AnchorKind::Unused);
         }
@@ -607,6 +758,105 @@ int main(int argc, char **argv)
         CHECK(avpn::pf::strictFlushList().contains(QStringLiteral("200.allowVPN")));
         CHECK_EQ(avpn::pf::strictBlockList(), (QStringList { QStringLiteral("000.allowLoopback"), QStringLiteral("100.blockAll"),
                                                               QStringLiteral("250.blockIPv6") }));
+    }
+
+    g_case = "P16 late deleteTun of an older session";
+    reboot();
+    xrayStart(xray);
+    ks()->disableKillSwitch(); // session 1 stops; its deleteTun comes late
+    ipcCreateTun(xray);        // session 2 brings up the same device
+    ipcDeleteTun(xray);        // session 1's late deleteTun
+    CHECK(ks()->enableKillSwitch(xrayConfig(), 0));
+    checkXray(xray);
+
+    g_case = "P17 a createTun no session takes: dropped by the next session opened";
+    reboot();
+    ipcCreateTun(QStringLiteral("utun9"));
+    awgStart(tA); // AmneziaWG opens with its own utun: the created one is not its
+    checkAwg(tA);
+    openVpnStart(); // its client lost (no stop): the next session never gets the dropped tun
+    CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), fileRules(QStringLiteral("200.allowVPN")));
+    g_case = "P17 ... dropped by a stop";
+    reboot();
+    ipcCreateTun(QStringLiteral("utun9"));
+    ks()->disableKillSwitch();
+    openVpnStart();
+    CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), fileRules(QStringLiteral("200.allowVPN")));
+    g_case = "P17 ... a createTun inside an open session changes neither it nor the next one";
+    reboot();
+    xrayStart(xray);
+    ipcCreateTun(QStringLiteral("utun9"));
+    checkXray(xray);
+    xrayStop(xray);
+    openVpnStart();
+    CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), fileRules(QStringLiteral("200.allowVPN")));
+
+    g_case = "P18 strict on over a live Xray session";
+    reboot();
+    xrayStart(xray);
+    setStrict(true);
+    checkXray(xray); // its pass, its tables, its 400 stay
+    CHECK_EQ(rulesOf(QStringLiteral("000.allowLoopback")), fileRules(QStringLiteral("000.allowLoopback")));
+    CHECK_EQ(rulesOf(QStringLiteral("250.blockIPv6")), fileRules(QStringLiteral("250.blockIPv6")));
+    xrayStop(xray);
+    checkStrictBlockOnly(false); // the block outlives the session
+    setStrict(false);
+    checkAllGone();
+    g_case = "P18 strict on over a live AWG session";
+    reboot();
+    awgStart(tA);
+    setStrict(true);
+    checkAwg(tA);
+    awgStop();
+    checkStrictBlockOnly(false);
+    g_case = "P18 strict off over a live session: no pf of ours (the client sends it for kill switch off too)";
+    awgStart(tA);
+    setStrict(false);
+    checkAllGone();
+    setStrict(true); // no session any more: the block alone
+    checkStrictBlockOnly(false);
+    setStrict(false);
+    g_case = "P18 strict on over a live session whose pf another program flushed";
+    reboot();
+    xrayStart(xray);
+    g_k.mainRefsTribe = false; // e.g. another VPN reloaded /etc/pf.conf
+    const QMap<QString, Anchor> before = g_k.anchors;
+    setStrict(true);
+    CHECK(g_k.anchors.keys() == before.keys());
+    CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), pass(xray)); // not flushed by an install
+    xrayStop(xray);
+    checkStrictBlockOnly(false);
+    setStrict(false);
+
+    g_case = "P19 the table model (pf.conf(5) TABLES, pfctl(8) -T)";
+    {
+        reboot();
+        const QString dir = QCoreApplication::applicationDirPath() + QStringLiteral("/pf");
+        model(QStringLiteral("pfctl -q -a 'tribe/110.allowNets' -f '%1/tribe.110.allowNets.conf'").arg(dir));
+        CHECK(hasTable(QStringLiteral("110.allowNets"), QStringLiteral("allownets")));
+        CHECK(!g_k.anchors.value(QStringLiteral("tribe/110.allowNets")).tables.value(QStringLiteral("allownets")).persist);
+        model(QStringLiteral("pfctl -q -a 'tribe/110.allowNets' -t 'allownets' -T replace %1").arg(kAwgPeer));
+        CHECK_EQ(tableOf(QStringLiteral("110.allowNets"), QStringLiteral("allownets")), QStringList { kAwgPeer });
+        model(QStringLiteral("pfctl -q -a 'tribe/110.allowNets' -F rules")); // the last rule referring to it
+        CHECK(!hasTable(QStringLiteral("110.allowNets"), QStringLiteral("allownets")));
+        model(QStringLiteral("pfctl -q -a 'tribe/110.allowNets' -t 'allownets' -T replace %1").arg(kAwgPeer));
+        CHECK(g_k.anchors.value(QStringLiteral("tribe/110.allowNets")).tables.value(QStringLiteral("allownets")).persist);
+        model(QStringLiteral("pfctl -q -a 'tribe/110.allowNets' -F rules")); // persistent: stays
+        CHECK_EQ(tableOf(QStringLiteral("110.allowNets"), QStringLiteral("allownets")), QStringList { kAwgPeer });
+        model(QStringLiteral("pfctl -q -a 'tribe/110.allowNets' -f '%1/tribe.110.allowNets.conf'").arg(dir));
+        CHECK_EQ(tableOf(QStringLiteral("110.allowNets"), QStringLiteral("allownets")), QStringList()); // "{ }" clears
+        CHECK(hasTable(QStringLiteral("110.allowNets"), QStringLiteral("allownets")));
+        model(QStringLiteral("pfctl -q -a 'tribe/110.allowNets' -F all 2> /dev/null"));
+        CHECK(!hasTable(QStringLiteral("110.allowNets"), QStringLiteral("allownets")));
+        model(QStringLiteral("pfctl -q -a 'tribe/300.allowLAN' -f '%1/tribe.300.allowLAN.conf'").arg(dir));
+        CHECK(tableOf(QStringLiteral("300.allowLAN"), QStringLiteral("lanips")).contains(QStringLiteral("192.168.0.0/16")));
+        model(QStringLiteral("pfctl -q -a 'tribe/300.allowLAN' -t 'lanips' -T kill"));
+        CHECK(!hasTable(QStringLiteral("300.allowLAN"), QStringLiteral("lanips")));
+        // A session's tables after a session with the kill switch off for blockNets: never left behind.
+        reboot();
+        awgStart(tA);
+        CHECK(!hasTable(QStringLiteral("120.blockNets"), QStringLiteral("blocknets")));
+        awgStop();
     }
 
     g_case = "every command modelled";

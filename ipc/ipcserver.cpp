@@ -166,10 +166,10 @@ bool IpcServer::createTun(const QString &dev, const QString &subnet)
 
     const bool created = Router::createTun(dev, subnet);
 #ifdef Q_OS_MACOS
-    // AVPN (pf state ownership): the tun this session brought up is the only one its kill switch passes
-    // (KillSwitch::enableKillSwitch -> MacOSFirewall::applySessionRules -> 200.allowVPN).
+    // AVPN (pf state ownership): a tun brought up for the session being built; the session's kill switch
+    // takes it and passes only it (KillSwitch::tunnelCreated, killswitch.h).
     if (created)
-        KillSwitch::instance()->setTunnelInterface(dev);
+        KillSwitch::instance()->tunnelCreated(dev);
 #endif
     return created;
 }
@@ -180,9 +180,6 @@ bool IpcServer::deleteTun(const QString &dev)
     qDebug() << "IpcServer::deleteTun";
 #endif
 
-#ifdef Q_OS_MACOS
-    KillSwitch::instance()->clearTunnelInterface(dev); // AVPN (pf state ownership)
-#endif
     return Router::deleteTun(dev);
 }
 

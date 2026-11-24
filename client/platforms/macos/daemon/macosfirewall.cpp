@@ -324,3 +324,15 @@ void MacOSFirewall::applyStrictBlock()
         reloadAnchor(anchor);
     flushAnchors(avpn::pf::strictFlushList());
 }
+
+void MacOSFirewall::addBlockToSession()
+{
+    if (!isInstalled()) {
+        logger.warning() << "Strict kill switch over a live session: our pf is not in force - the block comes at the session's stop";
+        return;
+    }
+    ensureRootAnchorPriority();
+    logger.info() << "Strict kill switch over a live session: its anchors stay, the block is added";
+    for (const QString& anchor : avpn::pf::strictBlockList())
+        enableAnchor(anchor);
+}

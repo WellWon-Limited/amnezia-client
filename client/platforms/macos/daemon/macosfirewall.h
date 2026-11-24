@@ -95,10 +95,15 @@ public:
     // brought up with IpcServer::createTun, empty when the service does not know it; allowPIA on).
     // Uses blockAll, allowNets + allowAddrs, blockNets + blockAddrs, dnsServers and allowPIA of params.
     static void applySessionRules(const FirewallParams &params, const QString &tunnelIfname);
-    // AVPN: the strict kill switch with no tunnel: installs our pf if needed, reloads the block anchors
-    // from their files and flushes every other anchor except the scan's (KillSwitch::disableKillSwitch
-    // with strict on, KillSwitch::disableAllTraffic, and so the service start with strict on).
+    // AVPN: the strict kill switch with NO tunnel session: installs our pf if needed, reloads the block
+    // anchors from their files and flushes every other anchor except the scan's (KillSwitch: a stop with
+    // strict on, the service start with strict on, strict turned on with no session).
     static void applyStrictBlock();
+    // AVPN: strict turned on while a tunnel session is up (KillSwitch::disableAllTraffic): the session's own
+    // anchors stay, the block anchors are switched on (load-if-empty, as upstream disableAllTraffic) and
+    // outlive the session (its stop applies applyStrictBlock). Nothing when our pf is not in force (another
+    // program flushed it): installing now would flush the live session's anchors and cut its tunnel.
+    static void addBlockToSession();
 
     static void install();
     static void uninstall();
