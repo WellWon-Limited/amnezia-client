@@ -145,6 +145,16 @@ public:
         const qint64 age = nowMs - dataStallAtMs;
         return (age >= 0 && age <= kDataStallMaxAgeMs) ? dataStallSec : -1;
     }
+    // tribe.18 (second review, G1): a probe whose wall-clock duration exceeds what its own timeouts allow (every endpoint
+    // timing out, plus kProbeSuspensionSlackMs) has spanned a suspension of the app: its failure says nothing about the
+    // tunnel. A clock that went backwards is treated the same.
+    static constexpr qint64 kProbeSuspensionSlackMs = 2000;
+    static bool probeSpannedSuspension(qint64 startedMs, qint64 nowMs, qint64 timeoutBudgetMs)
+    {
+        if (startedMs <= 0)
+            return false;
+        return nowMs < startedMs || nowMs - startedMs > timeoutBudgetMs + kProbeSuspensionSlackMs;
+    }
     // The newest handshake time the loop has seen (0 = none since the last reset).
     qint64 latestHandshakeEpoch() const { return m_hasPrev ? m_prev.latestHandshakeEpoch : 0; }
 

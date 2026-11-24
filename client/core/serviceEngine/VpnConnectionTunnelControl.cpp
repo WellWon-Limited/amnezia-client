@@ -175,10 +175,12 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
 #if defined(Q_OS_IOS)
     // AVPN (awg-apple tribe.17, device round 24.11 B1): the extension's stall verdict (-1 = unknown) with the time it
     // came in. iOS only: the macOS NE build keeps the behaviour of build 141 (its probe rule never sees the field).
+    // tribe.18 (second review, G1): dated by its request's send time, never by when the reply was applied (a reply
+    // queued before a suspension is applied after it, and must not look fresh then).
     connect(IosController::Instance(), &IosController::dataStallChanged, this,
-            [this](qint64 seconds) {
+            [this](qint64 seconds, qint64 measuredAtMs) {
                 m_stats.dataStallSec = seconds;
-                m_stats.dataStallAtMs = QDateTime::currentMSecsSinceEpoch();
+                m_stats.dataStallAtMs = measuredAtMs;
             },
             Qt::QueuedConnection);
 #endif

@@ -186,7 +186,8 @@ signals:
     // a stall right now (nothing in for 4 s while the user sends), how long the path has gone without data that
     // proved it; 0 = not stalled now (data comes in, or nobody sends); -1 = the reply has none (an extension before
     // tribe.17, an Xray session, a stale watchdog). Feeds the AmneziaWG probe failover (HealthLoop).
-    void dataStallChanged(qint64 seconds);
+    // `measuredAtMs` (tribe.18, G1) = when the status request was sent (wall clock): the reading is at most that old.
+    void dataStallChanged(qint64 seconds, qint64 measuredAtMs);
     // AVPN (floor 19.11): the awaited AmneziaWG handshake was seen - awaitedMs from the NE's Connected to this
     // status reply (the stage between "extension Connected" and the app's Connected; journal ios_handshake_seen).
     void handshakeConfirmed(qint64 awaitedMs);

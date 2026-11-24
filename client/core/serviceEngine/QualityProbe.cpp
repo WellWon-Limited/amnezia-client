@@ -1,5 +1,6 @@
 #include "QualityProbe.h"
 
+#include <QDateTime>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -25,6 +26,7 @@ void QualityProbe::measure(int timeoutMs)
         return;
     ++m_generation;
     m_inFlight = true;
+    m_startedWallMs = QDateTime::currentMSecsSinceEpoch(); // AVPN (tribe.18): suspension check of the caller
     m_timeoutMs = timeoutMs > 0 ? timeoutMs : 4000;
     m_curIdx = 0;
     tryEndpoint(0);

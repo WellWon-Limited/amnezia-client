@@ -16,7 +16,8 @@ struct TunnelStats {
     // AVPN (iOS, awg-apple tribe.17, device round 24.11 B1): the extension's stall verdict (status `data_stall_s`):
     // while its stall ladder sees a stall right now, how long the path has gone without data that proved it; 0 = not
     // stalled now. -1 = unknown: every other platform, an extension before tribe.17, Xray. `dataStallAtMs` = when the
-    // reply was applied (wall clock, ms; a reading is used only while fresh). Read only by the AmneziaWG probe rule.
+    // status request was sent (wall clock, ms; tribe.18: never the apply time; a reading is used only while fresh).
+    // Read only by the AmneziaWG probe rule.
     qint64 dataStallSec = -1;
     qint64 dataStallAtMs = 0;
 };
