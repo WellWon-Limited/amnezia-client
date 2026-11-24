@@ -1847,7 +1847,7 @@ public:
             break;
         case ScanPhase::Reach:
             v.stage = ScanStageKey::Reach;
-            v.stageTotal = m_cands.size();
+            v.stageTotal = checkedTotal();
             v.stageCount = reachedCount();
             v.progress = v.stageTotal > 0 ? double(v.stageCount) / v.stageTotal : 0;
             break;
@@ -2054,6 +2054,7 @@ private:
         bool probeDone = false;   // the scheduled probe has its result
         bool finalDone = false;   // the candidate has its verdict (or was given up)
         bool inHost = false;      // the current probe was handed to the host
+        bool probed = false;      // it was handed to the host at least once (a candidate given up before is no check)
         bool dropped = false;
         Lease lease = Lease::None;
         FollowUp followUp = FollowUp::None;
@@ -2982,6 +2983,7 @@ private:
         for (Cand &c : m_cands)
             if (!c.c.needsLease && !c.finalDone) {
                 c.inHost = true;
+                c.probed = true;
                 a.candidates << c.c;
             }
         a.limits = scanHostLimitsFrom(m_t, m_fullConc, m_legConc, m_awgConc);
@@ -3316,11 +3318,23 @@ private:
         return n;
     }
 
+    // «Проверяем доступность · N из M» (device round air-C, D6: «2 из 21» while the host got 18): one set for both - the
+    // candidates this scan checks, i.e. every one not given up before its probe (the plan's «Не проверено»: budget,
+    // the batch cap, a config on cellular, a refused lease). M shrinks when a lease is refused; it never counts a
+    // candidate that was never going to be probed, and N never counts one as reached before its probe.
+    static bool givenUp(const Cand &c) { return c.finalDone && !c.probed; }
+    int checkedTotal() const
+    {
+        int n = 0;
+        for (const Cand &c : m_cands)
+            n += givenUp(c) ? 0 : 1;
+        return n;
+    }
     int reachedCount() const
     {
         int n = 0;
         for (const Cand &c : m_cands)
-            n += (c.reachDone || c.probeDone || c.finalDone) ? 1 : 0;
+            n += (!givenUp(c) && (c.reachDone || c.probeDone || c.finalDone)) ? 1 : 0;
         return n;
     }
 
@@ -3490,6 +3504,7 @@ private:
                 continue;
             }
             c.inHost = true;
+            c.probed = true;
             if (initial) {
                 add.candidates << c.c;
             } else {

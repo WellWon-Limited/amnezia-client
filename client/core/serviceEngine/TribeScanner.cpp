@@ -1096,7 +1096,9 @@ void TribeScanner::doStartHost(const ScanAction &a)
         sa, m_active.token, m_active.tunnelBase, ScanAccess(), [this](const ScanCandidate &c) { return configOf(c); },
         [this](const ScanCandidate &c) { return awgInputOf(c); }, &refused);
     req.candidates = withXrayBursts(sa.candidates, req.candidates);
-    emitLog(QStringLiteral("action start_host_scan candidates=%1 max_bytes=%2").arg(req.candidates.size()).arg(req.maxBytes));
+    // checks = the scan's own count of what it checks (providers still waiting for a seat included): the screen's «из M»
+    emitLog(QStringLiteral("action start_host_scan candidates=%1 checks=%2 max_bytes=%3")
+                .arg(req.candidates.size()).arg(m_m.view(now()).stageTotal).arg(req.maxBytes));
     HostAsk ask = askNow(a.scanId);
     for (const ScanHostCandidate &c : req.candidates)
         ask.probeIds << c.id;

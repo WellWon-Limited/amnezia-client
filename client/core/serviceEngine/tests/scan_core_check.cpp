@@ -4938,6 +4938,36 @@ static void failedCandidatesAreNoResult()
     }
 }
 
+// D6 (device round air-C): «Проверяем доступность · 2 из 21» while the log said "start_host_scan candidates=18" - the
+// denominator counted the candidates the plan gave up before any probe (and counted them as reached). One set for
+// both numbers: what this scan checks (handed to the host, or still waiting for a seat).
+static void progressCountsWhatIsChecked()
+{
+    World w = baseWorld("progress", hostMac(), ScanNetKind::Cellular); // full-kind providers: no config on cellular
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+    w.runMs = 12000;
+    Driver d(w);
+    d.run();
+    int startAt = -1;
+    for (int i = 0; i < d.steps.size() && startAt < 0; ++i)
+        if (d.steps.at(i).step.has(ScanActionKind::StartHostScan))
+            startAt = i;
+    CHECK(startAt >= 0);
+    if (startAt < 0)
+        return;
+    const ScanStep &st = d.steps.at(startAt).step;
+    int checks = st.find(ScanActionKind::StartHostScan)->candidates.size();
+    if (const ScanAction *b = st.find(ScanActionKind::RequestProbeBatch))
+        checks += b->ids.size();
+    const QJsonObject v = d.steps.at(startAt).view;
+    CHECK(phaseOf(v) == QLatin1String("reach"));
+    CHECK(v.value(QLatin1String("stage_total")).toInt() == checks && v.value(QLatin1String("stage_count")).toInt() == 0);
+    // the count never passes the total, and it ends with every checked candidate reached
+    for (const Recorded &r : d.steps)
+        if (phaseOf(r.view) == QLatin1String("reach"))
+            CHECK(r.view.value(QLatin1String("stage_count")).toInt() <= r.view.value(QLatin1String("stage_total")).toInt());
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -5477,6 +5507,7 @@ int main(int argc, char **argv)
     refusedScopeNeverScansAnother();
     oneVerdictPerRow();
     failedCandidatesAreNoResult();
+    progressCountsWhatIsChecked();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();
