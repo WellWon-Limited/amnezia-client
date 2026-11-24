@@ -88,6 +88,17 @@
 // Air, Auto, empty ledger): the blind leg raised AT ONCE beside the race yielded to the first proof ~1 s in and
 // dropped a working Serbia 1 AmneziaWG leg on Wi-Fi (5.56 s to data, 3.7-3.9 s before); with the race first that leg
 // is never raised blind - on both traces no leg yields (tests/path_engine_check.cpp, "trace 19.11").
+//
+// System asleep (owner's Mac 24.11.2026: a Power Nap dark wake every ~15 min with the lid closed, the app runs in each
+// for seconds; SystemAwake.h): the platform says through the context (SelectionContext::systemAsleep) that the system
+// is not fully awake. Then the owner takes no step of its own: its clock stands (no awake time, no deadline), no next
+// leg is chosen, no data check is judged (an answer that comes is void - "the check did not happen", R12), and a
+// network change or a lost live session is noted and acted on only on the awake edge. Facts the platform reports keep
+// the state true (a tunnel up, a stop confirmed); a failure reported while asleep says nothing about the path
+// (Inconclusive). The person's own events (UserStart, UserStop) are taken as always; the leg a UserStart would choose
+// waits for the awake edge. On that edge the owner resumes as after a suspension (the leg in flight gets resumeGraceMs,
+// a check that was running is run again, nothing recorded) and takes the step it held, once - on the network it then
+// knows. A platform that never says "asleep" (every one but the macOS desktop app) runs exactly as before.
 #pragma once
 
 #include "NetworkKey.h"
@@ -320,6 +331,9 @@ struct SelectionContext {
     qint64 wallNowMs = 0;
     QHash<QString, double> crowd;
     ApiReach controlPlane = ApiReach::Unknown; // lane C: the direct control plane of the owner's network
+    // The system is not fully awake (see "System asleep" in the header; SystemAwake.h). false on every platform
+    // without a sleep source.
+    bool systemAsleep = false;
 };
 
 class AttemptOwner {
@@ -328,21 +342,31 @@ public:
 
     QList<AttemptEffect> handle(const AttemptEvent &ev, const SelectionContext &ctx)
     {
-        const bool resumed = advance(ev.nowMs);
-        if (resumed)
+        // System asleep (see the header): the edge is taken first; a gap that began or ended asleep never counts.
+        const bool wasAsleep = m_asleep;
+        m_asleep = ctx.systemAsleep;
+        const bool woke = wasAsleep && !m_asleep;
+        const bool resumed = advance(ev.nowMs, wasAsleep || m_asleep);
+        if (m_asleep && !wasAsleep)
+            onFellAsleep();
+        if ((resumed && !m_asleep) || woke)
             onResumed();
         QList<AttemptEffect> out;
+        if (woke)
+            onWoke(ctx, out);
         switch (ev.type) {
         case EventType::UserStart: onUserStart(ev, ctx, out); break;
         case EventType::UserStop: onUserStop(out); break;
         case EventType::PathFailed:
+            // asleep: the system slept, the failure says nothing about the path
             if (isLiveLeg(ev.stamp) && (m_phase == AttemptPhase::Starting || m_phase == AttemptPhase::Checking))
-                failLeg(isSuccess(ev.outcome) ? PathOutcome::Inconclusive : ev.outcome, out, ev.tunnelGone ? &ctx : nullptr);
+                failLeg(m_asleep || isSuccess(ev.outcome) ? PathOutcome::Inconclusive : ev.outcome, out,
+                        ev.tunnelGone ? &ctx : nullptr);
             break;
         case EventType::TunnelUp:
             if (isLiveLeg(ev.stamp) && m_phase == AttemptPhase::Starting) {
                 m_phase = AttemptPhase::Checking;
-                m_checkSuspended = false;
+                m_checkSuspended = m_asleep; // asleep: the platform holds the check; it runs on the awake edge
                 endLocalBuild(); // up without "built" (the platform reports both at once): the build ends here
                 m_leg.upAt = m_awake;
                 m_leg.deadline = m_awake + checkDeadlineMs();
@@ -351,7 +375,9 @@ public:
             break;
         case EventType::DataChecked:
             if (isLiveLeg(ev.stamp) && m_phase == AttemptPhase::Checking) {
-                if (ev.outcome == PathOutcome::DataOk)
+                if (m_asleep)
+                    m_checkSuspended = true; // judged by no one while asleep: run again on the awake edge
+                else if (ev.outcome == PathOutcome::DataOk)
                     connected(ev.ttfbMs, out);
                 else if (m_checkSuspended)
                     recheck(out); // the check spanned a suspension: it did not happen
@@ -367,9 +393,24 @@ public:
             if (m_phase == AttemptPhase::Stopping && ev.stamp == m_stopping)
                 onStopped(ctx, out);
             break;
-        case EventType::LiveLost: onLiveLost(ev, ctx, out); break;
+        case EventType::LiveLost:
+            if (m_asleep) {
+                // noted; acted on (reported, failed over) on the awake edge - the first loss of the session decides
+                if (m_phase == AttemptPhase::Connected && !m_heldLiveLost)
+                    m_heldLiveLost = ev;
+                break;
+            }
+            onLiveLost(ev, ctx, out);
+            break;
         case EventType::Adopted: onAdopted(ev, out); break;
-        case EventType::ProofReady: onProofReady(ev, ctx, out); break;
+        case EventType::ProofReady:
+            if (m_asleep) {
+                if (m_running)
+                    noteProof(ev.lead); // kept for the attempt; no leg yields while asleep
+                break;
+            }
+            onProofReady(ev, ctx, out);
+            break;
         case EventType::PermissionDenied:
             if (m_running && isLiveLeg(ev.stamp) && m_phase == AttemptPhase::Starting) {
                 // nothing was raised and nothing is judged: no report, no stop, no next choice
@@ -380,12 +421,15 @@ public:
             break;
         case EventType::LocalBuild: onLocalBuild(ev); break;
         }
-        // A check that was running across a suspension and has not answered yet: void, run it again.
-        if (m_checkSuspended && m_phase == AttemptPhase::Checking)
+        // A check that was running across a suspension and has not answered yet: void, run it again (awake only).
+        if (m_checkSuspended && m_phase == AttemptPhase::Checking && !m_asleep)
             recheck(out);
-        checkDeadlines(ctx, out);
+        if (!m_asleep)
+            checkDeadlines(ctx, out); // asleep: the clock stands, no deadline is due
         return out;
     }
+
+    bool systemAsleep() const { return m_asleep; }
 
     AttemptPhase phase() const { return m_phase; }
     bool running() const { return m_running; }
@@ -458,19 +502,47 @@ private:
         m_leg.buildSince = -1;
     }
 
-    // true: the gap since the last event was a suspension (none of it counts).
-    bool advance(qint64 now)
+    // true: the gap since the last event was a suspension (none of it counts). asleep: the gap began or ended while
+    // the system was not fully awake - it does not count either ("System asleep").
+    bool advance(qint64 now, bool asleep)
     {
         bool suspended = false;
         if (m_lastNow >= 0 && now > m_lastNow) {
             const qint64 gap = now - m_lastNow;
             suspended = gap > m_t.clockJumpMs;
-            if (!suspended)
+            if (!suspended && !asleep)
                 m_awake += gap;
         }
         if (now > m_lastNow)
             m_lastNow = now;
         return suspended;
+    }
+
+    // The system goes to sleep: a check that is running is void (the platform drops it at the same edge).
+    void onFellAsleep()
+    {
+        if (m_phase == AttemptPhase::Checking)
+            m_checkSuspended = true;
+    }
+
+    // The awake edge: the step held while asleep, once (a held loss of the live session first - it begins its own
+    // attempt on the network known now; otherwise a network change noted while asleep, else the next leg).
+    void onWoke(const SelectionContext &ctx, QList<AttemptEffect> &out)
+    {
+        bool began = false;
+        if (std::optional<AttemptEvent> lost = std::exchange(m_heldLiveLost, std::nullopt)) {
+            const quint64 before = m_attempt;
+            onLiveLost(*lost, ctx, out);
+            began = m_attempt != before;
+        }
+        const bool netChanged = std::exchange(m_netChangedAsleep, false);
+        const bool next = std::exchange(m_nextOnWake, false);
+        if (began || !m_running)
+            return;
+        if (netChanged)
+            restartOnNetworkChange(ctx, out);
+        else if (next && m_phase == AttemptPhase::Idle)
+            beginNext(ctx, out);
     }
 
     // Back from a suspension: what the platform did meanwhile arrives now - the leg in flight gets time for it;
@@ -537,6 +609,8 @@ private:
         out << e;
         m_running = false;
         m_pending.reset();
+        m_nextOnWake = false;
+        m_netChangedAsleep = false;
     }
 
     void report(PathOutcome o, int connectMs, int ttfbMs, QList<AttemptEffect> &out) const
@@ -666,8 +740,18 @@ private:
         m_proofs.clear();
         if (!m_running)
             return;
+        if (m_asleep) {
+            m_netChangedAsleep = true; // the key is kept; the attempt moves to the network known on the awake edge
+            return;
+        }
+        restartOnNetworkChange(ctx, out);
+    }
+
+    // The attempt goes on on the owner's current network (m_net): a new budget, a leg of the old network goes down.
+    void restartOnNetworkChange(const SelectionContext &ctx, QList<AttemptEffect> &out)
+    {
         restartOnNetwork();
-        if (!net.usable())
+        if (!m_net.usable())
             m_pending = failure(FailReason::NoNetwork);
         else if (m_pending && m_pending->reason == FailReason::NoNetwork)
             m_pending.reset();
@@ -809,7 +893,7 @@ private:
         m_leg.upAt = m_awake;
         m_leg.deadline = m_awake + checkDeadlineMs();
         m_phase = AttemptPhase::Checking;
-        m_checkSuspended = false;
+        m_checkSuspended = m_asleep; // asleep: the check runs on the awake edge
         m_progressTotal = 1;
         out << effect(EffectType::RunDataCheck, m_t.dataCheckMs) << show(AttemptPhase::Checking);
     }
@@ -829,6 +913,10 @@ private:
     {
         if (m_pending)
             return finish(*m_pending, out);
+        if (m_asleep) {
+            m_nextOnWake = true; // no leg is chosen while the system sleeps: on the awake edge, on the network then
+            return;
+        }
         if (!m_net.usable())
             return finish(failure(FailReason::NoNetwork), out);
         if (m_pathsThisNet >= m_t.maxPaths)
@@ -886,6 +974,11 @@ private:
     bool m_preferredTried = false; // a preferred path was brought up in this attempt
     QString m_lead;                // the path a proof named: the next choice takes it (see the header)
     QStringList m_proofs;          // the paths the race of THIS attempt proved on this network (see the header)
+    // "System asleep" (see the header): the context's fact at the last event, and the step held for the awake edge.
+    bool m_asleep = false;
+    bool m_nextOnWake = false;       // a next leg (or the first) was due while asleep
+    bool m_netChangedAsleep = false; // the network changed under a running attempt while asleep
+    std::optional<AttemptEvent> m_heldLiveLost; // the live session was lost while asleep
 };
 
 } // namespace avpn::path

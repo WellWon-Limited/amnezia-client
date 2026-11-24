@@ -233,6 +233,11 @@ public:
     // generation: an attempt in flight restarts on the new network, late answers of the old one change nothing.
     void observeNetwork(const path::NetworkObservation &o);
     const path::NetworkKey &network() const { return m_net.current(); }
+    // AVPN (owner's Mac 24.11.2026, cause F; SystemAwake.h): the system is (not) fully awake. The attempt owner reads
+    // the fact in its context at every event (AttemptOwner.h "System asleep"); the edge reaches it at once. Only the
+    // macOS desktop facade ever says false; elsewhere it stays true and nothing changes.
+    void setSystemAwake(bool awake);
+    bool systemAwake() const { return m_systemAwake; }
     void attemptTick();
     // Stage 2: a race that runs before the owner's first leg is part of the attempt (the orb is busy, reconcile waits).
     bool attemptRunning() const { return m_owner.running() || m_raceFirst; }
@@ -654,6 +659,7 @@ private:
     TransportModeGate m_modeGate; // 5.1.109: the stored choice and the mode in force (TransportModeGate.h)
     // Path engine (design 2026-11-17): the one owner of attempts, the evidence, the network, the user's choice.
     path::AttemptOwner m_owner;
+    bool m_systemAwake = true; // setSystemAwake: the owner's context reads it (SelectionContext::systemAsleep)
     QList<SubscriptionNode> m_scanOffered;   // contract 1.14.0
     qint64 m_scanOfferedRevision = 0;
     // stage 2
