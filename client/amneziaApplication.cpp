@@ -30,6 +30,9 @@
 #include "ui/utils/mtProxyPublicHostInput.h"
 #include "version.h"
 #include "core/utils/appUiConfig.h"
+#if defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS)
+#include "core/protocols/wireGuardProtocol.h" // AVPN (BUG-6 scope): the one session the daemon holds by itself
+#endif
 
 #include "platforms/ios/QRCodeReaderBase.h"
 
@@ -83,11 +86,28 @@ AmneziaApplication::~AmneziaApplication()
         QMetaObject::invokeMethod(m_vpnConnection.get(), "disconnectSlots", Qt::BlockingQueuedConnection);
 #ifndef Q_OS_MACOS
         QMetaObject::invokeMethod(m_vpnConnection.get(), "disconnectFromVpn", Qt::BlockingQueuedConnection);
-#endif
+#else
         // AVPN (BUG-6, macOS): выход GUI НЕ гасит туннель — root-демон держит его (анти-«засветка»:
         // Cmd+Q/смахивание не рвёт сессии), при следующем запуске GUI адоптирует живой туннель
         // (probeDaemonTunnelOnStartup). Выключение VPN — только явной кнопкой в приложении.
         // Win/Linux оставлены как в апстриме (deactivate на выходе) до отдельной проверки.
+        // AVPN (BUG-6 scope, owner's Mac 24.11.2026): that holds only for a session the daemon keeps by itself
+        // (AmneziaWG: WireguardProtocol -> the daemon socket). Any other session - own Xray - is controlled by
+        // this process (tun2socks is its child in the service; routes, DNS and the kill switch are set from
+        // here) and the next launch cannot adopt it. Left to ~XrayProtocol after this thread had stopped, it
+        // was torn down from the main thread except for tun2socks: the quit hung 30 s on the tun2socks replica
+        // of the stopped thread and tun2socks stayed as an orphan. It ends here, on its own thread while that
+        // thread still runs, as upstream ends every session on quit.
+        VpnConnection *connection = m_vpnConnection.get();
+        QMetaObject::invokeMethod(
+                connection,
+                [connection]() {
+                    const QSharedPointer<VpnProtocol> protocol = connection->vpnProtocol();
+                    if (protocol && !qobject_cast<WireguardProtocol *>(protocol.data()))
+                        connection->disconnectFromVpn();
+                },
+                Qt::BlockingQueuedConnection);
+#endif
     }
 #endif
 
