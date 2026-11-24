@@ -1010,6 +1010,128 @@ static void scenarioSuspended()
     CHECK(s.lastTapWallMs() > 30000); // wall time includes the sleep, the deadlines did not
 }
 
+// "System asleep" (AttemptOwner.h; owner's Mac 24.11.2026, cause F): the lid is closed, the Mac sleeps and makes a
+// Power Nap dark wake every ~15 min - the app runs in each for seconds (ticks and callbacks here) while the context
+// says the system is not fully awake. Times follow the service log of that night: "will sleep" 08:29:21, dark wakes
+// 08:39:16 (19 s) and 08:41:45 (11 s), 08:58:42 (2 s), the lid-open wake 15:38:14 (~7 h after "will sleep").
+static void scenarioSystemSleep()
+{
+    const NetworkObservation home = wifi("192.168.1.1"), otherAp = wifi("192.168.7.1");
+    const QString k = key(home);
+    constexpr qint64 kSleep = 1000;                       // "will sleep", 1 s after the tap
+    constexpr qint64 kDark1 = kSleep + 595'000;           // 08:39:16, 19 s
+    constexpr qint64 kDark2 = kDark1 + 149'000;           // 08:41:45, 11 s
+    constexpr qint64 kDark3 = kDark2 + 1'017'000;         // 08:58:42, 2 s
+    constexpr qint64 kWake = kSleep + 25'733'000;         // 15:38:14
+    const auto night = [&](Sim &s) {
+        s.at(kSleep, [&s] { s.setSystemAsleep(true); });
+        s.suspend(kSleep + 1, kDark1 - kSleep - 1);
+        s.suspend(kDark1 + 19'000, kDark2 - kDark1 - 19'000);
+        s.suspend(kDark2 + 11'000, kDark3 - kDark2 - 11'000);
+        s.suspend(kDark3 + 2'000, kWake - kDark3 - 2'000);
+        s.at(kWake, [&s] { s.setSystemAsleep(false); });
+    };
+
+    // A) Sleep mid-check (the 08:41:56 start): the leg is up, its data check gets nothing (the Mac sleeps); in the dark
+    // wakes nothing is checked, judged, recorded, stopped or started; on the awake edge the check runs again on the
+    // same tunnel and the path works - the same leg connects, the sleep spent none of the attempt's budget.
+    {
+        World w;
+        w.set(k, QStringLiteral("17"), PathScript::always(Behaviour::silent(300)).then(kWake, Behaviour::works(300, 400, 100)));
+        w.set(k, QStringLiteral("16"), Behaviour::works(300, 400, 100));
+        Sim s({ awg("17", "EE", false, 2.0), awg("16", "NL") }, w, home);
+        night(s);
+        s.deliver(AttemptEvent::userStart(0, UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));
+        s.run([&] { return s.now >= kWake - 1; }, kWake);
+        CHECK(s.systemAsleep && s.owner.systemAsleep());
+        CHECK(s.legs.size() == 1 && s.results.isEmpty() && s.owner.phase() == AttemptPhase::Checking);
+        CHECK(s.startsAsleep == 0 && s.checksAsleep == 0 && s.reportsAsleep == 0 && s.stopsAsleep == 0);
+        CHECK(s.reports.isEmpty() && s.ledger.size() == 0);
+        CHECK(s.owner.awakeMs() <= kSleep + 100); // the clock stood through every dark wake
+        const int checksBefore = s.checksRun;
+        s.run([&] { return !s.results.isEmpty(); }, 30'000);
+        CHECK(s.results.size() == 1 && s.results[0].connected && s.results[0].path.id.id == QLatin1String("17"));
+        CHECK(s.legs.size() == 1 && s.checksRun == checksBefore + 1 && s.rechecks == 1); // one evaluation
+        CHECK(s.results[0].elapsedMs < 5000);                                            // awake time only
+        CHECK(s.reports.size() == 1 && s.reports[0].outcome == PathOutcome::DataOk);
+        row("sleep mid-check, dark wakes, lid open (24.11)", s, s.results[0], 0);
+    }
+
+    // B) The network changes in the dark wakes (BSSID 08:39:16 to another access point, 08:41:45 back offline) and is
+    // another one at the full wake: noted, never acted on while asleep; on the awake edge the attempt moves to the
+    // network known then - the old leg goes down unrecorded, the next leg starts on that network.
+    {
+        World w;
+        w.set(k, QStringLiteral("17"), Behaviour::silent(300));
+        w.set(key(otherAp), QStringLiteral("17"), Behaviour::works(300, 400, 100));
+        Sim s({ awg("17", "EE", false, 2.0), awg("16", "NL") }, w, home);
+        night(s);
+        NetworkObservation off;
+        off.medium = NetMedium::Offline;
+        s.changeNetworkAt(kDark1 + 200, otherAp);
+        s.changeNetworkAt(kDark2 + 300, off);
+        s.changeNetworkAt(kWake - 1, otherAp); // the platform observed the network right before the edge (facade order)
+        s.deliver(AttemptEvent::userStart(0, UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));
+        s.run([&] { return s.now >= kWake - 1; }, kWake);
+        CHECK(s.legs.size() == 1 && s.results.isEmpty());
+        CHECK(s.startsAsleep == 0 && s.stopsAsleep == 0 && s.reportsAsleep == 0 && s.checksAsleep == 0);
+        s.run([&] { return !s.results.isEmpty(); }, 30'000);
+        CHECK(s.results.size() == 1 && s.results[0].connected);
+        CHECK(s.legs.size() == 2 && s.legs[1].network == key(otherAp) && s.legs[1].startedMs >= kWake);
+        CHECK(!s.ledger.entry(k, QStringLiteral("17"))); // the cut leg described the old network: not recorded
+    }
+
+    // C) The live session is lost while asleep (a seat answer that arrived in a dark wake): nothing is recorded, nothing
+    // stopped or started in the dark wake; the loss is taken once on the awake edge (failover).
+    {
+        World w;
+        w.set(k, QStringLiteral("17"), Behaviour::works(300, 400, 100));
+        w.set(k, QStringLiteral("16"), Behaviour::works(300, 400, 100));
+        Sim s({ awg("17", "EE", false, 2.0), awg("16", "NL") }, w, home);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        CHECK(r.connected && s.owner.phase() == AttemptPhase::Connected);
+        const qint64 base = s.now;
+        s.at(base + 100, [&s] { s.setSystemAsleep(true); });
+        s.at(base + 5000, [&s] {
+            s.deliver(AttemptEvent::liveLost(s.now, PathOutcome::NoData, false, true, UserChoice::automatic(),
+                                             TransportMode::Auto, s.tracker.current()));
+        });
+        s.idle(60'000);
+        CHECK(s.owner.phase() == AttemptPhase::Connected && s.results.size() == 1);
+        CHECK(s.reportsAsleep == 0 && s.stopsAsleep == 0 && s.startsAsleep == 0);
+        s.setSystemAsleep(false);
+        s.run([&] { return s.results.size() > 1; }, 30'000);
+        CHECK(s.results.size() == 2 && s.results.last().connected && s.results.last().path.id.id == QLatin1String("16"));
+        CHECK(s.reports.size() >= 2 && s.reports[1].outcome == PathOutcome::NoData); // the loss, once, after the edge
+    }
+
+    // D) The person's own events are taken as always while asleep: a stop stops at once and ends the attempt once; a
+    // start begins its attempt, and its leg waits for the awake edge (a person's press in the window is itself a
+    // proof of a full wake on the macOS app, SystemAwake.h - this is the owner's rule when none came).
+    {
+        World w;
+        w.set(k, QStringLiteral("17"), Behaviour::silent(300));
+        Sim s({ awg("17", "EE") }, w, home);
+        s.deliver(AttemptEvent::userStart(0, UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));
+        s.idle(1000);
+        s.setSystemAsleep(true);
+        s.deliver(AttemptEvent::userStop(s.now));
+        CHECK(s.stopsAsleep == 1);
+        s.run([&] { return !s.results.isEmpty(); }, 5000);
+        CHECK(s.results.size() == 1 && s.results[0].reason == FailReason::StoppedByUser && s.startsAsleep == 0);
+        World w2;
+        w2.set(k, QStringLiteral("17"), Behaviour::works(300, 400, 100));
+        Sim s2({ awg("17", "EE") }, w2, home);
+        s2.setSystemAsleep(true);
+        s2.deliver(AttemptEvent::userStart(s2.now, UserChoice::automatic(), TransportMode::Auto, s2.tracker.current()));
+        s2.idle(60'000);
+        CHECK(s2.owner.running() && s2.legs.isEmpty() && s2.results.isEmpty());
+        s2.setSystemAsleep(false);
+        s2.run([&] { return !s2.results.isEmpty(); }, 10'000);
+        CHECK(s2.legs.size() == 1 && s2.results.size() == 1 && s2.results[0].connected && s2.startsAsleep == 0);
+    }
+}
+
 // Android permission prompt (the system's "allow VPN configuration" dialog, VpnService.prepare): the host delivers
 // no tick while it is on screen (the same rule as the iOS prompt) - the simulator's suspend() is exactly that - and
 // reports "denied" with the leg's stamp. Granted: the leg goes on; denied: the attempt ends once.
@@ -2606,6 +2728,7 @@ int main()
     scenarioFlapping();
     scenarioNetworkChange();
     scenarioSuspended();
+    scenarioSystemSleep();
     scenarioPermissionPrompt();
     scenarioLocalBuild();
     scenarioLocalBuildQueued();

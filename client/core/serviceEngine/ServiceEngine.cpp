@@ -349,7 +349,24 @@ path::SelectionContext ServiceEngine::ownerContext() const
     if (m_race.running())
         for (const QString &id : m_race.inFlightPathIds())
             c.crowd.insert(id, 0.0);
+    c.systemAsleep = !m_systemAwake; // AttemptOwner.h "System asleep" (SystemAwake.h)
     return c;
+}
+
+void ServiceEngine::setSystemAwake(bool awake)
+{
+    if (awake == m_systemAwake)
+        return;
+    m_systemAwake = awake;
+    attemptJournal(QStringLiteral("system_awake=%1 owner=%2 running=%3 leg=%4")
+                       .arg(int(awake))
+                       .arg(QLatin1String(path::attemptPhaseName(m_owner.phase())))
+                       .arg(int(m_owner.running()))
+                       .arg(m_owner.currentLeg().leg));
+    m_owner.setTimings(attemptTimings());
+    // The owner learns of the edge now, not at the next tick: asleep - a running check is void and its clock stands;
+    // awake - it takes the step it held, once.
+    feedOwner(path::AttemptEvent::tick(nowMs()));
 }
 
 void ServiceEngine::attemptJournal(const QString &line)

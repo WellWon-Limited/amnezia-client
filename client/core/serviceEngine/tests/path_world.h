@@ -154,7 +154,23 @@ public:
         if (race.running())
             for (const QString &id : race.inFlightPathIds())
                 c.crowd.insert(id, 0.0);
+        c.systemAsleep = systemAsleep; // the engine's rule (ServiceEngine::ownerContext, setSystemAwake)
         return c;
+    }
+    // "System asleep" (AttemptOwner.h; the macOS desktop app, SystemAwake.h): the platform says the system is not
+    // fully awake - a Power Nap dark wake is a stretch of virtual time where ticks and callbacks run with this set
+    // (deep sleep between them: suspend()). The platform side plays the facade: no data check starts meanwhile
+    // (AvpnEngineQml::startDataPathVerification is held). The counters say what the owner did while asleep.
+    bool systemAsleep = false;
+    int startsAsleep = 0;  // StartPath effects
+    int checksAsleep = 0;  // RunDataCheck effects (not run: the facade holds them)
+    int reportsAsleep = 0; // Report effects
+    int stopsAsleep = 0;   // StopPath effects
+    // The engine's edge (ServiceEngine::setSystemAwake): the fact changes and the owner gets an event at once.
+    void setSystemAsleep(bool asleep)
+    {
+        systemAsleep = asleep;
+        deliver(AttemptEvent::tick(now));
     }
     ApiReach controlPlane = ApiReach::Unknown; // lane C: ConfigService::directApiReach of the current network
     QSet<QString> raceFailed; // paths whose probe failed in the race of this tap
@@ -335,6 +351,8 @@ private:
         for (const AttemptEffect &e : effects) {
             switch (e.type) {
             case EffectType::StartPath: {
+                if (systemAsleep)
+                    ++startsAsleep;
                 if (race.running()) // the leg's own path leaves the race (CONNECT-INVARIANTS §32 p. 3)
                     applyRace(race.legStarted(now, e.path.id.id));
                 const QString net = tracker.current().local;
@@ -374,6 +392,10 @@ private:
                 break;
             }
             case EffectType::RunDataCheck: {
+                if (systemAsleep) {
+                    ++checksAsleep; // the facade holds the check while the system sleeps (the owner reruns it)
+                    break;
+                }
                 // an adopted leg was never started here: the network's behaviour for that path decides
                 // the first check: the behaviour the leg started with; a check run again: the network as it is now
                 const Behaviour b = m_legBehaviour.contains(e.stamp.leg) && !e.recheck
@@ -417,8 +439,14 @@ private:
                     answer(now + e.timeoutMs, AttemptEvent::dataChecked(0, e.stamp, PathOutcome::Inconclusive));
                 break; // Silent: nothing comes, the owner's backstop deadline judges it
             }
-            case EffectType::StopPath: schedule(now + stopMs, AttemptEvent::stopConfirmed(0, e.stamp)); break;
+            case EffectType::StopPath:
+                if (systemAsleep)
+                    ++stopsAsleep;
+                schedule(now + stopMs, AttemptEvent::stopConfirmed(0, e.stamp));
+                break;
             case EffectType::Report:
+                if (systemAsleep)
+                    ++reportsAsleep;
                 reports.append(e.report);
                 if (tracker.isCurrent(e.report.networkGeneration))
                     ledger.record(e.report.network, e.report.path, e.report.outcome, wall(), e.report.connectMs,
