@@ -87,6 +87,10 @@ Item {
                                                  : (again ? ScanTexts.scanAgain : ScanTexts.scanScope)
     readonly property bool retryEnabled: countdown ? !counting : bar.button_enabled !== false
 
+    // what a tap of the button does now (F1: the press keeps its own)
+    function action() { return choosing ? "scan_all" : kind === "stop" ? "stop" : fallback ? "connect" : "retry" }
+    property string pressAction: ""
+
     implicitHeight: col.implicitHeight + Theme.space.sm + Theme.space.lg
 
     ColumnLayout {
@@ -129,11 +133,22 @@ Item {
                   : root.retryText
             enabled: root.choosing ? (!root.gated && root.kind !== "stop")
                      : (root.kind === "stop" || root.fallback) ? root.bar.button_enabled !== false : root.retryEnabled
+            // Review round 36, F1: this one button changes its action when it is tapped («Остановить» -> the choice's
+            // «Сканировать все страны», «Сканировать все страны» -> «Остановить»). The action never changes under the
+            // finger: a press fires only the action it began with, and the second tap of a double tap (Qt's own
+            // double-tap recognition of this button, doubleClicked) is absorbed - a double tap on «Остановить» only
+            // stops, it never starts a scan of every country.
+            onPressed: root.pressAction = root.action()
+            onCanceled: root.pressAction = ""
+            onDoubleClicked: root.pressAction = ""
             onClicked: {
+                const a = root.pressAction !== "" ? root.pressAction : root.action()
+                root.pressAction = ""
+                if (a !== root.action()) return    // the button changed its meaning while pressed: nothing
                 Haptic.play("light")
-                if (root.choosing) root.scanAllTapped()
-                else if (root.kind === "stop") root.stopTapped()
-                else if (root.fallback) root.connectAndScanTapped()
+                if (a === "scan_all") root.scanAllTapped()
+                else if (a === "stop") root.stopTapped()
+                else if (a === "connect") root.connectAndScanTapped()
                 else root.retryTapped()
             }
         }

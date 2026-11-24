@@ -333,6 +333,9 @@ public:
     Q_INVOKABLE void connectAndScan();
     Q_INVOKABLE void gotIt();
     Q_INVOKABLE void chooseCountry(const QString &cc);
+    // The country choice opens a scope's fresh result (view.slots) as it is, never a scan (review round 36, F3:
+    // ScanMachine::slotChosen - also out of a failed re-scan of the same scope).
+    Q_INVOKABLE void showSlot(const QString &cc);
     // «Найти ещё»: the next batch of this network's candidates not judged yet (country "" = the whole pool, else a
     // scan of that country over the whole pool). The view says more_available / batch / more_country
     // (ScanMachine::moreTapped).
