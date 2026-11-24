@@ -126,6 +126,15 @@ bool isSaneIfaceName(const QString &name)
 bool Xray::startXray(const QString &cfg)
 {
     qDebug() << "Xray::startXray()";
+#ifdef Q_OS_MACOS
+    // AVPN: a start runs only on a closed core. The bindings keep one instance and configure
+    // overwrites it without closing it (xraysession.h), so an instance still open here would keep its
+    // inbound, its outbound connections and the uplink routes beside the new one.
+    if (m_core.beforeStart() == avpn::XrayCoreSession::StartStep::CloseOpenFirst) {
+        qWarning() << "[xray] start: the previous core instance is still open - closing it first";
+        stopXray();
+    }
+#endif
     // AVPN (upstream nodes): never let the core fall back to a foreign geo copy (xrayassets.h).
     if (const QStringList missing = avpn::xrayMissingAssets(cfg, QCoreApplication::applicationDirPath());
         !missing.isEmpty()) {
@@ -143,6 +152,17 @@ bool Xray::startXray(const QString &cfg)
     if (defaultIface.index() > 0) {
         qDebug() << "[xray] using uplink interface:" << defaultIface.name() << "(" << defaultIface.index() << ")";
     }
+#ifdef Q_OS_MACOS
+    // AVPN (diag): getGatewayAndIface (macOS) scans the IPv4 routes, then the IPv6 ones, and an IPv6
+    // gateway route of the second pass overwrites the IPv4 default (gateway AND interface index) - then
+    // routeAddXray gets an IPv6 gateway for its IPv4 routes.
+    qDebug() << "[xray] uplink gateway family:"
+             << (defaultGateway.isEmpty() ? "none" : (defaultGateway.contains(QLatin1Char(':')) ? "v6" : "v4"));
+    m_bindOk = 0;
+    m_bindFailed = 0;
+    m_bindFirstErrno = 0;
+    m_droppedInfoLines = 0;
+#endif
 
 #ifdef Q_OS_MAC
     m_uplinkIfaceName = defaultIface.name();
@@ -163,12 +183,25 @@ bool Xray::startXray(const QString &cfg)
 
     amnezia_xray_setloghandler(ctxLogHandler, this);
 
+#ifdef Q_OS_MACOS
+    // AVPN (diag): with the service log on, the core reports its failed dials and DNS failures
+    // (Info level); only those Info lines reach the log (logHandler).
+    const avpn::XrayDiagConfig diag = avpn::xrayDiagConfig(cfg, m_diagnostics);
+    m_levelRaised = diag.raised;
+    qDebug().noquote() << "[xray] core config:" << avpn::xrayConfigSummary(diag.config, diag.level)
+                       << (diag.raised ? "(level raised for the service log)" : "");
+    QByteArray bytes = diag.config.toUtf8();
+#else
     QByteArray bytes = cfg.toUtf8();
+#endif
     if (auto err = amnezia_xray_configure(bytes.data()); err != nullptr) {
         qDebug() << "[xray] configuration failed: " << err;
         amnezia_xray_free(err);
         return false;
     }
+#ifdef Q_OS_MACOS
+    m_core.onConfigured(); // AVPN: from here the instance holds features and is closed exactly once
+#endif
 
     if (auto err = amnezia_xray_start(); err != nullptr) {
         qDebug() << "[xray] failed to start: " << err;
@@ -191,10 +224,33 @@ bool Xray::stopXray()
     // AVPN: сессия закрыта запросом клиента — статистика дальше не копится.
     m_running = false;
     bool success = true;
-    if (auto err = amnezia_xray_stop(); err != nullptr) {
-        qDebug() << "[xray] failed to stop: " << err;
-        amnezia_xray_free(err);
-        success = false;
+#ifdef Q_OS_MACOS
+    // AVPN: one close per instance (xraysession.h). XrayProtocol stops twice (its failover stop, then
+    // its destructor); the second close of the same instance made the core answer "inbound: failed to
+    // close all resources" although the first close had succeeded.
+    const bool closeCore = m_core.beforeStop() == avpn::XrayCoreSession::StopStep::Close;
+    if (!closeCore) {
+        qDebug() << "[xray] stop: no open core instance - nothing to close";
+    }
+#else
+    const bool closeCore = true;
+#endif
+    if (closeCore) {
+        if (auto err = amnezia_xray_stop(); err != nullptr) {
+            qDebug() << "[xray] failed to stop: " << err;
+            amnezia_xray_free(err);
+            success = false;
+        }
+#ifdef Q_OS_MACOS
+        m_core.onClosed();
+        if (success) {
+            qDebug() << "[xray] core instance closed";
+        }
+        // AVPN (diag): how the core's sockets were pinned to the uplink this session.
+        qDebug() << "[xray] session sockets bound to the uplink: ok" << m_bindOk.load() << "failed" << m_bindFailed.load()
+                 << "first errno" << m_bindFirstErrno.load() << "| core info lines filtered out:" << m_droppedInfoLines.load();
+        m_levelRaised = false;
+#endif
     }
 
 #ifdef Q_OS_MAC
@@ -262,7 +318,13 @@ QJsonObject Xray::runtimeStatus(const QString &ifaceHint)
 
 void Xray::logHandler(char* str)
 {
-    QMetaObject::invokeMethod(qApp, [str = QString::fromUtf8(str)] {
+    // AVPN (diag): an Info line we asked for only to see failures passes only when it reports one.
+    QString line = QString::fromUtf8(str);
+    if (!avpn::xrayKeepCoreLine(line, m_levelRaised.load())) {
+        ++m_droppedInfoLines;
+        return;
+    }
+    QMetaObject::invokeMethod(qApp, [str = std::move(line)] {
         qDebug() << "[xray]" << str;
     }, Qt::QueuedConnection);
 }
@@ -271,8 +333,19 @@ void Xray::sockCallback(uintptr_t fd)
 {
 #ifdef Q_OS_MAC
     if (m_defaultIfaceIdx > 0) {
-        setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &m_defaultIfaceIdx, sizeof(m_defaultIfaceIdx));
-        setsockopt(fd, IPPROTO_IPV6, IPV6_BOUND_IF, &m_defaultIfaceIdx, sizeof(m_defaultIfaceIdx));
+        // AVPN (diag): an AF_INET socket takes IP_BOUND_IF, an AF_INET6 one IPV6_BOUND_IF; a socket
+        // neither pins stays on the main table - whose 0/1 and 128/1 lead into the tunnel.
+        const int v4 = setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &m_defaultIfaceIdx, sizeof(m_defaultIfaceIdx));
+        const int v4errno = v4 == 0 ? 0 : errno;
+        const int v6 = setsockopt(fd, IPPROTO_IPV6, IPV6_BOUND_IF, &m_defaultIfaceIdx, sizeof(m_defaultIfaceIdx));
+        if (v4 == 0 || v6 == 0) {
+            ++m_bindOk;
+        } else if (m_bindFailed++ == 0) {
+            m_bindFirstErrno = v4errno;
+            QMetaObject::invokeMethod(qApp, [v4errno, idx = m_defaultIfaceIdx] {
+                qWarning() << "[xray] a core socket could not be bound to uplink index" << idx << "errno" << v4errno;
+            }, Qt::QueuedConnection);
+        }
     }
 #endif
 #ifdef Q_OS_WIN
