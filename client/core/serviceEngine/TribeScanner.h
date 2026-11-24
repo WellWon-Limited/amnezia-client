@@ -327,6 +327,7 @@ public:
     // open() stays for the coordinator's own paths and the engine's tests (it starts a scan).
     Q_INVOKABLE void show();
     Q_INVOKABLE void close();
+    // «Остановить» (owner 24.11): cancels the scan, the screen stays open (the page goes back to its country choice).
     Q_INVOKABLE void stop();
     Q_INVOKABLE void retry();
     Q_INVOKABLE void connectAndScan();

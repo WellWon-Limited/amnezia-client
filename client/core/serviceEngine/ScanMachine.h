@@ -466,6 +466,13 @@ struct ScanEmptyView {
     QString scopeCc;                 // an Empty result of a country scope: that country
 };
 
+// One fresh result of this network (the Scanner's country choice, owner 24.11): its scope, its working rows, its age.
+struct ScanSlotView {
+    QString scope;                   // "" = all countries, a country code, "whitelist"
+    int works = 0;                   // the result's working rows (Works / Slow)
+    int agoMin = 0;                  // minutes since that scan ended
+};
+
 struct ScanView {
     ScanPhase phase = ScanPhase::Idle;
     bool scanning = false;
@@ -499,6 +506,9 @@ struct ScanView {
                                      // menu counts that the list does not show - their probes failed, or they could not be
                                      // checked here (device round 13, A6/A12: «Великобритания 32» listed 30)
     QString netRadio;                // view.net_radio: the cellular radio generation ("" = unknown / not cellular)
+    // view.slots: this network's results a scope choice shows without a scan (ScanMachine::slotFresh), newest first;
+    // the country choice says «M доступно · K мин назад» on their rows and opens them as they are
+    QList<ScanSlotView> scopeSlots;
 };
 
 // PathOutcomeItem.probe / DoctorScanRow.probe of a probe kind.
@@ -704,14 +714,17 @@ public:
         return s;
     }
 
+    // «Остановить» (owner 24.11): the scan is cancelled and the screen STAYS open - the page goes back to its country
+    // choice; the scope's fresh result comes back on the list as on open (the rows of the cancelled scan are dropped).
+    // Leaving the screen is closed().
     ScanStep stopTapped(qint64 now)
     {
         now = clock(now);
         ScanStep s;
         if (scanPhaseScanning(m_phase)) {
             cancelScan(now, s);
-            m_screenOpen = false;
-            s.actions << act(ScanActionKind::CloseScreen);
+            showCachedScope(m_scope, now);
+            m_listRebuild = true; // the list of the cancelled scan is gone: built again from what is shown now (syncList)
         }
         finishStep(s, now);
         return s;
@@ -1657,6 +1670,16 @@ public:
                 v.moreRetryMin = scanRetryMinutes(budgetBlocked(now).retryInMs);
         }
         v.netRadio = m_net.kind == ScanNetKind::Cellular ? m_net.radio : QString();
+        for (const ScanCachedResult &c : m_slots) {
+            if (!slotFresh(c, now))
+                continue;
+            ScanSlotView sv;
+            sv.scope = scanScopeOf(c.scope);
+            for (const ScanCachedRow &r : c.rows)
+                sv.works += scanClassWorking(r.cls) ? 1 : 0;
+            sv.agoMin = int(qMax<qint64>(0, now - c.savedAtMs) / 60000);
+            v.scopeSlots << sv;
+        }
         v.bar.scopeCountries = scopeList();
         v.bar.scopeWhitelist = m_poolWhitelist;
         bool listCache = false; // the list shows a cached result (its scope, its age)
@@ -2208,15 +2231,21 @@ private:
     // scan_cache_works_ttl_s), with rows. Judged when a list is built, never while shown.
     const ScanCachedResult *slotShown(const QString &scope, qint64 now) const
     {
-        for (const ScanCachedResult &c : m_slots) {
-            if (scanScopeOf(c.scope) != scope || c.rows.isEmpty() || c.fingerprint.isEmpty() || c.fingerprint != m_net.fingerprint)
-                continue;
-            const qint64 age = now - c.savedAtMs;
-            if (age >= -60000 && age <= kScanCacheShowMaxMs && age <= qint64(m_t.cacheWorksTtlS) * 1000)
+        for (const ScanCachedResult &c : m_slots)
+            if (scanScopeOf(c.scope) == scope && slotFresh(c, now))
                 return &c;
-        }
         return nullptr;
     }
+
+    // A slot that can be shown now (the rule of slotShown, and of view.slots: the choice offers exactly what it shows).
+    bool slotFresh(const ScanCachedResult &c, qint64 now) const
+    {
+        if (c.rows.isEmpty() || c.fingerprint.isEmpty() || c.fingerprint != m_net.fingerprint)
+            return false;
+        const qint64 age = now - c.savedAtMs;
+        return age >= -60000 && age <= slotFreshMs();
+    }
+    qint64 slotFreshMs() const { return qMin(kScanCacheShowMaxMs, qint64(m_t.cacheWorksTtlS) * 1000); }
 
     // The cached rows on the screen become the ones of `scope`'s slot (none when the network has no result of that scope).
     void showCachedScope(const QString &scope, qint64 now)
@@ -4302,6 +4331,14 @@ private:
         }
         if (v.bar.button == ScanBarButton::RetryInMinutes)
             take(now + 60000);
+        // view.slots: an age turns a minute; a slot stops being fresh (its choice row then scans)
+        for (const ScanCachedResult &c : m_slots) {
+            if (!slotFresh(c, now))
+                continue;
+            const qint64 age = qMax<qint64>(0, now - c.savedAtMs);
+            take(c.savedAtMs + (age / 60000 + 1) * 60000);
+            take(c.savedAtMs + slotFreshMs() + 1);
+        }
         return w;
     }
 
@@ -4677,6 +4714,13 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     }
     if (!v.netRadio.isEmpty())
         o.insert(QStringLiteral("net_radio"), v.netRadio);
+    if (!v.scopeSlots.isEmpty()) {
+        QJsonArray slotsJ;
+        for (const ScanSlotView &sv : v.scopeSlots)
+            slotsJ << QJsonObject{{QStringLiteral("scope"), sv.scope}, {QStringLiteral("works"), sv.works},
+                                  {QStringLiteral("ago_min"), sv.agoMin}};
+        o.insert(QStringLiteral("slots"), slotsJ);
+    }
     QJsonObject bar;
     bar.insert(QStringLiteral("menu_visible"), v.bar.menuVisible);
     bar.insert(QStringLiteral("menu_enabled"), v.bar.menuEnabled);

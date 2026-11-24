@@ -1405,7 +1405,8 @@ static void machineRules()
         ScanStep s = m.opened(o, kT0);
         CHECK(m.phase() == ScanPhase::Connecting && !s.has(ScanActionKind::UserConnectForScan) && !m.startedVpn());
         s = m.stopTapped(kT0 + 300);
-        CHECK(!s.has(ScanActionKind::CancelPendingConnect) && s.has(ScanActionKind::CloseScreen));
+        // owner 24.11: Stop keeps the screen open (back to the country choice)
+        CHECK(!s.has(ScanActionKind::CancelPendingConnect) && !s.has(ScanActionKind::CloseScreen) && m.screenOpen());
         ScanMachine m2(wi.caps);
         ScanOpen off = openOf(wi, QString(), false);
         off.current.connecting = true; // an attempt without a live tunnel yet
@@ -4326,6 +4327,115 @@ static void countrylessRows()
     CHECK(!blank && v.bar.countries.size() == 1 && v.bar.total == 2);
 }
 
+// Owner 24.11: the Scanner opens on its country choice. view.slots lists this network's fresh results, one per scope
+// ({scope, works, ago_min}: a choice row with one shows it without a scan); «Остановить» cancels the scan and the
+// screen stays open (back to the choice), with the scope's last result as on open.
+static ScanCachedRow choiceRow(const QString &id, const QString &cc, ScanClass cls)
+{
+    ScanCachedRow r;
+    r.id = id;
+    r.origin = ScanOrigin::Upstream;
+    r.profileId = id.mid(3);
+    r.countryCode = cc;
+    r.label = cc + QStringLiteral(" 1");
+    r.cls = cls;
+    r.speed = ScanSpeed::Fast;
+    r.ms = 50;
+    return r;
+}
+
+static void choiceSlotsAndStopStays()
+{
+    World w = baseWorld("choice", hostMac(), ScanNetKind::Wifi);
+    ScanOpen o = openOf(w, QString(), false);
+    ScanCachedResult de;
+    de.networkKey = o.network.key;
+    de.fingerprint = o.network.fingerprint;
+    de.savedAtMs = kT0 - 3 * 60000 - 5000; // 3 min old
+    de.scope = QStringLiteral("DE");
+    de.rows << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa01"), QStringLiteral("DE"), ScanClass::Works)
+            << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa02"), QStringLiteral("DE"), ScanClass::Slow);
+    ScanCachedResult all = de;
+    all.scope.clear();
+    all.savedAtMs = kT0 - 7 * 60000; // 7 min old
+    all.rows = {choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa03"), QStringLiteral("NL"), ScanClass::Works)};
+    ScanCachedResult stale = de;
+    stale.scope = QStringLiteral("FI");
+    stale.savedAtMs = kT0 - 11 * 60000; // past scan_cache_works_ttl_s (600 s): never offered
+    stale.rows = {choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa04"), QStringLiteral("FI"), ScanClass::Works)};
+    ScanCachedResult bare = de;
+    bare.scope = QStringLiteral("PL");
+    bare.savedAtMs = kT0 - 60000;
+    bare.rows.clear(); // a result without a row: nothing to show
+    de.otherScopes = {all, stale, bare};
+    o.cached = de;
+
+    // the slots of the open page: fresh ones only, newest first, with the working rows and the age in minutes
+    {
+        ScanMachine m(w.caps);
+        m.shown(o, kT0);
+        const ScanView v = m.view(kT0);
+        CHECK(v.scopeSlots.size() == 2);
+        if (v.scopeSlots.size() == 2) {
+            CHECK(v.scopeSlots.at(0).scope == QLatin1String("DE") && v.scopeSlots.at(0).works == 2 && v.scopeSlots.at(0).agoMin == 3);
+            CHECK(v.scopeSlots.at(1).scope.isEmpty() && v.scopeSlots.at(1).works == 1 && v.scopeSlots.at(1).agoMin == 7);
+        }
+        const QJsonArray js = scanViewToJson(v).value(QStringLiteral("slots")).toArray();
+        CHECK(js.size() == 2 && js.at(0).toObject().value(QStringLiteral("scope")).toString() == QLatin1String("DE")
+              && js.at(0).toObject().value(QStringLiteral("works")).toInt() == 2
+              && js.at(0).toObject().value(QStringLiteral("ago_min")).toInt() == 3
+              && js.at(1).toObject().value(QStringLiteral("scope")).toString().isEmpty());
+        // the view is read again when an age turns a minute, and when a slot stops being fresh
+        CHECK(v.nextChangeAtMs > kT0 && v.nextChangeAtMs <= de.savedAtMs + 4 * 60000);
+        const ScanView later = m.view(all.savedAtMs + 600000 + 1);
+        CHECK(later.scopeSlots.size() == 1 && later.scopeSlots.at(0).scope == QLatin1String("DE"));
+        CHECK(m.view(de.savedAtMs + 600000 + 1).scopeSlots.isEmpty());
+        // a slot the view offers is the one a choice shows: no scan, its rows as the cached result
+        m.filterChosen(QStringLiteral("DE"), kT0 + 100);
+        const ScanView dv = m.view(kT0 + 100);
+        CHECK(!dv.scanning && dv.rows.size() == 2 && dv.rows.at(0).fromCache && dv.bar.scope == QLatin1String("DE"));
+        m.filterChosen(QString(), kT0 + 200);
+        const ScanView av = m.view(kT0 + 200);
+        CHECK(av.rows.size() == 1 && av.rows.at(0).id == QLatin1String("up:aaaaaaaaaaaaaa03"));
+    }
+    // a network without results: no slots (the JSON has no key)
+    {
+        ScanMachine m(w.caps);
+        m.shown(openOf(w, QString(), false), kT0);
+        CHECK(m.view(kT0).scopeSlots.isEmpty() && !scanViewToJson(m.view(kT0)).contains(QStringLiteral("slots")));
+    }
+    // «Остановить»: the scan is cancelled, the screen stays open, the scope's fresh result is shown again
+    {
+        ScanMachine m(w.caps);
+        m.shown(o, kT0);
+        m.filterChosen(QStringLiteral("DE"), kT0 + 100);
+        CHECK(m.retryTapped(kT0 + 200).has(ScanActionKind::RequestManifest));
+        CHECK(m.view(kT0 + 200).scanning && m.view(kT0 + 200).rows.isEmpty()); // a scan the person starts: a new list
+        const quint64 build = m.view(kT0 + 200).listBuild;
+        const ScanStep s = m.stopTapped(kT0 + 300);
+        CHECK(!s.has(ScanActionKind::CloseScreen) && m.screenOpen());
+        const ScanView v = m.view(kT0 + 300);
+        CHECK(v.phase == ScanPhase::Idle && !v.scanning && v.bar.scope == QLatin1String("DE"));
+        CHECK(v.rows.size() == 2 && v.rows.at(0).fromCache && v.listBuild != build);
+        CHECK(v.scopeSlots.size() == 2);
+        // stopped before anything was probed: no pause (the cooldown is armed by a host start, armCooldown)
+        CHECK(v.bar.button == ScanBarButton::Retry && v.bar.buttonEnabled);
+        // a scope without a result after a stop: an empty list of that scope, the screen still open
+        ScanMachine n(w.caps);
+        n.shown(o, kT0);
+        ScanPoolView pool;
+        pool.countries = {ScanPoolView::Country{QStringLiteral("DE"), 3, 0}, ScanPoolView::Country{QStringLiteral("SE"), 1, 0}};
+        n.poolReady(pool, kT0 + 50);
+        n.filterChosen(QStringLiteral("SE"), kT0 + 100);
+        CHECK(n.view(kT0 + 100).bar.scope == QLatin1String("SE") && n.view(kT0 + 100).rows.isEmpty());
+        n.retryTapped(kT0 + 200);
+        CHECK(!n.stopTapped(kT0 + 300).has(ScanActionKind::CloseScreen) && n.screenOpen() && n.view(kT0 + 300).rows.isEmpty());
+        // leaving the screen still closes it (back from the choice)
+        n.closed(kT0 + 400);
+        CHECK(!n.screenOpen());
+    }
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -4857,6 +4967,7 @@ int main(int argc, char **argv)
     cooldownRule();
     rowsAfter17Nov();
     countrylessRows();
+    choiceSlotsAndStopStays();
     refusedEndsScope();
     liveProofHasAnEnd();
     listFullPerBatch();

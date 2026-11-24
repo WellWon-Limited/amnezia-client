@@ -595,6 +595,7 @@ struct ListSteps {
             const QString prevChosen = prevView.value(QLatin1String("bar")).toObject().value(QLatin1String("scope")).toString();
             check(e == QLatin1String("opened") || e == QLatin1String("shown") || e == QLatin1String("filter") || e == QLatin1String("network_changed")
                       || e == QLatin1String("retry") || e == QLatin1String("connect_and_scan_tapped") // «Сканировать» always builds its own list
+                      || e == QLatin1String("stop") // owner 24.11: Stop keeps the screen open; the cancelled scan's list goes
                       || (scanStart && (a.isEmpty() || prevScope != scope || prevChosen != scope)),
                   where + QStringLiteral(": the list was rebuilt on ") + e);
             int lastRank = -1, lastMs = -1, verified = 0, unverified = 0;

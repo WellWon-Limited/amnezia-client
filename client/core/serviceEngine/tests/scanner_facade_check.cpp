@@ -4262,6 +4262,49 @@ static void caseBatchOperation()
 
 // Contract 1.14.0 end to end: the pool feeds the scope menu when the screen opens; «Найти ещё» asks the server's
 // batch with `seen`, the provider rows' stub nodes go to the engine before the rows; an older server (404) falls back.
+// Owner 24.11: the Scanner opens on its country choice. The facade's view carries the fresh results per scope
+// (view.slots, the choice rows' « · M доступно · K мин назад»), and Stop cancels the scan WITHOUT closing the screen
+// (closeScreenRequested is the page's «leave»: the page goes back to its choice instead).
+static void caseChoiceSlotsAndStop()
+{
+    g_case = QStringLiteral("choice_slots_and_stop");
+    World w;
+    w.liveOn(QStringLiteral("4:xray"));
+    w.start();
+    int closes = 0;
+    QObject::connect(w.s.get(), &TribeScanner::closeScreenRequested, w.s.get(), [&closes] { ++closes; });
+    w.s->show();
+    w.run(500);
+    CHECK(!w.s->viewJson().contains(QStringLiteral("slots"))); // nothing scanned on this network yet
+    w.s->retry();
+    w.run(12000);
+    CHECK_EQ(w.phase(), QStringLiteral("done"));
+    const QJsonArray slotsJ = w.s->viewJson().value(QStringLiteral("slots")).toArray();
+    CHECK_EQ(slotsJ.size(), 1);
+    if (!slotsJ.isEmpty()) {
+        const QJsonObject sl = slotsJ.first().toObject();
+        CHECK(sl.value(QStringLiteral("scope")).toString().isEmpty() && sl.value(QStringLiteral("works")).toInt() >= 1
+              && sl.value(QStringLiteral("ago_min")).toInt() == 0);
+    }
+    // the age follows the clock without an event (the view's next change)
+    w.run(61000);
+    CHECK_EQ(w.s->viewJson().value(QStringLiteral("slots")).toArray().first().toObject().value(QStringLiteral("ago_min")).toInt(), 1);
+    // a scan stopped by the person: cancelled, the screen stays, the scope's result is back
+    w.s->retry();
+    w.run(300);
+    CHECK(w.phase() != QStringLiteral("done") && w.phase() != QStringLiteral("idle"));
+    w.s->stop();
+    w.run(3000);
+    CHECK_EQ(closes, 0);
+    CHECK(w.s->screenOpen());
+    CHECK_EQ(w.phase(), QStringLiteral("idle"));
+    CHECK_EQ(w.s->viewJson().value(QStringLiteral("slots")).toArray().size(), 1);
+    CHECK(w.rows().size() >= 1);
+    w.s->close();
+    w.run(500);
+    CHECK(!w.s->screenOpen());
+}
+
 static void caseServerScope()
 {
     g_case = QStringLiteral("server_scope");
@@ -4402,6 +4445,7 @@ int main(int argc, char **argv)
     caseFullScan();
     caseFullProbeProfileRule();
     caseServerScope();
+    caseChoiceSlotsAndStop();
     caseLiveDigest();
     caseManifest304();
     caseManifestSignature();

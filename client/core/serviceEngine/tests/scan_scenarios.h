@@ -780,7 +780,8 @@ inline QList<Scenario> scenarios()
                   },
                   [](const Driver &d, Fail &f) {
                       f.check(countActions(d, ScanActionKind::CancelPendingConnect) == 1, QStringLiteral("one disconnect"));
-                      f.check(d.closes.size() == 1, QStringLiteral("screen closed"));
+                      // owner 24.11: Stop keeps the screen open (the page goes back to its country choice)
+                      f.check(d.closes.isEmpty(), QStringLiteral("screen stays open"));
                       f.check(phaseOf(lastView(d)) == QLatin1String("idle"), QStringLiteral("idle after stop"));
                   }};
 
