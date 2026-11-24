@@ -358,6 +358,25 @@ static void engineNeverAsleepUnchanged()
     CHECK(r.tun.upCalls == 2);
 }
 
+// The 08:41:57 start reached the service with no uplink and the core came up unpinned. A start the engine makes while
+// the authoritative uplink (macOS UplinkMonitor) reports none - a tap with Wi-Fi off, the awake edge's reconcile in a
+// network that is not back yet - ends "no network" before the tunnel is asked (the facade keeps the intent and waits
+// for the uplink, "Нет сети — подключимся, когда она появится"). The facade's observation of that case is
+// NetworkKey.h withPhysicalUplink (offline); this is the engine's side of it. It passes on the base too: it pins the
+// rule the fix relies on, it is not a new one.
+static void engineNoUplinkNoStart()
+{
+    Rig r;
+    path::NetworkObservation off;
+    off.medium = path::NetMedium::Offline;
+    r.eng.observeNetwork(path::withPhysicalUplink(wifi("aa"), /*uplinkAuthoritative=*/true, /*uplinkUp=*/false));
+    QString err;
+    CHECK(!r.eng.connect(err) && err == QLatin1String("no_network"));
+    CHECK(r.tun.upCalls == 0);
+    r.eng.observeNetwork(off);
+    CHECK(!r.eng.connect(err) && r.tun.upCalls == 0);
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -371,6 +390,7 @@ int main(int argc, char **argv)
     engineLiveLossWhileAsleep();
     engineStopWhileAsleep();
     engineNeverAsleepUnchanged();
+    engineNoUplinkNoStart();
     std::printf("system_sleep_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
 }
