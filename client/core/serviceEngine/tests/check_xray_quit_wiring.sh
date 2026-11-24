@@ -15,7 +15,11 @@
 #   Q6  the service binds a child to its controlling connections and, when a tun2socks loses its client without
 #       a stop, ends that Xray session in XrayProtocol::stop's order, then the child; not during its shutdown;
 #   Q7  macOS quit: a session the daemon does not hold by itself (not WireguardProtocol) is ended on the
-#       VpnConnection thread while it runs; Windows/Linux keep upstream's disconnect.
+#       VpnConnection thread while it runs; Windows/Linux keep upstream's disconnect;
+#   Q8  (review F1) a failing step ends its session through failSession, which reports the error only when the
+#       object outlived the teardown; nothing follows a stop() in this file; the destructor emits nothing;
+#   Q9  (review F2) the lost-client teardown is bound to the session: xrayStart/xrayStop move the ledger, a
+#       tun2socks start records its generation, the decision reads both.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -38,6 +42,7 @@ at() { local n; n="$(printf '%s\n' "$1" | grep -nF -- "$2" | head -1 | cut -d: -
 xp="$(code "$XP")"
 start="$(body "$XP" 'ErrorCode XrayProtocol::start()')"
 stop="$(body "$XP" 'void XrayProtocol::stop()')"
+endb="$(body "$XP" 'bool XrayProtocol::endSession(bool reportDisconnected)')"
 tun="$(body "$XP" 'ErrorCode XrayProtocol::startTun2Socks(quint64 session)')"
 lines="$(body "$XP" 'void XrayProtocol::onTun2SocksLines(quint64 session, const QList<QByteArray> &lines)')"
 finished="$(body "$XP" 'void XrayProtocol::onTun2SocksFinished(quint64 session, int exitCode, QProcess::ExitStatus exitStatus)')"
@@ -72,19 +77,19 @@ has "$exitb" 'const ErrorCode err = startTun2Socks(session);' || bad "Q3: the re
 has "$exitb" 'if (!self || m_session != session)' || bad "Q3: the retry acts on its result without checking its session"
 
 # ---- Q4 ------------------------------------------------------------------------------------------------
-bump=$(at "$stop" '++m_session;')
-cut=$(at "$stop" 'QObject::disconnect(m_tun2socksProcess.data(), nullptr, this, nullptr);')
-teardown=$(at "$stop" 'iface->disableKillSwitch();')
+bump=$(at "$endb" '++m_session;')
+cut=$(at "$endb" 'QObject::disconnect(m_tun2socksProcess.data(), nullptr, this, nullptr);')
+teardown=$(at "$endb" 'iface->disableKillSwitch();')
 [ "$bump" -gt 0 ] && [ "$cut" -gt "$bump" ] && [ "$teardown" -gt "$cut" ] \
-    || bad "Q4: stop() does not end the session and cut the replica off before the teardown"
-has "$stop" 'const bool tearDown = std::exchange(m_sessionOpen, false);' || bad "Q4: stop() tears the service down more than once per session"
-has "$stop" 'if (tearDown) {' || bad "Q4: the teardown is not gated by the session"
-has "$stop" 'm_tun2socksReader->stop();' || bad "Q4: stop() does not stop the reader"
-[ "$(cnt "$stop" 'waitForFinished(1000)')" = "0" ] || bad "Q4: stop() waits on the tun2socks replica again (30 s on quit)"
-has "$stop" 'if (QThread::currentThread() == process->thread()) {' || bad "Q4: stop() uses the replica from another thread"
-has "$stop" 'delivered.waitForFinished(tun2socksStopReplyMs);' || bad "Q4: the one round trip of stop() is not bounded"
+    || bad "Q4: endSession() does not end the session and cut the replica off before the teardown"
+has "$endb" 'const bool tearDown = std::exchange(m_sessionOpen, false);' || bad "Q4: endSession() tears the service down more than once per session"
+has "$endb" 'if (tearDown) {' || bad "Q4: the teardown is not gated by the session"
+has "$endb" 'm_tun2socksReader->stop();' || bad "Q4: endSession() does not stop the reader"
+[ "$(cnt "$endb" 'waitForFinished(1000)')" = "0" ] || bad "Q4: endSession() waits on the tun2socks replica again (30 s on quit)"
+has "$endb" 'if (QThread::currentThread() == process->thread()) {' || bad "Q4: endSession() uses the replica from another thread"
+has "$endb" 'delivered.waitForFinished(tun2socksStopReplyMs);' || bad "Q4: the one round trip of endSession() is not bounded"
 grep -qF 'static constexpr int tun2socksStopReplyMs = 1000;' "$XH" || bad "Q4: the bound of stop()'s round trip changed"
-has "$stop" 'std::exchange(m_tun2socksProcess, {});' || bad "Q4: the replica is not taken out before the waits"
+has "$endb" 'std::exchange(m_tun2socksProcess, {});' || bad "Q4: the replica is not taken out before the waits"
 
 # ---- Q5 ------------------------------------------------------------------------------------------------
 pstart="$(body "$PROC" 'void IpcServerProcess::start()')"
@@ -111,8 +116,8 @@ has "$create" '[this, process]() { onProcessControllerLost(process); }, Qt::Sing
     || bad "Q6: the end of a controlling connection does not reach onProcessControllerLost"
 lost="$(body "$SRV" 'void IpcServer::onProcessControllerLost(IpcServerProcess *process)')"
 has "$lost" 'if (m_closing)' || bad "Q6: the service's own shutdown is taken for a lost client"
-has "$lost" 'loss == avpn::ControllerLoss::Abandoned && process->program() == amnezia::PermittedProcess::Tun2Socks;' \
-    || bad "Q6: the Xray session is not ended for an abandoned tun2socks only"
+has "$lost" 'const bool xraySession = step == avpn::LostControllerStep::EndSessionThenChild;' \
+    || bad "Q6: the Xray session is not ended by the lost-controller decision"
 prev=0
 for step in 'disableKillSwitch();' 'StartRoutingIpv6();' 'restoreResolvers();' 'deleteTun(device);' 'xrayStop();' \
             'process->endChild();' 'clearSavedRoutes();' 'flushDns();'; do
@@ -134,6 +139,32 @@ quit=$(at "$dtor" 'm_vpnConnectionThread.quit();')
 [ "$keep" -gt "$el" ] && [ "$dis" -gt "$keep" ] || bad "Q7: macOS quit does not end a session the daemon does not hold"
 [ "$(printf '%s\n' "$dtor" | sed -n "${el},${quit}p" | grep -cF 'Qt::BlockingQueuedConnection);')" -ge 1 ] && [ "$quit" -gt "$dis" ] \
     || bad "Q7: the macOS quit stop does not run on the VpnConnection thread before it stops"
+
+# ---- Q8 ------------------------------------------------------------------------------------------------
+dtorx="$(body "$XP" 'XrayProtocol::~XrayProtocol()')"
+failb="$(body "$XP" 'void XrayProtocol::failSession(ErrorCode error)')"
+has "$dtorx" 'endSession(false);' || bad "Q8: the destructor does not end the session quietly"
+[ "$(cnt "$dtorx" 'stop()')" = "0" ] || bad "Q8: the destructor calls stop() (a signal from a half-destroyed object)"
+has "$stop" 'endSession(true);' || bad "Q8: stop() does not end the session"
+has "$failb" 'if (endSession(true))' && has "$failb" 'setLastError(error);' || bad "Q8: failSession reports the error without checking the object outlived the teardown"
+[ "$(cnt "$xp" 'setLastError(')" = "1" ] || bad "Q8: an error is reported outside failSession"
+[ "$(cnt "$endb" 'return false; // AVPN: destroyed')" = "2" ] || bad "Q8: endSession does not tell its caller that the object is gone"
+has "$endb" 'if (reportDisconnected)' || bad "Q8: endSession always emits Disconnected"
+[ "$(printf '%s\n' "$xp" | grep -A1 -E '^[[:space:]]*stop\(\);' | grep -cvE '^[[:space:]]*(stop\(\);|\}|--)?$')" = "0" ] \
+    || bad "Q8: a statement follows a stop() call (it may run on a destroyed object)"
+for site in 'failSession(res);' 'failSession(err);' 'failSession(ErrorCode::Tun2SockExecutableCrashed);'; do
+  has "$xp" "$site" || bad "Q8: '$site' is missing"
+done
+
+# ---- Q9 ------------------------------------------------------------------------------------------------
+xs="$(body "$SRV" 'bool IpcServer::xrayStart(const QString& cfg)')"
+xt="$(body "$SRV" 'bool IpcServer::xrayStop()')"
+a1=$(at "$xs" 'avpn::XraySessionLedger::service().onCoreStart();'); a2=$(at "$xs" 'Xray::getInstance().startXray(cfg)')
+[ "$a1" -gt 0 ] && [ "$a2" -gt "$a1" ] || bad "Q9: xrayStart does not open a new session generation first"
+has "$xt" 'avpn::XraySessionLedger::service().onCoreStop();' || bad "Q9: xrayStop does not close the session generation"
+has "$pstart" 'm_xrayGeneration = avpn::XraySessionLedger::service().generation;' || bad "Q9: a child does not record its session generation"
+has "$lost" 'process->xrayGeneration(), avpn::XraySessionLedger::service());' || bad "Q9: the lost-client decision does not read the session identity"
+has "$lost" 'avpn::decideLostController(' || bad "Q9: the lost-client decision is not the tested one"
 
 [ "$fail" = "0" ] && echo "check_xray_quit_wiring: ok"
 exit "$fail"
