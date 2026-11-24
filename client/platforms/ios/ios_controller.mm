@@ -1047,6 +1047,11 @@ void IosController::beginAwaitTeardown(uint64_t operation)
     m_connectAwaitingTeardown = operation;
 #if defined(Q_OS_IOS)
     Avpn_recordLifecycle(QStringLiteral("connect_awaits_teardown"), {{QStringLiteral("operation_generation"), qulonglong(operation)}});
+    // AVPN (device round air-B 24.11): the start has not left the device - the engine's leg is in its local phase
+    // (startAwaitsTeardown in ios_controller.h). The wait is the owner's to bound; the native keeps only the ceiling.
+    armConnectDeadline(operation, avpn_ios::nativeTimings().permissionPromptCapMs);
+    qInfo().noquote() << QStringLiteral("[ios lifecycle] start parked: the previous session is still tearing down");
+    emit startAwaitsTeardown(true);
 #endif
     recheckTeardown(operation);
 }
@@ -1091,6 +1096,11 @@ IosController::TeardownStep IosController::continueConnectAfterTeardown()
         noteSessionRuntimeEnded();
 #if defined(Q_OS_IOS)
         Avpn_recordLifecycle(QStringLiteral("connect_after_teardown"), {{QStringLiteral("operation_generation"), qulonglong(operation)}});
+        // AVPN (device round air-B 24.11): the parked start goes out now - its own deadline from here, and the
+        // engine's leg clock runs from here (startAwaitsTeardown(false) = "built").
+        armConnectDeadline(operation, avpn_ios::nativeTimings().connectDeadlineMs);
+        qInfo().noquote() << QStringLiteral("[ios lifecycle] parked start goes out: the previous session is down");
+        emit startAwaitsTeardown(false);
 #endif
         if (!configureSelectedTunnel()) {
             m_connectPending = false;

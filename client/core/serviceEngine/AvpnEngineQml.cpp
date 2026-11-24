@@ -1470,6 +1470,26 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // The attempt owner's clock does not run while the dialog is open (the transition timer skips its
         // tick); the first tick after it counts at most clockJumpMs.
     });
+    // Device round air-B 24.11 (iPhone Air, first Auto tap, empty ledger): the stop of a blind leg still starting took
+    // 25 s; the owner gave it up after 10 s and sent the proven path, the native PARKED that start behind the teardown
+    // (one session at a time) and its 5 s clock wrote "no handshake" against the path the race had just proven. The
+    // native says when a start is parked and when it goes out; that is the leg's local phase, one mechanism with
+    // Android's build reports (AttemptOwner.h "Local build", ServiceEngine::onLocalBuild): the clock stands, nothing is
+    // judged for it, the start's own deadline runs from "goes out". The leg is the one the native stream is at (review
+    // E2: the park is reported for the controller's current operation only, which is the newest start sent).
+#ifdef Q_OS_IOS
+    connect(IosController::Instance(), &IosController::startAwaitsTeardown, this, [this](bool waiting) {
+        const quint64 leg = m_tunnel.nativeLegSeen();
+        reliabilityEvent(QStringLiteral("ios_start_%1 leg=%2 attempt_leg=%3")
+                             .arg(waiting ? QStringLiteral("parked") : QStringLiteral("resumed"))
+                             .arg(leg).arg(m_engine.attemptLeg()));
+        m_engine.onLocalBuild(waiting ? avpn::ServiceEngine::LocalBuildReport::Building
+                                      : avpn::ServiceEngine::LocalBuildReport::Built,
+                              leg);
+        if (syncAttempt())
+            QTimer::singleShot(0, this, [this]() { reconcile(); });
+    }, Qt::QueuedConnection);
+#endif
     // The physical path for the native's journal of a session that never completed a handshake (an input of the
     // line only: the attempt owner decides about such a session, review of 18.11).
     IosController::Instance()->setUplinkProbe([] { return avpn::UplinkMonitor::instance()->physicalUp(); });

@@ -354,11 +354,12 @@ struct Observed {
     std::vector<std::pair<QString, bool>> reasons;
     std::vector<bool> rebinds;
     std::vector<bool> prompts; // permissionPromptPending(bool)
+    std::vector<bool> parks;   // startAwaitsTeardown(bool) - air-B 24.11
     int live = 0;
     qint64 lastHandshake = 0;
     bool has(Vpn::ConnectionState s) const { for (auto x : states) if (x == s) return true; return false; }
     int count(Vpn::ConnectionState s) const { int n = 0; for (auto x : states) if (x == s) ++n; return n; }
-    void clear() { log.clear(); states.clear(); reasons.clear(); rebinds.clear(); prompts.clear(); live = 0; }
+    void clear() { log.clear(); states.clear(); reasons.clear(); rebinds.clear(); prompts.clear(); parks.clear(); live = 0; }
 };
 static Observed obs;
 
@@ -394,6 +395,10 @@ public:
             obs.prompts.push_back(pending);
             obs.log.push_back(pending ? "prompt:1" : "prompt:0");
         }
+        if (id == 3) {
+            const bool waiting = *reinterpret_cast<bool *>(args[1]);
+            obs.parks.push_back(waiting); // its own channel: the ordered log of states/reasons stays as it was
+        }
         return -1;
     }
     bool attach()
@@ -402,10 +407,12 @@ public:
         const int live = c->metaObject()->indexOfSignal("liveSessionFound()");
         const int rebind = c->metaObject()->indexOfSignal("rebindFinished(bool)");
         const int prompt = c->metaObject()->indexOfSignal("permissionPromptPending(bool)");
+        const int park = c->metaObject()->indexOfSignal("startAwaitsTeardown(bool)");
         const int base = QObject::staticMetaObject.methodCount();
         if (live >= 0) QMetaObject::connect(c, live, this, base + 0, Qt::DirectConnection);
         if (rebind >= 0) QMetaObject::connect(c, rebind, this, base + 1, Qt::DirectConnection);
         if (prompt >= 0) QMetaObject::connect(c, prompt, this, base + 2, Qt::DirectConnection);
+        if (park >= 0) QMetaObject::connect(c, park, this, base + 3, Qt::DirectConnection);
         return live >= 0 && rebind >= 0;
     }
 };
@@ -1399,17 +1406,70 @@ static void test_connect_over_disconnecting_session()
     CHECK(!obs.has(Vpn::ConnectionState::Disconnected), "терминал старой сессии переслан посреди нашего старта");
     CHECK(!obs.has(Vpn::ConnectionState::Error), "Error после продолжения старта");
     CHECK(obs.has(Vpn::ConnectionState::Connecting) || obs.has(Vpn::ConnectionState::Connected), "реальный статус нового старта не пришёл");
+#ifndef HARNESS_OLD
+    // air-B 24.11: parked, then goes out - once each, in this order, the second before the start is configured
+    CHECK(obs.parks == std::vector<bool>({ true, false }), "startAwaitsTeardown: parked, then goes out");
+#endif
 }
 
-// Ревью REV-2: ожидание терминала ограничено дедлайном коннекта (профиль завис в Disconnecting):
-// честный Error старта, ожидание снято — поздний Disconnected старт уже не запускает.
-static void test_connect_over_disconnecting_deadline()
+// AVPN (device round air-B 24.11): the old session tears down for longer than the connect deadline (the 25 s stop of
+// a starting Xray leg). The parked start is not cut by that deadline (the attempt owner bounds the leg's local
+// phase), it goes out with the real Disconnected, and from then it has its own whole connect deadline. A stop of the
+// parked start (the owner gave the leg up) ends the park without a "goes out".
+static void test_park_longer_than_connect_deadline()
 {
     setIntent("i-resume", "resume");
     HarnessSession *s = newSession(NEVPNStatusDisconnecting);
     g_managers = [@[newManager(@"mgr-1", @"cfg-1", s)] retain];
+    SignalTap tap;
+    tap.attach();
     IosController::Instance()->connectVpn(amnezia::Proto::Awg, awgConfig());
-    spin(W(500, 10500));
+    spin(W(900, 900)); // three connect deadlines of the harness (300 ms)
+    CHECK(obs.parks == std::vector<bool>({ true }), "a parked start is reported once");
+    CHECK(!obs.has(Vpn::ConnectionState::Error), "Error while the old session still tears down");
+    CHECK(s.startCalls == 0, "a start over a session still tearing down");
+    s.hStatus = NEVPNStatusDisconnected;
+    notifyStatus(s);
+    spin(200);
+    CHECK(obs.parks == std::vector<bool>({ true, false }), "the start that goes out is reported");
+    CHECK(s.startCalls == 1 && !obs.has(Vpn::ConnectionState::Error), "the parked start goes out with the Disconnected");
+
+    // the app stops a parked start: the park ends, nothing goes out, no "goes out" report
+    obs.clear();
+    HarnessSession *s2 = newSession(NEVPNStatusDisconnecting);
+    g_managers = [@[newManager(@"mgr-1", @"cfg-1", s2)] retain];
+    IosController::Instance()->connectVpn(amnezia::Proto::Awg, awgConfig());
+    spin(100);
+    CHECK(obs.parks == std::vector<bool>({ true }), "second park reported");
+    IosController::Instance()->disconnectVpn();
+    spin(50);
+    s2.hStatus = NEVPNStatusDisconnected;
+    notifyStatus(s2);
+    spin(200);
+    CHECK(obs.parks == std::vector<bool>({ true }), "a stopped park reports no 'goes out'");
+    CHECK(s2.startCalls == 0, "a stopped park started anyway");
+}
+
+// Ревью REV-2: ожидание терминала ограничено (профиль завис в Disconnecting): честный Error старта,
+// ожидание снято — поздний Disconnected старт уже не запускает. AVPN (air-B 24.11): пока старт запаркован,
+// его ждёт владелец попытки (локальная фаза ноги); натив держит только длинный потолок
+// (permissionPromptCapMs) — обычный дедлайн коннекта парковку не режет.
+static void test_connect_over_disconnecting_deadline()
+{
+#ifndef HARNESS_OLD
+    avpn_ios::nativeTimings().permissionPromptCapMs = 900;
+#endif
+    setIntent("i-resume", "resume");
+    HarnessSession *s = newSession(NEVPNStatusDisconnecting);
+    g_managers = [@[newManager(@"mgr-1", @"cfg-1", s)] retain];
+    IosController::Instance()->connectVpn(amnezia::Proto::Awg, awgConfig());
+#ifndef HARNESS_OLD
+    spin(500); // past connectDeadlineMs (300): the park is not cut by the start's own deadline
+    CHECK(!obs.has(Vpn::ConnectionState::Error), "the connect deadline cut a parked start (the owner bounds it)");
+    spin(600);
+#else
+    spin(10500);
+#endif
     CHECK(obs.count(Vpn::ConnectionState::Error) == 1, "дедлайн ожидания терминала не дал Error старта");
     s.hStatus = NEVPNStatusDisconnected;
     notifyStatus(s);
@@ -1458,6 +1518,9 @@ static void test_start_race_disconnecting_waits()
     CHECK(s.startCalls == 1, "после Disconnected старт не продолжен");
     CHECK(!obs.has(Vpn::ConnectionState::Error), "Error при ожидании терминала");
     CHECK(!obs.has(Vpn::ConnectionState::Disconnected), "терминал старой сессии переслан посреди старта");
+#ifndef HARNESS_OLD
+    CHECK(obs.parks == std::vector<bool>({ true, false }), "startTunnel park site: parked, then goes out");
+#endif
 }
 
 // Ревью REV-3 (K2): стоп приложения, Disconnected которого GUI пропустил (фон), не приписывается
@@ -2165,6 +2228,7 @@ static const Test kTests[] = {
     {"connect_over_live_session", test_connect_over_live_session},
     {"connect_over_disconnecting_session", test_connect_over_disconnecting_session},
     {"connect_over_disconnecting_deadline", test_connect_over_disconnecting_deadline},
+    {"park_longer_than_connect_deadline", test_park_longer_than_connect_deadline},
     {"connect_over_disconnecting_then_relive", test_connect_over_disconnecting_then_relive},
     {"start_race_disconnecting_waits", test_start_race_disconnecting_waits},
     {"local_stop_flag_not_inherited_by_new_session", test_local_stop_flag_not_inherited_by_new_session},

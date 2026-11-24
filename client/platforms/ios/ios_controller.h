@@ -214,6 +214,15 @@ signals:
     // (сохранили/ошибка/отмена). ОБЯЗАТЕЛЕН для фасада (ревью REV-1): пока true, его сторож старта
     // не должен звать down() — disconnectVpn сменит поколение операции, и поздний save отбросится.
     void permissionPromptPending(bool pending);
+    // AVPN (device round air-B 24.11, iOS only): true - the current connect is PARKED: the previous tunnel session is
+    // still tearing down (Disconnecting), one session at a time, so its start has not left the device; false - that
+    // session is down and the parked start goes out now (configureSelectedTunnel). Emitted once per park, in this
+    // order, only for the current operation. A park that ends otherwise (the app's stop, the deadline, a live session
+    // found) emits no false: those end the start themselves. The facade passes both to the attempt owner as the leg's
+    // local phase (ServiceEngine::onLocalBuild: Building / Built) - the leg's clock stands and its path is never judged
+    // for it. While parked the connect deadline is the long ceiling (permissionPromptCapMs: the owner bounds the wait),
+    // the start that follows gets the whole connectDeadlineMs.
+    void startAwaitsTeardown(bool waiting);
 
     void finished();
 
