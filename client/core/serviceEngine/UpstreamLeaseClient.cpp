@@ -33,17 +33,13 @@ QString standbyFilePath()
     return dir + QStringLiteral("/upstream_standby.lkg");
 }
 
-// HTTP status of a finished reply; 0 = no complete answer: no status at all, or a 2xx whose body was cut
-// (our timeout, a reset) - a partial signed body is a transport failure, not "another server".
+// HTTP status of a finished reply; 0 = no complete answer: no status at all, or a body cut by a reset or by the request's own
+// bound, whatever the status (review round 44 F2) - a partial signed body is a transport failure, not "another server". THE one
+// definition (UpstreamLeaseWire.h::upstreamCompleteStatus): the lease code and the host rule read the same value.
 int answerStatus(QNetworkReply *r)
 {
     const QVariant code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute);
-    if (!code.isValid())
-        return 0;
-    const int s = code.toInt();
-    if (s >= 200 && s < 300 && r->error() != QNetworkReply::NoError)
-        return 0;
-    return s;
+    return upstreamCompleteStatus(code.isValid() ? code.toInt() : 0, int(r->error()));
 }
 
 // Bytes of a reply, bounded: a lease answer is at most a 256 KiB config + JSON escaping.
@@ -74,37 +70,47 @@ static QString trimmedBase(QString b)
     return b;
 }
 
-QString UpstreamLeaseClient::baseFor(const LeaseRoute &route) const
+// THE place where a lease request's host and its actual path are decided, at the moment it is built (review round 44 F1).
+UpstreamLeaseClient::LeaseTarget UpstreamLeaseClient::targetFor(const LeaseRoute &route) const
 {
-    if (!route.apiBase.isEmpty())
-        return trimmedBase(route.apiBase); // through the tunnel: never redirected
-    // The direct route: ONE host rule for every lease request (UpstreamLeaseWire.h::upstreamDirectBase).
-    const QString walk = m_directBase ? m_directBase() : QString();
-    const QString next = (m_nextDirectBase && !walk.isEmpty()) ? m_nextDirectBase(walk) : QString();
-    return upstreamDirectBase(trimmedBase(walk), trimmedBase(next), m_edgeMark, QDateTime::currentMSecsSinceEpoch());
+    LeaseTarget t;
+    t.path = upstreamRequestPath(!route.apiBase.isEmpty(), !m_tunnelDown, m_stopConfirmed, m_tunnelUpFn && m_tunnelUpFn());
+    if (!route.apiBase.isEmpty()) {
+        t.base = trimmedBase(route.apiBase); // the lease's tunnel_api_base: never redirected
+        return t;
+    }
+    const QString walk = trimmedBase(m_directBase ? m_directBase() : QString());
+    if (t.path != UpstreamRequestPath::Direct) {
+        t.base = walk; // through a tunnel of ours: the walk's edge (the session edge while it carries), never redirected
+        return t;
+    }
+    // The direct path: ONE host rule for every lease request (UpstreamLeaseWire.h::upstreamDirectBase).
+    const QString next = (m_nextDirectBase && !walk.isEmpty()) ? trimmedBase(m_nextDirectBase(walk)) : QString();
+    t.base = upstreamDirectBase(walk, next, m_edgeMark, QDateTime::currentMSecsSinceEpoch());
+    t.redirected = !t.base.isEmpty() && t.base != walk;
+    return t;
 }
 
-void UpstreamLeaseClient::noteHostOutcome(const QString &base, const LeaseRoute &route, QNetworkReply *reply)
+void UpstreamLeaseClient::noteHostOutcome(const LeaseTarget &t, QNetworkReply *reply)
 {
-    if (!route.apiBase.isEmpty() || !reply)
-        return;
-    const QVariant code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
-    const UpstreamHostOutcome o = upstreamHostOutcome(code.isValid() ? code.toInt() : 0,
+    if (t.path != UpstreamRequestPath::Direct || !reply)
+        return; // a request through a tunnel says nothing about the direct hosts
+    const UpstreamHostOutcome o = upstreamHostOutcome(answerStatus(reply),
                                                       upstreamFromTribeApi(reply->rawHeader(QByteArray(kUpstreamTribeApiHeader))),
                                                       reply->error() == QNetworkReply::OperationCanceledError,
                                                       reply->property("avpn_timed_out").toBool());
     const UpstreamEdgeMark before = m_edgeMark;
-    m_edgeMark = upstreamEdgeMarkAfter(m_edgeMark, base, o, QDateTime::currentMSecsSinceEpoch());
+    m_edgeMark = upstreamEdgeMarkAfter(m_edgeMark, t.base, o, QDateTime::currentMSecsSinceEpoch());
     if (m_edgeMark.base != before.base && !m_edgeMark.base.isEmpty())
         qInfo() << "avpn upstream: an API host left a lease request without an answer - the next lease request goes to the other host";
 }
 
-void UpstreamLeaseClient::noteHostSilent(const QString &base, const LeaseRoute &route)
+void UpstreamLeaseClient::noteHostSilent(const LeaseTarget &t)
 {
-    if (!route.apiBase.isEmpty())
+    if (t.path != UpstreamRequestPath::Direct)
         return;
     const UpstreamEdgeMark before = m_edgeMark;
-    m_edgeMark = upstreamEdgeMarkAfter(m_edgeMark, base, UpstreamHostOutcome::Silent, QDateTime::currentMSecsSinceEpoch());
+    m_edgeMark = upstreamEdgeMarkAfter(m_edgeMark, t.base, UpstreamHostOutcome::Silent, QDateTime::currentMSecsSinceEpoch());
     if (m_edgeMark.base != before.base)
         qInfo() << "avpn upstream: an API host gave a seat request no answer within the attempt's wait - the next lease request goes to the other host";
 }
@@ -127,7 +133,8 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
                                   const QString &standbyConfigSha256, const LeaseRoute &route,
                                   const QString &sessionNonce, qint64 sessionOrder, bool hedged)
 {
-    const QString base = baseFor(route);
+    const LeaseTarget target = targetFor(route);
+    const QString &base = target.base;
     const QString token = m_token ? m_token() : QString();
     // Device round 4 (R1a): the server granted seats in 3.8-4.2 s while the client gave up at 4 s - the seat stayed
     // taken and the path was blamed. The attempt stops WAITING at the lease share of its leg (a transport failure
@@ -153,23 +160,25 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
     }
     auto answered = std::make_shared<bool>(false);
     m_acquiresOut.insert(requestId, profileId); // until its HTTP request ends (it outlives the attempt's wait)
-    QTimer::singleShot(waitMs, r, [this, requestId, answered, waitMs, hedged, base, route]() {
+    QTimer::singleShot(waitMs, r, [this, requestId, answered, waitMs, hedged, target]() {
         if (*answered)
             return;
         *answered = true; // the attempt stops waiting; the request goes on (a late grant is released below)
         qWarning() << "avpn upstream: lease answer later than" << waitMs
                    << "ms - the attempt moves on, a late grant will be released";
         // The host rule: the attempt's FULL wait with no answer is a silent host - the next leg's request goes to the other one
-        // (a hedge is a short wait by design and proves nothing about the host).
-        if (!hedged)
-            noteHostSilent(base, route);
+        // (a hedge is a short wait by design and proves nothing about the walk's edge). A REDIRECTED request marks its host at
+        // the end of any wait, a hedge too: the next one goes back at once (review round 44 Q5(b): at most one bounded attempt
+        // on the second host per silence of the first).
+        if (!hedged || target.redirected)
+            noteHostSilent(target);
         if (onAcquire)
             onAcquire(requestId, classifyAcquireReply(0, {}, {}, m_pubKeyHex));
     });
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId, answered, route, profileId, base]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, answered, route, profileId, target]() {
         r->deleteLater();
         m_acquiresOut.remove(requestId);
-        noteHostOutcome(base, route, r); // the host rule (UpstreamLeaseWire.h::upstreamDirectBase)
+        noteHostOutcome(target, r); // the host rule (UpstreamLeaseWire.h::upstreamDirectBase)
         const int status = answerStatus(r); // 0 = no complete HTTP answer (transport, timeout)
         const QByteArray body = r->read(kMaxLeaseAnswerBytes);
         const QByteArray sig = r->rawHeader(QByteArrayLiteral("X-Tribe-Sig"));
@@ -233,7 +242,8 @@ void UpstreamLeaseClient::reportAcquireEnded(const QString &profileId, const QSt
 void UpstreamLeaseClient::renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
                                 const LeaseRoute &route)
 {
-    const QString base = baseFor(route);
+    const LeaseTarget target = targetFor(route);
+    const QString &base = target.base;
     const QString bearer = !route.renewToken.isEmpty() ? route.renewToken : (m_token ? m_token() : QString());
     QNetworkReply *r = (base.isEmpty() || !upstreamLeaseIdValid(leaseId))
                            ? nullptr
@@ -246,9 +256,9 @@ void UpstreamLeaseClient::renew(quint64 requestId, const QString &leaseId, const
         });
         return;
     }
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId, base, route]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, target]() {
         r->deleteLater();
-        noteHostOutcome(base, route, r); // the host rule (direct route only: a renewal through the tunnel is never redirected)
+        noteHostOutcome(target, r); // the host rule (direct path only: a renewal through a tunnel is never redirected)
         const int status = answerStatus(r);
         if (onRenew)
             onRenew(requestId, classifyRenewReply(status, r->read(kMaxLeaseAnswerBytes)));
@@ -277,6 +287,7 @@ void UpstreamLeaseClient::releaseVia(quint64 requestId, const QString &leaseId, 
 void UpstreamLeaseClient::holdReleasesForStop()
 {
     m_tunnelDown = false; // the app is stopping a tunnel it believes running
+    m_stopConfirmed = false;
     if (!m_stopPending)
         m_heldSinceMs = QDateTime::currentMSecsSinceEpoch();
     m_stopPending = true;
@@ -300,6 +311,7 @@ void UpstreamLeaseClient::holdReleasesForStopIfRunning()
 void UpstreamLeaseClient::tunnelStopped()
 {
     m_tunnelDown = true;
+    m_stopConfirmed = true; // from now on the requests are direct, even before the app's own state has moved (upstreamRequestPath)
     flushHeld(true);
 }
 
@@ -321,7 +333,8 @@ void UpstreamLeaseClient::flushHeld(bool tunnelDown)
 void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
                                       const LeaseRoute &route, int attempt, qint64 spacedMs, quint64 bgKey)
 {
-    const QString base = baseFor(route);
+    const LeaseTarget target = targetFor(route);
+    const QString &base = target.base;
     const QString bearer = !route.renewToken.isEmpty() ? route.renewToken : (m_token ? m_token() : QString());
     QNetworkReply *r = nullptr;
     if (m_nam && !base.isEmpty() && !bearer.isEmpty() && upstreamLeaseIdValid(leaseId)) {
@@ -344,17 +357,17 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         });
         return;
     }
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt, spacedMs, bgKey, base]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, leaseId, meter, route, attempt, spacedMs, bgKey, target]() {
         r->deleteLater();
         // The host rule first: a resend below takes its base at its own send, so after a silent try it goes to the other host
         // within this same budget (device round air-C 24.11: 12 tries to one silent host, the seat freed 68 s after the Stop).
-        noteHostOutcome(base, route, r);
+        noteHostOutcome(target, r);
         // The release goes out just before the tunnel transition it belongs to, and that transition aborts every
         // API request in flight (owner's iPhone 16.11: "net_error 5" within 40-80 ms); an API restart answers 502
         // (device round 19.11). seatReleaseNext - the one rule of every seat release: no answer or 5xx is sent again
         // on the shared growing spacing within its budget; any other HTTP answer is final.
-        const QVariant code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute);
-        const int status = code.isValid() ? code.toInt() : 0;
+        // Review round 44 F2: only a COMPLETE answer counts (answerStatus, the one definition); a cut one is sent again.
+        const int status = answerStatus(r);
         // Round 11 R3: only the API's own answer (the mark) can finish a release; a foreign one is a transport-class failure.
         const bool fromApi = upstreamFromTribeApi(r->rawHeader(QByteArray(kUpstreamTribeApiHeader)));
         const SeatReleaseNext next = seatReleaseNext(status, attempt, spacedMs, releaseRetryBudgetMs, fromApi);
@@ -405,7 +418,8 @@ bool UpstreamLeaseClient::fetchStandby(const QString &networkKey,
 {
     if (!configured() || !m_standbyReply.isNull())
         return false;
-    const QString base = baseFor(LeaseRoute());
+    const LeaseTarget target = targetFor(LeaseRoute());
+    const QString &base = target.base;
     const QString token = m_token();
     if (base.isEmpty() || token.isEmpty())
         return false;
@@ -421,10 +435,10 @@ bool UpstreamLeaseClient::fetchStandby(const QString &networkKey,
     QNetworkReply *r = m_nam->get(req);
     armTimeout(r);
     m_standbyReply = r;
-    connect(r, &QNetworkReply::finished, this, [this, r, done, base]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, done, target]() {
         r->deleteLater();
         m_standbyReply.clear();
-        noteHostOutcome(base, LeaseRoute(), r); // the same host rule as the lease requests (a direct request)
+        noteHostOutcome(target, r); // the same host rule as the lease requests
         const QVariant code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute);
         const int status = code.isValid() ? code.toInt() : 0;
         const QByteArray body = r->read(kStandbyMaxBodyBytes + 1);

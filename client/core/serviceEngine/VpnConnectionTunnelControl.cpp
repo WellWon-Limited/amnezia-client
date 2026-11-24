@@ -911,7 +911,7 @@ void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)
     // returns it with every status reply, so a relaunched app knows which start runs (adoptUpstreamSession). Not a secret.
     {
         QJsonObject meta = xcfg.value(QStringLiteral("tribeSessionMetadata")).toObject();
-        meta.insert(QLatin1String(kUpstreamSessionOrderMetaKey), double(m_upOwner.sessionOrder()));
+        meta.insert(QLatin1String(kUpstreamSessionOrderMetaKey), double(m_upOwner.tunnelOrder())); // the tunnel's identity (round 44 F3)
         xcfg.insert(QStringLiteral("tribeSessionMetadata"), meta);
     }
 #endif

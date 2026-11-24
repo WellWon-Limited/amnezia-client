@@ -326,20 +326,56 @@ inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 
 // ever told anybody that the edge was silent: the walk moves on the facade's own requests, and after a Stop nothing else asked
 // the API, so the edge stayed for the release's whole budget. The acquires of that round reached the second host only once the
 // walk had moved for other reasons (or through a tunnel's session edge) - the acquire had no fallback of its own either.
-// The rule, for every lease request on the DIRECT route (an empty route.apiBase; a request through the tunnel - the lease's
-// tunnel_api_base - is never redirected): the walk's edge, unless the last lease request to THAT edge ended silent less than
-// kUpstreamEdgeMarkMs ago - then the walk's next edge (upstreamDirectBase). Silent = no answer of the API: no HTTP answer, the
-// request's own bound, a foreign answer (upstreamHostOutcome); the app's own abort (a tunnel transition's API reset, a stop)
-// says nothing. An answer of the API on the marked edge clears the mark; a silent end on the other edge moves the mark there,
-// so consecutive silent tries alternate between the hosts (upstreamEdgeMarkAfter). Each try keeps its own bound and a release
-// its retry budget: a Stop never waits longer, the second host is only tried within that bound. Tests: upstream_lease_check
-// hostRule, upstream_engine_check releaseHostFallback.
-enum class UpstreamHostOutcome { Answered, Silent, NoVerdict };
-inline UpstreamHostOutcome upstreamHostOutcome(int httpStatus, bool fromTribeApi, bool canceled, bool timedOut)
+// The rule, for every lease request whose ACTUAL path is direct (upstreamRequestPath, decided where the request is built: no
+// tunnel of ours carries it): the walk's edge, unless the last direct lease request to THAT edge ended silent less than
+// kUpstreamEdgeMarkMs ago - then the walk's next edge (upstreamDirectBase). A request through a tunnel (it names the lease's
+// tunnel_api_base, or a tunnel of ours is up and carries the app's requests - a seat taken before a switch, review round 44 F1)
+// never marks and is never redirected: the edge reachable from a tunnel's exit is the walk's (EdgeWalk.h R1a). Silent = anything
+// from the network that is not a COMPLETE answer of the API (upstreamHostOutcome on upstreamCompleteStatus: no HTTP answer, a
+// body cut by a reset or by the request's own bound, a foreign answer); the app's own abort (a tunnel transition's API reset, a
+// stop) says nothing. An answer of the API on the marked edge clears the mark; a silent end on the redirected edge moves the mark
+// there, so the next request goes BACK to the walk's edge (upstreamEdgeMarkAfter).
+// The cost, accepted: an answer of the OTHER edge does not clear the mark, so for up to kUpstreamEdgeMarkMs direct lease requests
+// keep going to it while the walk's edge may have recovered. From Russia the second (foreign) edge can stall a large acquire answer
+// (EdgeWalk.h R1a, ~15 KB): such an acquire costs ONE attempt's wait (upstreamAcquireTimeoutMsTuned, 6 s by default, at most 10 s)
+// and then marks the redirected edge - every redirected acquire marks its edge at the end of its wait, a hedged one too - so the
+// next goes back. At most one bounded attempt per silence of the walk's edge. Each try keeps its own bound and a release its retry
+// budget: a Stop never waits longer, the second host is only tried within that bound. Tests: upstream_lease_check hostRule,
+// upstream_engine_check releaseHostFallback.
+
+// THE one definition of an answer of a lease request (the lease code and the host rule alike): the HTTP status of a reply received
+// to its end - any status - or 0. Qt reports a complete 4xx / 5xx with the content (201-299) or server (401-499) error it derives
+// from the status; any other error after the status line (1-99 network layer: a reset, the request's own bound, the app's abort;
+// 101-199 proxy; 301-399 protocol) means the body did not arrive whole: a partial signed body is a transport failure, not an answer.
+inline int upstreamCompleteStatus(int httpStatus, int qtNetworkError)
 {
-    if (httpStatus > 0 && fromTribeApi)
+    if (httpStatus <= 0)
+        return 0;
+    const bool whole = qtNetworkError == 0 || (qtNetworkError >= 201 && qtNetworkError <= 299)
+                       || (qtNetworkError >= 401 && qtNetworkError <= 499);
+    return whole ? httpStatus : 0;
+}
+
+// The path a lease request really takes, decided where it is built (UpstreamLeaseClient). Through a tunnel when it names the
+// lease's tunnel_api_base, or when a tunnel of ours may carry the app's requests now: the client was told a native tunnel starts,
+// runs or is being stopped (clientSawStart, no confirmed stop since), or - for a tunnel this client never heard of (a session
+// adopted at startup) - the app's own native state says one is up and no stop was confirmed to the client since. Direct otherwise.
+enum class UpstreamRequestPath { Direct, Tunnel };
+inline UpstreamRequestPath upstreamRequestPath(bool namesTunnelBase, bool clientSawStart, bool clientSawConfirmedStop,
+                                               bool appSaysTunnelUp)
+{
+    if (namesTunnelBase || clientSawStart)
+        return UpstreamRequestPath::Tunnel;
+    return appSaysTunnelUp && !clientSawConfirmedStop ? UpstreamRequestPath::Tunnel : UpstreamRequestPath::Direct;
+}
+
+enum class UpstreamHostOutcome { Answered, Silent, NoVerdict };
+// completeStatus = upstreamCompleteStatus of the reply.
+inline UpstreamHostOutcome upstreamHostOutcome(int completeStatus, bool fromTribeApi, bool canceled, bool timedOut)
+{
+    if (completeStatus > 0 && fromTribeApi)
         return UpstreamHostOutcome::Answered; // any status: the host and the API answered (a 5xx is the API's, resent as before)
-    if (httpStatus <= 0 && canceled && !timedOut)
+    if (canceled && !timedOut)
         return UpstreamHostOutcome::NoVerdict; // cut by the app itself, not by the request's bound
     return UpstreamHostOutcome::Silent;
 }
