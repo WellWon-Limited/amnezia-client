@@ -58,7 +58,10 @@ class AwgApple(ConanFile):
     # definition of "data is flowing" (TribeDataFlow: no handshake bytes, no echo of a repair step), so
     # a fresh port that brings back only a burst is followed by the soft restart (device round 24.11, B1).
     # tribe.14 and tribe.15 were never released: no snapshot of TribeRoaming.swift is frozen for them.
-    version = "3.1.4-tribe.16"
+    # tribe.17: tribe.16's patches + the reviewed TribeRoaming.swift (service traffic from the session's
+    # configuration, idle end of an episode, sampling gaps, the stall verdict for the app). tribe.16 was
+    # never released either: rebuilt from this recipe it gets tribe.17's TribeRoaming.swift.
+    version = "3.1.4-tribe.17"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
@@ -117,6 +120,8 @@ class AwgApple(ConanFile):
                                                         "0014-tribe-scan-host-limits.patch"))
     # tribe.16 = tribe.15 + package patch 0017 and the new TribeRoaming.swift; everything else identical.
     _xray_pins["3.1.4-tribe.16"] = _xray_pins["3.1.4-tribe.15"]
+    # tribe.17 = tribe.16 (same patches) with the reviewed TribeRoaming.swift.
+    _xray_pins["3.1.4-tribe.17"] = _xray_pins["3.1.4-tribe.16"]
 
     @property
     def _pins(self):

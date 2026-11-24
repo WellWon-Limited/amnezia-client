@@ -250,13 +250,14 @@ inline int awgProbeDeadHandshakeAgeSTuned()
 {
     return qBound(60, int(TuningStore::numberOr(QStringLiteral("awg_probe_dead_hs_age_s"), 135)), 600);
 }
-// Device round 24.11 (case B1): seconds without inbound DATA (the extension's `data_quiet_s`, iOS with awg-apple
-// tribe.16) that corroborate the failing probe even while handshakes complete. 45 s = the extension's own ladder
-// first: its engine restart comes about 15 s after a roam that brought back only a burst, and data must last 10 s
-// after it to count; the network-change grace (20 s) is kept on top. 0 = off (the handshake age alone, as in 141).
-inline int awgProbeDeadQuietSTuned()
+// Device round 24.11 (case B1): the extension's stall verdict (`data_stall_s`, iOS with awg-apple tribe.17: stalled
+// right now, this long without data that proved the path) that corroborates the failing probe even while handshakes
+// complete. 45 s = the extension's own ladder first: its engine restart comes about 15 s after a roam that brought
+// back only a burst, and data must last 10 s after it to count; the network-change grace (20 s) is kept on top.
+// 0 = off (the handshake age alone, as in 141).
+inline int awgProbeDeadStallSTuned()
 {
-    const int v = qBound(0, int(TuningStore::numberOr(QStringLiteral("awg_probe_dead_quiet_s"), 45)), 600);
+    const int v = qBound(0, int(TuningStore::numberOr(QStringLiteral("awg_probe_dead_stall_s"), 45)), 600);
     return v == 0 ? 0 : qMax(20, v);
 }
 

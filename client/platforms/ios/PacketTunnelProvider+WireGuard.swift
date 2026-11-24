@@ -223,12 +223,13 @@ extension PacketTunnelProvider {
                     "last_handshake_time_sec": lastHandshake,
                     "roam": counters.asDictionary.mapValues { Int(clamping: $0) }
                 ]
-                // AVPN (awg-apple tribe.16, device round 24.11 B1): how long inbound data has not proved the
-                // path (TribeDataFlow: no handshake bytes, no echo of a repair step) - the app's failover rule
-                // reads the same judgment the stall ladder acts on. Top level, not in `roam`: it changes every
-                // second and `roam` is logged and journaled on every change. Absent = unknown (older apps
-                // ignore the key).
-                if counters.dataQuietSeconds >= 0 { response["data_quiet_s"] = counters.dataQuietSeconds }
+                // AVPN (awg-apple tribe.17, device round 24.11 B1 + its review): the extension's stall verdict
+                // for the app's failover - how long the path has gone without data that proved it, reported
+                // only while the stall ladder sees a stall right now (0 while data comes in, also inside a
+                // repair's echo window, and while nobody sends anything; never across a sampling gap).
+                // Top level, not in `roam`: it changes every second and `roam` is logged and journaled on
+                // every change. Absent = unknown. A new key (tribe.16 sent `data_quiet_s`, another meaning).
+                if counters.dataQuietSeconds >= 0 { response["data_stall_s"] = counters.dataQuietSeconds }
 
                 // AVPN (build 141, data watch): the `watch` block. With the watch off there is no
                 // block and the reply is the one of build 139.

@@ -1254,8 +1254,8 @@ void IosController::checkStatus()
         const uint64_t txBytes = uint64FromResponse(response, @"tx_bytes");
         const uint64_t rxBytes = uint64FromResponse(response, @"rx_bytes");
         const long long last_handshake_time_sec = int64FromResponse(response, @"last_handshake_time_sec");
-        // AVPN (awg-apple tribe.16): absent in an older extension's reply -> -1 (unknown)
-        const long long dataQuietSec = int64FromResponse(response, @"data_quiet_s", -1);
+        // AVPN (awg-apple tribe.17): absent in an older extension's reply -> -1 (unknown)
+        const long long dataStallSec = int64FromResponse(response, @"data_stall_s", -1);
         // AVPN (этап D3): runtime_state xray-пути (starting/running/stopping/stopped/failed) —
         // только для лога; у WG-ответа ключа нет (пусто).
         const QString runtimeState = stringFromResponse(response, @"runtime_state");
@@ -1299,7 +1299,7 @@ void IosController::checkStatus()
             roamSummary = parts.join(QLatin1Char(' '));
         }
 
-        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, dataQuietSec, runtimeState, engineDown, // AVPN: capture list - status generation/request (C5/H7), session metadata, data quiet (tribe.16), xray runtime (D3), roam counters
+        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, dataStallSec, runtimeState, engineDown, // AVPN: capture list - status generation/request (C5/H7), session metadata, data stall (tribe.17), xray runtime (D3), roam counters
                                          startFailure, ifaceName, coreLogTail, roamSummary, roamSoftRestarts, roamResumes,
                                          xrayProtectBound, xrayProtectUnbound, xrayProtectRejected, upstreamStatus]() { // AVPN (upstream nodes): + upstreamStatus
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
@@ -1463,7 +1463,7 @@ void IosController::checkStatus()
                 }
             } else {
                 emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);
-                emit dataQuietChanged(dataQuietSec >= 0 ? (qint64) dataQuietSec : -1); // AVPN (tribe.16)
+                emit dataStallChanged(dataStallSec >= 0 ? (qint64) dataStallSec : -1); // AVPN (tribe.17)
             }
             m_rxBytes = rxBytes;
             m_txBytes = txBytes;

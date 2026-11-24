@@ -413,14 +413,15 @@ int main(int argc, char **argv)
         CHECK(!HealthLoop::probeDeadCorroborated(3, 4, false, 1000, 1000 + 140, 135));  // not enough failures yet
         CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 0, 1000 + 140, 135));     // handshake time unknown
         CHECK(!HealthLoop::probeDeadCorroborated(9, 0, false, 1000, 1000 + 999, 135));  // switched off
-        // Device round 24.11 (B1, awg-apple tribe.16): handshakes complete, no data comes back. The extension's
-        // `data_quiet_s` (no inbound DATA for N s) corroborates the failing probe; the grace still vetoes.
-        CHECK(HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 10, 135, 45, 45));    // fresh hs, 45 s quiet
-        CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 10, 135, 44, 45));   // not quiet long enough
+        // Device round 24.11 (B1, awg-apple tribe.17): handshakes complete, no data comes back. The extension's stall
+        // verdict (`data_stall_s`) corroborates the failing probe; the grace still vetoes.
+        CHECK(HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 10, 135, 45, 45));    // fresh hs, stalled 45 s
+        CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 10, 135, 44, 45));   // not long enough
+        CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 10, 135, 0, 45));    // not stalled now
         CHECK(!HealthLoop::probeDeadCorroborated(4, 4, true, 1000, 1000 + 10, 135, 600, 45));   // network change: grace
         CHECK(!HealthLoop::probeDeadCorroborated(3, 4, false, 1000, 1000 + 10, 135, 600, 45));  // 3 of 4 failures
         CHECK(!HealthLoop::probeDeadCorroborated(4, 4, false, 1000, 1000 + 10, 135, 600, 0));   // switched off: 141
-        CHECK(HealthLoop::probeDeadCorroborated(4, 4, false, 0, 1000, 135, 50, 45));           // no hs time, quiet
+        CHECK(HealthLoop::probeDeadCorroborated(4, 4, false, 0, 1000, 135, 50, 45));           // no hs time, stalled
         // Unchanged where the field is unknown (-1: Android, desktop, an extension before tribe.16): the rule of 141.
         {
             const auto rule141 = [](int fail, int cycles, bool grace, qint64 hs, qint64 now, int age) {
@@ -466,14 +467,17 @@ int main(int argc, char **argv)
         CHECK(eng.state() == EngineState::Connected);
         CHECK(tun.downCalls == 0);
     }
-    // --- Device round 24.11 (B1, awg-apple tribe.16): the AmneziaWG probe failover through the engine. The roam is at
-    // R (noteNetworkChange), the in-tunnel probe fails every 4 s, handshakes stay fresh, the extension says how long no
-    // data came in. 141: never (the handshake never ages); now: the first failure with 4 in a row, outside the grace
-    // window and 45 s of quiet - the probe at R+48. Within the grace window, or with data coming in: nothing.
+    // --- Device round 24.11 (B1) and the review of its fix (awg-apple tribe.17): the AmneziaWG probe failover through the
+    // engine. The roam is at R (noteNetworkChange, 60 s ago: its grace is over), the in-tunnel probe fails, handshakes
+    // stay fresh, and the extension's stall verdict (`data_stall_s`) is what its replay reports at each probe.
+    // 141: never (the handshake never ages). Now: the first failure with 4 in a row, outside the grace window, with a
+    // FRESH verdict of 45 s or more. Data coming in (the extension reports 0), an old extension (-1), a stale reading
+    // and the grace window: nothing.
     {
         TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}}, {}, {});
-        struct Run { bool failedOver = false; qint64 at = -1; int downs = 0; };
-        const auto run = [&](qint64 quietFromRoam /* -1 = an extension without the field */, bool dataFlows) {
+        struct Run { bool failedOver = false; qint64 at = -1; };
+        // probes: (seconds after R, the verdict the extension reports then); staleMs: how old the reading is
+        const auto run = [&](const QList<QPair<qint64, qint64>> &probes, qint64 staleMs = 0, bool grace = false) {
             ServiceEngine eng;
             FakeTunnel tun;
             eng.setTunnel(&tun);
@@ -484,44 +488,37 @@ int main(int argc, char **argv)
             CHECK(upConnected(eng));
             Run r;
             const qint64 now = QDateTime::currentSecsSinceEpoch();
-            // R = 60 s ago: the grace window (20 s) and the probe streak of the roam are behind us; replay the probes.
-            const qint64 roam = now - 60;
-            eng.noteNetworkChange(roam);
-            for (qint64 t = 4; t <= 60 && !r.failedOver; t += 4) {
-                tun.st = mkStats(now - 5, 1000 + (dataFlows ? t * 1000 : 0), 5000 + t * 1500); // a fresh handshake
-                tun.st.dataQuietSec = quietFromRoam < 0 ? -1 : (dataFlows ? 0 : quietFromRoam + t);
-                if (eng.feedProbeResult(false)) { r.failedOver = true; r.at = t; }
+            eng.noteNetworkChange(grace ? now : now - 60);
+            for (const auto &p : probes) {
+                if (r.failedOver)
+                    break;
+                tun.st = mkStats(now - 5, 1000, 5000 + p.first * 1500); // a fresh handshake
+                tun.st.dataStallSec = p.second;
+                tun.st.dataStallAtMs = QDateTime::currentMSecsSinceEpoch() - staleMs;
+                if (eng.feedProbeResult(false)) { r.failedOver = true; r.at = p.first; }
             }
-            r.downs = tun.downCalls;
             return r;
         };
-        const Run b1 = run(0, false);
-        CHECK(b1.failedOver && b1.at == 48);       // quiet 48 s >= 45 at the 12th failed probe (the 4th of 4 at 16 s)
-        const Run oldExt = run(-1, false);
-        CHECK(!oldExt.failedOver);                 // an extension before tribe.16: the rule of 141 (fresh handshake)
-        const Run flowing = run(0, true);
-        CHECK(!flowing.failedOver);                // probe addresses down, data flows: never torn down
-        // During the grace window of a network change: no failover however quiet (the extension heals the roam).
-        {
-            ServiceEngine eng;
-            FakeTunnel tun;
-            eng.setTunnel(&tun);
-            QString err;
-            CHECK(eng.loadSubscription(subJson({ EE, US }, 7), err));
-            CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
-            CHECK(eng.connect(err));
-            CHECK(upConnected(eng));
-            const qint64 now = QDateTime::currentSecsSinceEpoch();
-            eng.noteNetworkChange(now); // the roam right now: 20 s of grace
-            bool failedOver = false;
-            for (int i = 0; i < 8; ++i) {
-                tun.st = mkStats(now - 5, 1000, 5000 + i * 6000);
-                tun.st.dataQuietSec = 600;
-                failedOver = failedOver || eng.feedProbeResult(false);
-            }
-            CHECK(!failedOver);
-            CHECK(eng.state() == EngineState::Connected);
+        QList<QPair<qint64, qint64>> noData, oldExt, review;
+        for (qint64 t = 4; t <= 60; t += 4) {
+            noData << qMakePair(t, t);   // B1 with no data at all: stalled since R
+            oldExt << qMakePair(t, qint64(-1));
         }
+        // The review's F3 sequence (TribeRoamingTests "F3 recovered inside the echo window": 12, 24, 36, then 0 at 48:
+        // the data has returned at 45 s, inside the stage-3 fresh port's echo window).
+        review << qMakePair(qint64(12), qint64(12)) << qMakePair(qint64(24), qint64(24)) << qMakePair(qint64(36), qint64(36))
+               << qMakePair(qint64(48), qint64(0)) << qMakePair(qint64(60), qint64(0));
+        const Run b1 = run(noData);
+        CHECK(b1.failedOver && b1.at == 48);       // verdict 48 s >= 45 at the 12th failed probe (4 in a row at 16 s)
+        CHECK(!run(oldExt).failedOver);           // an extension before tribe.17: the rule of 141 (fresh handshake)
+        CHECK(!run(review).failedOver);           // F3: the path recovered at 45 s - never failed over
+        CHECK(!run(noData, 10000).failedOver);    // Q6: a verdict applied 10 s ago is stale - not corroboration
+        CHECK(run(noData, 3000).failedOver);      // ... 3 s ago is fresh (the status poll answers every second)
+        CHECK(!run(noData, 0, true).failedOver);  // during the grace window of a network change: no failover
+        const qint64 nowMs = 1'800'000'000'000;
+        CHECK(HealthLoop::freshDataStall(50, nowMs - 5000, nowMs) == 50 && HealthLoop::freshDataStall(50, nowMs - 5001, nowMs) == -1);
+        CHECK(HealthLoop::freshDataStall(50, nowMs + 1000, nowMs) == -1 && HealthLoop::freshDataStall(50, 0, nowMs) == -1);
+        CHECK(HealthLoop::freshDataStall(-1, nowMs, nowMs) == -1);
     }
 #endif
 

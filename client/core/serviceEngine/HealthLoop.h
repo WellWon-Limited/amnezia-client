@@ -116,21 +116,34 @@ public:
     // An unknown handshake time cannot corroborate anything: no verdict. rx/tx are NOT used here - every handshake
     // the server starts adds bytes to rx, which is what kept a dead session "alive" for the byte-based rule.
     // Device round 24.11 (case B1, LTE -> Wi-Fi): handshakes kept completing while no data came back for 8 minutes, so
-    // the handshake never aged and the rule waited. The extension (awg-apple tribe.16) now reports how long inbound
-    // DATA has not proved the path (`dataQuietSec`: no handshake bytes, no echo of its own repair step - the judgment
-    // its stall ladder acts on); `minDataQuietSec` or more of that corroborates the failing probe as well. -1 / 0 =
-    // unknown / off: the handshake age alone, as before (every platform but iOS, an extension before tribe.16).
+    // the handshake never aged and the rule waited. The extension (awg-apple tribe.17) reports its stall verdict
+    // (`dataStallSec`: while its ladder sees a stall right now - nothing in for 4 s while the user sends - how long the
+    // path has gone without data that proved it; 0 while data comes in, also right after a repair, and while nobody
+    // sends: an idle phone whose probes fail locally is never corroborated). `minDataStallSec` or more of that
+    // corroborates the failing probe as well. -1 / 0 = unknown / off: the handshake age alone, as before (every
+    // platform but iOS, an extension before tribe.17, a stale reading - freshDataStall).
     static bool probeDeadCorroborated(int failStreak, int cycles, bool inGrace, qint64 latestHandshakeEpoch,
-                                      qint64 nowEpoch, int maxHandshakeAgeSec, qint64 dataQuietSec = -1,
-                                      int minDataQuietSec = 0)
+                                      qint64 nowEpoch, int maxHandshakeAgeSec, qint64 dataStallSec = -1,
+                                      int minDataStallSec = 0)
     {
         if (cycles <= 0 || failStreak < cycles || inGrace)
             return false;
-        if (minDataQuietSec > 0 && dataQuietSec >= minDataQuietSec)
+        if (minDataStallSec > 0 && dataStallSec >= minDataStallSec)
             return true;
         if (latestHandshakeEpoch <= 0)
             return false;
         return nowEpoch - latestHandshakeEpoch > maxHandshakeAgeSec;
+    }
+    // tribe.17 (review Q6): the extension's stall verdict counts only while fresh - applied at most kDataStallMaxAgeMs
+    // ago by the wall clock (the status poll answers every second while the app runs; a reading from before a
+    // suspension or a sleep is stale). -1 = no fresh reading.
+    static constexpr qint64 kDataStallMaxAgeMs = 5000;
+    static qint64 freshDataStall(qint64 dataStallSec, qint64 dataStallAtMs, qint64 nowMs)
+    {
+        if (dataStallSec < 0 || dataStallAtMs <= 0)
+            return -1;
+        const qint64 age = nowMs - dataStallAtMs;
+        return (age >= 0 && age <= kDataStallMaxAgeMs) ? dataStallSec : -1;
     }
     // The newest handshake time the loop has seen (0 = none since the last reset).
     qint64 latestHandshakeEpoch() const { return m_hasPrev ? m_prev.latestHandshakeEpoch : 0; }

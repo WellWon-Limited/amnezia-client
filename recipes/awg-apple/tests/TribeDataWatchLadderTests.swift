@@ -14,6 +14,14 @@ func check(_ cond: @autoclosure () -> Bool, _ what: @autoclosure () -> String, l
     if !cond() { failures += 1; print("FAIL line \(line): \(what())") }
 }
 
+/// tribe.17: the stall ladder deducts the session's own service traffic; the rigs below simulate a session
+/// whose completed handshake sends 422 B and which sends no keepalives of its own.
+let rigRoaming: TribeRoamingPolicy = {
+    var policy = TribeRoamingPolicy.seamless
+    policy.serviceTraffic = TribeServiceTraffic(handshakeTxBytes: 422, keepaliveTxBytes: 0, keepaliveIntervalSeconds: 0)
+    return policy
+}()
+
 /// The device and the path, one simulated second at a time.
 final class World {
     var tx: UInt64 = 0
@@ -142,7 +150,7 @@ final class Rig {
         verdicts.append(out.verdict)
         if out.wouldSwitch { wouldSwitchSeen = true }
         if out.verdict == .noData, firstNoData == nil { firstNoData = world.uptime - startedAt }
-        switch arbiter.tick(sample, pathSatisfied: true, policy: .seamless) {
+        switch arbiter.tick(sample, pathSatisfied: true, policy: rigRoaming) {
         case .perform(let action):
             switch action {
             case .rebindPort:
@@ -166,11 +174,11 @@ final class Rig {
 
 // 0. tribe.16: one definition of "data is flowing" (TribeDataFlow in TribeRoaming.swift): the watch
 // deducts the same handshake bytes as the ladder (its own file compiles alone, so the value is pinned
-// here, where both are compiled together).
+// here, where both are compiled together). tribe.17: the outbound side is the session's own
+// (TribeServiceTraffic, computed from its configuration); the provider raises the watch's allowance to
+// it (TribeDataWatchRuntime, sessionHandshakeTxBytes), so there is no fixed tx number to pin any more.
 check(TribeDataWatchPolicy().handshakeRxAllowanceBytes == TribeDataFlow.handshakeRxBytes,
       "rx allowance of the watch = TribeDataFlow.handshakeRxBytes: \(TribeDataWatchPolicy().handshakeRxAllowanceBytes)")
-check(TribeDataWatchPolicy().handshakeTxAllowanceBytes == TribeDataFlow.handshakeTxBytes,
-      "tx allowance of the watch = TribeDataFlow.handshakeTxBytes: \(TribeDataWatchPolicy().handshakeTxAllowanceBytes)")
 
 // 1. The path of 13.11 (handshake passes every 15 s, not one data packet) at low demand: the
 // ladder does not step at all, and the verdict is reached all the same.
@@ -472,7 +480,7 @@ final class SwitchRig {
         }
         if executed { return } // one executor per tick: the ladder skips this sample
         if watch.arbiterOwnsRecovery { return } // and one owner of recovery while a round is in progress
-        if case .perform(let action) = arbiter.tick(sample, pathSatisfied: true, policy: .seamless), action == .softRestart {
+        if case .perform(let action) = arbiter.tick(sample, pathSatisfied: true, policy: rigRoaming), action == .softRestart {
             net.newDevice()
             deviceReplaced()
             watch.noteBackendRestarted(at: net.uptime, policy: policy)

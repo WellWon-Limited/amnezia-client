@@ -120,6 +120,8 @@ enum TribeDataWatchRuntimeTests {
         var stateReads = 0
         var uplinkReads = 0
         var uplink = "cellular"
+        /// awg-apple tribe.17: the session's own handshake bytes (WGConfig.serviceTraffic in the provider).
+        var sessionHandshakeTx: UInt64 = 0
         /// What the extension wrote into the plan file itself (only ever a scrubbed copy).
         var plansWritten: [Data] = []
         /// The write of the extension fails (a full disk, a locked file).
@@ -155,6 +157,7 @@ enum TribeDataWatchRuntimeTests {
                     if let answer = self.sanityAnswer { completion(answer) }
                 },
                 uptime: { [unowned self] in self.uptime },
+                sessionHandshakeTxBytes: { [unowned self] in self.sessionHandshakeTx },
                 nowMs: { [unowned self] in self.wallMs },
                 readState: { [unowned self] in self.stateReads += 1; return self.previousState },
                 replacePlan: { [unowned self] expected, clean in
@@ -905,6 +908,22 @@ enum TribeDataWatchRuntimeTests {
     }
 
     static func main() {
+        run("session_handshake_raises_the_tx_allowance") {
+            // awg-apple tribe.17 (review of tribe.16, F2): the watch deducts at least the session's own handshake
+            // (a heavy-junk session sends 3726 B), never less than the plan says.
+            let heavy = Bench()
+            heavy.sessionHandshakeTx = 3726
+            heavy.writePlan()
+            _ = heavy.startSession()
+            check(heavy.adapter.policy.enabled && heavy.adapter.policy.handshakeTxAllowanceBytes == 3726,
+                  "heavy session: allowance 3726: \(heavy.adapter.policy.handshakeTxAllowanceBytes)")
+            let plain = Bench()
+            plain.sessionHandshakeTx = 180
+            plain.writePlan()
+            _ = plain.startSession()
+            check(plain.adapter.policy.handshakeTxAllowanceBytes == TribeDataWatchPolicy().handshakeTxAllowanceBytes,
+                  "a small session keeps the plan's allowance: \(plain.adapter.policy.handshakeTxAllowanceBytes)")
+        }
         run("flag_never_on_leaves_no_trace") {
             // No plan file at all: the install has never seen the flag. Exactly build 139.
             let b = Bench()
