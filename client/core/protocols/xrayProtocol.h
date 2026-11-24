@@ -32,6 +32,12 @@ private:
     void onTun2SocksLines(quint64 session, const QList<QByteArray> &lines);
     void onTun2SocksFinished(quint64 session, int exitCode, QProcess::ExitStatus exitStatus);
     void onTun2SocksExit(quint64 session, bool resourceBusy, int exitCode, QProcess::ExitStatus exitStatus);
+    // AVPN (review F1): stop()'s work. False: this object was destroyed during the teardown's waits - the caller
+    // must not touch it. reportDisconnected=false from the destructor (no signal from a half-destroyed object).
+    bool endSession(bool reportDisconnected);
+    // AVPN: the session failed - end it, then report the error if this object is still alive. The only way a
+    // step of this file ends a session it is running in.
+    void failSession(ErrorCode error);
 
     // AVPN: start() and stop() each begin a new value; a continuation of an older one is dropped.
     quint64 m_session = 0;

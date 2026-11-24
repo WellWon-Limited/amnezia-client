@@ -83,7 +83,9 @@ XrayProtocol::XrayProtocol(const QJsonObject &configuration, QObject *parent) : 
 XrayProtocol::~XrayProtocol()
 {
     qDebug() << "XrayProtocol::~XrayProtocol()";
-    XrayProtocol::stop();
+    // AVPN: the session ends with the object, but nothing is emitted from a destructor - a receiver may be the
+    // VpnConnection that is being destroyed itself.
+    endSession(false);
 }
 
 ErrorCode XrayProtocol::start()
@@ -148,7 +150,19 @@ ErrorCode XrayProtocol::start()
 void XrayProtocol::stop()
 {
     qDebug() << "XrayProtocol::stop()";
+    endSession(true);
+}
 
+// AVPN (review F1): a failure of the running session ends it and reports the error - only when this object
+// outlived the teardown (its IPC waits run the event loop; a disconnect delivered there destroys the protocol).
+void XrayProtocol::failSession(ErrorCode error)
+{
+    if (endSession(true))
+        setLastError(error);
+}
+
+bool XrayProtocol::endSession(bool reportDisconnected)
+{
     // AVPN (macOS quit and crash 24.11.2026): the session ends here, first of all for its own continuations
     // (reads, routing, retries) and for the tun2socks replica - its signals used to reach this object while
     // the teardown below waited on the service, and its finished handler re-entered stop(). The service is torn
@@ -188,7 +202,7 @@ void XrayProtocol::stop()
                 qWarning() << "Failed to stop xray";
         });
         if (!self)
-            return; // AVPN: destroyed by a call the waits above delivered
+            return false; // AVPN: destroyed by a call the waits above delivered
     }
 
     if (m_tun2socksProcess) {
@@ -217,9 +231,11 @@ void XrayProtocol::stop()
 #endif
     }
     if (!self)
-        return; // AVPN: destroyed by a call the wait above delivered
+        return false; // AVPN: destroyed by a call the wait above delivered
 
-    setConnectionState(Vpn::ConnectionState::Disconnected);
+    if (reportDisconnected)
+        setConnectionState(Vpn::ConnectionState::Disconnected);
+    return true;
 }
 
 ErrorCode XrayProtocol::startTun2Socks(quint64 session)
@@ -286,8 +302,7 @@ void XrayProtocol::onTun2SocksLines(quint64 session, const QList<QByteArray> &li
     if (!self || m_session != session)
         return; // stopped (or destroyed) while the routing was being set up
     if (res != ErrorCode::NoError) {
-        stop();
-        setLastError(res);
+        failSession(res);
     } else {
         setConnectionState(Vpn::ConnectionState::Connected);
     }
@@ -327,10 +342,8 @@ void XrayProtocol::onTun2SocksExit(quint64 session, bool resourceBusy, int exitC
             const ErrorCode err = startTun2Socks(session);
             if (!self || m_session != session)
                 return;
-            if (err != ErrorCode::NoError) {
-                stop();
-                setLastError(err);
-            }
+            if (err != ErrorCode::NoError)
+                failSession(err);
         });
         return;
     }
@@ -342,8 +355,7 @@ void XrayProtocol::onTun2SocksExit(quint64 session, bool resourceBusy, int exitC
     } else {
         qCritical() << QString("Tun2socks process was closed with %1 exit code").arg(exitCode);
     }
-    stop();
-    setLastError(ErrorCode::Tun2SockExecutableCrashed);
+    failSession(ErrorCode::Tun2SockExecutableCrashed);
 }
 
 ErrorCode XrayProtocol::setupRouting(quint64 session)
