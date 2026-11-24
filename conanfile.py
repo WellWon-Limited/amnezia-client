@@ -39,6 +39,8 @@ class AmneziaVPN(ConanFile):
         if has_ne:
             # Official parser-fixed 3.1.4 plus the existing Tribe
             # dnsfwd/warmup/rebind patch set.
+            # tribe.18: tribe.17 after the second review (handshake by time only, RandomTrailers as the engine
+            # reads it, service TX settled over the handshake window; same patches).
             # tribe.17: tribe.16 after its review (service traffic from the session's config, idle end of an
             # episode, sampling gaps, data_stall_s for the app's failover; same patches).
             # tribe.16: tribe.15 + one definition of "data is flowing" for the stall ladder and the app's
@@ -46,7 +48,7 @@ class AmneziaVPN(ConanFile):
             # tribe.15: tribe.14 + the probe engine's host limits (in-app probe host). tribe.14: tribe.12 (Xray core amnezia-xray-core v1.261101.0 on Go 1.27.4, LibXrayTribeHTTP,
             # FreeOSMemory loop once per process, the Scanner's probe engine) + the tunnel-side data
             # watch (patches 0012 and 0016).
-            self.requires("awg-apple/3.1.4-tribe.17")
+            self.requires("awg-apple/3.1.4-tribe.18")
             # Cut geo pair, shipped as appex resources and passed as datDir.
             self.requires("tribe-xray-geo/1.0.0")
             self.requires("hev-socks5-tunnel/2.15.0", options={"as_framework": True})
