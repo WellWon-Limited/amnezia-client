@@ -13,11 +13,14 @@
 #include <QTimer>
 #include <QJsonObject>
 #include <QNetworkInterface>
+#include <QRegularExpression>
+#include <QThread>
 #include <QtCore/qlogging.h>
 #include <QtCore/qobjectdefs.h>
 #include <QtCore/qprocess.h>
 
 #include <exception>
+#include <utility>
 
 #ifdef Q_OS_MACOS
 static const QString tunName = "utun22";
@@ -86,6 +89,8 @@ XrayProtocol::~XrayProtocol()
 ErrorCode XrayProtocol::start()
 {
     qDebug() << "XrayProtocol::start()";
+    const quint64 session = ++m_session; // AVPN: see the header
+    m_sessionOpen = true;
 
     // Inject SOCKS5 auth into the inbound before starting xray.
     // Re-uses existing credentials if the config already has them (e.g. imported config).
@@ -125,12 +130,17 @@ ErrorCode XrayProtocol::start()
 
     return IpcClient::withInterface(
             [&](QSharedPointer<IpcInterfaceReplica> iface) {
+                const QPointer<XrayProtocol> self(this); // AVPN
                 auto xrayStart = iface->xrayStart(xrayConfigStr);
-                if (!xrayStart.waitForFinished() || !xrayStart.returnValue()) {
+                const bool started = xrayStart.waitForFinished() && xrayStart.returnValue();
+                // AVPN: the wait ran the event loop - a stop that came meanwhile has ended this start.
+                if (!self || m_session != session)
+                    return ErrorCode::NoError;
+                if (!started) {
                     qCritical() << "Failed to start xray";
                     return ErrorCode::XrayExecutableCrashed;
                 }
-                return startTun2Socks();
+                return startTun2Socks(session);
             },
             []() { return ErrorCode::AmneziaServiceConnectionFailed; });
 }
@@ -139,127 +149,111 @@ void XrayProtocol::stop()
 {
     qDebug() << "XrayProtocol::stop()";
 
-    IpcClient::withInterface([](QSharedPointer<IpcInterfaceReplica> iface) {
-        auto disableKillSwitch = iface->disableKillSwitch();
-        if (!disableKillSwitch.waitForFinished() || !disableKillSwitch.returnValue())
-            qWarning() << "Failed to disable killswitch";
+    // AVPN (macOS quit and crash 24.11.2026): the session ends here, first of all for its own continuations
+    // (reads, routing, retries) and for the tun2socks replica - its signals used to reach this object while
+    // the teardown below waited on the service, and its finished handler re-entered stop(). The service is torn
+    // down once per started session: a second stop (~XrayProtocol after a failover stop) only reports
+    // Disconnected; it used to stop the core twice.
+    ++m_session;
+    const bool tearDown = std::exchange(m_sessionOpen, false);
+    if (m_tun2socksReader) {
+        m_tun2socksReader->stop();
+        m_tun2socksReader->deleteLater();
+        m_tun2socksReader = nullptr;
+    }
+    if (m_tun2socksProcess)
+        QObject::disconnect(m_tun2socksProcess.data(), nullptr, this, nullptr);
 
-        auto StartRoutingIpv6 = iface->StartRoutingIpv6();
-        if (!StartRoutingIpv6.waitForFinished() || !StartRoutingIpv6.returnValue())
-            qWarning() << "Failed to start routing ipv6";
+    const QPointer<XrayProtocol> self(this);
+    if (tearDown) {
+        IpcClient::withInterface([](QSharedPointer<IpcInterfaceReplica> iface) {
+            auto disableKillSwitch = iface->disableKillSwitch();
+            if (!disableKillSwitch.waitForFinished() || !disableKillSwitch.returnValue())
+                qWarning() << "Failed to disable killswitch";
 
-        auto restoreResolvers = iface->restoreResolvers();
-        if (!restoreResolvers.waitForFinished() || !restoreResolvers.returnValue())
-            qWarning() << "Failed to restore resolvers";
+            auto StartRoutingIpv6 = iface->StartRoutingIpv6();
+            if (!StartRoutingIpv6.waitForFinished() || !StartRoutingIpv6.returnValue())
+                qWarning() << "Failed to start routing ipv6";
 
-        auto deleteTun = iface->deleteTun(tunName);
-        if (!deleteTun.waitForFinished() || !deleteTun.returnValue())
-            qWarning() << "Failed to delete tun";
+            auto restoreResolvers = iface->restoreResolvers();
+            if (!restoreResolvers.waitForFinished() || !restoreResolvers.returnValue())
+                qWarning() << "Failed to restore resolvers";
 
-        auto xrayStop = iface->xrayStop();
-        if (!xrayStop.waitForFinished() || !xrayStop.returnValue())
-            qWarning() << "Failed to stop xray";
-    });
+            auto deleteTun = iface->deleteTun(tunName);
+            if (!deleteTun.waitForFinished() || !deleteTun.returnValue())
+                qWarning() << "Failed to delete tun";
+
+            auto xrayStop = iface->xrayStop();
+            if (!xrayStop.waitForFinished() || !xrayStop.returnValue())
+                qWarning() << "Failed to stop xray";
+        });
+        if (!self)
+            return; // AVPN: destroyed by a call the waits above delivered
+    }
 
     if (m_tun2socksProcess) {
-        m_tun2socksProcess->blockSignals(true);
-
+        // AVPN: taken out first - a stop that a wait below delivers finds nothing left to end.
+        const QSharedPointer<IpcProcessInterfaceReplica> process = std::exchange(m_tun2socksProcess, {});
 #ifndef Q_OS_WIN
-        m_tun2socksProcess->terminate();
-        auto waitForFinished = m_tun2socksProcess->waitForFinished(1000);
-        if (!waitForFinished.waitForFinished() || !waitForFinished.returnValue()) {
-            qWarning() << "Failed to terminate tun2socks. Killing the process...";
-            m_tun2socksProcess->kill();
+        // AVPN (macOS quit 24.11.2026): terminate() + close() end the child in the service (SIGTERM, then
+        // QProcess::close: SIGKILL and reap) - nothing is awaited from the child. One bounded round trip
+        // (waitForFinished(0) returns at once in the service) only makes sure both requests left this process
+        // before the replica and its socket go. The former waitForFinished(1000) ran on the main thread on quit
+        // (~XrayProtocol after the VpnConnection thread had stopped): no reply could come, the default 30 s
+        // passed, and the kill() after it never left this process - tun2socks stayed as an orphan of the
+        // service. A replica of another thread cannot send at all, so it is not used: the service ends the
+        // child itself when this process's connection to it closes (IpcServer::onProcessControllerLost).
+        if (QThread::currentThread() == process->thread()) {
+            process->terminate();
+            process->close();
+            auto delivered = process->waitForFinished(0);
+            delivered.waitForFinished(tun2socksStopReplyMs);
         }
 #else
         // terminate does not do anything useful on Windows
         // so just kill the process
-        m_tun2socksProcess->kill();
+        process->kill();
+        process->close();
 #endif
-
-        m_tun2socksProcess->close();
-        m_tun2socksProcess.reset();
     }
+    if (!self)
+        return; // AVPN: destroyed by a call the wait above delivered
 
     setConnectionState(Vpn::ConnectionState::Disconnected);
 }
 
-ErrorCode XrayProtocol::startTun2Socks()
+ErrorCode XrayProtocol::startTun2Socks(quint64 session)
 {
-    m_tun2socksProcess = IpcClient::CreatePrivilegedProcess();
-    if (!m_tun2socksProcess->waitForSource()) {
+    const QPointer<XrayProtocol> self(this); // AVPN
+    QSharedPointer<IpcProcessInterfaceReplica> process = IpcClient::CreatePrivilegedProcess();
+    // AVPN: creating the replica waits on the service (the event loop runs): a stop that came meanwhile has
+    // ended this session - the replica is dropped unstarted, the service has no child for it.
+    if (!self || m_session != session)
+        return ErrorCode::NoError;
+    if (!process || !process->waitForSource()) {
         return ErrorCode::AmneziaServiceConnectionFailed;
     }
+    if (m_tun2socksReader) { // AVPN: the reader of the previous tun2socks of this session (a retry)
+        m_tun2socksReader->stop();
+        m_tun2socksReader->deleteLater();
+    }
+    m_tun2socksProcess = process;
+    m_tun2socksStackUp = false;
 
     const QString proxyUrl = QString("socks5://%1:%2@127.0.0.1:%3").arg(m_socksUser, m_socksPassword, QString::number(m_socksPort));
 
     m_tun2socksProcess->setProgram(PermittedProcess::Tun2Socks);
     m_tun2socksProcess->setArguments({ "-device", QString("tun://%1").arg(tunName), "-proxy", proxyUrl });
 
-    connect(
-            m_tun2socksProcess.data(), &IpcProcessInterfaceReplica::readyReadStandardError, this,
-            [this]() {
-                auto readAllStandardError = m_tun2socksProcess->readAllStandardError();
-                if (!readAllStandardError.waitForFinished()) {
-                    qWarning() << "Failed to read output from tun2socks";
-                    return;
-                }
-
-                const QString line = readAllStandardError.returnValue();
-
-                if (!line.contains("[TCP]") && !line.contains("[UDP]"))
-                    qDebug() << "[tun2socks]:" << line;
-
-                if (line.contains("[STACK] tun://") && line.contains("<-> socks5://")) {
-                    disconnect(m_tun2socksProcess.data(), &IpcProcessInterfaceReplica::readyReadStandardOutput, this, nullptr);
-
-                    if (ErrorCode res = setupRouting(); res != ErrorCode::NoError) {
-                        stop();
-                        setLastError(res);
-                    } else {
-                        setConnectionState(Vpn::ConnectionState::Connected);
-                    }
-                }
-            },
-            Qt::QueuedConnection);
+    // AVPN (macOS crash 24.11.2026): one read in flight, no nested event loop (tun2socksOutputReader.h).
+    m_tun2socksReader = new avpn::ProcessStderrReader(
+            m_tun2socksProcess.data(),
+            [this, session](const QList<QByteArray> &lines) { onTun2SocksLines(session, lines); }, this);
 
     connect(
             m_tun2socksProcess.data(), &IpcProcessInterfaceReplica::finished, this,
-            [this](int exitCode, QProcess::ExitStatus exitStatus) {
-                // Check stdout for "resource busy" — the TUN device was not yet released
-                // by the previous tun2socks instance. Retry after a short delay.
-                bool resourceBusy = false;
-                if (m_tun2socksProcess) {
-                    auto readOut = m_tun2socksProcess->readAllStandardOutput();
-                    if (readOut.waitForFinished()) {
-                        resourceBusy = readOut.returnValue().contains("resource busy");
-                    }
-                }
-
-                if (resourceBusy && m_tun2socksRetryCount < maxTun2SocksRetries) {
-                    m_tun2socksRetryCount++;
-                    qWarning() << QString("Tun2socks: TUN resource busy, retrying (%1/%2) in %3ms...")
-                                      .arg(m_tun2socksRetryCount)
-                                      .arg(maxTun2SocksRetries)
-                                      .arg(tun2socksRetryDelayMs);
-                    QTimer::singleShot(tun2socksRetryDelayMs, this, [this]() {
-                        if (ErrorCode err = startTun2Socks(); err != ErrorCode::NoError) {
-                            stop();
-                            setLastError(err);
-                        }
-                    });
-                    return;
-                }
-
-                m_tun2socksRetryCount = 0;
-
-                if (exitStatus == QProcess::ExitStatus::CrashExit) {
-                    qCritical() << "Tun2socks process crashed!";
-                } else {
-                    qCritical() << QString("Tun2socks process was closed with %1 exit code").arg(exitCode);
-                }
-                stop();
-                setLastError(ErrorCode::Tun2SockExecutableCrashed);
+            [this, session](int exitCode, QProcess::ExitStatus exitStatus) {
+                onTun2SocksFinished(session, exitCode, exitStatus);
             },
             Qt::QueuedConnection);
 
@@ -267,10 +261,100 @@ ErrorCode XrayProtocol::startTun2Socks()
     return ErrorCode::NoError;
 }
 
-ErrorCode XrayProtocol::setupRouting()
+void XrayProtocol::onTun2SocksLines(quint64 session, const QList<QByteArray> &lines)
+{
+    if (m_session != session)
+        return;
+    // AVPN: the proxy URL carries the per-session socks credentials; the log keeps only the scheme.
+    static const QRegularExpression socksUserInfo(QStringLiteral("socks5://[^@\\s\"]*@"));
+    bool stackUp = false;
+    for (const QByteArray &raw : lines) {
+        const QString line = QString::fromUtf8(raw);
+        if (!line.contains("[TCP]") && !line.contains("[UDP]"))
+            qDebug() << "[tun2socks]:" << QString(line).replace(socksUserInfo, QStringLiteral("socks5://"));
+        if (line.contains("[STACK] tun://") && line.contains("<-> socks5://"))
+            stackUp = true;
+    }
+    // AVPN: the routing is set up once per tun2socks process. The output is still read after that (the former
+    // disconnect named readyReadStandardOutput and never took effect): the service's QProcess drains the pipe
+    // into memory whether anyone reads it or not, and a read empties that buffer.
+    if (!stackUp || m_tun2socksStackUp)
+        return;
+    m_tun2socksStackUp = true;
+    const QPointer<XrayProtocol> self(this);
+    const ErrorCode res = setupRouting(session);
+    if (!self || m_session != session)
+        return; // stopped (or destroyed) while the routing was being set up
+    if (res != ErrorCode::NoError) {
+        stop();
+        setLastError(res);
+    } else {
+        setConnectionState(Vpn::ConnectionState::Connected);
+    }
+}
+
+void XrayProtocol::onTun2SocksFinished(quint64 session, int exitCode, QProcess::ExitStatus exitStatus)
+{
+    if (m_session != session || !m_tun2socksProcess)
+        return;
+    // Check stdout for "resource busy" — the TUN device was not yet released
+    // by the previous tun2socks instance. Retry after a short delay.
+    // AVPN: read without waiting - a wait here ran the event loop inside this queued slot.
+    auto *watcher = new QRemoteObjectPendingCallWatcher(m_tun2socksProcess->readAllStandardOutput(), this);
+    connect(watcher, &QRemoteObjectPendingCallWatcher::finished, this,
+            [this, watcher, session, exitCode, exitStatus](QRemoteObjectPendingCallWatcher *) {
+                watcher->deleteLater();
+                const bool resourceBusy = watcher->error() == QRemoteObjectPendingCall::NoError
+                        && watcher->returnValue().toByteArray().contains("resource busy");
+                onTun2SocksExit(session, resourceBusy, exitCode, exitStatus);
+            });
+}
+
+void XrayProtocol::onTun2SocksExit(quint64 session, bool resourceBusy, int exitCode, QProcess::ExitStatus exitStatus)
+{
+    if (m_session != session)
+        return;
+    if (resourceBusy && m_tun2socksRetryCount < maxTun2SocksRetries) {
+        m_tun2socksRetryCount++;
+        qWarning() << QString("Tun2socks: TUN resource busy, retrying (%1/%2) in %3ms...")
+                              .arg(m_tun2socksRetryCount)
+                              .arg(maxTun2SocksRetries)
+                              .arg(tun2socksRetryDelayMs);
+        QTimer::singleShot(tun2socksRetryDelayMs, this, [this, session]() {
+            if (m_session != session)
+                return;
+            const QPointer<XrayProtocol> self(this);
+            const ErrorCode err = startTun2Socks(session);
+            if (!self || m_session != session)
+                return;
+            if (err != ErrorCode::NoError) {
+                stop();
+                setLastError(err);
+            }
+        });
+        return;
+    }
+
+    m_tun2socksRetryCount = 0;
+
+    if (exitStatus == QProcess::ExitStatus::CrashExit) {
+        qCritical() << "Tun2socks process crashed!";
+    } else {
+        qCritical() << QString("Tun2socks process was closed with %1 exit code").arg(exitCode);
+    }
+    stop();
+    setLastError(ErrorCode::Tun2SockExecutableCrashed);
+}
+
+ErrorCode XrayProtocol::setupRouting(quint64 session)
 {
     return IpcClient::withInterface(
-            [this](QSharedPointer<IpcInterfaceReplica> iface) -> ErrorCode {
+            [this, session](QSharedPointer<IpcInterfaceReplica> iface) -> ErrorCode {
+                // AVPN: each wait below runs the event loop; a stop that came during one has torn the session
+                // down already (its calls are queued after ours on the same connection) - the next step would
+                // put the kill switch, DNS or routes back on a session that is over.
+                const QPointer<XrayProtocol> self(this);
+                const auto ended = [&]() { return !self || m_session != session; };
 #ifdef Q_OS_WIN
                 // AVPN (upstream nodes, release C): a provider session has no single server - hostName is the
                 // display constant 192.0.2.1 and the real dial addresses live inside the Xray config. Its uplink
@@ -287,6 +371,7 @@ ErrorCode XrayProtocol::setupRouting()
                     return ErrorCode::InternalError;
                 }
 
+                if (ended()) return ErrorCode::NoError; // AVPN
                 auto updateResolvers = iface->updateResolvers(tunName, m_dnsServers);
                 if (!updateResolvers.waitForFinished() || !updateResolvers.returnValue()) {
                     qCritical() << "Failed to set DNS resolvers for TUN";
@@ -305,6 +390,7 @@ ErrorCode XrayProtocol::setupRouting()
 #else
                 static const int vpnAdapterIndex = 0;
 #endif
+                if (ended()) return ErrorCode::NoError; // AVPN
                 const bool killSwitchEnabled = QVariant(m_rawConfig.value(configKey::killSwitchOption).toString()).toBool();
                 if (killSwitchEnabled) {
                     if (vpnAdapterIndex != -1) {
@@ -320,6 +406,7 @@ ErrorCode XrayProtocol::setupRouting()
                         qWarning() << "Failed to get vpnAdapterIndex. Killswitch disabled";
                 }
 
+                if (ended()) return ErrorCode::NoError; // AVPN
                 if (m_routeMode == amnezia::RouteMode::VpnAllSites) {
                     static const QStringList subnets = { "1.0.0.0/8",  "2.0.0.0/7",  "4.0.0.0/6",  "8.0.0.0/5",
                                                          "16.0.0.0/4", "32.0.0.0/3", "64.0.0.0/2", "128.0.0.0/1" };
@@ -331,6 +418,7 @@ ErrorCode XrayProtocol::setupRouting()
                     }
                 }
 
+                if (ended()) return ErrorCode::NoError; // AVPN
                 auto StopRoutingIpv6 = iface->StopRoutingIpv6();
                 if (!StopRoutingIpv6.waitForFinished() || !StopRoutingIpv6.returnValue()) {
                     qCritical() << "Failed to disable IPv6 routing";
@@ -338,6 +426,7 @@ ErrorCode XrayProtocol::setupRouting()
                 }
 
 #ifdef Q_OS_WIN
+                if (ended()) return ErrorCode::NoError; // AVPN
                 if (inetAdapterIndex != -1 && vpnAdapterIndex != -1) {
                     QJsonObject config = m_rawConfig;
                     config.insert("inetAdapterIndex", inetAdapterIndex);
