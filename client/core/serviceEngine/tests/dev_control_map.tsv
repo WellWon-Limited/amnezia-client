@@ -10,14 +10,14 @@ showPage	sig:activated	client/ui/qml/Tribe/components/TribeBottomNav.qml	signal 
 showPage	sig:requestServerPicker	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	signal requestServerPicker()	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	root.requestServerPicker()
 showPage	sig:requestScanner	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	signal requestScanner()	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	onClicked: { Haptic.play("light"); root.requestScanner() }
 showPage	sig:requestScanner	client/ui/qml/Tribe/Pages/PageServersTribe.qml	signal requestScanner()	client/ui/qml/Tribe/Pages/PageServersTribe.qml	onClicked: { Haptic.play("light"); root.requestScanner() }
-cmdChoose	js:tapRow	client/ui/qml/Tribe/Pages/PageServersTribe.qml	function tapRow(entry) {	client/ui/qml/Tribe/Pages/PageServersTribe.qml	onClicked: root.tapRow(row.modelData)
+cmdChoose	js:tapRow	client/ui/qml/Tribe/Pages/PageServersTribe.qml	function tapRow(entry) {	client/ui/qml/Tribe/Pages/PageServersTribe.qml	onClicked: root.tapRow(row.d)
 cmdAuto	js:tapAuto	client/ui/qml/Tribe/Pages/PageServersTribe.qml	function tapAuto() {	client/ui/qml/Tribe/Pages/PageServersTribe.qml	onClicked: root.tapAuto()
 cmdMode	js:tapMode	client/ui/qml/Tribe/Pages/PageServersTribe.qml	function tapMode(key) {	client/ui/qml/Tribe/components/TribeTransportSelector.qml	onClicked: root.tapSegment(segment.modelData.key)
-cmdScanSelect	cpp:showSlot	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void showSlot(const QString &cc);	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	TribeScanner.showSlot(sc)
-cmdScanSelect	cpp:chooseCountry	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void chooseCountry(const QString &cc);	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	TribeScanner.chooseCountry(sc)
-cmdScanStart	cpp:retry	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void retry();	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onRetryTapped: if (root.hasScanner) TribeScanner.retry()
-cmdScanStart	cpp:connectAndScan	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void connectAndScan();	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onConnectAndScanTapped: if (root.hasScanner) TribeScanner.connectAndScan()
-cmdScanStop	cpp:stop	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void stop();	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	if (scanning && hasScanner) TribeScanner.stop()
+cmdScanSelect	js:select	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	function select(sc) {	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onClicked: root.select(scope)
+cmdScanStart	js:action	client/ui/qml/Tribe/components/TribeScanBar.qml	function action() {	client/ui/qml/Tribe/components/TribeScanBar.qml	onPressed: root.pressAction = root.action()
+cmdScanStart	js:fire	client/ui/qml/Tribe/components/TribeScanBar.qml	function fire(a) {	client/ui/qml/Tribe/components/TribeScanBar.qml	if (a === root.action()) root.fire(a)
+cmdScanStop	js:action	client/ui/qml/Tribe/components/TribeScanBar.qml	function action() {	client/ui/qml/Tribe/components/TribeScanBar.qml	onPressed: root.pressAction = root.action()
+cmdScanStop	js:fire	client/ui/qml/Tribe/components/TribeScanBar.qml	function fire(a) {	client/ui/qml/Tribe/components/TribeScanBar.qml	if (a === root.action()) root.fire(a)
 cmdScanConnect	cpp:tapRow	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void tapRow(const QString &id);	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
 cmdScanBack	cpp:keyPressEvent	client/ui/controllers/qml/pageController.h	void keyPressEvent(Qt::Key key);	client/ui/qml/main2.qml	PageController.keyPressEvent(event.key)
 cmdWindowShow	sig:raiseMainWindow	client/ui/controllers/qml/pageController.h	void raiseMainWindow();	client/core/controllers/coreSignalHandlers.cpp	&NotificationHandler::raiseRequested, m_coreController->m_pageController, &PageController::raiseMainWindow
@@ -52,3 +52,17 @@ chain	client/ui/qml/Pages2/PageStart.qml	if (!ScanSwitches.scanner) return
 chain	client/ui/qml/Pages2/PageStart.qml	visible: root.avpnNav && !root.onboardingActive && !root.kbActive
 chain	client/ui/qml/Tribe/components/TribeScanRow.qml	enabled: row.tappable
 chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	tappable: f.not_tappable !== true
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	objectName: "scannerBar"
+chain	client/ui/qml/Tribe/components/TribeScanBar.qml	objectName: "scannerActionButton"
+chain	client/ui/qml/Tribe/components/TribeScanBar.qml	if (a === "scan") root.scanTapped()
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onScanTapped: root.scanSelected()
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onShowTapped: root.showSelected()
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onStopTapped: root.stopScan()
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onRetryTapped: root.retryScan()
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	if (root.choosing) root.connectSelected()
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	else if (root.hasScanner) TribeScanner.connectAndScan()
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	TribeScanner.chooseCountry(selected)
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	TribeScanner.showSlot(selected)
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	if (hasScanner) TribeScanner.retry()
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	TribeScanner.stop()
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	function systemBack() { navBack() }

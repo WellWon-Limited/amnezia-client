@@ -1042,6 +1042,7 @@ PageType {
     // ── the one pinned button ──
     TribeScanBar {
         id: bar
+        objectName: "scannerBar"   // found by name: the desktop test rig presses this button (scan.start / scan.stop)
         z: 10
         visible: root.showBar
         anchors.left: parent.left

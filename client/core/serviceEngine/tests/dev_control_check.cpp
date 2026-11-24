@@ -496,42 +496,76 @@ int main(int argc, char **argv)
         CHECK(ok(r) && res(r).value("page").toString() == "PageScannerTribe" && res(r).value("screen_open").toBool()
                   && scn.calls.contains("show"),
               "scan.open: the page opens and shows the Scanner");
+        CHECK(res(r).value("pane").toString() == "choose" && res(r).value("selected").toString().isEmpty(),
+              "scan.open: the page opens on its choice, «Все страны» selected");
+        // the scope row: the selection only - nothing reaches the Scanner until the button
         scn.calls.clear();
         r = c.cmd("scan.select", {{"scope", "DE"}});
-        CHECK(ok(r) && res(r).value("fresh").toBool() && scn.calls == QStringList{"showSlot:DE"},
-              "scan.select with a fresh result: showSlot");
-        scn.calls.clear();
-        r = c.cmd("scan.select", {{"scope", "NL"}});
-        CHECK(ok(r) && !res(r).value("fresh").toBool() && scn.calls == QStringList{"chooseCountry:NL"},
-              "scan.select without one: chooseCountry");
+        CHECK(ok(r) && res(r).value("fresh").toBool() && res(r).value("selected").toString() == "DE"
+                  && res(r).value("action").toString() == "scan" && scn.calls.isEmpty(),
+              qPrintable("scan.select: the page's select(scope), no Scanner call: " + scn.calls.join(',')));
         r = c.cmd("scan.select", {{"scope", "ZZ"}});
         CHECK(!ok(r) && errOf(r).startsWith("unknown_scope"), "scan.select unknown scope");
+        r = c.cmd("scan.select", {{"scope", "whitelist"}});
+        CHECK(!ok(r) && errOf(r).startsWith("unknown_scope"), "scan.select whitelist without white lists in the pool");
+        // the one button on the choice: «Сканировать» the selected scope -> the page's scanSelected
         scn.calls.clear();
         r = c.cmd("scan.start");
-        CHECK(ok(r) && scn.calls == QStringList{"retry"} && res(r).value("phase").toString() == "preparing",
-              "scan.start -> retry");
+        CHECK(ok(r) && res(r).value("pressed").toString() == "scan" && res(r).value("from").toString() == "choice"
+                  && scn.calls == (QStringList{"chooseCountry:DE", "retry"}) && res(r).value("pane").toString() == "result"
+                  && res(r).value("phase").toString() == "preparing",
+              qPrintable("scan.start on the choice -> scan the selected scope: " + scn.calls.join(',')));
+        r = c.cmd("scan.select", {{"scope", "NL"}});
+        CHECK(!ok(r) && errOf(r).startsWith("not_choosing"), "scan.select on the result: refused");
         scn.setButton("stop");
         r = c.cmd("scan.start");
         CHECK(!ok(r) && errOf(r).startsWith("scanning"), "scan.start while «Остановить»: refused");
         scn.calls.clear();
         r = c.cmd("scan.stop");
-        CHECK(ok(r) && res(r).value("stopped").toBool() && scn.calls == QStringList{"stop"}, "scan.stop -> stop");
+        CHECK(ok(r) && res(r).value("stopped").toBool() && scn.calls == QStringList{"stop"}, "scan.stop -> the button's stop");
+        scn.setButton("retry");
         scn.calls.clear();
         r = c.cmd("scan.stop");
-        CHECK(ok(r) && !res(r).value("stopped").toBool() && scn.calls.isEmpty(), "scan.stop when idle: nothing");
-        scn.setButton("connect_and_scan");
+        CHECK(ok(r) && !res(r).value("stopped").toBool() && scn.calls.isEmpty(), "scan.stop when the button does not say it");
         scn.calls.clear();
         r = c.cmd("scan.start");
-        CHECK(ok(r) && scn.calls == QStringList{"connectAndScan"}, "scan.start as the bar says: connectAndScan");
+        CHECK(ok(r) && res(r).value("pressed").toString() == "retry" && scn.calls == QStringList{"retry"},
+              "scan.start on the result -> «Сканировать снова»");
         scn.setButton("retry", false);
         r = c.cmd("scan.start");
         CHECK(!ok(r) && errOf(r).startsWith("button_disabled"), "scan.start with the button disabled: refused");
+        scn.setButton("connect_and_scan");
+        scn.calls.clear();
+        r = c.cmd("scan.start");
+        CHECK(ok(r) && res(r).value("pressed").toString() == "connect" && scn.calls == QStringList{"connectAndScan"},
+              "scan.start on the result as the bar says: connectAndScan");
+        // back: the result -> the choice (the page stays)
+        r = c.cmd("scan.back");
+        CHECK(ok(r) && res(r).value("page").toString() == "PageScannerTribe", "scan.back from the result: the choice");
+        scn.calls.clear();
+        r = c.cmd("scan.start");
+        CHECK(ok(r) && res(r).value("pressed").toString() == "connect" && scn.calls == (QStringList{"chooseCountry:DE", "connectAndScan"}),
+              qPrintable("scan.start on the choice, VPN off: connect and scan the selected scope: " + scn.calls.join(',')));
+        c.cmd("scan.back");
+        // during the pause: a scope with a fresh result offers «Показать результат», one without it a disabled scan
         scn.setButton("retry_in_s", false);
         scn.calls.clear();
         r = c.cmd("scan.start");
-        CHECK(ok(r) && scn.calls == QStringList{"retry"}, "scan.start during a countdown: the machine judges");
+        CHECK(ok(r) && res(r).value("pressed").toString() == "show" && scn.calls == QStringList{"showSlot:DE"},
+              qPrintable("scan.start during the pause: show the fresh result: " + scn.calls.join(',')));
+        c.cmd("scan.back");
+        c.cmd("scan.select", {{"scope", "NL"}});
+        scn.calls.clear();
+        r = c.cmd("scan.start");
+        CHECK(!ok(r) && errOf(r).startsWith("button_disabled: scan") && scn.calls.isEmpty(),
+              "scan.start during the pause without a fresh result: the disabled «Сканировать через N с»");
         scn.setButton("retry");
+        c.cmd("scan.select", {{"scope", "DE"}});
+        c.cmd("scan.start");
         scn.setPhase("done");
+        scn.m_view.insert("available", 1);
+        scn.m_view.insert("partial", true);
+        emit scn.viewChanged();
 
         r = c.cmd("scan.rows");
         const QJsonArray rows = res(r).value("rows").toArray();
@@ -541,6 +575,10 @@ int main(int argc, char **argv)
                   && rows.at(0).toObject().value("kind").toString() == "xray",
               "scan.rows: name, kind, status, latency");
         CHECK(!raw.contains("3f9c2a7b1d4e8f60"), "scan.rows: no provider id");
+        CHECK(res(r).value("available").toInt() == 1 && res(r).value("partial").toBool()
+                  && res(r).value("pane").toString() == "result" && res(r).value("scopes").toArray().size() == 2
+                  && res(r).value("slots").toArray().size() == 1,
+              "scan.rows: the rings' count, the stopped scan's mark, the pane, the scopes and their fresh results");
         rowRef = rows.at(0).toObject().value("ref").toString();
         scn.calls.clear();
         r = c.cmd("scan.connect", {{"row", 1}, {"ref", rowRef}});
@@ -551,6 +589,7 @@ int main(int argc, char **argv)
         r = c.cmd("scan.connect", {{"row", 2}, {"ref", rowRef}});
         CHECK(!ok(r) && errOf(r).startsWith("row_changed"), "scan.connect: the row changed under the ref");
 
+        c.cmd("scan.back"); // the result -> the choice
         pc.calls.clear();
         r = c.cmd("scan.back");
         CHECK(ok(r) && pc.calls == QStringList{QStringLiteral("keyPressEvent:%1").arg(int(Qt::Key_Escape))}

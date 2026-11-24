@@ -22,6 +22,8 @@ SCANNER_H="$ROOT/client/core/serviceEngine/TribeScanner.h"
 SERVERS_QML="$ROOT/client/ui/qml/Tribe/Pages/PageServersTribe.qml"
 START_QML="$ROOT/client/ui/qml/Pages2/PageStart.qml"
 NAV_QML="$ROOT/client/ui/qml/Tribe/components/TribeBottomNav.qml"
+SCANNER_QML="$ROOT/client/ui/qml/Tribe/Pages/PageScannerTribe.qml"
+SCANBAR_QML="$ROOT/client/ui/qml/Tribe/components/TribeScanBar.qml"
 fail=0
 bad() { echo "FAIL: $1"; fail=1; }
 code() { grep -v '^[[:space:]]*//' "$1" || true; }
@@ -95,6 +97,18 @@ done
 for p in $(printf '%s\n' "$app" | grep -oE 'prop\(bar, "[A-Za-z]+"\)' | sed -E 's/.*"([A-Za-z]+)".*/\1/' | sort -u); do
   [ "$p" = visible ] && continue
   grep -qE "property [a-z]+ $p[: ]" "$NAV_QML" || bad "W4: TribeBottomNav has no property $p"
+done
+# the Scanner page (sp) and its pinned bar (sb): their own properties, `visible` is an Item's
+for p in $(printf '%s\n' "$app" | grep -oE 'prop\(sp, "[A-Za-z]+"\)' | sed -E 's/.*"([A-Za-z]+)".*/\1/' | sort -u); do
+  grep -qE "property [a-z]+ $p[: ]" "$SCANNER_QML" || bad "W4: PageScannerTribe has no property $p"
+done
+for p in $(printf '%s\n' "$app" | grep -oE 'prop\(sb, "[A-Za-z]+"\)' | sed -E 's/.*"([A-Za-z]+)".*/\1/' | sort -u); do
+  [ "$p" = visible ] && continue
+  grep -qE "property [a-z]+ $p[: ]" "$SCANBAR_QML" || bad "W4: TribeScanBar has no property $p"
+done
+# the view keys the Scanner commands read are written by the machine (ScanMachine.h scanViewToJson)
+for k in available partial slots scope_countries scope_whitelist; do
+  grep -qF "QStringLiteral(\"$k\")" "$ROOT/client/core/serviceEngine/ScanMachine.h" || bad "W4: the Scanner view has no key $k"
 done
 # the keys `state` reads from currentNode and debugSnapshot are written by the engine
 state="$(body "$APP" 'QJsonObject App::cmdState()')"

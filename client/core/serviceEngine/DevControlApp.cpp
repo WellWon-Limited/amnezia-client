@@ -562,6 +562,8 @@ QJsonObject App::cmdState()
                              {QStringLiteral("rows"), int(v.value(QStringLiteral("rows")).toList().size())},
                              {QStringLiteral("verified"), v.value(QStringLiteral("verified")).toInt()},
                              {QStringLiteral("unverified"), v.value(QStringLiteral("unverified")).toInt()},
+                             {QStringLiteral("available"), v.value(QStringLiteral("available")).toInt()},
+                             {QStringLiteral("partial"), v.value(QStringLiteral("partial")).toBool()},
                              {QStringLiteral("slots"), int(v.value(QStringLiteral("slots")).toList().size())},
                              {QStringLiteral("more_available"), v.value(QStringLiteral("more_available")).toBool()},
                              {QStringLiteral("button"), bar.value(QStringLiteral("button")).toString()},
@@ -691,6 +693,21 @@ QJsonObject App::cmdNav(const QJsonObject &args, QString *err)
 
 // ---- servers -----------------------------------------------------------------------------------------------------
 
+// The Servers page's rows as it shows them: the location keys in their order on screen (shownKeys, the ListView's
+// model: the order taken when the page opened, ServerListOrder.js) and each key's values (rowsByKey) - what a row
+// delegate draws (row.d) and hands to tapRow.
+static QVariantList shownServerRows(QObject *page)
+{
+    QVariantList out;
+    const QVariantMap byKey = prop(page, "rowsByKey").toMap();
+    for (const QVariant &k : prop(page, "shownKeys").toList()) {
+        const QVariant row = byKey.value(k.toString());
+        if (row.isValid())
+            out << row;
+    }
+    return out;
+}
+
 QJsonObject App::serverRows(QObject *page)
 {
     QHash<QString, QString> protoOf;
@@ -701,7 +718,7 @@ QJsonObject App::serverRows(QObject *page)
                            n.value(QStringLiteral("proto"), QStringLiteral("awg")).toString());
         }
     QJsonArray rows;
-    const QVariantList list = prop(page, "countries").toList();
+    const QVariantList list = shownServerRows(page);
     for (int i = 0; i < list.size(); ++i) {
         const QVariantMap e = list.at(i).toMap();
         QJsonArray kinds;
@@ -753,7 +770,7 @@ QJsonObject App::cmdChoose(const QJsonObject &args, QString *err)
     QObject *page = showPage(QStringLiteral("servers"), err);
     if (!page)
         return {};
-    const QVariantList list = prop(page, "countries").toList();
+    const QVariantList list = shownServerRows(page);
     const int rowNo = args.value(QStringLiteral("row")).toInt(0);
     const QString id = args.value(QStringLiteral("id")).toString();
     const QString name = args.value(QStringLiteral("name")).toString();
@@ -824,6 +841,22 @@ QJsonObject App::cmdMode(const QJsonObject &args, QString *err)
 
 // ---- Scanner -----------------------------------------------------------------------------------------------------
 
+// The Scanner page on the screen (null when another page is shown) and its one pinned button (TribeScanBar: the page's
+// `scannerBar`, its button `scannerActionButton`).
+static QObject *scanBarOf(QObject *sp)
+{
+    return sp ? sp->findChild<QObject *>(QStringLiteral("scannerBar")) : nullptr;
+}
+
+static QJsonObject scanPaneOf(QObject *sp)
+{
+    if (!sp)
+        return {};
+    return {{QStringLiteral("pane"), prop(sp, "pane").toString()},
+            {QStringLiteral("selected"), prop(sp, "selected").toString()},
+            {QStringLiteral("action"), prop(sp, "chooseAction").toString()}};
+}
+
 QJsonObject App::cmdScanOpen(QString *err)
 {
     if (!showPage(QStringLiteral("scanner"), err))
@@ -831,93 +864,122 @@ QJsonObject App::cmdScanOpen(QString *err)
     QObject *s = scanner(err);
     if (!s)
         return {};
-    return {{QStringLiteral("page"), currentPageName()}, {QStringLiteral("screen_open"), prop(s, "screenOpen").toBool()},
-            {QStringLiteral("phase"), scanView().value(QStringLiteral("phase")).toString()}};
+    QJsonObject r{{QStringLiteral("page"), currentPageName()}, {QStringLiteral("screen_open"), prop(s, "screenOpen").toBool()},
+                  {QStringLiteral("phase"), scanView().value(QStringLiteral("phase")).toString()}};
+    const QJsonObject pane = scanPaneOf(currentPage());
+    for (auto it = pane.constBegin(); it != pane.constEnd(); ++it)
+        r.insert(it.key(), it.value());
+    return r;
 }
 
+// A scope row of the choice: the selection only (PageScannerTribe select(scope), as the row's tap) - nothing scans until
+// the button (scan.start).
 QJsonObject App::cmdScanSelect(const QJsonObject &args, QString *err)
 {
     QObject *s = scanner(err);
     if (!s)
         return {};
-    if (!prop(s, "screenOpen").toBool()) {
+    QObject *sp = currentPageName() == QLatin1String("PageScannerTribe") ? currentPage() : nullptr;
+    if (!prop(s, "screenOpen").toBool() || !sp) {
         *err = QStringLiteral("scanner_closed: send scan.open first");
+        return {};
+    }
+    if (!prop(sp, "choosing").toBool()) {
+        *err = QStringLiteral("not_choosing: a result is on the screen (scan.back shows the choice)");
         return {};
     }
     const QString scope = args.value(QStringLiteral("scope")).toString();
     const QVariantMap v = scanView();
     const QVariantMap bar = v.value(QStringLiteral("bar")).toMap();
-    bool known = scope.isEmpty() || scope == QLatin1String("whitelist");
+    // the rows the choice lists: «Все страны», «Белые списки» while the pool has them, a country of the pool
+    bool known = scope.isEmpty() || (scope == QLatin1String("whitelist") && bar.value(QStringLiteral("scope_whitelist")).toInt() > 0);
     for (const QVariant &c : bar.value(QStringLiteral("scope_countries")).toList())
         known = known || c.toMap().value(QStringLiteral("cc")).toString() == scope;
     if (!known) {
-        *err = QStringLiteral("unknown_scope: \"\" (all), \"whitelist\" or a country of the pool");
+        *err = QStringLiteral("unknown_scope: \"\" (all), \"whitelist\" or a country of the pool (scan.rows: scopes)");
         return {};
     }
-    bool fresh = false; // view.slots: this network's fresh result of the scope - the choice shows it without a scan
+    if (!js(sp, "select", {scope}, nullptr, err))
+        return {};
+    bool fresh = false; // view.slots: this network's fresh result of the scope (the button may then show it)
     for (const QVariant &sl : v.value(QStringLiteral("slots")).toList())
         fresh = fresh || sl.toMap().value(QStringLiteral("scope")).toString() == scope;
-    if (fresh) {
-        if (!cpp(s, "showSlot", {scope}, err))
-            return {};
-    } else {
-        if (!cpp(s, "chooseCountry", {scope}, err))
-            return {};
-    }
-    return {{QStringLiteral("scope"), scope}, {QStringLiteral("fresh"), fresh},
-            {QStringLiteral("phase"), scanView().value(QStringLiteral("phase")).toString()}};
+    QJsonObject r = scanPaneOf(sp);
+    r.insert(QStringLiteral("scope"), scope);
+    r.insert(QStringLiteral("fresh"), fresh);
+    r.insert(QStringLiteral("phase"), scanView().value(QStringLiteral("phase")).toString());
+    return r;
 }
 
+// The one pinned button, pressed for what it says now (TribeScanBar action(): the choice - scan / show / connect the
+// selected scope; the result - retry / connect; «Остановить» is scan.stop) and only while it is enabled, as a finger
+// would; the press itself is the bar's fire(action), the button's own call.
 QJsonObject App::cmdScanStart(QString *err)
 {
     QObject *s = scanner(err);
     if (!s)
         return {};
-    if (!prop(s, "screenOpen").toBool()) {
+    QObject *sp = currentPageName() == QLatin1String("PageScannerTribe") ? currentPage() : nullptr;
+    if (!prop(s, "screenOpen").toBool() || !sp) {
         *err = QStringLiteral("scanner_closed: send scan.open first");
         return {};
     }
-    const QVariantMap bar = scanView().value(QStringLiteral("bar")).toMap();
-    const QString button = bar.value(QStringLiteral("button"), QStringLiteral("retry")).toString();
-    if (button == QLatin1String("stop")) {
-        *err = QStringLiteral("scanning: the button says «Остановить»");
+    QObject *sb = scanBarOf(sp);
+    if (!sb || !prop(sb, "visible").toBool()) {
+        *err = QStringLiteral("no_button: the screen shows no bar (a blocked or empty state has its own action)");
         return {};
     }
-    // a countdown (retry_in_s / retry_in_min) is the machine's to judge: it re-checks the cooldown on retry
-    const bool counting = button.startsWith(QLatin1String("retry_in"));
-    if (!counting && bar.value(QStringLiteral("button_enabled"), true).toBool() == false) {
-        *err = QStringLiteral("button_disabled: ") + button;
+    QVariant a;
+    if (!js(sb, "action", {}, &a, err))
+        return {};
+    const QString action = a.toString();
+    if (action == QLatin1String("stop")) {
+        *err = QStringLiteral("scanning: the button says «Остановить» (scan.stop)");
         return {};
     }
-    QString pressed;
-    if (button == QLatin1String("connect_and_scan")) {
-        if (!cpp(s, "connectAndScan", {}, err))
-            return {};
-        pressed = button;
-    } else {
-        if (!cpp(s, "retry", {}, err))
-            return {};
-        pressed = QStringLiteral("retry");
+    QObject *button = sb->findChild<QObject *>(QStringLiteral("scannerActionButton"));
+    if (!button || !prop(button, "enabled").toBool()) {
+        *err = QStringLiteral("button_disabled: ") + action + QStringLiteral(" (") + prop(sb, "kind").toString()
+            + QStringLiteral(", ") + QString::number(prop(sb, "remaining").toInt()) + QStringLiteral(" left)");
+        return {};
     }
-    return {{QStringLiteral("pressed"), pressed}, {QStringLiteral("button"), button},
-            {QStringLiteral("phase"), scanView().value(QStringLiteral("phase")).toString()}};
+    const bool choosing = prop(sp, "choosing").toBool();
+    if (!js(sb, "fire", {action}, nullptr, err))
+        return {};
+    QJsonObject r = scanPaneOf(sp);
+    r.insert(QStringLiteral("pressed"), action);
+    r.insert(QStringLiteral("from"), choosing ? QStringLiteral("choice") : QStringLiteral("result"));
+    r.insert(QStringLiteral("phase"), scanView().value(QStringLiteral("phase")).toString());
+    return r;
 }
 
+// «Остановить»: the same button while it says so.
 QJsonObject App::cmdScanStop(QString *err)
 {
     QObject *s = scanner(err);
     if (!s)
         return {};
-    if (!prop(s, "screenOpen").toBool()) {
+    QObject *sp = currentPageName() == QLatin1String("PageScannerTribe") ? currentPage() : nullptr;
+    if (!prop(s, "screenOpen").toBool() || !sp) {
         *err = QStringLiteral("scanner_closed: send scan.open first");
         return {};
     }
-    const QString phase = scanView().value(QStringLiteral("phase")).toString();
-    if (!scanningPhase(phase))
-        return {{QStringLiteral("stopped"), false}, {QStringLiteral("phase"), phase}};
-    if (!cpp(s, "stop", {}, err))
+    QObject *sb = scanBarOf(sp);
+    const QJsonObject notStopped{{QStringLiteral("stopped"), false},
+                                 {QStringLiteral("phase"), scanView().value(QStringLiteral("phase")).toString()}};
+    if (!sb || !prop(sb, "visible").toBool())
+        return notStopped;
+    QVariant a;
+    if (!js(sb, "action", {}, &a, err))
         return {};
-    return {{QStringLiteral("stopped"), true}, {QStringLiteral("phase"), scanView().value(QStringLiteral("phase")).toString()}};
+    if (a.toString() != QLatin1String("stop"))
+        return notStopped;
+    if (!js(sb, "fire", {QStringLiteral("stop")}, nullptr, err))
+        return {};
+    QJsonObject r = scanPaneOf(sp);
+    r.insert(QStringLiteral("stopped"), true);
+    r.insert(QStringLiteral("phase"), scanView().value(QStringLiteral("phase")).toString());
+    return r;
 }
 
 QJsonObject App::cmdScanRows(QString *err)
@@ -945,12 +1007,39 @@ QJsonObject App::cmdScanRows(QString *err)
                             {QStringLiteral("latency_ms"), scalar(r.value(QStringLiteral("ms")))},
                             {QStringLiteral("flags"), flags}};
     }
+    QJsonArray slotsOut;
+    for (const QVariant &sl : v.value(QStringLiteral("slots")).toList()) {
+        const QVariantMap m = sl.toMap();
+        slotsOut << QJsonObject{{QStringLiteral("scope"), m.value(QStringLiteral("scope")).toString()},
+                                {QStringLiteral("works"), m.value(QStringLiteral("works")).toInt()},
+                                {QStringLiteral("ago_min"), m.value(QStringLiteral("ago_min")).toInt()},
+                                {QStringLiteral("partial"), m.value(QStringLiteral("partial")).toBool()}};
+    }
+    QJsonArray scopes;
+    const QVariantMap bar = v.value(QStringLiteral("bar")).toMap();
+    for (const QVariant &c : bar.value(QStringLiteral("scope_countries")).toList())
+        scopes << QJsonObject{{QStringLiteral("scope"), c.toMap().value(QStringLiteral("cc")).toString()},
+                              {QStringLiteral("count"), c.toMap().value(QStringLiteral("count")).toInt()}};
+    if (bar.value(QStringLiteral("scope_whitelist")).toInt() > 0)
+        scopes << QJsonObject{{QStringLiteral("scope"), QStringLiteral("whitelist")},
+                              {QStringLiteral("count"), bar.value(QStringLiteral("scope_whitelist")).toInt()}};
     const QString phase = v.value(QStringLiteral("phase")).toString();
-    return {{QStringLiteral("rows"), rows}, {QStringLiteral("phase"), phase},
-            {QStringLiteral("scanning"), scanningPhase(phase)},
-            {QStringLiteral("verified"), v.value(QStringLiteral("verified")).toInt()},
-            {QStringLiteral("unverified"), v.value(QStringLiteral("unverified")).toInt()},
-            {QStringLiteral("screen_open"), prop(s, "screenOpen").toBool()}};
+    QJsonObject r{{QStringLiteral("rows"), rows}, {QStringLiteral("phase"), phase},
+                  {QStringLiteral("scanning"), scanningPhase(phase)},
+                  {QStringLiteral("verified"), v.value(QStringLiteral("verified")).toInt()},
+                  {QStringLiteral("unverified"), v.value(QStringLiteral("unverified")).toInt()},
+                  // the rings' number (view.available) and the stopped scan's mark (view.partial)
+                  {QStringLiteral("available"), v.value(QStringLiteral("available")).toInt()},
+                  {QStringLiteral("partial"), v.value(QStringLiteral("partial")).toBool()},
+                  {QStringLiteral("scope"), bar.value(QStringLiteral("scope")).toString()},
+                  {QStringLiteral("scopes"), scopes}, {QStringLiteral("slots"), slotsOut},
+                  {QStringLiteral("screen_open"), prop(s, "screenOpen").toBool()}};
+    if (currentPageName() == QLatin1String("PageScannerTribe")) {
+        const QJsonObject pane = scanPaneOf(currentPage());
+        for (auto it = pane.constBegin(); it != pane.constEnd(); ++it)
+            r.insert(it.key(), it.value());
+    }
+    return r;
 }
 
 QJsonObject App::cmdScanConnect(const QJsonObject &args, QString *err)

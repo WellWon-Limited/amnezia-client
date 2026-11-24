@@ -107,7 +107,14 @@ public:
     Q_INVOKABLE void stop() { calls << QStringLiteral("stop"); setPhase(QStringLiteral("idle")); }
     Q_INVOKABLE void retry() { calls << QStringLiteral("retry"); setPhase(QStringLiteral("preparing")); }
     Q_INVOKABLE void connectAndScan() { calls << QStringLiteral("connectAndScan"); }
-    Q_INVOKABLE void chooseCountry(const QString &cc) { calls << QStringLiteral("chooseCountry:") + cc; }
+    Q_INVOKABLE void chooseCountry(const QString &cc)
+    {
+        calls << QStringLiteral("chooseCountry:") + cc;
+        QJsonObject bar = m_view.value(QStringLiteral("bar")).toObject();
+        bar.insert(QStringLiteral("scope"), cc); // the machine takes a scope of the pool
+        m_view.insert(QStringLiteral("bar"), bar);
+        emit viewChanged();
+    }
     Q_INVOKABLE void showSlot(const QString &cc) { calls << QStringLiteral("showSlot:") + cc; }
     Q_INVOKABLE void findMore(const QString &cc = QString()) { calls << QStringLiteral("findMore:") + cc; }
     Q_INVOKABLE void tapRow(const QString &id) { calls << QStringLiteral("tapRow:") + id; }
