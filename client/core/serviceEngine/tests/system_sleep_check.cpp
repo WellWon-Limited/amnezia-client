@@ -41,13 +41,19 @@ static qint64 utc(const char *hms)
 // What each would have done counts in `acted`; the awake edge's one evaluation counts in `evaluations`/`probes`.
 struct FacadeModel {
     SystemAwake fact;
-    int acted = 0;       // an automatic action that ran (a probe, a restart, a start, a renewal, a check)
+    int acted = 0;       // an automatic action that ran (a probe entry, a restart, a start, a renewal, a check)
     int evaluations = 0; // awake edges (leaveSystemSleep)
-    int probes = 0;      // liveness probes of the live session (§18)
+    int probes = 0;      // liveness probe chains the awake edge started (§18)
+    int chains = 0;      // liveness probe chains started by any entry (daemonWakeEvent: WakeProbe::Start)
+    bool probing = false; // a chain in flight (m_wakeProbing)
     bool intentOn = true, tunnelUp = true, engineConnected = true;
     bool gateEnabled = true;
+    // the wake restart's retry (m_wakeRestartPending / m_wakeTries, wakeKick) and how often it ran
+    bool wakeRestartPending = false;
+    int wakeTries = 0;
+    int wakeResumes = 0;
 
-    // AvpnEngineQml::noteSleepSignal
+    // AvpnEngineQml::noteSleepSignal (+ leaveSystemSleep on the Woke edge)
     bool signal(SleepSignal s, qint64 now)
     {
         if (fact.awake() && s != SleepSignal::WillSleep)
@@ -55,12 +61,16 @@ struct FacadeModel {
         switch (fact.note(s, now, gateEnabled)) {
         case SleepEdge::Woke: {
             ++evaluations;
-            const WakeEvaluation e = wakeEvaluation(intentOn, tunnelUp, engineConnected);
-            if (e.probeTunnel)
+            const WakeEvaluation e = wakeEvaluation(intentOn, tunnelUp, engineConnected, probing, wakeRestartPending);
+            if (e.resumeWakeRestart)
+                wakeKick();
+            if (e.probeTunnel && startChain())
                 ++probes;
             return true;
         }
         case SleepEdge::Slept:
+            probing = false; // enterSystemSleep ends the chain in flight
+            break;
         case SleepEdge::None: break;
         }
         return false;
@@ -72,13 +82,48 @@ struct FacadeModel {
             return;
         ++acted;
     }
-    // the service's networkChanged / wakeup (onDaemonNetworkChanged / onDaemonWakeup)
-    void networkChanged() { automatic(SleepHeld::TunnelProbe); }
+    // daemonWakeEvent after its gate: the one probe decision of every entry
+    bool startChain()
+    {
+        if (wakeProbeDecision(intentOn, tunnelUp, engineConnected, probing) != WakeProbe::Start)
+            return false;
+        probing = true;
+        ++chains;
+        return true;
+    }
+    // the service's networkChanged / wakeup (onDaemonNetworkChanged / onDaemonWakeup -> daemonWakeEvent)
+    void probeEntry()
+    {
+        if (fact.hold(SleepHeld::TunnelProbe))
+            return;
+        ++acted;
+        startChain();
+    }
+    void networkChanged() { probeEntry(); }
     void wakeup(qint64 now)
     {
         if (signal(SleepSignal::ServicePoweredOn, now))
-            return; // the edge's evaluation probes itself
-        automatic(SleepHeld::TunnelProbe);
+            return; // the edge's evaluation decided
+        probeEntry(); // already awake: what it meant before the gate, through the same probe decision
+    }
+    // AvpnEngineQml::wakeKick (a network that returns; the awake edge's held retry)
+    void wakeKick()
+    {
+        if (fact.hold(SleepHeld::WakeRetry))
+            return;
+        if (!wakeRestartPending)
+            return;
+        if (tunnelUp) {
+            wakeRestartPending = false;
+            return;
+        }
+        if (wakeTries >= 5) {
+            wakeRestartPending = false;
+            return;
+        }
+        ++wakeTries;
+        ++wakeResumes;
+        intentOn = true; // the failed restart dropped the intent; the retry restores it and reconciles
     }
 };
 
@@ -199,12 +244,144 @@ static void killSwitch()
 // The evaluation probes only a live session the person wants; an attempt in flight is resumed by the owner itself.
 static void wakeEvaluationRule()
 {
-    CHECK(wakeEvaluation(true, true, true).probeTunnel);
-    CHECK(!wakeEvaluation(false, true, true).probeTunnel);  // the person turned it off
-    CHECK(!wakeEvaluation(true, false, false).probeTunnel); // down: reconcile starts it
-    CHECK(!wakeEvaluation(true, true, false).probeTunnel);  // checking: the owner runs the check again
-    const WakeEvaluation e = wakeEvaluation(true, false, false);
-    CHECK(e.observeNetwork && e.resumeOwner && e.reconcile);
+    CHECK(wakeEvaluation(true, true, true, false, false).probeTunnel);
+    CHECK(!wakeEvaluation(false, true, true, false, false).probeTunnel); // the person turned it off
+    CHECK(!wakeEvaluation(true, false, false, false, false).probeTunnel); // down: reconcile starts it
+    CHECK(!wakeEvaluation(true, true, false, false, false).probeTunnel); // checking: the owner runs the check again
+    CHECK(wakeEvaluation(true, true, true, true, false).probe == WakeProbe::Joined); // a chain in flight: joined
+    const WakeEvaluation e = wakeEvaluation(true, false, false, false, false);
+    CHECK(e.observeNetwork && e.resumeOwner && e.reconcile && !e.resumeWakeRestart);
+    CHECK(wakeEvaluation(false, false, false, false, true).resumeWakeRestart);
+    // every entry into the probe has the same rule (the edge, the service's wakeup, networkChanged, a chain's step)
+    for (const bool intent : { false, true })
+        for (const bool up : { false, true })
+            for (const bool live : { false, true })
+                for (const bool probing : { false, true }) {
+                    const WakeProbe d = wakeProbeDecision(intent, up, live, probing);
+                    CHECK((d != WakeProbe::None) == liveSessionToProbe(intent, up, live));
+                    CHECK(wakeEvaluation(intent, up, live, probing, false).probe == d);
+                }
+}
+
+// F1 (review of 558d79086): our wake restart failed before the sleep and waits for the network - pending, tries left,
+// the failed attempt dropped the intent. In a dark wake the network "returns" (QNetworkInformation Online -> wakeKick)
+// and the retry is held. On the awake edge it goes on exactly once; a second proof of the same wake (the service's
+// wakeup 50 ms after NSWorkspace did wake, the first click) does not run it again. On 558d79086 the edge only
+// reconciled: with the intent off and no later Online the VPN stayed off until a tap.
+static void heldWakeRestartResumedOnce()
+{
+    FacadeModel f;
+    f.intentOn = false;
+    f.tunnelUp = false;
+    f.engineConnected = false;
+    f.wakeRestartPending = true;
+    f.wakeTries = 1;
+    f.signal(SleepSignal::WillSleep, utc("08:29:21.268"));
+    f.wakeKick(); // 08:39:16 dark wake: the network "returns"
+    CHECK(f.wakeResumes == 0 && !f.intentOn && f.wakeTries == 1);
+    CHECK(sleepHeldNames(f.fact.heldMask()) == QLatin1String("wake_retry"));
+    CHECK(f.signal(SleepSignal::DidWake, utc("15:38:14.200")));
+    CHECK(f.wakeResumes == 1 && f.intentOn && f.wakeTries == 2);
+    f.wakeup(utc("15:38:14.250"));
+    CHECK(!f.signal(SleepSignal::ScreensDidWake, utc("15:38:14.300")));
+    CHECK(!f.signal(SleepSignal::PersonInput, utc("15:43:40.000")));
+    CHECK(f.wakeResumes == 1 && f.evaluations == 1 && f.chains == 0);
+    // its tries spent: the edge hands it to the retry, which ends it honestly - no start
+    FacadeModel g;
+    g.intentOn = false;
+    g.tunnelUp = false;
+    g.engineConnected = false;
+    g.wakeRestartPending = true;
+    g.wakeTries = 5;
+    g.signal(SleepSignal::WillSleep, 0);
+    CHECK(g.signal(SleepSignal::ServicePoweredOn, 1000));
+    CHECK(g.wakeResumes == 0 && !g.wakeRestartPending && !g.intentOn);
+}
+
+// F2 (review of 558d79086): the sleep began mid data-check. NSWorkspace did wake makes the edge (the owner runs the check
+// again; no liveness probe beside it); the service's wakeup 50 ms later is no edge and, on 558d79086, fell through to
+// the probe entry, which looked only at the platform's Connected and started a chain that could restart a VPN whose
+// check then passed. Now every entry goes through one decision: no chain while the engine is checking; the same pair
+// on a live session starts exactly one chain.
+static void lateServiceWakeupThroughOneDecision()
+{
+    FacadeModel f;
+    f.engineConnected = false; // Verifying: an attempt's data check
+    f.signal(SleepSignal::WillSleep, utc("08:41:56.771"));
+    CHECK(f.signal(SleepSignal::DidWake, utc("15:38:14.200")) && f.probes == 0);
+    f.wakeup(utc("15:38:14.250"));
+    f.networkChanged();
+    CHECK(f.evaluations == 1 && f.chains == 0 && f.acted == 2);
+    FacadeModel g; // a live session
+    g.signal(SleepSignal::WillSleep, utc("08:29:21.268"));
+    CHECK(g.signal(SleepSignal::DidWake, utc("15:38:14.200")) && g.probes == 1 && g.chains == 1);
+    g.wakeup(utc("15:38:14.250"));
+    CHECK(g.evaluations == 1 && g.chains == 1);
+    // the app missed "will sleep" (awake all along): the service's wakeup is the only sign of the wake and checks a live
+    // session once, as before the gate - and never an attempt's check
+    FacadeModel h;
+    h.wakeup(utc("15:38:14.261"));
+    CHECK(h.evaluations == 0 && h.chains == 1);
+    FacadeModel k;
+    k.engineConnected = false;
+    k.wakeup(utc("15:38:14.261"));
+    CHECK(k.chains == 0);
+}
+
+// The friend QtTest uses to deliver a window-system event in tests (qtestspontaneevent.h): QEvent::setSpontaneous().
+class QSpontaneKeyEvent
+{
+public:
+    static void setSpontaneous(QEvent *ev) { ev->setSpontaneous(); }
+};
+
+// F3 (review of 558d79086): only a press or key from the window system is a person. An event the code sent or posted
+// (QCoreApplication::sendEvent / postEvent: spontaneous() false) does not open the gate. On 558d79086 the filter took
+// every MouseButtonPress/KeyPress/TouchBegin/TabletPress.
+static void postedPressIsNoPerson()
+{
+    QEvent posted(QEvent::MouseButtonPress);
+    CHECK(!posted.spontaneous() && !personInputProof(posted.type(), posted.spontaneous()));
+    for (const QEvent::Type t : { QEvent::KeyPress, QEvent::TouchBegin, QEvent::TabletPress }) {
+        QEvent ev(t);
+        CHECK(!personInputProof(ev.type(), ev.spontaneous()));
+        QSpontaneKeyEvent::setSpontaneous(&ev);
+        CHECK(personInputProof(ev.type(), ev.spontaneous()));
+    }
+    QEvent press(QEvent::MouseButtonPress);
+    QSpontaneKeyEvent::setSpontaneous(&press);
+    CHECK(press.spontaneous() && personInputProof(press.type(), press.spontaneous()));
+    QEvent move(QEvent::MouseMove);
+    QSpontaneKeyEvent::setSpontaneous(&move);
+    CHECK(!personInputProof(move.type(), move.spontaneous())); // not a press
+
+    // Through the real event loop: an application-wide filter (AvpnSystemSleep.mm's rule) sees a posted and a sent press
+    // as not spontaneous - the gate stays shut; a window-system press opens it.
+    FacadeModel f;
+    f.signal(SleepSignal::WillSleep, 0);
+    struct Filter : QObject {
+        FacadeModel *m = nullptr;
+        bool eventFilter(QObject *o, QEvent *e) override
+        {
+            if (personInputProof(e->type(), e->spontaneous()))
+                m->signal(SleepSignal::PersonInput, 1);
+            return QObject::eventFilter(o, e);
+        }
+    } filter;
+    filter.m = &f;
+    QObject target;
+    QCoreApplication::instance()->installEventFilter(&filter);
+    QCoreApplication::postEvent(&target, new QEvent(QEvent::MouseButtonPress));
+    QCoreApplication::sendPostedEvents();
+    QEvent sent(QEvent::KeyPress);
+    QCoreApplication::sendEvent(&target, &sent);
+    CHECK(!f.fact.awake() && f.evaluations == 0);
+    QEvent fromSystem(QEvent::MouseButtonPress);
+    QSpontaneKeyEvent::setSpontaneous(&fromSystem);
+    QCoreApplication::instance()->notify(&target, &fromSystem); // as the window system delivers it (sendEvent clears
+                                                                 // the flag - QtTest delivers spontaneous events so too)
+    QCoreApplication::instance()->removeEventFilter(&filter);
+    CHECK(f.fact.awake() && f.evaluations == 1 && f.fact.wokeBy() == SleepSignal::PersonInput);
 }
 
 // --- the real engine behind the gate -------------------------------------------------------------------------
@@ -386,6 +563,9 @@ int main(int argc, char **argv)
     appOwnsTheFact();
     killSwitch();
     wakeEvaluationRule();
+    heldWakeRestartResumedOnce();
+    lateServiceWakeupThroughOneDecision();
+    postedPressIsNoPerson();
     engineSleepMidStart();
     engineLiveLossWhileAsleep();
     engineStopWhileAsleep();

@@ -29,13 +29,18 @@
 // data check, no seat renewal. One call per mechanism, at its own entry (the facade: reconcile, the service's wake
 // and network events, the wake-restart retry, the health tick, the live probe, the data check), and the attempt
 // owner reads the same fact in its context at every event (path/AttemptOwner.h "System asleep"). A person's action
-// is never held: a press in the window is itself a proof of a full wake and comes before the action.
+// is not held: a press in the window (from the window system - personInputProof) is itself a proof of a full wake and
+// comes before the action. A call made by code is not a person: a programmatic start() while asleep is held like any
+// automatic start (reconcile) and runs on the awake edge; stop() stops at once (it is never held). Code that speaks
+// for a person (a test command channel) says so through AvpnEngineQml::notePersonPresent() first.
 // The awake edge: exactly one evaluation (wakeEvaluation): the network as it is now (the path engine's generation
-// decides whether it is another one), the attempt owner's held step, one liveness probe of a live session, the intent
+// decides whether it is another one), the attempt owner's held step, a held wake-restart retry once, one liveness
+// probe of a live session (wakeProbeDecision - the same decision as every other entry into the probe), the intent
 // once (reconcile). What was held is only journalled - a networkChanged of a dark wake is never lost, because the
 // evaluation always looks at the network and the tunnel as they are at the full wake.
 #pragma once
 
+#include <QEvent>
 #include <QString>
 #include <QStringList>
 #include <QtGlobal>
@@ -89,21 +94,75 @@ inline QString sleepHeldNames(unsigned mask)
 
 enum class SleepEdge : quint8 { None, Slept, Woke };
 
+// The one decision of the wake liveness probe (CONNECT-INVARIANTS §18), for EVERY entry into it: the awake edge's
+// evaluation, the service's wakeup, the service's networkChanged - and for every step of a chain in flight. Only a
+// live session the person wants is probed: intentOn (the person wants the VPN), tunnelUp (the platform reports the
+// tunnel connected) and engineConnected (the engine holds it as a live session - an attempt in flight, its data check
+// included, is judged by its own check, never by this probe: review F2 of 558d79086, a probe started beside a running
+// check could restart a VPN whose check then passed). probing: a chain is already running - joined, never a second.
+//
+// The service's wakeup (kIOMessageSystemHasPoweredOn) when the fact is ALREADY awake - a full wake whose edge another
+// proof made a moment earlier (NSWorkspace did wake comes first), or one the app never saw go to sleep (a missed
+// "will sleep") - means what it meant before the gate: a reason to check a live session, through this decision like
+// every other entry. It is never a second evaluation of the edge and never resumes a wake restart (the edge did, once).
+enum class WakeProbe : quint8 { None, Start, Joined };
+
+inline bool liveSessionToProbe(bool intentOn, bool tunnelUp, bool engineConnected)
+{
+    return intentOn && tunnelUp && engineConnected;
+}
+
+inline WakeProbe wakeProbeDecision(bool intentOn, bool tunnelUp, bool engineConnected, bool probing)
+{
+    if (!liveSessionToProbe(intentOn, tunnelUp, engineConnected))
+        return WakeProbe::None;
+    return probing ? WakeProbe::Joined : WakeProbe::Start;
+}
+
 // What the one evaluation of the awake edge does (the facade carries it out, in this order).
 struct WakeEvaluation {
-    bool observeNetwork = true; // the platform network as it is now, once: the path engine first, then the Scanner
-    bool resumeOwner = true;    // the attempt owner takes the step it held (a next leg, the check again, a lost session)
-    bool probeTunnel = false;   // one liveness probe of the live session (the macOS wake path, CONNECT-INVARIANTS §18)
-    bool reconcile = true;      // the intent once (a start or a restart that was held)
+    bool observeNetwork = true;     // the platform network as it is now, once: the path engine first, then the Scanner
+    bool resumeOwner = true;        // the attempt owner takes the step it held (a next leg, the check again, a lost session)
+    bool resumeWakeRestart = false; // a wake restart that waits for the network goes on, once (its retry was held)
+    WakeProbe probe = WakeProbe::None; // the liveness probe of a live session (wakeProbeDecision)
+    bool probeTunnel = false;       // probe == Start
+    bool reconcile = true;          // the intent once (a start or a restart that was held)
 };
 
-// intentOn: the person wants the VPN; tunnelUp: the platform reports the tunnel connected; engineConnected: the engine
-// holds it as a live session (an attempt in flight is resumed by the owner itself, its data check decides).
-inline WakeEvaluation wakeEvaluation(bool intentOn, bool tunnelUp, bool engineConnected)
+// intentOn / tunnelUp / engineConnected / probing: as in wakeProbeDecision. wakeRestartPending: our own wake restart
+// failed before the sleep and waits for the network to return (its retry, the wake restart's wakeKick, may have been
+// held in a dark wake - review F1 of 558d79086: the edge only reconciled, and with the intent dropped by the failed
+// attempt the VPN stayed off until a tap). The retry itself decides its tries and a tunnel already up (wakeKick);
+// the edge resumes it exactly once - the edge is one per sleep.
+inline WakeEvaluation wakeEvaluation(bool intentOn, bool tunnelUp, bool engineConnected, bool probing,
+                                     bool wakeRestartPending)
 {
     WakeEvaluation e;
-    e.probeTunnel = intentOn && tunnelUp && engineConnected;
+    e.resumeWakeRestart = wakeRestartPending;
+    e.probe = wakeProbeDecision(intentOn, tunnelUp, engineConnected, probing);
+    e.probeTunnel = e.probe == WakeProbe::Start;
     return e;
+}
+
+// A person's input as a proof of a full wake (AvpnSystemSleep.mm): a press or a key that came from the window system.
+// Qt (qevent.html, QEvent::spontaneous): "Returns true if the event originated outside the application (a system
+// event); otherwise returns false" - and "it is also possible to manually send events using
+// QCoreApplication::sendEvent() and QCoreApplication::postEvent() (spontaneous() returns false)". An event the code
+// sent or posted proves nothing about a person (review F3 of 558d79086). A test channel that must count as "the person
+// is here" calls AvpnEngineQml::notePersonPresent() - it never fakes input events.
+inline bool personInputProof(QEvent::Type type, bool spontaneous)
+{
+    if (!spontaneous)
+        return false;
+    switch (type) {
+    case QEvent::MouseButtonPress:
+    case QEvent::KeyPress:
+    case QEvent::TouchBegin:
+    case QEvent::TabletPress:
+        return true;
+    default:
+        return false;
+    }
 }
 
 class SystemAwake

@@ -3,8 +3,8 @@
 //  - NSWorkspaceWillSleepNotification -> WillSleep: the system is going to sleep;
 //  - NSWorkspaceDidWakeNotification -> DidWake: fully awake (a Power Nap dark wake does not post it);
 //  - NSWorkspaceScreensDidWakeNotification -> ScreensDidWake: a screen is on (a dark wake has none);
-//  - a press or a key delivered to the app (QEvent::MouseButtonPress / KeyPress / TouchBegin / TabletPress) ->
-//    PersonInput: a person is at the Mac.
+//  - a press or a key the window system delivered to the app (QEvent::MouseButtonPress / KeyPress / TouchBegin /
+//    TabletPress, spontaneous only) -> PersonInput: a person is at the Mac (AvpnEngineQml::notePersonPresent).
 // The notifications are filed on NSWorkspace's own notification center (Technical Q&A QA1340: "You will not receive
 // sleep/wake notifications if you file with the default notification center") and delivered on the main queue - the
 // Qt GUI thread of the app. Installed once, from the engine's constructor (AvpnEngineQml, Q_OS_MACOS && !MACOS_NE);
@@ -36,6 +36,9 @@ void tell(avpn::SleepSignal s)
 
 // A person's input in any window of the app (an application-wide filter sees every event before its receiver; it
 // never consumes one). The engine ignores it while the system is awake (SystemAwake: a proof of what is true).
+// Only events from the window system count (SystemAwake.h personInputProof: QEvent::spontaneous() - "Returns true if
+// the event originated outside the application (a system event); otherwise returns false"): a press the code sent or
+// posted is no person (review F3 of 558d79086).
 class PersonInputFilter final : public QObject
 {
 public:
@@ -44,16 +47,8 @@ public:
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override
     {
-        switch (event->type()) {
-        case QEvent::MouseButtonPress:
-        case QEvent::KeyPress:
-        case QEvent::TouchBegin:
-        case QEvent::TabletPress:
+        if (avpn::personInputProof(event->type(), event->spontaneous()))
             tell(avpn::SleepSignal::PersonInput);
-            break;
-        default:
-            break;
-        }
         return QObject::eventFilter(watched, event);
     }
 };

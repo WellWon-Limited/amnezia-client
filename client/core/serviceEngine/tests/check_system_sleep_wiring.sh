@@ -13,7 +13,11 @@
 #   S5  the attempt owner reads the same fact in its context at every event (ServiceEngine::ownerContext) and holds its
 #       own steps while asleep;
 #   S6  the sources: the app's NSWorkspace notifications and a person's input (macOS desktop app only), the service's
-#       wakeup as a proof; the gate is a constant false everywhere else.
+#       wakeup as a proof; the gate is a constant false everywhere else;
+#   F1  (review of 558d79086) the awake edge resumes a held wake-restart retry once, decided by the edge's evaluation;
+#   F2  every entry into the wake probe (the edge, the service's wakeup, networkChanged, a chain's step) goes through
+#       the one decision that includes the engine's state - a running data check is never probed beside;
+#   F3  only a spontaneous press or key is a person; code speaks for a person through notePersonPresent() only.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -134,9 +138,7 @@ for n in NSWorkspaceWillSleepNotification NSWorkspaceDidWakeNotification NSWorks
 done
 has "$mm" '[[NSWorkspace sharedWorkspace] notificationCenter]' || bad "S6: the notifications are not taken from NSWorkspace's own center"
 has "$mm" 'installEventFilter(new PersonInputFilter(app));' || bad "S6: a person's input is not a proof of a full wake"
-for e in MouseButtonPress KeyPress; do
-    has "$mm" "case QEvent::$e:" || bad "S6: QEvent::$e is not a person's input"
-done
+has "$mm" 'tell(avpn::SleepSignal::PersonInput);' || bad "S6: a person's input is not told to the engine"
 ins=$(printf '%s\n' "$fac" | grep -n 'AvpnSystemSleep_install(\[guard' | cut -d: -f1)
 [ -n "$ins" ] || bad "S6: the observers are not installed"
 if [ -n "$ins" ]; then
@@ -150,6 +152,44 @@ has "$fh" 'static constexpr bool heldBySystemSleep(avpn::SleepHeld) { return fal
     || bad "S6: the gate is not a constant false off the macOS desktop app"
 grep -B12 'platforms/macos/AvpnSystemSleep.mm' "$CMK" | grep -qF 'if(APPLE AND NOT IOS AND NOT MACOS_NE)' \
     || bad "S6: AvpnSystemSleep.mm is built outside the macOS desktop app"
+
+# ---- F1 ------------------------------------------------------------------------------------------------
+sa="$(code "$SE/SystemAwake.h")"
+has "$sa" 'e.resumeWakeRestart = wakeRestartPending;' || bad "F1: the edge's evaluation does not decide the held wake restart"
+has "$leave" 'wakeProbeEngineLive(), m_wakeProbing, m_wakeRestartPending);' \
+    || bad "F1: the awake edge does not give its evaluation the pending wake restart"
+lk=$(at "$leave" 'wakeKick();')
+lc=$(at "$leave" 'if (e.resumeWakeRestart)')
+[ "$lc" -gt 0 ] && [ "$lk" -eq $((lc + 1)) ] || bad "F1: the awake edge does not resume the held wake restart by its evaluation"
+[ "$(cnt "$leave" 'wakeKick();')" = "1" ] || bad "F1: the awake edge resumes the wake restart more than once"
+[ "$lk" -lt "$lp" ] || bad "F1: the wake restart is resumed after the probe"
+
+# ---- F2 ------------------------------------------------------------------------------------------------
+has "$sa" 'e.probe = wakeProbeDecision(intentOn, tunnelUp, engineConnected, probing);' \
+    || bad "F2: the edge's probe is not the one probe decision"
+has "$wakeEv" 'const avpn::WakeProbe decision = avpn::wakeProbeDecision(m_wantConnected, m_lastTunnelState == Vpn::Connected,' \
+    || bad "F2: an entry into the wake probe does not go through the one decision"
+has "$wakeEv" 'wakeProbeEngineLive(), m_wakeProbing);' || bad "F2: the probe decision does not see the engine's state"
+[ "$(cnt "$wakeEv" 'm_lastTunnelState != Vpn::Connected')" = "0" ] || bad "F2: the probe entry decides on the platform's state alone"
+[ "$(cnt "$probe" 'avpn::liveSessionToProbe(m_wantConnected, m_lastTunnelState == Vpn::Connected, wakeProbeEngineLive())')" = "2" ] \
+    || bad "F2: a step of the probe chain decides without the engine's state"
+[ "$(cnt "$probe" 'm_lastTunnelState != Vpn::Connected')" = "0" ] || bad "F2: a step of the probe chain decides on the platform's state alone"
+live2="$(body "$FAC" 'bool AvpnEngineQml::wakeProbeEngineLive() const')"
+has "$live2" 'return m_engine.state() == avpn::EngineState::Connected;' || bad "F2: the macOS app does not give the engine's live session"
+has "$onWakeup" 'daemonWakeEvent("wakeup");' || bad "F2: a service wakeup while awake no longer reaches the one probe entry"
+[ "$(cnt "$fac" 'm_wakeProbing = true;')" = "2" ] || bad "F2: a probe chain is started outside the probe entry and its retry"
+
+# ---- F3 ------------------------------------------------------------------------------------------------
+has "$mm" 'if (avpn::personInputProof(event->type(), event->spontaneous()))' \
+    || bad "F3: the window's input is taken without its spontaneous flag"
+[ "$(cnt "$mm" 'case QEvent::')" = "0" ] || bad "F3: the window's filter decides on the event type alone"
+pip="$(printf '%s\n' "$sa" | awk '/inline bool personInputProof\(QEvent::Type type, bool spontaneous\)/ { on = 1 } on { print } on && /^}$/ { exit }')"
+first "$pip" | grep -qF 'if (!spontaneous)' || bad "F3: a press the code sent or posted is a person"
+npp="$(body "$FAC" 'void AvpnEngineQml::notePersonPresent()')"
+has "$npp" 'noteSleepSignal(avpn::SleepSignal::PersonInput);' || bad "F3: notePersonPresent is not the proof of a person"
+[ "$(cnt "$fac" 'noteSleepSignal(avpn::SleepSignal::PersonInput)')" = "1" ] || bad "F3: a person is told to the fact outside notePersonPresent"
+has "$fac" 'guard->notePersonPresent(); // the one entry for "a person is here"' || bad "F3: the window's input does not use the one entry"
+grep -qF 'Not covered by the gate (by decision of the review of' "$FAC" || bad "F2: the gate does not say the vanilla path (wake_restart off) is not covered"
 
 if [ "$fail" -ne 0 ]; then
     echo "check_system_sleep_wiring: FAILED"

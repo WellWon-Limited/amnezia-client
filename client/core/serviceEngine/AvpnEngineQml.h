@@ -692,6 +692,12 @@ public:
     // Orb tap: decideOrbTap (start / stop / ignored, journaled as orb_tap); programmatic
     // start()/stop() calls (Doctor, rotation) do not go through the policy.
     Q_INVOKABLE QString orbTap();
+    // AVPN (review F3 of 558d79086; SystemAwake.h): the one engine entry for "a person is here" - a proof that the
+    // system is fully awake. The window's input calls it (a press or key from the window system only); a test command
+    // channel that speaks for a person calls it before its start()/stop() - never a faked input event. Without it a
+    // programmatic start() while the system sleeps waits for the awake edge; stop() is never held. macOS desktop app;
+    // a no-op elsewhere.
+    void notePersonPresent();
     Q_INVOKABLE void reprobe();                      // повторный выбор ноды (re-pick)
     Q_INVOKABLE void manualSwitch();                 // принудительный свитч (как DEAD)
     Q_INVOKABLE void resetLkg();                     // очистить кэш токена/подписки (re-enroll при start)
@@ -1286,6 +1292,7 @@ private:
     void daemonWakeEvent(const char *why);
     void wakeLivenessProbe(int epoch); // async HEAD через туннель; мёртв → needsRestart+reconcile; epoch: the chain's
     void wakeKick();                  // ретрай подъёма по появлению сети (кап tries)
+    bool wakeProbeEngineLive() const; // the engine's input of SystemAwake.h wakeProbeDecision (per platform)
 #endif
     // AVPN (owner's Mac 24.11.2026, cause F; SystemAwake.h): the one fact "the system is fully awake" and the one gate
     // of the engine's own automation. heldBySystemSleep(what) is called once at the entry of each automatic mechanism
