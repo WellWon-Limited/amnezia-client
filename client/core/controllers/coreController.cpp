@@ -9,6 +9,9 @@
     #include <QJsonObject>
     #include <QStandardPaths>
 #endif
+#ifdef AVPN_DESKTOP_TEST_CHANNEL // AVPN: the test command channel of desktop development builds
+    #include "core/serviceEngine/DevControlApp.h"
+#endif
 
 #include "core/utils/selfhosted/sshSession.h"
 #include "core/controllers/selfhosted/installController.h"
@@ -314,6 +317,9 @@ void CoreController::initControllers()
             qWarning() << "[avpn dev] client flags forced by the control file:" << flags.keys();
         }
     }
+#ifdef AVPN_DESKTOP_TEST_CHANNEL // AVPN: desktop development builds - the test command channel (DevControlApp.h)
+    avpn::devctl::install(m_engine, this);
+#endif
 #endif
     installScanHost(avpnEngine);             // AVPN
     {

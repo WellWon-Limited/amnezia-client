@@ -1,0 +1,54 @@
+# AVPN (desktop test rig): the test command channel's command -> app entry point map, read by check_dev_control_wiring.sh.
+# A row: the C++ function of DevControlApp.cpp, the call it makes (js = a QML function, cpp = a Q_INVOKABLE/slot,
+# sig = a signal it emits, quit = the env's quit), where that entry is declared, and the button's own call site that
+# makes the same call. A function's calls must be exactly its rows. `chain` rows: a fixed string that must stay in a
+# file - the rest of the button's path down to the engine (the page's host handler, the engine call).
+# fn	call	decl_file	decl	button_file	button_call
+cmdConnect	js:onOrbClicked	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	function onOrbClicked() {	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	onClicked: root.onOrbClicked()
+cmdStop	js:onOrbClicked	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	function onOrbClicked() {	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	onClicked: root.onOrbClicked()
+showPage	sig:activated	client/ui/qml/Tribe/components/TribeBottomNav.qml	signal activated(int index)	client/ui/qml/Tribe/components/TribeBottomNav.qml	nav.currentIndex = index; nav.activated(index)
+showPage	sig:requestServerPicker	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	signal requestServerPicker()	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	root.requestServerPicker()
+showPage	sig:requestScanner	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	signal requestScanner()	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	onClicked: { Haptic.play("light"); root.requestScanner() }
+showPage	sig:requestScanner	client/ui/qml/Tribe/Pages/PageServersTribe.qml	signal requestScanner()	client/ui/qml/Tribe/Pages/PageServersTribe.qml	onClicked: { Haptic.play("light"); root.requestScanner() }
+cmdChoose	js:tapRow	client/ui/qml/Tribe/Pages/PageServersTribe.qml	function tapRow(entry) {	client/ui/qml/Tribe/Pages/PageServersTribe.qml	onClicked: root.tapRow(row.modelData)
+cmdAuto	js:tapAuto	client/ui/qml/Tribe/Pages/PageServersTribe.qml	function tapAuto() {	client/ui/qml/Tribe/Pages/PageServersTribe.qml	onClicked: root.tapAuto()
+cmdMode	js:tapMode	client/ui/qml/Tribe/Pages/PageServersTribe.qml	function tapMode(key) {	client/ui/qml/Tribe/components/TribeTransportSelector.qml	onClicked: root.tapSegment(segment.modelData.key)
+cmdScanSelect	cpp:showSlot	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void showSlot(const QString &cc);	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	TribeScanner.showSlot(sc)
+cmdScanSelect	cpp:chooseCountry	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void chooseCountry(const QString &cc);	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	TribeScanner.chooseCountry(sc)
+cmdScanStart	cpp:retry	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void retry();	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onRetryTapped: if (root.hasScanner) TribeScanner.retry()
+cmdScanStart	cpp:connectAndScan	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void connectAndScan();	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onConnectAndScanTapped: if (root.hasScanner) TribeScanner.connectAndScan()
+cmdScanStop	cpp:stop	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void stop();	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	if (scanning && hasScanner) TribeScanner.stop()
+cmdScanConnect	cpp:tapRow	client/core/serviceEngine/TribeScanner.h	Q_INVOKABLE void tapRow(const QString &id);	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
+cmdScanBack	cpp:keyPressEvent	client/ui/controllers/qml/pageController.h	void keyPressEvent(Qt::Key key);	client/ui/qml/main2.qml	PageController.keyPressEvent(event.key)
+cmdWindowShow	sig:raiseMainWindow	client/ui/controllers/qml/pageController.h	void raiseMainWindow();	client/core/controllers/coreSignalHandlers.cpp	&NotificationHandler::raiseRequested, m_coreController->m_pageController, &PageController::raiseMainWindow
+cmdQuit	quit:quit	client/core/serviceEngine/DevControlInstall.cpp	env.quit = [] { QCoreApplication::quit(); };	client/ui/utils/systemTrayNotificationHandler.cpp	[&](){ qApp->quit(); }
+# the rest of each path
+chain	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	const decision = String(TribeEngine.orbTap())
+chain	client/ui/qml/Pages2/PageStart.qml	onActivated: function(index) { root.goAvpnTab(index) }
+chain	client/ui/qml/Pages2/PageStart.qml	function onRequestServerPicker() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageServersTribe.qml") }
+chain	client/ui/qml/Pages2/PageStart.qml	root.openScanner(root.currentPageIs("PageServersTribe.qml") ? "servers" : "home")
+chain	client/ui/qml/Tribe/Pages/PageServersTribe.qml	root.pickNode(entry.nodeId)
+chain	client/ui/qml/Tribe/Pages/PageServersTribe.qml	root.pickAuto()
+chain	client/ui/qml/Tribe/Pages/PageServersTribe.qml	return transportSelector.tapSegment(key)
+chain	client/ui/qml/Tribe/Pages/PageServersTribe.qml	onModeRequested: (m) => root.pickTransport(m)
+chain	client/ui/qml/Tribe/components/TribeTransportSelector.qml	root.modeRequested(key)
+chain	client/ui/qml/Pages2/PageStart.qml	if (typeof TribeEngine !== "undefined") TribeEngine.pinAndReconnect(nodeId)
+chain	client/ui/qml/Pages2/PageStart.qml	TribeEngine.selectAuto()
+chain	client/ui/qml/Pages2/PageStart.qml	TribeEngine.setTransportMode(mode)
+chain	client/ui/controllers/qml/pageController.cpp	emit escapePressed();
+chain	client/ui/qml/Pages2/PageStart.qml	tabBarStackView.currentItem.systemBack()
+chain	client/ui/qml/main2.qml	function onRaiseMainWindow() {
+chain	client/ui/qml/main2.qml	objectName: "pageStart"
+chain	client/ui/qml/Pages2/PageStart.qml	objectName: "tabBarStackView"
+chain	client/ui/qml/Pages2/PageStart.qml	objectName: "avpnBottomNav"
+chain	client/core/controllers/coreController.cpp	setQmlContextProperty("TribeEngine", avpnEngine);
+chain	client/core/controllers/coreController.cpp	setQmlContextProperty("TribeScanner", tribeScanner);
+chain	client/core/controllers/coreController.cpp	setQmlContextProperty("PageController", m_pageController);
+chain	client/ui/qml/Tribe/ScanSwitches.qml	readonly property bool scanner: hasEngine ? TribeEngine.scannerEnabled === true
+chain	client/ui/qml/Tribe/ScanSwitches.qml	readonly property bool replacesDoctor: scanner && !doctorLegacy
+chain	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	visible: ScanSwitches.replacesDoctor
+chain	client/ui/qml/Tribe/Pages/PageServersTribe.qml	visible: ScanSwitches.scanner
+chain	client/ui/qml/Pages2/PageStart.qml	if (!ScanSwitches.scanner) return
+chain	client/ui/qml/Pages2/PageStart.qml	visible: root.avpnNav && !root.onboardingActive && !root.kbActive
+chain	client/ui/qml/Tribe/components/TribeScanRow.qml	enabled: row.tappable
+chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	tappable: f.not_tappable !== true
