@@ -2024,12 +2024,12 @@ Puedes adjuntar una foto o un video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+63"/>
+        <location line="+58"/>
         <source>Сканер</source>
         <translation>Escáner</translation>
     </message>
     <message>
-        <location line="-62"/>
+        <location line="-57"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2054,12 +2054,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Comprobando el acceso</translation>
     </message>
     <message>
-        <location line="+2"/>
-        <source>Рабочие ноды появятся здесь</source>
-        <translation>Los nodos que funcionan aparecerán aquí</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+3"/>
         <source>Ищем ещё… до %1&#xa0;с</source>
         <translation>Buscando más… hasta %1&#xa0;s</translation>
     </message>
@@ -2072,11 +2067,6 @@ Puedes adjuntar una foto o un video.</translation>
         <location line="+1"/>
         <source>Работает у других в вашей сети</source>
         <translation>Funciona para otros en su red</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Скан завершён</source>
-        <translation>Escaneo terminado</translation>
     </message>
     <message>
         <location line="+4"/>
@@ -2160,7 +2150,7 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+87"/>
+        <location line="+83"/>
         <source>Отправляем отчёт…</source>
         <translation>Enviando el informe…</translation>
     </message>
@@ -2220,27 +2210,13 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>El servicio de Tribe VPN no está en ejecución</translation>
     </message>
     <message>
-        <location line="+10"/>
-        <source>Сканер проверяет ноды через службу приложения, а она сейчас не запущена.</source>
-        <translation>El escáner comprueba los nodos a través del servicio de la aplicación, que ahora no está en ejecución.</translation>
+        <location line="+166"/>
+        <source>ru</source>
+        <comment>plural rule of this translation: ru (one/few/many) or en (one/other)</comment>
+        <translation>en</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Сканер проверяет ноды через службу приложения, а она не установлена.</source>
-        <translation>El escáner comprueba los nodos a través del servicio de la aplicación, que no está instalado.</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Сканер проверяет ноды через службу приложения, а она остановлена.</source>
-        <translation>El escáner comprueba los nodos a través del servicio de la aplicación, que está detenido.</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Сканер проверяет ноды через службу приложения, а она устарела.</source>
-        <translation>El escáner comprueba los nodos a través del servicio de la aplicación, que está desactualizado.</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="-152"/>
         <source>Подключаться к VPN можно как обычно, а Сканеру нужна обновлённая служба.</source>
         <translation>Puede conectarse a la VPN como siempre, pero el escáner necesita el servicio actualizado.</translation>
     </message>
@@ -2315,12 +2291,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Buscar más en %1 min</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Больше доступных нод в этой сети нет</source>
-        <translation>No hay más nodos disponibles en esta red</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Сканировать</source>
         <translation>Escanear</translation>
     </message>
@@ -2380,17 +2351,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>%1: todos los servidores comprobados. Sin respuesta: %2</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>%1: доступных нод сейчас нет</source>
-        <translation>%1: no hay nodos disponibles ahora</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Попробуйте другую страну или проверьте все.</source>
         <translation>Pruebe otro país o escanee todos.</translation>
     </message>
     <message>
-        <location line="+9"/>
+        <location line="+10"/>
         <source>ВЫБЕРИТЕ СТРАНУ</source>
         <translation>ELIJA UN PAÍS</translation>
     </message>
@@ -2426,16 +2392,51 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
+        <source>Показать результат</source>
+        <translation>Mostrar resultado</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>доступно</source>
+        <translation>disponibles</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Доступно серверов: %1</source>
+        <translation>Servidores disponibles: %1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Скан остановлен</source>
+        <translation>Escaneo detenido</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Список стран пока не загружен — можно проверить все страны сразу.</source>
         <translation>La lista de países aún no se ha cargado: puede escanear todos los países ahora mismo.</translation>
     </message>
     <message>
-        <location line="-14"/>
+        <location line="-19"/>
         <source>Проверить подключение и отправить отчёт</source>
         <translation>Comprobar la conexión y enviar un informe</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-56"/>
+        <source>VPN выключен — чтобы проверить серверы, нужно подключиться</source>
+        <translation>La VPN está desactivada: conéctese para comprobar los servidores</translation>
+    </message>
+    <message>
+        <location line="+39"/>
+        <source>Больше доступных серверов в этой сети нет</source>
+        <translation>No hay más servidores disponibles en esta red</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>%1: доступных серверов сейчас нет</source>
+        <translation>%1: no hay servidores disponibles ahora</translation>
+    </message>
+    <message>
+        <location line="+4"/>
         <source>Отчёт придёт сюда, в чат</source>
         <translation>El informe llegará aquí, al chat</translation>
     </message>
@@ -2460,7 +2461,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Iniciar el servicio</translation>
     </message>
     <message>
-        <location line="-90"/>
+        <location line="-85"/>
         <source>только что</source>
         <translation>ahora mismo</translation>
     </message>
@@ -2520,7 +2521,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Comprobando la transferencia de datos · %1 de&#xa0;%2 disponibles</translation>
     </message>
     <message>
-        <location line="+8"/>
+        <location line="+1"/>
+        <source>Доступные серверы появятся здесь</source>
+        <translation>Los servidores disponibles aparecerán aquí</translation>
+    </message>
+    <message>
+        <location line="+6"/>
         <source>Доступно</source>
         <translation>Disponible</translation>
     </message>
@@ -2530,32 +2536,32 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Conéctese a Wi‑Fi: la VPN suele funcionar a través de ella. Luego abra el Escáner y pulse «Escanear».</translation>
     </message>
     <message>
-        <location line="+9"/>
-        <source>Найдена 1 доступная нода</source>
-        <translation>Encontrado 1 servidor disponible</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Найдена %1 доступная нода</source>
-        <translation>Encontrados %1 servidores disponibles</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Найдено %1 доступные ноды</source>
-        <translation>Encontrados %1 servidores disponibles</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Найдено %1 доступных нод</source>
-        <translation>Encontrados %1 servidores disponibles</translation>
-    </message>
-    <message>
-        <location line="+27"/>
+        <location line="+35"/>
         <source>Службу Tribe VPN нужно обновить</source>
         <translation>Hay que actualizar el servicio de Tribe VPN</translation>
     </message>
     <message>
-        <location line="+13"/>
+        <location line="+3"/>
+        <source>Сканер проверяет серверы через службу приложения, а она сейчас не запущена.</source>
+        <translation>El escáner comprueba los servidores a través del servicio de la aplicación, que ahora no está en ejecución.</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сканер проверяет серверы через службу приложения, а она не установлена.</source>
+        <translation>El escáner comprueba los servidores a través del servicio de la aplicación, que no está instalado.</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сканер проверяет серверы через службу приложения, а она остановлена.</source>
+        <translation>El escáner comprueba los servidores a través del servicio de la aplicación, que está detenido.</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сканер проверяет серверы через службу приложения, а она устарела.</source>
+        <translation>El escáner comprueba los servidores a través del servicio de la aplicación, que está desactualizado.</translation>
+    </message>
+    <message>
+        <location line="+7"/>
         <source>Обновить службу</source>
         <translation>Actualizar el servicio</translation>
     </message>
@@ -2600,12 +2606,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>RESULTADO ANTERIOR</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>VPN выключен — чтобы проверить ноды, нужно подключиться</source>
-        <translation>La VPN está desactivada: conéctese para comprobar los nodos</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Подключиться и проверить</source>
         <translation>Conectar y comprobar</translation>
     </message>
@@ -2880,6 +2881,14 @@ Puedes adjuntar una foto o un video.</translation>
         <location line="-626"/>
         <source> с</source>
         <translation> s</translation>
+    </message>
+</context>
+<context>
+    <name>TribeHeader</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/components/TribeHeader.qml" line="+29"/>
+        <source>Назад</source>
+        <translation>Atrás</translation>
     </message>
 </context>
 <context>
@@ -3186,7 +3195,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4579"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4586"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3382,12 +3391,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3921"/>
+        <location line="+3920"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-3918"/>
+        <location line="-3917"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
     </message>
@@ -3498,7 +3507,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>baseline y amnezia ven el mismo egress (%1): parece que la VPN no estaba apagada durante la medición baseline</translation>
     </message>
     <message>
-        <location line="+1115"/>
+        <location line="+1114"/>
         <source>Установка службы VPN отменена</source>
         <translation>Instalación del servicio VPN cancelada</translation>
     </message>
@@ -3544,8 +3553,8 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Este servidor no está disponible ahora: conectando otro</translation>
     </message>
     <message>
-        <location line="-3942"/>
-        <location line="+3954"/>
+        <location line="-3941"/>
+        <location line="+3953"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>

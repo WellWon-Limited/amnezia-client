@@ -12,14 +12,19 @@ Rectangle {
     property alias leftItem: leftSlot.data
     property bool interactive: true
     property bool monoSubtitle: true    // false: the subtitle in the body font (words, not an endpoint - the Scanner's choice)
+    // the chosen row of a choice list: the kit's selection look (the server list's chosen row, the «Авто» card,
+    // the transport segment): chipSelected fill + accent border
+    property bool selected: false
     signal clicked()
 
     implicitHeight: 60
     radius: Theme.radius.md
-    color: ma.containsMouse && interactive ? Theme.color.surface2 : Theme.color.surface1
+    color: selected ? Theme.color.chipSelected
+                    : (ma.containsMouse && interactive ? Theme.color.surface2 : Theme.color.surface1)
     border.width: 1
-    border.color: Theme.color.border
+    border.color: selected ? Theme.color.accent : Theme.color.border
     Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+    Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
 
     Row {
         anchors.fill: parent
