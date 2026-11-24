@@ -384,6 +384,15 @@ public:
     {
         return m_wantConnected && m_waitUplink && !m_busy && !m_paused && m_lastTunnelState != Vpn::Connected;
     }
+    // Device round of 142 (B2): the tunnel is up and the device is known to have no physical network (the tunnel is
+    // kept through the loss, health pauses). The Connect caption says «Нет сети — VPN продолжит…» instead of a verdict
+    // on the tunnel. The fact: UplinkMonitor.h physicalUplinkKnownDown, read by noteUplinkFact.
+    Q_PROPERTY(bool tunnelUpNoUplink READ tunnelUpNoUplink NOTIFY changed)
+    bool tunnelUpNoUplink() const { return m_lastTunnelState == Vpn::Connected && m_uplinkKnownDown; }
+private:
+    void noteUplinkFact();
+    bool m_uplinkKnownDown = false;
+public:
     bool lastSelectionMeasured() const { return m_lastSelectionMeasured; }
     // AVPN (macOS): идёт фоновая установка root-демона (см. Q_PROPERTY выше). Прочие ОС — false.
     bool svcInstalling() const { return m_svcInstalling; }

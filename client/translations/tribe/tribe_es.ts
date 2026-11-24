@@ -1084,7 +1084,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+197"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+201"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1155,12 +1155,12 @@
     </message>
     <message>
         <location line="+1"/>
-        <location line="+544"/>
+        <location line="+545"/>
         <source>Проверяем трафик…</source>
         <translation>Comprobando el tráfico…</translation>
     </message>
     <message>
-        <location line="-542"/>
+        <location line="-543"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>El tráfico iba por fuera de la VPN: probando otra ruta</translation>
     </message>
@@ -1176,17 +1176,22 @@
     </message>
     <message>
         <location line="+3"/>
-        <location line="+535"/>
+        <location line="+536"/>
         <source>Отключаемся…</source>
         <translation>Desconectando…</translation>
     </message>
     <message>
-        <location line="-534"/>
+        <location line="-535"/>
         <source>Проверяем…</source>
         <translation>Verificando…</translation>
     </message>
     <message>
-        <location line="+5"/>
+        <location line="+4"/>
+        <source>Нет сети — VPN продолжит, когда сеть вернётся</source>
+        <translation>Sin red: la VPN seguirá cuando vuelva</translation>
+    </message>
+    <message>
+        <location line="+2"/>
         <source>Защита активна — ваше соединение безопасно</source>
         <translation>Protección activa: tu conexión es segura</translation>
     </message>
@@ -1196,7 +1201,7 @@
         <translation>Conectado, pero el tráfico no pasa</translation>
     </message>
     <message>
-        <location line="-700"/>
+        <location line="-701"/>
         <source>Нет связи</source>
         <translation>Sin conexión</translation>
     </message>
@@ -1211,7 +1216,7 @@
         <translation>Buscando un servidor que funcione: probando %1 de %2</translation>
     </message>
     <message>
-        <location line="+5"/>
+        <location line="+6"/>
         <source>Доступ приостановлен — подписка истекла</source>
         <translation>Acceso pausado: la suscripción ha caducado</translation>
     </message>
@@ -1344,8 +1349,8 @@
         <translation>Instalando…</translation>
     </message>
     <message>
-        <location line="-534"/>
-        <location line="+535"/>
+        <location line="-535"/>
+        <location line="+536"/>
         <source>Подключаемся…</source>
         <translation>Conectando…</translation>
     </message>
@@ -1824,7 +1829,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+235"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+282"/>
         <source>недоступно для этого режима</source>
         <translation>no disponible para este modo</translation>
     </message>
@@ -1834,7 +1839,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>no disponible en esta versión</translation>
     </message>
     <message>
-        <location line="+78"/>
+        <location line="+79"/>
         <source>Выбор сервера</source>
         <translation>Elegir servidor</translation>
     </message>
@@ -1889,7 +1894,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>TODAS LAS UBICACIONES</translation>
     </message>
     <message>
-        <location line="+98"/>
+        <location line="+100"/>
         <source>ONLINE</source>
         <translation>ONLINE</translation>
     </message>
@@ -1899,7 +1904,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>~%1 ms</translation>
     </message>
     <message>
-        <location line="+17"/>
+        <location line="+26"/>
         <source>Режим соединения — «Авто»: у этого сервера нет транспорта %1</source>
         <translation>Modo de conexión «Auto»: este servidor no tiene transporte %1</translation>
     </message>
@@ -3231,7 +3236,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4586"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4587"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3331,7 +3336,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-3160"/>
+        <location line="-3161"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3427,12 +3432,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3920"/>
+        <location line="+3921"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-3917"/>
+        <location line="-3918"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
     </message>
@@ -3462,7 +3467,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Grabando, enviado a las %1</translation>
     </message>
     <message>
-        <location line="+1146"/>
+        <location line="+1147"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>Este informe ya se ha entregado</translation>
     </message>
@@ -3589,8 +3594,8 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Este servidor no está disponible ahora: conectando otro</translation>
     </message>
     <message>
-        <location line="-3941"/>
-        <location line="+3953"/>
+        <location line="-3942"/>
+        <location line="+3954"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>
@@ -3610,7 +3615,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
     <message>
-        <location line="+674"/>
+        <location line="+706"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>

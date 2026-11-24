@@ -4334,6 +4334,7 @@ void AvpnEngineQml::identifyAdoptedSession()
 
 void AvpnEngineQml::onTick()
 {
+    noteUplinkFact(); // round 142 (B2): the iOS app path monitor tells no event without the Scanner's hook
     // S2 (device round 5): the identity of an adopted session is looked for on every tick until it is known - after a
     // relaunch the session metadata often arrives after the first Connected (the card had no server name, the
     // Scanner showed «VPN не подключён»).
@@ -8009,6 +8010,38 @@ void AvpnEngineQml::finishScannerSvc(bool ok, const QString &err)
 void AvpnEngineQml::scanNotifyNetwork()
 {
     m_scanNotifier.notice();
+    noteUplinkFact();
+}
+
+// Device round of 142 (B2): the fact behind tunnelUpNoUplink - the device is known to have no physical network
+// (UplinkMonitor.h physicalUplinkKnownDown). Read on every network notice (scanNotifyNetwork: the uplink monitor's
+// events; the iOS app path monitor's while the Scanner hooks it) and on every tick (iOS without that hook) - no timer
+// or probe of its own. A move voids the live verdict: what the probe said before (red bars, «трафик не проходит») is
+// not about the network now - measured again from scratch, as after a tunnel change. The session's data proof
+// (m_liveProven) and the chips stay.
+void AvpnEngineQml::noteUplinkFact()
+{
+    const avpn::UplinkMonitor *uplink = avpn::UplinkMonitor::instance();
+    avpn::AppPathFact appPath = avpn::AppPathFact::None;
+#ifdef Q_OS_IOS
+    ScanNetSource seen;
+    if (IosScanHost::appGeneration(seen))
+        appPath = IosScanHost::appBindInterfaceIndex() > 0 ? avpn::AppPathFact::Physical : avpn::AppPathFact::NoPhysical;
+#endif
+    const bool down = avpn::physicalUplinkKnownDown(uplink->authoritative(), uplink->up(), appPath);
+    if (down == m_uplinkKnownDown)
+        return;
+    m_uplinkKnownDown = down;
+    reliabilityEvent(QStringLiteral("uplink_known_down %1 tunnel=%2")
+                         .arg(int(down)).arg(int(m_lastTunnelState == Vpn::Connected)));
+    m_signal.reset();
+    m_liveBars = 0;
+    m_liveRtt = -1;
+    m_liveReachable = false;
+    m_liveDead = false;
+    m_liveFailStreak = 0;
+    emit liveQualityChanged();
+    emit changed();
 }
 
 // The live status for the coordinator (deduplicated), the own connect's «Подключено» latch and a row tap's

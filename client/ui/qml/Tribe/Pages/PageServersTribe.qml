@@ -54,8 +54,9 @@ PageType {
     readonly property bool autoMode: hasChoice ? choiceId === "" : !cur.pinned
     // ONLINE у строки текущей страны — то же свойство движка, что бейдж ONLINE на главной (5.1.108):
     // данные идут через туннель (живая проба или whoami works), от флага node_scan не зависит.
+    // Device round of 142 (B2): no ONLINE while the device is known to have no network (the home says «Нет сети»).
     readonly property bool onlineNow: hasEngine && TribeEngine.state === "connected"
-                                      && TribeEngine.dataFlowing === true
+                                      && TribeEngine.dataFlowing === true && TribeEngine.tunnelUpNoUplink !== true
     property string query: ""
 
     // AVPN awg31-xray-v1: режим транспорта — факт из движка (=== undefined на старом бинаре ⇒ "auto").
