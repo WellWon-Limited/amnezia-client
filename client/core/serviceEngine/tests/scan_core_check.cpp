@@ -4344,6 +4344,53 @@ static ScanCachedRow choiceRow(const QString &id, const QString &cc, ScanClass c
     return r;
 }
 
+// Review round 36, F2: a scope's result counts only its own rows. The live tunnel is probed in every scope and saved in
+// that scope's slot; connected to the Netherlands while Germany is scanned, Germany must not read «1 доступно».
+static void slotCountsOnlyItsScope()
+{
+    World w = baseWorld("slot_scope", hostMac(), ScanNetKind::Wifi);
+    ScanOpen o = openOf(w, QString(), false);
+    const auto result = [&o](const QString &scope, qint64 savedAt, const QList<ScanCachedRow> &rows) {
+        ScanCachedResult c;
+        c.networkKey = o.network.key;
+        c.fingerprint = o.network.fingerprint;
+        c.savedAtMs = savedAt;
+        c.scope = scope;
+        c.rows = rows;
+        return c;
+    };
+    const ScanCachedRow nlLive = choiceRow(QStringLiteral("up:bbbbbbbbbbbbbb01"), QStringLiteral("NL"), ScanClass::Works);
+    const ScanCachedRow de = choiceRow(QStringLiteral("up:bbbbbbbbbbbbbb02"), QStringLiteral("DE"), ScanClass::Works);
+    ScanCachedRow wl = choiceRow(QStringLiteral("up:bbbbbbbbbbbbbb03"), QString(), ScanClass::Works);
+    ScanCachedResult deMixed = result(QStringLiteral("DE"), kT0 - 60000, {nlLive, de});
+    ScanCachedResult frOnlyLive = result(QStringLiteral("FR"), kT0 - 120000, {nlLive});
+    ScanCachedResult wlRes = result(QStringLiteral("whitelist"), kT0 - 180000, {nlLive, wl});
+    ScanCachedResult all = result(QString(), kT0 - 240000, {nlLive, de, wl});
+    deMixed.otherScopes = {frOnlyLive, wlRes, all};
+    o.cached = deMixed;
+    ScanMachine m(w.caps);
+    m.shown(o, kT0);
+    const ScanView v = m.view(kT0);
+    QHash<QString, int> works;
+    for (const ScanSlotView &sv : v.scopeSlots)
+        works.insert(sv.scope, sv.works);
+    CHECK(works.value(QStringLiteral("DE"), -1) == 1);            // the German row, not the Dutch live one
+    CHECK(works.value(QStringLiteral("whitelist"), -1) == 1);     // a row without a country
+    CHECK(works.value(QString(), -1) == 3);                       // «Все страны»: every row
+    CHECK(!works.contains(QStringLiteral("FR")));                 // only another country's row: no result of France
+    // ... and choosing France shows nothing of it: its choice row scans
+    ScanPoolView pool;
+    pool.countries = {ScanPoolView::Country{QStringLiteral("DE"), 3, 0}, ScanPoolView::Country{QStringLiteral("FR"), 2, 0},
+                      ScanPoolView::Country{QStringLiteral("NL"), 2, 0}};
+    m.poolReady(pool, kT0 + 50);
+    m.filterChosen(QStringLiteral("FR"), kT0 + 100);
+    CHECK(m.view(kT0 + 100).bar.scope == QLatin1String("FR"));
+    bool frRow = false;
+    for (const ScanRowView &r : m.view(kT0 + 100).rows)
+        frRow = frRow || r.fromCache;
+    CHECK(!frRow);
+}
+
 static void choiceSlotsAndStopStays()
 {
     World w = baseWorld("choice", hostMac(), ScanNetKind::Wifi);
@@ -4968,6 +5015,7 @@ int main(int argc, char **argv)
     rowsAfter17Nov();
     countrylessRows();
     choiceSlotsAndStopStays();
+    slotCountsOnlyItsScope();
     refusedEndsScope();
     liveProofHasAnEnd();
     listFullPerBatch();

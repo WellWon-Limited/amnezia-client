@@ -623,6 +623,18 @@ inline QString scanScopeOf(const QString &raw)
     return t.toUpper();
 }
 
+// A row of a result belongs to a scope: "" = every row, "whitelist" = a row without a country, else its country. The
+// live tunnel is probed in every scope and saved in that scope's result: it never counts for another country (review
+// round 36, F2).
+inline bool scanRowInScope(const QString &countryCode, const QString &scope)
+{
+    if (scope.isEmpty())
+        return true;
+    if (scope == QLatin1String(kScanScopeWhitelist))
+        return countryCode.isEmpty();
+    return countryCode == scope;
+}
+
 // --- the machine -----------------------------------------------------------------------------------------------
 
 class ScanMachine
@@ -1675,8 +1687,7 @@ public:
                 continue;
             ScanSlotView sv;
             sv.scope = scanScopeOf(c.scope);
-            for (const ScanCachedRow &r : c.rows)
-                sv.works += scanClassWorking(r.cls) ? 1 : 0;
+            sv.works = slotWorks(c);
             sv.agoMin = int(qMax<qint64>(0, now - c.savedAtMs) / 60000);
             v.scopeSlots << sv;
         }
@@ -2237,13 +2248,23 @@ private:
         return nullptr;
     }
 
-    // A slot that can be shown now (the rule of slotShown, and of view.slots: the choice offers exactly what it shows).
+    // A slot that can be shown now (the rule of slotShown, and of view.slots: the choice offers exactly what it shows):
+    // at least one row of its own scope (a result holding only another country's live row is no result of this one).
     bool slotFresh(const ScanCachedResult &c, qint64 now) const
     {
-        if (c.rows.isEmpty() || c.fingerprint.isEmpty() || c.fingerprint != m_net.fingerprint)
+        if (slotWorks(c) == 0 || c.fingerprint.isEmpty() || c.fingerprint != m_net.fingerprint)
             return false;
         const qint64 age = now - c.savedAtMs;
         return age >= -60000 && age <= slotFreshMs();
+    }
+    // The result's working rows of its own scope (view.slots works, «M доступно»).
+    static int slotWorks(const ScanCachedResult &c)
+    {
+        const QString scope = scanScopeOf(c.scope);
+        int n = 0;
+        for (const ScanCachedRow &r : c.rows)
+            n += (scanClassWorking(r.cls) && scanRowInScope(r.countryCode, scope)) ? 1 : 0;
+        return n;
     }
     qint64 slotFreshMs() const { return qMin(kScanCacheShowMaxMs, qint64(m_t.cacheWorksTtlS) * 1000); }
 
