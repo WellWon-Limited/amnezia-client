@@ -1053,6 +1053,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // handshake): N провалов подряд (xray_probe_fail_cycles) → движок уводит на другой транспорт
         // той же локации (двухфазный свитч, как health-DEAD). awg — no-op внутри. Сигнал приходит с
         // верха цикла событий (async-ответ QNetworkReply), не из-под Selector::pick.
+        // tribe.17 (review of the 24.11 fix, Q6): a failed probe while the health verdict is held after a return /
+        // thaw (the iOS data watch's resume guard, the one the health tick uses; false elsewhere and with the watch
+        // off) is not fed: a request that was in flight across a suspension says nothing about the tunnel.
+#ifdef Q_OS_IOS
+        if (!reachable && tunnelWatchFrozen("live_probe"))
+            return;
+#endif
         if (m_engine.feedProbeResult(reachable)) { // a dead live session: the failover attempt of the owner
             syncAttempt();
             emit changed();
