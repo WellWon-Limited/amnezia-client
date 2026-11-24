@@ -5,9 +5,12 @@
 #include "wireguardutilsmacos.h"
 
 #include <errno.h>
+
+#include <algorithm>  // AVPN (round mac-B): std::clamp
 #include <net/route.h>
 
 #include <QByteArray>
+#include <QDeadlineTimer>  // AVPN (round mac-B): the UAPI waits
 #include <QDir>
 #include <QFile>
 #include <QLocalSocket>
@@ -455,14 +458,19 @@ bool WireguardUtilsMacos::excludeLocalNetworks(const QList<IPAddress>& routes) {
   return result;
 }
 
+// AVPN (round mac-B, test Mac 25.11.2026: six service crashes, SIGSEGV at 0x8 in QIODevice::readAll under
+// DaemonLocalServerConnection::readData, during rapid AmneziaWG connect/stop). The waits below spun the daemon's event
+// loop (upstream: QCoreApplication::processEvents) inside the client connection's readData -> parseCommand ->
+// activate / status. A client that closed its socket meanwhile (Stop right after Connect: the app's controller is
+// gone) had its connection deleted inside that loop (deleteLater on the socket's disconnected), and readData went on
+// with freed memory. The waits block on the UAPI socket / the tunnel process instead (waitForReadyRead,
+// waitForFinished) against a deadline - no event is dispatched inside a client's command, so a connection is
+// destroyed only after its command returned. Bounded as before (WG_UAPI_TIMEOUT, WG_TUN_PROC_TIMEOUT).
 QString WireguardUtilsMacos::uapiCommand(const QString& command) {
   QLocalSocket socket;
-  QTimer uapiTimeout;
+  QDeadlineTimer uapiDeadline(WG_UAPI_TIMEOUT);
   QDir wgRuntimeDir(WG_RUNTIME_DIR);
   QString wgSocketFile = wgRuntimeDir.filePath(m_ifname + ".sock");
-
-  uapiTimeout.setSingleShot(true);
-  uapiTimeout.start(WG_UAPI_TIMEOUT);
 
   socket.connectToServer(wgSocketFile, QIODevice::ReadWrite);
   if (!socket.waitForConnected(WG_UAPI_TIMEOUT)) {
@@ -477,15 +485,20 @@ QString WireguardUtilsMacos::uapiCommand(const QString& command) {
     message.append('\n');
   }
   socket.write(message);
+  socket.waitForBytesWritten(int(std::max<qint64>(1, uapiDeadline.remainingTime())));
 
   QByteArray reply;
   while (!reply.contains("\n\n")) {
-    if (!uapiTimeout.isActive()) {
+    if (uapiDeadline.hasExpired()) {
       logger.error() << "UAPI command timed out";
       return QString();
     }
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    socket.waitForReadyRead(int(std::clamp<qint64>(uapiDeadline.remainingTime(), 1, 100)));
     reply.append(socket.readAll());
+    if (socket.state() != QLocalSocket::ConnectedState && socket.bytesAvailable() == 0 && !reply.contains("\n\n")) {
+      logger.error() << "UAPI socket closed before the reply";
+      return QString();
+    }
   }
 
   return QString::fromUtf8(reply).trimmed();
@@ -505,14 +518,16 @@ int WireguardUtilsMacos::uapiErrno(const QString& reply) {
   return EINVAL;
 }
 
+// AVPN (round mac-B): waits on the tunnel process (waitForFinished: returns at once when it exits), never in the event
+// loop - see uapiCommand.
 QString WireguardUtilsMacos::waitForTunnelName(const QString& filename) {
-  QTimer timeout;
-  timeout.setSingleShot(true);
-  timeout.start(WG_TUN_PROC_TIMEOUT);
+  QDeadlineTimer deadline(WG_TUN_PROC_TIMEOUT);
 
   QFile file(filename);
-  while ((m_tunnel.state() == QProcess::Running) && timeout.isActive()) {
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+  while ((m_tunnel.state() == QProcess::Running) && !deadline.hasExpired()) {
+    if (m_tunnel.waitForFinished(100)) {
+      break;
+    }
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
       continue;
     }

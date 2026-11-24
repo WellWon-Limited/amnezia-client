@@ -12,7 +12,10 @@
 #   L2  on macOS logIpcResult only watches the reply (QRemoteObjectPendingCallWatcher) and withInterfaceNow takes the
 #       replica as it is (Interface + isReplicaValid, no waitForSource); other desktops keep upstream's waits;
 #   L3  the protocol is released only in connectToVpn and disconnectFromVpn (and the Android restore path);
-#   L4  the daemon socket's own handlers (readData, parseCommand, errorOccurred, disconnectInternal) wait for nothing.
+#   L4  the daemon socket's own handlers (readData, parseCommand, errorOccurred, disconnectInternal) wait for nothing;
+#   D1  the service side of the same socket (six service crashes in the same round: SIGSEGV in QIODevice::readAll under
+#       DaemonLocalServerConnection::readData): the macOS daemon's waits inside a client's command (the UAPI reply,
+#       the tunnel's name) dispatch no events - a client that leaves meanwhile is deleted only after its command.
 # The lifetime itself is not host-testable: VpnConnection needs the app's IPC replica, repositories and protocols. It
 # is proven on the test Mac (round mac-B: 30 rapid AmneziaWG connect/stop cycles and the leg loop, no crash).
 # Run by the check sweep (every check_*.sh of this directory).
@@ -21,6 +24,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CLIENT="$(cd "$HERE/../../.." && pwd)"
 VC="$CLIENT/vpnConnection.cpp"
 LSC="$CLIENT/mozilla/localsocketcontroller.cpp"
+WGM="$CLIENT/platforms/macos/daemon/wireguardutilsmacos.cpp"
+DLSC="$CLIENT/daemon/daemonlocalserverconnection.cpp"
 fail=0
 bad() { echo "FAIL: $1"; fail=1; }
 code() { grep -v '^[[:space:]]*//' "$1" | sed 's#[[:space:]]//.*##' || true; }
@@ -64,6 +69,15 @@ for f in 'void LocalSocketController::readData() {' 'void LocalSocketController:
 done
 b="$(code "$LSC" | awk '/^void LocalSocketController::errorOccurred\(/ { on = 1 } on { print } on && /^}$/ { exit }')"
 [ -n "$b" ] && ! printf '%s\n' "$b" | grep -qE "$WAITS" || bad "L4: errorOccurred waits (or is gone)"
+
+# ---- D1 ----
+wg="$(code "$WGM")"
+printf '%s\n' "$wg" | grep -nE 'processEvents|QEventLoop' | sed 's/^/  /' | grep . && bad "D1: the macOS daemon dispatches events inside a client's command"
+uapi="$(body "$WGM" 'QString WireguardUtilsMacos::uapiCommand(const QString& command) {')"
+has "$uapi" 'socket.waitForReadyRead(' && has "$uapi" 'uapiDeadline.hasExpired()' || bad "D1: the UAPI reply is not a blocking wait against a deadline"
+name="$(body "$WGM" 'QString WireguardUtilsMacos::waitForTunnelName(const QString& filename) {')"
+has "$name" 'm_tunnel.waitForFinished(100)' && has "$name" 'deadline.hasExpired()' || bad "D1: the tunnel name wait is not a blocking wait against a deadline"
+printf '%s\n' "$(code "$DLSC")" | grep -qE 'processEvents|QEventLoop|waitForFinished\(\)' && bad "D1: the daemon's client connection waits"
 
 [ "$fail" = 0 ] && echo "check_vpn_connection_callback_loop: OK"
 exit "$fail"
