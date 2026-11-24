@@ -1019,6 +1019,23 @@ PageType {
                 }
             }
         }
+        // The list's top edge (device round air-C, D3): content scrolled under the badges fades out over Theme.space.xl -
+        // a line cut at the edge (the half «ДОСТУПНЫ СЕЙЧАС» under the count badge) never shows as a fragment. Only while
+        // the list is scrolled; the badges row above keeps its own background.
+        Rectangle {
+            objectName: "scannerListEdge"
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: Theme.space.xl
+            visible: list.contentY > 0
+            // solid over the first third (a cut line is never taller), then the fade
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: Theme.color.bg800 }
+                GradientStop { position: 0.35; color: Theme.color.bg800 }
+                GradientStop { position: 1.0; color: Qt.alpha(Theme.color.bg800, 0) }
+            }
+        }
     }
 
     // ── the one pinned button ──
