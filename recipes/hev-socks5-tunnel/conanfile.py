@@ -14,7 +14,9 @@ required_conan_version = ">=2.26"
 
 class HevSocks5Tunnel(ConanFile):
     name = "hev-socks5-tunnel"
-    version = "2.15.0"
+    # 2.15.0-tribe.1: upstream 2.15.0 + patch 0001 (readiness, non-blocking stop) + patch 0002 (the stop request
+    # belongs to one run: set-and-check under one mutex on both sides, never kept outside a run - review R46).
+    version = "2.15.0-tribe.1"
     _source_commit = "00c7eb9ad7ca381b0f1fee880abc1077fe9b93be"
     settings = "os", "arch", "compiler"
     options = {
