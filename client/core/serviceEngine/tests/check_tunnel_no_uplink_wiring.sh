@@ -7,7 +7,8 @@
 #   N1  the engine property: tunnelUpNoUplink = tunnel Connected && the cached fact (NOTIFY changed);
 #   N2  noteUplinkFact reads the fact from the facts the engine already has: the uplink monitor (authoritative / up)
 #       and, on iOS, the app's own path monitor (a path seen; a physical interface on it) - no timer, no probe;
-#   N3  it is read on every network notice (scanNotifyNetwork) and first thing on every tick (onTick);
+#   N3  it is read on every network notice (scanNotifyNetwork) and first thing on every tick (onTick; only the
+#       system-sleep gate, a constant false on iOS, may come before it);
 #   N4  a move of the fact voids the live verdict of the old network (liveDead, the streak, bars, RTT) and tells QML
 #       (liveQualityChanged, changed) - the session's data proof (m_liveProven) is kept;
 #   N5  the Connect caption: in the connected branch, before «трафик не проходит», the neutral colour; ONLINE waits
@@ -57,8 +58,14 @@ has "$note" 'm_liveProven' && bad "N4: the session's data proof (m_liveProven) i
 # ---- N3 ----
 has "$(body "$FACADE" 'void AvpnEngineQml::scanNotifyNetwork()')" 'noteUplinkFact();' || bad "N3: scanNotifyNetwork must read the fact"
 tick="$(body "$FACADE" 'void AvpnEngineQml::onTick()')"
-[ "$(printf '%s\n' "$tick" | sed -n '3p' | sed 's#//.*##' | tr -d ' ')" = "noteUplinkFact();" ] \
-    || bad "N3: onTick must read the fact first (iOS: the app path monitor has no event without the Scanner's hook)"
+# the statements of onTick in order (comments and blanks dropped): the fact first, or right after the system-sleep
+# gate (macOS desktop: the gate is the tick's first statement, check_system_sleep_wiring.sh S1; a constant false on iOS)
+stmts="$(printf '%s\n' "$tick" | sed -n '3,$p' | sed 's#//.*##' | tr -d ' ' | grep -v '^$')"
+gate="$(printf '%s\n' 'if(heldBySystemSleep(avpn::SleepHeld::HealthTick)){' 'm_engine.resetHealthSampling();' 'return;' '}')"
+if [ "$(printf '%s\n' "$stmts" | sed -n '1p')" != "noteUplinkFact();" ]; then
+    [ "$(printf '%s\n' "$stmts" | sed -n '1,4p')" = "$gate" ] && [ "$(printf '%s\n' "$stmts" | sed -n '5p')" = "noteUplinkFact();" ] \
+        || bad "N3: onTick must read the fact first, after the system-sleep gate only (iOS: the app path monitor has no event without the Scanner's hook)"
+fi
 
 # ---- N5 ----
 c="$(code "$CONNECT")"

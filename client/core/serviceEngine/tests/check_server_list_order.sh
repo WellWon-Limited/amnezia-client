@@ -11,7 +11,7 @@
 #      O3 a fresh sort only when the page opens and when the transport mode changes; the engine's changed() keeps the
 #         order; the search only filters it;
 #      O4 the values update before the order waits; the order waits while the list moves or a row is pressed;
-#      O5 a pressed row holds the order, its tap acts on its own row (row.d);
+#      O5 a pressed row holds the order, its tap acts on its own row (tapRow(row.d) -> entry.nodeId);
 #      O6 ServerListOrder.js is in qml.qrc (else a blank page in a qrc build).
 # Run by the check sweep (every check_*.sh of this directory).
 set -u
@@ -72,7 +72,10 @@ has "$p" 'onListTouchedChanged: if (!listTouched && orderPending) rebuildCountri
 
 ma="$(body_of 'onPressedChanged: {' "$PAGE")"
 has "$ma" 'root.pressedKey = row.modelData' || bad "O5: a pressed row must hold the order (pressedKey)"
-has "$(code "$PAGE" | awk '/delegate: Rectangle \{/,0')" 'root.pickNode(row.d.nodeId)' || bad "O5: the tap picks its own row (row.d.nodeId)"
+# the delegate's tap hands its own row's values to the page's one tap function (tapRow, which the test command channel
+# calls too), and that function picks the node of the row it was given
+has "$(code "$PAGE" | awk '/delegate: Rectangle \{/,0')" 'onClicked: root.tapRow(row.d)' || bad "O5: the tap acts on its own row (tapRow(row.d))"
+has "$(body_of 'function tapRow(entry) {' "$PAGE")" 'root.pickNode(entry.nodeId)' || bad "O5: tapRow picks the node of the row it was given"
 
 grep -qF '<file>Tribe/ServerListOrder.js</file>' "$QRC" || bad "O6: Tribe/ServerListOrder.js is not in qml.qrc"
 
