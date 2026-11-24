@@ -1047,6 +1047,11 @@ void IosController::beginAwaitTeardown(uint64_t operation)
     m_connectAwaitingTeardown = operation;
 #if defined(Q_OS_IOS)
     Avpn_recordLifecycle(QStringLiteral("connect_awaits_teardown"), {{QStringLiteral("operation_generation"), qulonglong(operation)}});
+    // AVPN (device round air-B 24.11): the start has not left the device - the engine's leg is in its local phase
+    // (startAwaitsTeardown in ios_controller.h). The wait is the owner's to bound; the native keeps only the ceiling.
+    armConnectDeadline(operation, avpn_ios::nativeTimings().permissionPromptCapMs);
+    qInfo().noquote() << QStringLiteral("[ios lifecycle] start parked: the previous session is still tearing down");
+    emit startAwaitsTeardown(true);
 #endif
     recheckTeardown(operation);
 }
@@ -1091,6 +1096,11 @@ IosController::TeardownStep IosController::continueConnectAfterTeardown()
         noteSessionRuntimeEnded();
 #if defined(Q_OS_IOS)
         Avpn_recordLifecycle(QStringLiteral("connect_after_teardown"), {{QStringLiteral("operation_generation"), qulonglong(operation)}});
+        // AVPN (device round air-B 24.11): the parked start goes out now - its own deadline from here, and the
+        // engine's leg clock runs from here (startAwaitsTeardown(false) = "built").
+        armConnectDeadline(operation, avpn_ios::nativeTimings().connectDeadlineMs);
+        qInfo().noquote() << QStringLiteral("[ios lifecycle] parked start goes out: the previous session is down");
+        emit startAwaitsTeardown(false);
 #endif
         if (!configureSelectedTunnel()) {
             m_connectPending = false;
@@ -1157,10 +1167,15 @@ void IosController::reportDisconnected()
             // Разбор журнала 25.09: запись NE о последнем стопе — в лог, даже когда она не отнесена к
             // этой сессии (ночной стоп при холодном старте уходил в unknown_external без причины;
             // reason — NEProviderStopReason: 11 другой VPN, 16 обновление приложения).
-            qInfo().noquote() << QStringLiteral("[ios lifecycle] NE last stop reason=%1 intentional=%2 age_s=%3 -> %4")
+            // AVPN (device round air-B 24.11): how long the extension's own stop took (stopTunnel -> its completion)
+            // and whether a start was still unanswered when the stop came - with age_s this tells whether a slow
+            // Disconnected was spent in our stop or by the system after it (-1: an extension without these fields).
+            qInfo().noquote() << QStringLiteral("[ios lifecycle] NE last stop reason=%1 intentional=%2 age_s=%3 stop_ms=%4 start_pending=%5 -> %6")
                                          .arg(in.neStop.reason)
                                          .arg(in.neStop.intentional ? 1 : 0)
                                          .arg((in.nowMs - in.neStop.utcMs) / 1000)
+                                         .arg(stop.value(QStringLiteral("stop_ms"), -1).toLongLong())
+                                         .arg(stop.value(QStringLiteral("start_pending"), -1).toInt())
                                          .arg(QString::fromStdString(decision.reason));
         }
         emitDisconnectReason(QString::fromStdString(decision.reason), decision.intentional);

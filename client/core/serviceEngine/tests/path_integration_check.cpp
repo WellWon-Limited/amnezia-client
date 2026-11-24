@@ -1260,6 +1260,45 @@ int main(int argc, char **argv)
         CHECK(!r.eng.attemptRunning() && r.eng.state() == EngineState::Connected && r.tun.downs == 1);
         CHECK(!r.eng.takeAttemptResult().has_value());
     }
+    // Device round air-B 24.11 (iOS): the stop of leg 1 is never confirmed (the session took 25 s to tear down), the
+    // owner gives it up and sends leg 2, and the native PARKS that start behind the teardown (one session at a time).
+    // The facade passes the native's report (IosController::startAwaitsTeardown) with the leg the native stream is at
+    // (ITunnelControl::nativeLegSeen) to the same engine entry as Android's build reports: leg 2's clock stands for the
+    // whole park, nothing is recorded for it, and its start deadline runs from "goes out". The reports are iOS's -
+    // setLocalBuildReported stays off, every other leg is judged from its start as before.
+    {
+        using LB = ServiceEngine::LocalBuildReport;
+        for (const bool reported : { false, true }) {
+            Rig r(pool);
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            r.pass(5000); // 17's own deadline (its start left the device): judged as always, stopped
+            CHECK(r.tun.downs == 1 && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect"));
+            r.pass(10500); // the teardown goes on: the stop is given up, leg 2 is sent
+            CHECK(journalHas(r.journal, "attempt_stop_unconfirmed leg=") && r.last() == QLatin1String("16"));
+            const quint64 leg = r.tun.nativeLegSeen();
+            CHECK(leg == r.eng.attemptLeg());
+            if (reported)
+                r.eng.onLocalBuild(LB::Building, leg); // ios_start_parked
+            r.pass(9500); // parked 9.5 s - twice 16's start deadline
+            if (!reported) {
+                // the defect, for contrast: 16 judged for a start that never left the device
+                CHECK(r.eng.pathStateHere(QStringLiteral("16")) == QLatin1String("suspect") && r.tun.downs == 2);
+                continue;
+            }
+            CHECK(r.tun.downs == 1 && r.eng.attemptRunning() && r.eng.pathStateHere(QStringLiteral("16")) == QLatin1String("unknown"));
+            r.eng.onLocalBuild(LB::Built, leg); // the old session is down: the parked start goes out
+            r.pass(4000);                        // 4 s of the server's 4.5 s
+            CHECK(r.tun.downs == 1);
+            r.up();
+            CHECK(r.eng.verifySucceeded(300));
+            const path::AttemptResult res = r.result();
+            CHECK(res.connected && res.path.id.id == QLatin1String("16") && res.paths == 2);
+            CHECK(r.eng.pathStateHere(QStringLiteral("16")) == QLatin1String("working"));
+            CHECK(journalHas(r.journal, "leg_build begin leg=") && journalHas(r.journal, "build_ms=9500"));
+            CHECK(!journalLineHas(r.journal, "path_outcome", "node=16", "no_handshake"));
+        }
+    }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
 }
