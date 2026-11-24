@@ -153,11 +153,20 @@ QtObject {
     readonly property string chooseOther: qsTr("Выбрать другую страну")                     // the empty country state's second button: back to the choice
     readonly property string scanAgain: qsTr("Сканировать снова")                           // the result's Scan button once a result is on the screen
     readonly property string rescanInS: qsTr("Повторный скан — через %1 с")                 // hint over the choice's «Показать результат» during the 30 s pause
-    readonly property string slotWorks: qsTr("%1 доступно")                                 // a choice row with a fresh result, right side over its age («3 мин назад»)
+    // a choice row with a fresh result, right side over its age («3 мин назад»); three forms for the languages whose
+    // word changes with the number (Spanish «1 disponible», «3 disponibles»), see plural()
+    readonly property string slotWorksOne: qsTr("%1 доступно", "a choice row's fresh result: the one form")
+    readonly property string slotWorksFew: qsTr("%1 доступно", "a choice row's fresh result: the few form")
+    readonly property string slotWorksMany: qsTr("%1 доступно", "a choice row's fresh result: the many form")
+    readonly property string slotStopped: qsTr("остановлен · %1")                            // under it, a stopped scan's result (%1 = its age), review F5
     readonly property string showResult: qsTr("Показать результат")                         // the choice's button: the selected scope has a fresh result and no scan can run now
-    readonly property string ringAvailable: qsTr("доступно")                                // under the found count in the rings' core
+    // under the found count in the rings' core, by the number (see plural())
+    readonly property string ringAvailableOne: qsTr("доступно", "under the number in the rings: the one form")
+    readonly property string ringAvailableFew: qsTr("доступно", "under the number in the rings: the few form")
+    readonly property string ringAvailableMany: qsTr("доступно", "under the number in the rings: the many form")
     readonly property string ringName: qsTr("Доступно серверов: %1")                         // screen reader name of the rings with a result
     readonly property string stoppedLine: qsTr("Скан остановлен")                           // the line under the rings after «Остановить» (what was found stays)
+    readonly property string stoppedAgo: qsTr("Скан остановлен · %1")                     // the same with the result's age («только что», «3 мин назад»)
     readonly property string poolWait: qsTr("Список стран пока не загружен — можно проверить все страны сразу.") // the choice before the pool answers (NO FRAME)
     // ELSEWHERE: «Не удалось сохранить отчёт на устройстве — он не отправлен» - chat toast, TribeSupportChat.cpp (queue lane)
     // NO FRAME, existing texts reused (no new wording; listed so the owner sees every fallback):
@@ -255,6 +264,8 @@ QtObject {
         return a === 1 && b !== 11 ? one : ((a >= 2 && a <= 4 && (b < 12 || b > 14)) ? few : many)
     }
     function servers(n) { return t.plural(n, t.serverOne, t.serverFew, t.serverMany).arg(n) }
+    function available(n) { return t.plural(n, t.ringAvailableOne, t.ringAvailableFew, t.ringAvailableMany) }
+    function slotAvailable(n) { return t.plural(n, t.slotWorksOne, t.slotWorksFew, t.slotWorksMany).arg(n) }
     // radio: the engine's view.net_radio ("5g" | "lte" | "3g" | "2g"; not sent yet) - without it «Сотовая»
     function netCaption(net, radio) {
         if (net === "wifi") return t.netWifi

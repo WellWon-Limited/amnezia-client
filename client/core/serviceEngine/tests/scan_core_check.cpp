@@ -4563,6 +4563,7 @@ static void stopKeepsWhatItFound()
     CHECK(countActions(d, ScanActionKind::PersistResults) >= 1); // + one per later proof by exclusion
     const QJsonArray fresh = v.value(QLatin1String("slots")).toArray();
     CHECK(fresh.size() == 1 && fresh.at(0).toObject().value(QLatin1String("works")).toInt() == kept);
+    CHECK(v.value(QLatin1String("available")).toInt() == kept && v.value(QLatin1String("partial")).toBool());
     CHECK(countActions(d, ScanActionKind::FreezeHostScan) == 1 && countActions(d, ScanActionKind::StopHostScan) == 1);
     CHECK(countActions(d, ScanActionKind::CloseScreen) == 0 && d.m.screenOpen());
     CHECK(d.m.lastSummary().value(QLatin1String("stop_reason")).toString() == QLatin1String("cancel"));
@@ -4575,6 +4576,270 @@ static void stopKeepsWhatItFound()
     const QJsonObject ev = lastView(e);
     CHECK(phaseOf(ev) == QLatin1String("idle") && ev.value(QLatin1String("rows")).toArray().isEmpty());
     CHECK(countActions(e, ScanActionKind::PersistResults) == 0 && e.m.screenOpen());
+}
+
+// --- review of the one-screen Scanner (24.11) ------------------------------------------------------------------
+
+static QJsonObject viewJson(const ScanMachine &m, qint64 now) { return scanViewToJson(m.view(now)); }
+
+static int rowsInState(const QJsonObject &v, const char *state)
+{
+    int n = 0;
+    for (const QJsonValue &x : v.value(QLatin1String("rows")).toArray())
+        n += x.toObject().value(QLatin1String("state")).toString() == QLatin1String(state) ? 1 : 0;
+    return n;
+}
+
+static const ScanAction *lastAction(const Driver &d, ScanActionKind k)
+{
+    for (int i = d.steps.size() - 1; i >= 0; --i)
+        if (const ScanAction *a = d.steps.at(i).step.find(k))
+            return a;
+    return nullptr;
+}
+
+// The first moment a scan of `w` shows a verified row while it still runs, after `from` (ms from kT0); -1 = none.
+static qint64 firstFoundAt(const World &w, qint64 from)
+{
+    Driver plain(w);
+    plain.run();
+    for (const Recorded &r : plain.steps) {
+        const qint64 at = qint64(r.event.value(QLatin1String("now_ms")).toDouble()) - kT0;
+        if (at > from && scanPhaseNameScanning(phaseOf(r.view)) && r.view.value(QLatin1String("verified")).toInt() > 0)
+            return at;
+    }
+    return -1;
+}
+
+// F1: the number in the rings is the machine's view.available - the rows the list shows as available in the shown
+// scope, counted in one place: cached rows too, a row that failed after a tap no more.
+static void availableIsWhatTheListShows()
+{
+    // a cached result of 3 working rows shown while the VPN is connected (its proof not taken yet): 3, not 0 / 1
+    {
+        World w = baseWorld("available", hostMac(), ScanNetKind::Wifi);
+        ScanOpen o = openOf(w, QStringLiteral("1"), true);
+        ScanCachedResult all;
+        all.networkKey = o.network.key;
+        all.fingerprint = o.network.fingerprint;
+        all.savedAtMs = kT0 - 5 * 60000;
+        all.rows << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa01"), QStringLiteral("DE"), ScanClass::Works)
+                 << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa02"), QStringLiteral("NL"), ScanClass::Slow)
+                 << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa03"), QStringLiteral("FI"), ScanClass::Works);
+        o.cached = all;
+        ScanMachine m(w.caps);
+        m.shown(o, kT0);
+        const QJsonObject v = viewJson(m, kT0);
+        CHECK(rowsInState(v, "works") + rowsInState(v, "slow") == 3 && rowsInState(v, "connected") == 1);
+        CHECK(v.value(QLatin1String("available")).toInt() == 3);
+    }
+    // a finished scan: every working row of the list; a row tapped and failed is «Не удалось» and no more counted
+    {
+        World w = baseWorld("available_done", hostMac(), ScanNetKind::Wifi);
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        w.runMs = 9000;
+        Driver d(w);
+        d.run();
+        const QJsonObject v = lastView(d);
+        const int shown = rowsInState(v, "works") + rowsInState(v, "slow");
+        CHECK(phaseOf(v) == QLatin1String("done") && shown > 1 && v.value(QLatin1String("available")).toInt() == shown);
+        QString a;
+        for (const QJsonValue &x : v.value(QLatin1String("rows")).toArray())
+            if (a.isEmpty() && x.toObject().value(QLatin1String("state")).toString() == QLatin1String("works"))
+                a = x.toObject().value(QLatin1String("id")).toString();
+        const qint64 t = d.now + 1000;
+        d.m.rowTapped(a, t);
+        CHECK(viewJson(d.m, t).value(QLatin1String("available")).toInt() == shown); // «Подключение…» is still available
+        d.m.exactRowFailed(a, t + 100);
+        const QJsonObject f = viewJson(d.m, t + 100);
+        CHECK(rowOf(f, a).value(QLatin1String("state")).toString() == QLatin1String("failed"));
+        CHECK(f.value(QLatin1String("available")).toInt() == shown - 1);
+    }
+    // nothing works: 0
+    {
+        World w = baseWorld("available_zero", hostMacMinimal(), ScanNetKind::Wifi);
+        w.nodes = ownOnly(w.nodes);
+        for (auto it = w.out.begin(); it != w.out.end(); ++it)
+            it.value().reachOk = false, it.value().works = false;
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        w.runMs = 12000;
+        Driver d(w);
+        d.run();
+        const QJsonObject v = lastView(d);
+        CHECK(!scanPhaseNameScanning(phaseOf(v)) && v.contains(QLatin1String("available"))
+              && v.value(QLatin1String("available")).toInt() == 0);
+    }
+}
+
+// F6 (device round, iPhone): a second row tapped while the first still connects. The server list's rule - the newest
+// pick wins (PageStart.onPickNode -> AvpnEngineQml::pinAndReconnect, no guard while a connect runs) - holds here too:
+// the new row connects, the older one's request ends without a verdict (no «Не удалось», no outcome), and its late
+// failure fails nothing.
+static void secondRowTapTakesOver()
+{
+    World w = baseWorld("tap_takes_over", hostMac(), ScanNetKind::Wifi);
+    w.current = QStringLiteral("1");
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
+    w.runMs = 9000;
+    Driver d(w);
+    d.run();
+    QStringList ids;
+    for (const QJsonValue &x : lastView(d).value(QLatin1String("rows")).toArray()) {
+        const QJsonObject r = x.toObject();
+        if (r.value(QLatin1String("state")).toString() == QLatin1String("works")
+            && !r.value(QLatin1String("flags")).toArray().contains(QStringLiteral("not_tappable")))
+            ids << r.value(QLatin1String("id")).toString();
+    }
+    CHECK(ids.size() >= 3);
+    if (ids.size() < 3)
+        return;
+    const QString a = ids.at(0), b = ids.at(1);
+    const qint64 t = d.now + 1000;
+    const ScanStep sa = d.m.rowTapped(a, t);
+    CHECK(sa.has(ScanActionKind::ConnectRow) && sa.find(ScanActionKind::ConnectRow)->nodeId == a);
+    const ScanStep sb = d.m.rowTapped(b, t + 400);
+    const ScanAction *cb = sb.find(ScanActionKind::ConnectRow);
+    CHECK(cb && cb->nodeId == b && !cb->ids.contains(a) && cb->userOrigin && cb->forceConnect);
+    for (const ScanAction &x : sb.actions)
+        CHECK(x.kind != ScanActionKind::ShowShade);
+    QJsonObject v = viewJson(d.m, t + 400);
+    CHECK(rowOf(v, a).value(QLatin1String("state")).toString() == QLatin1String("works"));
+    CHECK(rowOf(v, b).value(QLatin1String("state")).toString() == QLatin1String("connecting") && d.m.connectingId() == b);
+    // the superseded row's late failure is not the running chain's
+    d.m.connectFailed(a, t + 800);
+    d.m.exactRowFailed(a, t + 850);
+    v = viewJson(d.m, t + 850);
+    CHECK(rowOf(v, a).value(QLatin1String("state")).toString() == QLatin1String("works") && d.m.connectingId() == b);
+    // the new row comes up: its chain reports it working, nothing is reported for the superseded row
+    const ScanStep up = d.m.vpnState(liveOf(w, b, true), t + 2500);
+    const ScanAction *o = up.find(ScanActionKind::SendOutcomes);
+    bool bWorks = false, aAny = false;
+    for (const ScanOutcomeItem &it : o ? o->outcomes : QList<ScanOutcomeItem>()) {
+        bWorks = bWorks || ((it.id == b || QStringLiteral("up:") + it.id == b) && it.outcome == ScanClass::Works);
+        aAny = aAny || it.id == a || QStringLiteral("up:") + it.id == a;
+    }
+    CHECK(bWorks && !aAny && d.m.connectingId().isEmpty());
+    // the same row tapped again while it connects: nothing new
+    ScanMachine &m = d.m;
+    m.rowTapped(ids.at(2), t + 3000);
+    CHECK(!m.rowTapped(ids.at(2), t + 3100).has(ScanActionKind::ConnectRow));
+}
+
+// F5: «Остановить» stays honest. (b) a stopped scan never replaces the scope's COMPLETE fresh result: that one stays
+// the stored result, the stopped scan's proven rows go out as evidence only (store false), and showing the scope's
+// result again shows the complete one. (c) without one, the partial result is stored marked partial; the mark survives
+// the store and a restore, a scope switch, and every view of it says so (view.partial, slots[].partial).
+static void stoppedResultStaysHonest()
+{
+    // (b): a full scan, then the same scope scanned again and stopped once it found something
+    {
+        World w = baseWorld("stop_after_complete", hostMac(), ScanNetKind::Wifi);
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        w.script << qMakePair(qint64(40000), at("retry"));
+        w.runMs = 52000;
+        const qint64 found = firstFoundAt(w, 40000);
+        CHECK(found > 40000);
+        World ws = w;
+        ws.script << qMakePair(found + 1, at("stop"));
+        Driver plain(w);
+        plain.run();
+        const int complete = lastView(plain).value(QLatin1String("verified")).toInt();
+        Driver d(ws);
+        d.run();
+        const ScanAction *p = lastAction(d, ScanActionKind::PersistResults);
+        CHECK(p && scanActionToJson(*p).value(QLatin1String("store")).toBool(true) == false && p->cached.partial);
+        const QJsonObject v = lastView(d);
+        CHECK(phaseOf(v) == QLatin1String("done") && v.value(QLatin1String("partial")).toBool());
+        const QJsonArray sl = v.value(QLatin1String("slots")).toArray();
+        CHECK(sl.size() == 1 && sl.at(0).toObject().value(QLatin1String("works")).toInt() == complete
+              && !sl.at(0).toObject().value(QLatin1String("partial")).toBool());
+        // «Показать результат» of that scope: the stored complete result, not the stopped one
+        const qint64 t = d.now + 1000;
+        d.m.slotChosen(QString(), t);
+        const QJsonObject c = viewJson(d.m, t);
+        CHECK(!c.value(QLatin1String("partial")).toBool() && c.value(QLatin1String("available")).toInt() == complete);
+    }
+    // (c): no complete result of the scope: the stopped one is stored, marked
+    {
+        World w = baseWorld("stop_first", hostMac(), ScanNetKind::Wifi);
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        w.runMs = 12000;
+        const qint64 found = firstFoundAt(w, 0);
+        World ws = w;
+        ws.script << qMakePair(found + 1, at("stop"));
+        Driver d(ws);
+        d.run();
+        const ScanAction *p = lastAction(d, ScanActionKind::PersistResults);
+        CHECK(p && scanActionToJson(*p).value(QLatin1String("store")).toBool(true) && p->cached.partial);
+        const QJsonObject v = lastView(d);
+        CHECK(v.value(QLatin1String("partial")).toBool());
+        const QJsonArray sl = v.value(QLatin1String("slots")).toArray();
+        CHECK(sl.size() == 1 && sl.at(0).toObject().value(QLatin1String("partial")).toBool());
+        if (!p)
+            return;
+        // the store and a restore keep the mark (and in another scope's slot too)
+        ScanCachedResult stored = scanCachedResultFromJson(scanCachedResultToJson(p->cached));
+        CHECK(stored.partial);
+        ScanCachedResult other = stored;
+        other.scope = QStringLiteral("DE");
+        other.savedAtMs = stored.savedAtMs + 1000;
+        other.partial = false;
+        other.otherScopes = {stored};
+        const ScanCachedResult back = scanCachedResultFromJson(scanCachedResultToJson(other));
+        CHECK(!back.partial && back.otherScopes.size() == 1 && back.otherScopes.at(0).partial);
+        // a page opened later on that stored result: the slot and the shown result say «stopped»
+        ScanOpen o = openOf(w, QString(), false);
+        o.cached = stored;
+        ScanMachine m(w.caps);
+        const qint64 t = stored.savedAtMs + 60000;
+        m.shown(o, t);
+        QJsonObject r = viewJson(m, t);
+        const QJsonArray rs = r.value(QLatin1String("slots")).toArray();
+        CHECK(!rs.isEmpty() && rs.at(0).toObject().value(QLatin1String("partial")).toBool());
+        m.slotChosen(QString(), t + 10);
+        r = viewJson(m, t + 10);
+        CHECK(r.value(QLatin1String("partial")).toBool() && r.value(QLatin1String("available")).toInt() > 0);
+    }
+    // the server list's figures: a newer narrower (stopped) result never wipes the figures of rows it did not reach
+    {
+        ScanCachedResult full;
+        full.networkKey = QStringLiteral("wifi:asn:64500");
+        full.fingerprint = QStringLiteral("fp");
+        full.savedAtMs = kT0 - 4 * 60000;
+        full.rows << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa01"), QStringLiteral("DE"), ScanClass::Works)
+                  << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa02"), QStringLiteral("NL"), ScanClass::Works);
+        full.rows[0].ms = 90;
+        full.rows[1].ms = 70;
+        ScanCachedResult stopped = full;
+        stopped.scope = QStringLiteral("DE");
+        stopped.partial = true;
+        stopped.savedAtMs = kT0 - 60000;
+        stopped.rows = {full.rows.at(0)};
+        stopped.rows[0].ms = 50;
+        stopped.otherScopes = {full};
+        const QHash<QString, int> fig = scanListFigures(stopped, QStringLiteral("fp"), kT0, 600);
+        CHECK(fig.value(QStringLiteral("up:aaaaaaaaaaaaaa01"), -1) == 50 && fig.value(QStringLiteral("up:aaaaaaaaaaaaaa02"), -1) == 70);
+    }
+}
+
+// F2: a scope the machine refuses (here the white lists of a pool without them) leaves the old scope - and the
+// «Сканировать» after it scans nothing, never that old scope; a scope it takes scans again.
+static void refusedScopeNeverScansAnother()
+{
+    World w = baseWorld("refused_scope", hostMac(), ScanNetKind::Wifi);
+    ScanMachine m(w.caps);
+    m.shown(openOf(w, QString(), false), kT0);
+    ScanPoolView pool;
+    pool.countries = {ScanPoolView::Country{QStringLiteral("DE"), 3, 0}, ScanPoolView::Country{QStringLiteral("SE"), 1, 0}};
+    pool.whitelist = 0;
+    m.poolReady(pool, kT0 + 10);
+    m.filterChosen(QStringLiteral("DE"), kT0 + 20);
+    CHECK(m.view(kT0 + 20).bar.scope == QLatin1String("DE"));
+    m.filterChosen(QStringLiteral("whitelist"), kT0 + 30);
+    CHECK(m.view(kT0 + 30).bar.scope == QLatin1String("DE")); // refused: the old scope stays
+    CHECK(!m.retryTapped(kT0 + 40).has(ScanActionKind::RequestManifest) && !m.view(kT0 + 40).scanning);
+    m.filterChosen(QStringLiteral("SE"), kT0 + 50);
+    CHECK(m.retryTapped(kT0 + 60).has(ScanActionKind::RequestManifest));
 }
 
 static void refusedEndsScope()
@@ -5110,6 +5375,10 @@ int main(int argc, char **argv)
     countrylessRows();
     choiceSlotsAndStopStays();
     stopKeepsWhatItFound();
+    availableIsWhatTheListShows();
+    secondRowTapTakesOver();
+    stoppedResultStaysHonest();
+    refusedScopeNeverScansAnother();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();

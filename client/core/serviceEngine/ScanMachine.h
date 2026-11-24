@@ -265,6 +265,8 @@ struct ScanAction {
     ShadeRequest shade;
     QList<ScanOutcomeItem> outcomes;
     ScanCachedResult cached;
+    bool storeResult = true;          // PersistResults: false = evidence only (the proofs, nothing stored: a stopped scan
+                                      // whose scope keeps its complete fresh result)
     QJsonArray ledger;
     bool withConnection = false;
     bool userOrigin = false;          // ConnectRow: always true (a user tap)
@@ -471,6 +473,7 @@ struct ScanSlotView {
     QString scope;                   // "" = all countries, a country code, "whitelist"
     int works = 0;                   // the result's working rows (Works / Slow)
     int agoMin = 0;                  // minutes since that scan ended
+    bool partial = false;            // a stopped scan's result (no complete one of the scope was fresh)
 };
 
 struct ScanView {
@@ -509,6 +512,13 @@ struct ScanView {
     // view.slots: this network's results a scope choice shows without a scan (ScanMachine::slotFresh), newest first;
     // the country choice says «M доступно · K мин назад» on their rows and opens them as they are
     QList<ScanSlotView> scopeSlots;
+    // The rows the list shows as available in the shown scope (owner 24.11, the number in the rings): working rows,
+    // fresh or cached, a tapped row while it connects and the proven live connection of that scope; never a
+    // «Не удалось» / «Не проверено» row (view.available). One count for the page and any other reader.
+    int availableCount = 0;
+    // The shown result was cut short by «Остановить» (view.partial): its rows are what the scan found before the stop
+    // - on the screen right after the stop and whenever that stored result is shown again.
+    bool partial = false;
 };
 
 // PathOutcomeItem.probe / DoctorScanRow.probe of a probe kind.
@@ -626,6 +636,16 @@ inline QString scanScopeOf(const QString &raw)
 // A row of a result belongs to a scope: "" = every row, "whitelist" = a row without a country, else its country. The
 // live tunnel is probed in every scope and saved in that scope's result: it never counts for another country (review
 // round 36, F2).
+// A row the list shows as available (view.available): a proven working row - fresh or cached, a tapped row while it
+// connects, the proven live connection; never «Не удалось» (a failed probe or tap) nor «Не проверено».
+inline bool scanRowShownAvailable(const ScanRowView &r)
+{
+    if (r.unavailable || !r.verified)
+        return false;
+    return r.state == ScanRowState::Works || r.state == ScanRowState::Slow || r.state == ScanRowState::Connecting
+           || r.state == ScanRowState::Connected;
+}
+
 inline bool scanRowInScope(const QString &countryCode, const QString &scope)
 {
     if (scope.isEmpty())
@@ -651,6 +671,7 @@ public:
         now = clock(now);
         ScanStep s;
         m_screenOpen = true;
+        m_scopeRefused = false; // a page that opens chooses its scope again
         m_listRebuild = true; // the page opens: its list is built from empty (syncList)
         m_connectOnOpen = o.connectOnOpen;
         m_net.radio = o.network.radio; // display only, never part of the identity
@@ -696,6 +717,7 @@ public:
         now = clock(now);
         ScanStep s;
         m_screenOpen = true;
+        m_scopeRefused = false; // a page that opens chooses its scope again
         m_listRebuild = true; // the page opens: its list is built from empty (syncList)
         m_connectOnOpen = o.connectOnOpen;
         m_net.radio = o.network.radio; // display only, never part of the identity
@@ -738,6 +760,7 @@ public:
         now = clock(now);
         ScanStep s;
         if ((m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data) && foundBesidesLive()) {
+            m_userStopped = true; // the result is partial (finishImpl): marked wherever it is shown or stored
             stopStage2(now, QStringLiteral("cancel"), s);
         } else if (scanPhaseScanning(m_phase)) {
             cancelScan(now, s);
@@ -752,8 +775,8 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!scanPhaseScanning(m_phase) && now >= m_cooldownUntil && now >= m_lastManifestAt + kScanManifestBackoffMs
-            && !budgetBlocked(now).hourly) {
+        if (!scanPhaseScanning(m_phase) && !m_scopeRefused && now >= m_cooldownUntil
+            && now >= m_lastManifestAt + kScanManifestBackoffMs && !budgetBlocked(now).hourly) {
             m_tapScan = true;
             beginScan(now, s);
             m_tapScan = false;
@@ -767,7 +790,7 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!scanPhaseScanning(m_phase) && m_caps.needsVpn && !m_current.working() && now >= m_cooldownUntil
+        if (!scanPhaseScanning(m_phase) && !m_scopeRefused && m_caps.needsVpn && !m_current.working() && now >= m_cooldownUntil
             && now >= m_lastManifestAt + kScanManifestBackoffMs && !budgetBlocked(now).hourly) {
             m_tapScan = true;
             beginScan(now, s, true);
@@ -839,6 +862,9 @@ public:
                 inPool = inPool || c.countryCode == scope;
             if (inPool || present)
                 m_scope = scope;
+            // review F2 (24.11): a scope the machine cannot take (not in the pool, no such rows) leaves the old one -
+            // and the next «Сканировать» must not scan that old scope for a caller who asked for another
+            m_scopeRefused = m_scope != scope;
             if (m_scope != scopeBefore) {
                 // A result is shown only for the scope it covered: the new scope shows its own slot, else nothing.
                 if (!m_completed)
@@ -863,7 +889,10 @@ public:
         ScanStep s;
         const QString scope = scanScopeOf(cc);
         if (!scanPhaseScanning(m_phase) && slotShown(scope, now)) {
-            const bool onScreen = m_completed && m_phase == ScanPhase::Done && m_scannedScope == scope;
+            m_scopeRefused = false;
+            // the finished result on the screen is this slot only when it is the stored one (a stopped scan that left
+            // the scope's complete result stored is not: the stored one is shown)
+            const bool onScreen = m_completed && m_resultStored && m_phase == ScanPhase::Done && m_scannedScope == scope;
             m_scope = scope;
             m_filter.clear();
             if (!onScreen) {
@@ -1558,10 +1587,18 @@ public:
             if (e.id == id && e.row.tappable)
                 found = true;
         const bool currentRow = m_current.working() && m_current.nodeId == id;
-        if (!found || !m_connectingId.isEmpty() || currentRow || m_tapFailed.contains(id)) {
+        if (!found || id == m_connectingId || currentRow || m_tapFailed.contains(id)) {
             finishStep(s, now);
             return s;
         }
+        // Device round on the iPhone (24.11): a second row tapped while the first still connects was dropped. The server
+        // list's rule holds here too - the newest pick wins (PageServersTribe -> PageStart.onPickNode ->
+        // AvpnEngineQml::pinAndReconnect, no guard while a connect runs): the older row's request ends WITHOUT a verdict
+        // (never «Не удалось», no outcome for it - the engine keeps its result off the new row by the row's intent epoch,
+        // AvpnEngineQml::connectToNode), what its chain already proved goes out, and the new row connects.
+        const QString superseded = m_connectingId;
+        if (!superseded.isEmpty())
+            endChain(s, false);
         m_connectingId = id; // before the finish below: the tapped row is kept whatever its age
         if (scanPhaseScanning(m_phase)) {
             // The tap stops the scan at once and keeps what it found (artboard `connect`).
@@ -1583,7 +1620,8 @@ public:
         QStringList order;
         for (int k = 1; k < m_list.size(); ++k) {
             const ScanRowView &r = m_list.at((at + k) % m_list.size()).row;
-            if (r.id == id || m_tapFailed.contains(r.id) || r.unavailable || (m_current.working() && r.id == m_current.nodeId))
+            if (r.id == id || r.id == superseded || m_tapFailed.contains(r.id) || r.unavailable
+                || (m_current.working() && r.id == m_current.nodeId))
                 continue;
             order << r.id;
         }
@@ -1606,7 +1644,7 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!m_connectingId.isEmpty()) {
+        if (ofRunningChain(nodeId)) {
             m_tapFailed.insert(nodeId);
             addChainOutcome(nodeId, ScanClass::NoData);
             QString next;
@@ -1633,7 +1671,7 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!m_connectingId.isEmpty()) {
+        if (ofRunningChain(nodeId)) {
             m_tapFailed.insert(nodeId.isEmpty() ? m_connectingId : nodeId);
             addChainOutcome(nodeId.isEmpty() ? m_connectingId : nodeId, ScanClass::NoData);
             endChain(s, true);
@@ -1662,6 +1700,13 @@ public:
         }
         finishStep(s, now);
         return s;
+    }
+
+    // A failure the engine reports belongs to the running chain only when it names the chain's row or one of its
+    // attempt order ("" = the chain's own): the late failure of a row a newer tap superseded fails nothing.
+    bool ofRunningChain(const QString &nodeId) const
+    {
+        return !m_connectingId.isEmpty() && (nodeId.isEmpty() || nodeId == m_connectingId || m_chainOrder.contains(nodeId));
     }
 
     // The engine's attempt ended in an error (engine Error) while a tap's chain ran.
@@ -1724,6 +1769,7 @@ public:
             sv.scope = scanScopeOf(c.scope);
             sv.works = slotWorks(c);
             sv.agoMin = int(qMax<qint64>(0, now - c.savedAtMs) / 60000);
+            sv.partial = c.partial;
             v.scopeSlots << sv;
         }
         v.bar.scopeCountries = scopeList();
@@ -1742,6 +1788,8 @@ public:
         if (m_phase == ScanPhase::Empty)
             v.empty.scopeCc = m_scannedScope;
         for (const ScanRowView &r : v.rows) {
+            if (scanRowShownAvailable(r) && (!r.current || scanRowInScope(r.countryCode, m_listScope)))
+                ++v.availableCount; // the rings' number: what the list shows as available, cached rows too
             if (r.unavailable)
                 continue; // failed now: on the screen, never counted
             if (r.verified && !r.fromCache)
@@ -1749,6 +1797,12 @@ public:
             else if (!r.verified && !r.current)
                 ++v.unverifiedCount; // the unproven live row is neither (F2)
         }
+        // a stopped scan's result: the finished one on the screen, or the stored one shown as the cache
+        if (!v.scanning && m_completed)
+            v.partial = m_resultPartial;
+        else if (!v.scanning && listCache)
+            if (const ScanCachedResult *c = slotShown(m_cachedScope, now))
+                v.partial = c->partial;
         // The bar's country figures count the result (every country of it, whatever the list's scope).
         const QList<ScanRowView> all = resultRows(now);
         QString filter;
@@ -2586,6 +2640,8 @@ private:
         m_accessStamp.clear();
         m_exclusionDone = false;
         m_exclusionWhy.clear();
+        m_stopReason.clear(); // this scan's own reason (a Stop's "cancel" never leaks into the next summary)
+        m_userStopped = false;
         m_seatsRequested = 0;
         m_exclusionRows = 0;
         // The manual cooldown is armed only once this scan reaches a host or sends the live probe
@@ -3624,6 +3680,7 @@ private:
             m_emptyReason = QStringLiteral("connect_failed");
         m_finishedAt = now;
         m_completed = true;
+        m_resultPartial = m_userStopped;
         m_startedVpn = false;
         // «Найти ещё»: this network's judged ids grow; more is available while a planned candidate has no verdict
         // (the stop came first or it stayed «Не проверено»).
@@ -3650,13 +3707,12 @@ private:
         // the cache would not keep.
         if (working + m_t.listTargetWorks > kScanCacheRowsMax)
             m_moreAvailable = false;
-        ScanCachedResult cache = buildCache(rows, now);
-        if (!connectStep)
-            recordSummary(rows, now);
         if (!connectStep) {
-            ScanAction p = act(ScanActionKind::PersistResults, cache.networkKey);
-            p.cached = cache;
-            s.actions << p;
+            recordSummary(rows, now);
+            persistResult(rows, now, s);
+        } else {
+            buildCache(rows, now); // the scope's slot as before; nothing stored
+            m_resultStored = true;
         }
         recordScanEnd(now, s);
         // no «Найдено N …» shade: the rings say the count in their core (owner 24.11, one screen)
@@ -3879,9 +3935,7 @@ private:
         } else if (m_phase == ScanPhase::Done || m_phase == ScanPhase::Empty) {
             if (m_phase == ScanPhase::Empty && !resultRows(now).isEmpty())
                 m_phase = ScanPhase::Done;
-            ScanAction p = act(ScanActionKind::PersistResults, m_scanNet.key);
-            p.cached = buildCache(resultRows(now), now);
-            s.actions << p;
+            persistResult(resultRows(now), now, s);
             // The summary of the finished scan gets the proven rows (its other figures stay as they were).
             if (!m_summary.isEmpty() && m_exclusionRows > 0) {
                 const QJsonObject fresh = buildSummary(resultRows(now), m_finishedAt);
@@ -3891,7 +3945,29 @@ private:
         }
     }
 
+    // The finished result into its scope's slot and the store (PersistResults). A stopped scan (owner 24.11: Stop keeps
+    // what was found) is honest about it: stored marked partial, and never over a COMPLETE fresh result of its scope -
+    // that one stays the stored result, and the stopped scan's proven rows go out as evidence only (store false: the
+    // path ledger's probe proofs, nothing written; TribeScanner::persistCache).
+    void persistResult(const QList<ScanRowView> &rows, qint64 now, ScanStep &s)
+    {
+        const ScanCachedResult *had = slotShown(m_scannedScope, now);
+        m_resultStored = !(m_resultPartial && had && !had->partial);
+        ScanAction p = act(ScanActionKind::PersistResults, m_scanNet.key);
+        p.cached = m_resultStored ? buildCache(rows, now) : cacheOf(rows, now);
+        p.storeResult = m_resultStored;
+        s.actions << p;
+    }
+
     ScanCachedResult buildCache(const QList<ScanRowView> &rows, qint64 now)
+    {
+        ScanCachedResult cache = cacheOf(rows, now);
+        addSlot(cache, now);
+        return cache;
+    }
+
+    // The finished result as a cached result (its proven rows, this scan's failures, the partial mark), no slot.
+    ScanCachedResult cacheOf(const QList<ScanRowView> &rows, qint64 now) const
     {
         ScanCachedResult cache;
         cache.networkKey = m_scanNet.key;
@@ -3924,7 +4000,7 @@ private:
                 cache.rows << cr;
         }
         cache.failures = m_failuresThisScan;
-        addSlot(cache, now);
+        cache.partial = m_resultPartial;
         return cache;
     }
 
@@ -4560,6 +4636,10 @@ private:
     bool m_startedVpn = false;
     bool m_checkAfterScan = false;
     QString m_stopReason;
+    bool m_userStopped = false;   // «Остановить» ended this scan keeping what it found (stopTapped)
+    bool m_scopeRefused = false;  // the last scope choice was refused: no scan until a choice is taken (review F2)
+    bool m_resultPartial = false; // the finished result on the screen is a stopped scan's (view.partial)
+    bool m_resultStored = true;   // ... and it is the stored result of its scope (persistResult)
     QString m_emptyReason;
     QString m_noScanReason;
     ScanOutcomeCollector m_outcomes;
@@ -4688,6 +4768,8 @@ inline QJsonObject scanActionToJson(const ScanAction &a)
     }
     case ScanActionKind::PersistResults:
         o.insert(QStringLiteral("cached"), scanCachedResultToJson(a.cached));
+        if (!a.storeResult)
+            o.insert(QStringLiteral("store"), false);
         break;
     case ScanActionKind::PersistBudget:
         o.insert(QStringLiteral("ledger"), a.ledger);
@@ -4763,6 +4845,9 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     o.insert(QStringLiteral("list_build"), double(v.listBuild));
     o.insert(QStringLiteral("verified"), v.verifiedCount);
     o.insert(QStringLiteral("unverified"), v.unverifiedCount);
+    o.insert(QStringLiteral("available"), v.availableCount);
+    if (v.partial)
+        o.insert(QStringLiteral("partial"), true);
     o.insert(QStringLiteral("more_available"), v.moreAvailable);
     o.insert(QStringLiteral("batch"), v.batch);
     o.insert(QStringLiteral("more_country"), v.moreCountry);
@@ -4780,9 +4865,13 @@ inline QJsonObject scanViewToJson(const ScanView &v)
         o.insert(QStringLiteral("net_radio"), v.netRadio);
     if (!v.scopeSlots.isEmpty()) {
         QJsonArray slotsJ;
-        for (const ScanSlotView &sv : v.scopeSlots)
-            slotsJ << QJsonObject{{QStringLiteral("scope"), sv.scope}, {QStringLiteral("works"), sv.works},
-                                  {QStringLiteral("ago_min"), sv.agoMin}};
+        for (const ScanSlotView &sv : v.scopeSlots) {
+            QJsonObject so{{QStringLiteral("scope"), sv.scope}, {QStringLiteral("works"), sv.works},
+                           {QStringLiteral("ago_min"), sv.agoMin}};
+            if (sv.partial)
+                so.insert(QStringLiteral("partial"), true);
+            slotsJ << so;
+        }
         o.insert(QStringLiteral("slots"), slotsJ);
     }
     QJsonObject bar;
