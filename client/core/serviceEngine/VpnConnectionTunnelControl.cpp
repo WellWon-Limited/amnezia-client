@@ -172,6 +172,13 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     connect(IosController::Instance(), &IosController::handshakeChanged, this,
             [this](qint64 hsEpochSec) { updateHandshakeEpoch(m_stats, hsEpochSec); },
             Qt::QueuedConnection);
+#if defined(Q_OS_IOS)
+    // AVPN (awg-apple tribe.16, device round 24.11 B1): the extension's own "no data for N s" (-1 = unknown). iOS only:
+    // the macOS NE build keeps the behaviour of build 141 (its probe rule never sees the field).
+    connect(IosController::Instance(), &IosController::dataQuietChanged, this,
+            [this](qint64 seconds) { m_stats.dataQuietSec = seconds; },
+            Qt::QueuedConnection);
+#endif
     // AVPN (девайс-разбор 2026-09-02): ядро Xray не поднялось в NE — текст причины наружу
     // (лог + последний отчёт о конфигурации, который уходит в диагностику). Раньше отказ был
     // безымянным, и «вечное подключение» нечем было объяснить.
