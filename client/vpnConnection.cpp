@@ -40,6 +40,60 @@
 
 using namespace ProtocolUtils;
 
+#ifdef AMNEZIA_DESKTOP
+namespace {
+// AVPN (round mac-B, test Mac 25.11.2026: three crashes, SIGSEGV at 0x30 in QMetaObject::activate under
+// QIODevice::channelReadyRead of a socket on this thread). VpnConnection::setConnectionState runs INSIDE the protocol's
+// callback - for AmneziaWG inside LocalSocketController::readData, the readyRead of the daemon socket. Upstream waited
+// for the service's replies there (QRemoteObjectPendingReply::waitForFinished = a nested event loop on this thread),
+// and that loop ran the queued disconnectFromVpn / connectToVpn of the next step: the protocol, its controller and the
+// daemon socket were deleted while the socket was still emitting readyRead (app log: «Connected» -> «Deactivating»
+// 4 ms later inside the wait -> the last line «Successfully flushed DNS» -> the crash). The rule: no event loop is
+// ever spun inside a protocol's callback, so a protocol is destroyed only by a command event of its own
+// (connectToVpn / disconnectFromVpn), never under its own stack. The requests go out in the same order as before
+// (the service handles them in order); only their results are logged when they come.
+// macOS only (the platform where it was measured); the other desktops keep upstream's waits.
+void logIpcResult(QObject *ctx, QRemoteObjectPendingReply<bool> reply, const char *ok, const char *failed)
+{
+#ifdef Q_OS_MACOS
+    auto *watcher = new QRemoteObjectPendingCallWatcher(reply, ctx);
+    QObject::connect(watcher, &QRemoteObjectPendingCallWatcher::finished, ctx,
+                     [ok, failed](QRemoteObjectPendingCallWatcher *call) {
+                         if (call->error() == QRemoteObjectPendingCall::NoError && call->returnValue().toBool())
+                             qDebug() << ok;
+                         else
+                             qWarning() << failed;
+                         call->deleteLater();
+                     });
+#else
+    Q_UNUSED(ctx)
+    if (reply.waitForFinished() && reply.returnValue())
+        qDebug() << ok;
+    else
+        qWarning() << failed;
+#endif
+}
+
+// The service's interface for the protocol callbacks. macOS: as it is now, never waited for (waitForSource spins an
+// event loop while the service restarts - the same door); a service that is not up gets nothing, as after upstream's
+// 1 s wait. Other desktops: upstream's IpcClient::withInterface.
+template <typename Func>
+void withInterfaceNow(Func func)
+{
+#ifdef Q_OS_MACOS
+    const QSharedPointer<IpcInterfaceReplica> iface = IpcClient::Interface();
+    if (iface.isNull() || !iface->isReplicaValid()) {
+        qWarning() << "VpnConnection::onConnectionStateChanged: the service is not running - nothing sent";
+        return;
+    }
+    func(iface);
+#else
+    IpcClient::withInterface(func);
+#endif
+}
+} // namespace
+#endif
+
 VpnConnection::VpnConnection(SecureServersRepository* serversRepository, SecureAppSettingsRepository* appSettingsRepository, QObject *parent)
     : QObject(parent),
       m_serversRepository(serversRepository),
@@ -137,16 +191,14 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
         container = m_connectContainer;
 #endif
 
-    IpcClient::withInterface([&](QSharedPointer<IpcInterfaceReplica> iface) {
+    // AVPN (round mac-B): this runs inside the protocol's callback - no event loop here (logIpcResult, withInterfaceNow)
+    withInterfaceNow([&](QSharedPointer<IpcInterfaceReplica> iface) {
         switch (state) {
             case Vpn::ConnectionState::Connected: {
                 iface->resetIpStack();
 
-                auto flushDns = iface->flushDns();
-                if (flushDns.waitForFinished() && flushDns.returnValue())
-                    qDebug() << "VpnConnection::onConnectionStateChanged: Successfully flushed DNS";
-                else
-                    qWarning() << "VpnConnection::onConnectionStateChanged: Failed to flush DNS";
+                logIpcResult(this, iface->flushDns(), "VpnConnection::onConnectionStateChanged: Successfully flushed DNS",
+                             "VpnConnection::onConnectionStateChanged: Failed to flush DNS");
 
                 if (!ContainerUtils::isAwgContainer(container) && container != DockerContainer::WireGuard) {
                     QString dns1 = m_vpnConfiguration.value(configKey::dns1).toString();
@@ -181,17 +233,11 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
             } break;
             case Vpn::ConnectionState::Disconnected:
             case Vpn::ConnectionState::Error: {
-                auto flushDns = iface->flushDns();
-                if (flushDns.waitForFinished() && flushDns.returnValue())
-                    qDebug() << "VpnConnection::onConnectionStateChanged: Successfully flushed DNS";
-                else
-                    qWarning() << "VpnConnection::onConnectionStateChanged: Failed to flush DNS";
-
-                auto clearSavedRoutes = iface->clearSavedRoutes();
-                if (clearSavedRoutes.waitForFinished() && clearSavedRoutes.returnValue())
-                    qDebug() << "VpnConnection::onConnectionStateChanged: Successfully cleared saved routes";
-                else
-                    qWarning() << "VpnConnection::onConnectionStateChanged: Failed to clear saved routes";
+                logIpcResult(this, iface->flushDns(), "VpnConnection::onConnectionStateChanged: Successfully flushed DNS",
+                             "VpnConnection::onConnectionStateChanged: Failed to flush DNS");
+                logIpcResult(this, iface->clearSavedRoutes(),
+                             "VpnConnection::onConnectionStateChanged: Successfully cleared saved routes",
+                             "VpnConnection::onConnectionStateChanged: Failed to clear saved routes");
             } break;
             default:
                 break;
