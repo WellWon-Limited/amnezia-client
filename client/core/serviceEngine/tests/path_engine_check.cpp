@@ -1448,6 +1448,94 @@ static void scenarioIosStopDuringStart()
         s.run([&s] { return !s.results.isEmpty(); }, 30000);
         CHECK(!s.results.isEmpty() && s.reports.isEmpty() && s.ledger.size() == 0);
     }
+    // 4. (review R43 F5) A start parked a second time (the profile torn down again during its save): the clock stands
+    //    again, and the 20 s local bound counts both parks together - a second park never buys a fresh 20 s.
+    {
+        const AttemptTimings t;
+        World w;
+        w.set(k, a1.id.id, Behaviour::noHandshake());
+        Sim s({ a1 }, w, home);
+        s.deliver(AttemptEvent::userStart(s.now, UserChoice::exactPath(a1.id.id), TransportMode::Auto, s.tracker.current()));
+        const PathStamp leg = s.owner.currentLeg();
+        s.deliver(AttemptEvent::localBuild(s.now, leg, true));
+        s.at(15000, [&s, leg] { s.deliver(AttemptEvent::localBuild(s.now, leg, false)); }); // goes out after 15 s
+        s.at(15500, [&s, leg] { s.deliver(AttemptEvent::localBuild(s.now, leg, true)); }); // parked again 0.5 s later
+        s.run([&s] { return !s.results.isEmpty(); }, 60000);
+        CHECK(s.localOverruns == 1 && s.reports.isEmpty() && s.ledger.size() == 0);
+        // overrun when both parks reach the bound: 15 s + 5 s = 20.5 s from the tap, not 15.5 s + 20 s
+        CHECK(s.now <= 15500 + (t.localBuildMs - 15000) + t.stopConfirmMs + 600 && s.now >= 15500 + (t.localBuildMs - 15000));
+        CHECK(!s.results.isEmpty() && s.results.last().elapsedMs < 15500 + 20000);
+    }
+}
+
+// Android (review R43): the local phase and the invariant of AttemptOwner::report() as Android uses them - the service
+// reports its builds, the leg is local from its start command until its own "built" (setLocalBuildReported). Every
+// outcome below is the one of the build before the invariant (the 71 scenario rows of this file, the Android ones
+// included, are byte-identical to the base): no Android path delivers a no_handshake while a leg is local - its local
+// outcomes are LocalBuildOverrun and NotStarted (Inconclusive) - so the invariant changes no Android outcome. What
+// changes for Android (R43 F5, ServiceEngine::onLocalBuild): a "building" of the same leg after its "built" (the
+// service rebuilding that start) opens a second local phase instead of being ignored, and the local bound counts all
+// phases of a leg together.
+static void scenarioAndroidLocalPhaseUnchanged()
+{
+    const NetworkObservation home = wifi("192.168.26.1");
+    const QString k = key(home);
+    const AttemptTimings t;
+    const PathCandidate n16 = awg("n16", "RS"), n17 = awg("n17", "EE", false, 0.9);
+    const auto noHandshakes = [](const Sim &s) {
+        int n = 0;
+        for (const OutcomeReport &rep : s.reports)
+            n += rep.outcome == PathOutcome::NoHandshake ? 1 : 0;
+        return n;
+    };
+    {   // a server that does not answer after its own "built": still judged no_handshake (nothing is hidden)
+        World w;
+        w.set(k, n17.id.id, Behaviour::works(700, 400, 100));
+        Sim s({ n16, n17 }, w, home);
+        s.owner.setLocalBuildReported(true);
+        s.buildMs = 2000;
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("Android: built 2 s, n16 dead (judged)", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("n17") && noHandshakes(s) == 1);
+        CHECK(stateOf(s, n16) == PathState::Suspect && s.legs[1].startedMs >= 2000 + t.awgStartMs);
+    }
+    {   // a build that never ends, then a fast one: a local outcome, nothing recorded for the first server
+        World w;
+        w.set(k, n16.id.id, Behaviour::works(700, 400, 100));
+        w.set(k, n17.id.id, Behaviour::works(700, 400, 100));
+        Sim s({ n16, n17 }, w, home);
+        s.owner.setLocalBuildReported(true);
+        s.buildMs = 300;
+        s.buildMsFor.insert(n16.id.id, Sim::kBuildNever);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("Android: n16 never built, n17 built", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("n17") && s.localOverruns == 1 && noHandshakes(s) == 0);
+        CHECK(stateOf(s, n16) == PathState::Unknown);
+    }
+    {   // the service takes the start late (queued behind an earlier build): local until its own "built", then judged
+        World w;
+        Sim s({ n16 }, w, home);
+        s.owner.setLocalBuildReported(true);
+        s.buildMs = 300;
+        s.buildReachMs = 7900;
+        const AttemptResult r = s.tap(UserChoice::exactPath(n16.id.id));
+        row("Android: start taken after 7.9 s, dead", s, r, 0);
+        CHECK(!r.connected && noHandshakes(s) == 1 && s.localOverruns == 0);
+        CHECK(s.reports.size() == 1 && s.reports[0].outcome == PathOutcome::NoHandshake);
+    }
+    {   // what changes (F5): a second build of the same leg after its "built" is local again, bounded with the first
+        World w;
+        Sim s({ n16 }, w, home);
+        s.owner.setLocalBuildReported(true);
+        s.deliver(AttemptEvent::userStart(s.now, UserChoice::exactPath(n16.id.id), TransportMode::Auto, s.tracker.current()));
+        const PathStamp leg = s.owner.currentLeg();
+        s.at(100, [&s, leg] { s.deliver(AttemptEvent::localBuild(s.now, leg, true)); });
+        s.at(8000, [&s, leg] { s.deliver(AttemptEvent::localBuild(s.now, leg, false)); });
+        s.at(9000, [&s, leg] { s.deliver(AttemptEvent::localBuild(s.now, leg, true)); }); // the service builds it again
+        s.run([&s] { return !s.results.isEmpty(); }, 60000);
+        CHECK(noHandshakes(s) == 0 && s.localOverruns == 1);                       // never judged during either build
+        CHECK(!s.results.isEmpty() && s.results.last().elapsedMs <= t.localBuildMs + 1000 + t.stopConfirmMs + 600);
+    }
 }
 
 static void scenarioPreference()
@@ -2808,6 +2896,7 @@ int main()
     scenarioLocalBuildQueued();
     scenarioTraceAirB2411();
     scenarioIosStopDuringStart();
+    scenarioAndroidLocalPhaseUnchanged();
     scenarioPreference();
     scenarioModeBeatsPreference();
     scenarioRevision();

@@ -1299,6 +1299,47 @@ int main(int argc, char **argv)
             CHECK(!journalLineHas(r.journal, "path_outcome", "node=16", "no_handshake"));
         }
     }
+    // Review R43 F5 (iOS): the same start parked a second time - the old session went down ("goes out"), then during
+    // the start's save the profile was started and torn down again in iOS Settings and the start is parked again. The
+    // second park is a second local phase of the same leg: its clock stands again (no no_handshake for a start that was
+    // never sent), and the 20 s local bound counts both parks.
+    {
+        using LB = ServiceEngine::LocalBuildReport;
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        const quint64 leg = r.tun.nativeLegSeen();
+        r.eng.onLocalBuild(LB::Building, leg); // parked
+        r.pass(1000);
+        r.eng.onLocalBuild(LB::Built, leg);    // goes out
+        r.pass(500);
+        r.eng.onLocalBuild(LB::Building, leg); // parked again, the same leg
+        r.pass(6000);                          // past 17's 4.5 s start deadline
+        CHECK(r.tun.downs == 0 && r.eng.attemptRunning() && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+        CHECK(journalHas(r.journal, "leg_build again leg="));
+        r.eng.onLocalBuild(LB::Building, leg); // a repeat while parked changes nothing
+        r.eng.onLocalBuild(LB::Built, leg);
+        r.up();
+        CHECK(r.eng.verifySucceeded(300));
+        const path::AttemptResult res = r.result();
+        CHECK(res.connected && res.path.id.id == QLatin1String("17"));
+        CHECK(!journalLineHas(r.journal, "path_outcome", "node=17", "no_handshake"));
+
+        // both parks together reach the local bound: 12 s + 8.5 s > 20 s - a local outcome, nothing recorded
+        Rig b(pool);
+        CHECK(b.eng.connect(err) && b.last() == QLatin1String("17"));
+        const quint64 leg2 = b.tun.nativeLegSeen();
+        b.eng.onLocalBuild(LB::Building, leg2);
+        b.pass(12000);
+        b.eng.onLocalBuild(LB::Built, leg2);
+        b.pass(500);
+        b.eng.onLocalBuild(LB::Building, leg2);
+        b.pass(7500); // 19.5 s local in total: still parked
+        CHECK(b.tun.downs == 0);
+        b.pass(1000); // 20.5 s
+        CHECK(b.tun.downs == 1 && journalHas(b.journal, "leg_local_build_overrun leg="));
+        CHECK(b.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+    }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
 }
