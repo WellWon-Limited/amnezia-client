@@ -72,8 +72,39 @@ private:
     static int execute(const QString &command, bool ignoreErrors = false);
     static bool isPFEnabled();
     static bool isRootAnchorLoaded();
+    // AVPN (pf state ownership, macospfanchors.h): replace an anchor's rules with its bundled file
+    // (one pfctl -f: atomic, no flush in between); for anchors without a table.
+    static void reloadAnchor(const QString &anchor);
+    // AVPN: flush the rules and tables of the given sub-anchors (one shell, one pfctl per anchor).
+    static void flushAnchors(const QStringList &anchors);
+    // AVPN: 200.allowVPN of a session: only its own tun; an unknown tun gets the static file, written
+    // explicitly (never the rule an earlier session left in the kernel).
+    static void setTunnelPass(const QString &tunnelIfname);
 
 public:
+    // AVPN (pf state ownership): the command seam of the host check
+    // (client/core/serviceEngine/tests/mac_pf_session_check.cpp). nullptr (the default) = every command
+    // runs in /bin/bash, as upstream. The runner returns the command's exit code.
+    using CommandRunner = int (*)(const QString &command);
+    static void setCommandRunner(CommandRunner runner);
+
+    // AVPN (pf state ownership, 2026-11-24): the kill switch of one tunnel session writes every tribe/*
+    // anchor it uses here, so nothing of an earlier session is inherited (macospfanchors.h). Called by the
+    // AmneziaWG kill switch (WireguardUtilsMacos::applyFirewallRules, tunnel = its utun, allowPIA off) and
+    // the service-routed one of Xray / OpenVPN (KillSwitch::enableKillSwitch, tunnel = the tun the session
+    // brought up with IpcServer::createTun, empty when the service does not know it; allowPIA on).
+    // Uses blockAll, allowNets + allowAddrs, blockNets + blockAddrs, dnsServers and allowPIA of params.
+    static void applySessionRules(const FirewallParams &params, const QString &tunnelIfname);
+    // AVPN: the strict kill switch with NO tunnel session: installs our pf if needed, reloads the block
+    // anchors from their files and flushes every other anchor except the scan's (KillSwitch: a stop with
+    // strict on, the service start with strict on, strict turned on with no session).
+    static void applyStrictBlock();
+    // AVPN: strict turned on while a tunnel session is up (KillSwitch::disableAllTraffic): the session's own
+    // anchors stay, the block anchors are switched on (load-if-empty, as upstream disableAllTraffic) and
+    // outlive the session (its stop applies applyStrictBlock). Nothing when our pf is not in force (another
+    // program flushed it): installing now would flush the live session's anchors and cut its tunnel.
+    static void addBlockToSession();
+
     static void install();
     static void uninstall();
     static bool isInstalled();

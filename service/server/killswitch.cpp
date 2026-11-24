@@ -135,17 +135,13 @@ bool KillSwitch::disableKillSwitch() {
 #endif
 
 #ifdef Q_OS_MACOS
+    // AVPN (pf state ownership, macospfanchors.h): a stop ends the kill-switch session and leaves no session
+    // pf state. Strict: the block stays and every anchor of the session is flushed; otherwise every tribe/*
+    // anchor is flushed. The session's tun goes with it (killswitch.h).
+    m_sessionOpen = false;
+    m_createdTun.clear();
     if (isStrictKillSwitchEnabled()) {
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), true);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("400.allowPIA"), false);
+        MacOSFirewall::applyStrictBlock();
     } else {
         MacOSFirewall::uninstall();
     }
@@ -176,14 +172,14 @@ bool KillSwitch::disableAllTraffic() {
     LinuxFirewall::setAnchorEnabled(LinuxFirewall::IPv6, QStringLiteral("250.blockIPv6"), true);
 #endif
 #ifdef Q_OS_MACOS
-    // double-check + ensure our firewall is installed and enabled. This is necessary as
-    // other software may disable pfctl before re-enabling with their own rules (e.g other VPNs)
-    if (!MacOSFirewall::isInstalled())
-        MacOSFirewall::install();
-    MacOSFirewall::ensureRootAnchorPriority();
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
+    // AVPN (pf state ownership): callers - KillSwitch::init (the service start with strict on: never a
+    // session), refresh(true) (strict turned on), the IPC slot. A tunnel session up: its own anchors stay and
+    // the block is added; it outlives the session (its stop applies the strict block). No session: the block
+    // alone, which also flushes what a previous session or service process left.
+    if (m_sessionOpen)
+        MacOSFirewall::addBlockToSession();
+    else
+        MacOSFirewall::applyStrictBlock();
 #endif
     m_allowedRanges.clear();
     return true;
@@ -403,24 +399,6 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
 #endif
 
 #ifdef Q_OS_MACOS
-    // double-check + ensure our firewall is installed and enabled. This is necessary as
-    // other software may disable pfctl before re-enabling with their own rules (e.g other VPNs)
-    if (!MacOSFirewall::isInstalled())
-        MacOSFirewall::install();
-
-    MacOSFirewall::ensureRootAnchorPriority();
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), blockAll);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), allowNets);
-    MacOSFirewall::setAnchorTable(QStringLiteral("110.allowNets"), allowNets, QStringLiteral("allownets"), allownets);
-
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), blockNets);
-    MacOSFirewall::setAnchorTable(QStringLiteral("120.blockNets"), blockNets, QStringLiteral("blocknets"), blocknets);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), true);
-
     QStringList dnsServers;
     if (!dns1.isEmpty())
         dnsServers.append(dns1);
@@ -429,12 +407,36 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
 
     dnsServers.append(allowedDnsServers);
 
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), true);
-    MacOSFirewall::setAnchorTable(QStringLiteral("310.blockDNS"), true, QStringLiteral("dnsaddr"), dnsServers);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("400.allowPIA"), true);
+    // AVPN (pf state ownership, macospfanchors.h): every tribe/* anchor of this session is written by one
+    // call; 200.allowVPN passes only the tun this session brought up (IpcServer::createTun), never the
+    // rule an earlier (AmneziaWG) session left in the kernel. The service's own sockets pass by 400.allowPIA.
+    FirewallParams params {};
+    params.blockAll = blockAll;
+    params.allowNets = allowNets;
+    params.allowAddrs = allownets;
+    params.blockNets = blockNets;
+    params.blockAddrs = blocknets;
+    params.dnsServers = dnsServers;
+    params.allowPIA = true;
+    // The tun brought up for this session (IpcServer::createTun) is taken: it is this session's from here on.
+    const QString tunnel = m_createdTun;
+    m_createdTun.clear();
+    MacOSFirewall::applySessionRules(params, tunnel);
+    m_sessionOpen = true;
     // AVPN (diag): what the kill switch lets out - the server and the resolvers of this session.
     qDebug().noquote() << "[killswitch] split" << splitTunnelType << "allownets:" << allownets.join(QStringLiteral(", "))
                        << "| dnsaddr:" << dnsServers.join(QStringLiteral(", "));
 #endif
     return true;
 }
+
+#ifdef Q_OS_MACOS
+// AVPN (pf state ownership): the AmneziaWG kill switch of its own utun opens the session
+// (WireguardUtilsMacos::applyFirewallRules); a tun created for another session being built is not this one's.
+void KillSwitch::openTunnelSession(const FirewallParams &params, const QString &tunnelIfname)
+{
+    m_createdTun.clear();
+    MacOSFirewall::applySessionRules(params, tunnelIfname);
+    m_sessionOpen = true;
+}
+#endif

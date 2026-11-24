@@ -1568,7 +1568,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // AVPN (24.11.2026, cause F; SystemAwake.h): the observations of the system's sleep feed the one fact. The guard:
     // the observers outlive nothing they call - the engine lives to the app's end, and a late notice finds no engine.
     AvpnSystemSleep_install([guard = QPointer<AvpnEngineQml>(this)](avpn::SleepSignal s) {
-        if (guard)
+        if (!guard)
+            return;
+        if (s == avpn::SleepSignal::PersonInput)
+            guard->notePersonPresent(); // the one entry for "a person is here"
+        else
             guard->noteSleepSignal(s);
     });
 #endif
@@ -7117,7 +7121,11 @@ void AvpnEngineQml::onDaemonWakeup()
 {
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // The service's kIOMessageSystemHasPoweredOn - a full wake (a dark wake does not deliver it): a proof of "awake".
-    // When it is the awake edge, the edge's one evaluation probes the tunnel itself.
+    // When it is the awake edge, the edge's one evaluation decides everything (SystemAwake.h wakeEvaluation). When the
+    // fact is already awake (another proof of the same wake came first, or the app missed the "will sleep"), it means
+    // what it meant before the gate - a reason to check a live session - and goes through the same probe decision as
+    // every entry (SystemAwake.h wakeProbeDecision, in daemonWakeEvent): an attempt's check is left alone, a chain in
+    // flight is joined (review F2 of 558d79086).
     if (noteSleepSignal(avpn::SleepSignal::ServicePoweredOn))
         return;
 #endif
@@ -7129,7 +7137,9 @@ void AvpnEngineQml::daemonWakeEvent(const char *why)
 {
     // AVPN (24.11.2026, cause F): a BSSID change in a Power Nap dark wake (Wi-Fi associates for seconds with the lid
     // closed) is no reason to probe or restart: nothing passes there. Held; the awake edge looks at the network and the
-    // tunnel as they are then, once (leaveSystemSleep).
+    // tunnel as they are then, once (leaveSystemSleep). Not covered by the gate (by decision of the review of
+    // 558d79086): with features.wake_restart off the vanilla rep -> VpnConnection::reconnectToVpn subscriptions are not
+    // cut (hookDaemonWakeSignals returns early) and run in dark wakes as upstream does - "off" means upstream behaviour.
     if (heldBySystemSleep(avpn::SleepHeld::TunnelProbe))
         return;
     // Kill-switch мог флипнуться уже ПОСЛЕ среза ванильных подписок — честно возвращаем ваниль.
@@ -7138,14 +7148,17 @@ void AvpnEngineQml::daemonWakeEvent(const char *why)
         QMetaObject::invokeMethod(m_conn, &VpnConnection::reconnectToVpn, Qt::QueuedConnection);
         return;
     }
-    if (!m_wantConnected)
-        return;                                  // намерения нет — спека §2.1 шаг 1
-    if (m_lastTunnelState != Vpn::Connected)
-        return;                                  // туннель не поднят — рвать/чинить нечего
+    // The one decision of every entry into the wake probe (SystemAwake.h wakeProbeDecision): no intent - nothing to
+    // repair (спека §2.1 шаг 1); the tunnel not up or an attempt of the engine in flight - its own check decides;
+    // a chain already running - wakeup+networkChanged летят пачкой, одна проба.
+    const avpn::WakeProbe decision = avpn::wakeProbeDecision(m_wantConnected, m_lastTunnelState == Vpn::Connected,
+                                                             wakeProbeEngineLive(), m_wakeProbing);
+    if (decision == avpn::WakeProbe::None)
+        return;
     // Ночные дельты rx/tx не должны дать ложный onDead первым же health-tick (спека §2.2).
     m_engine.resetHealthSampling();
-    if (m_wakeProbing)
-        return;                                  // wakeup+networkChanged летят пачкой — одна проба
+    if (decision == avpn::WakeProbe::Joined)
+        return;
     m_wakeProbing = true;
     m_wakeProbeAttempt = 0;                      // новый цикл проб — счётчик повторов с нуля
     qInfo() << "[wake]" << why << "— probing tunnel liveness";
@@ -7158,7 +7171,7 @@ void AvpnEngineQml::wakeLivenessProbe(int epoch)
 {
     if (epoch != m_wakeProbeEpoch)
         return;                                  // the chain was ended (the system went to sleep meanwhile)
-    if (!m_wantConnected || m_lastTunnelState != Vpn::Connected) {
+    if (!avpn::liveSessionToProbe(m_wantConnected, m_lastTunnelState == Vpn::Connected, wakeProbeEngineLive())) {
         m_wakeProbing = false;                   // состояние уехало, пока ждали — не вмешиваемся
         m_wakeProbeAttempt = 0;
         return;
@@ -7183,7 +7196,7 @@ void AvpnEngineQml::wakeLivenessProbe(int epoch)
             qInfo() << "[wake] tunnel alive — nothing to do";
             return;
         }
-        if (!m_wantConnected || m_lastTunnelState != Vpn::Connected)
+        if (!avpn::liveSessionToProbe(m_wantConnected, m_lastTunnelState == Vpn::Connected, wakeProbeEngineLive()))
             return;                              // за время пробы состояние уехало
         // AVPN seamless roaming (§23.9): смена BSSID на mesh — секундный провал радио; одна
         // неудачная проба через 2.5 с = ещё не «мёртв». Повторяем пробу (кап
@@ -7234,6 +7247,18 @@ void AvpnEngineQml::wakeKick()
     // (спека §2.1 шаг 4). Это не авто-коннект §13 — операция началась с живого туннеля до сна.
     m_wantConnected = true;
     reconcile();
+}
+
+// The engine's input of the wake probe's decision (SystemAwake.h wakeProbeDecision). macOS desktop app: the engine holds
+// a live session - not an attempt in flight or its data check (review F2 of 558d79086). Windows / Linux: true - their
+// wake path keeps its rule from before the sleep gate (the platform's Connected only); nothing changes there.
+bool AvpnEngineQml::wakeProbeEngineLive() const
+{
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    return m_engine.state() == avpn::EngineState::Connected;
+#else
+    return true;
+#endif
 }
 
 #endif // AMNEZIA_DESKTOP && !MACOS_NE (wake-перехват)
@@ -7307,21 +7332,35 @@ void AvpnEngineQml::leaveSystemSleep()
     m_engine.resetHealthSampling(); // samples across the sleep say nothing
     syncAttempt();
     const avpn::WakeEvaluation e = avpn::wakeEvaluation(m_wantConnected, m_lastTunnelState == Vpn::Connected,
-                                                        m_engine.state() == avpn::EngineState::Connected);
-    reliabilityEvent(QStringLiteral("system_sleep asleep=0 why=%1 asleep_s=%2 held=%3 held_n=%4 probe=%5 net_gen=%6")
+                                                        wakeProbeEngineLive(), m_wakeProbing, m_wakeRestartPending);
+    reliabilityEvent(QStringLiteral("system_sleep asleep=0 why=%1 asleep_s=%2 held=%3 held_n=%4 probe=%5 "
+                                    "wake_restart=%6 net_gen=%7")
                          .arg(why).arg(asleepMs >= 0 ? asleepMs / 1000 : -1)
                          .arg(avpn::sleepHeldNames(m_systemAwake.heldMask())).arg(m_systemAwake.heldCount())
-                         .arg(int(e.probeTunnel)).arg(m_engine.network().generation));
+                         .arg(int(e.probeTunnel)).arg(int(e.resumeWakeRestart)).arg(m_engine.network().generation));
     qInfo().noquote() << "[sleep] full wake (" + why + ") - one look at the network and the tunnel";
-    // 3. One liveness probe of the live session (§18: alive - nothing; dead - a restart through reconcile).
+    // 3. A wake restart that waited for the network goes on once (its retry may have been held in a dark wake; it
+    //    restores the intent the failed restart dropped and decides its tries itself - review F1 of 558d79086).
+    if (e.resumeWakeRestart)
+        wakeKick();
+    // 4. One liveness probe of the live session (§18: alive - nothing; dead - a restart through reconcile).
     if (e.probeTunnel && avpn::TuningStore::flag(QStringLiteral("wake_restart")))
         daemonWakeEvent("awake");
-    // 4. The intent once: a start or a restart that was held.
+    // 5. The intent once: a start or a restart that was held.
     if (e.reconcile)
         QTimer::singleShot(0, this, [this]() { reconcile(); });
     emit changed();
 }
 #endif // Q_OS_MACOS && !MACOS_NE (the system's sleep)
+
+// AVPN (review F3 of 558d79086): the one entry for "a person is here" (see the header). The window's input reaches it
+// through AvpnSystemSleep.mm (spontaneous presses and keys only); a test command channel calls it itself.
+void AvpnEngineQml::notePersonPresent()
+{
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    noteSleepSignal(avpn::SleepSignal::PersonInput);
+#endif
+}
 
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
 // AVPN (BUG-6): путь к сокету демона — тот же, что у LocalSocketController (initializeInternal).
