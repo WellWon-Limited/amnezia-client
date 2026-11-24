@@ -2293,7 +2293,7 @@ static void lateGrantOwnership()
     struct Rig {
         LeaseEdge edge;
         LeaseEdge edge2; // the tunnel's API base (row S2)
-        QNetworkAccessManager nam;
+        avpn::TribeNetworkAccessManager nam; // the app's shared API manager (NetAwait.h)
         UpstreamLeaseClient client;
         UpstreamLeaseOwner owner;
         QElapsedTimer clock;
@@ -3017,7 +3017,7 @@ static void lateGrantOwnership()
             pump(10);
         CHECK(r.owner.provisionalPending() && r.edge.posts.size() == 1 && r.owner.seatDebts() == 0);
         r.client.tunnelStarted();
-        avpn::resetApiConnections(&r.nam, /*clearCache=*/true, /*abortInFlight=*/true); // Connected: the facade's transition reset
+        avpn::resetApiConnections(&r.nam); // Connected: the engine's transition reset (a new API generation)
         pump(200);
         CHECK(r.owner.seatDebts() == 1 && !r.owner.proofOwed(r.now())); // owed, but the start still runs: its confirmation may name the lease
         r.apply(r.owner.tunnelUp(r.now()));
@@ -3025,7 +3025,7 @@ static void lateGrantOwnership()
         CHECK(r.edge2.posts.size() == 1); // the seat confirmation, through the tunnel
         r.client.holdReleasesForStop();
         r.apply(r.owner.disconnect(r.now())); // the data check found no data: the attempt fails, the tunnel is stopped
-        avpn::resetApiConnections(&r.nam, true, true); // Disconnected: the reset again - the confirmation ends with no answer too
+        avpn::resetApiConnections(&r.nam); // Disconnected: the reset again - the confirmation ends with no answer too
         r.client.tunnelStopped();
         pump(300);
         CHECK(!r.owner.active() && r.edge.deletes.isEmpty() && r.owner.seatDebts() == 1 && r.owner.proofOwed(r.now()));

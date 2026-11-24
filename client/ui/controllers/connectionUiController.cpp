@@ -59,7 +59,11 @@ void ConnectionUiController::onConnectionStateChanged(Vpn::ConnectionState state
     m_connectionStateText = tr("Connecting...");
     switch (state) {
     case Vpn::ConnectionState::Connected: {
+#ifndef AVPN_ENGINE_ENABLED
         amnApp->networkManager()->clearConnectionCache();
+#endif
+        // AVPN (android5 H3): with the engine, its native-state handler alone renews the API connections on Connected
+        // (AvpnEngineQml::applyNativeState, NetAwait.h) - clearConnectionCache() here waited up to 5 s on this thread
 
         m_isConnectionInProgress = false;
         m_isConnected = true;

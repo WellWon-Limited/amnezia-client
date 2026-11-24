@@ -1,6 +1,7 @@
 #include "amneziaApplication.h"
 #ifdef AVPN_ENGINE_ENABLED
 #include "core/serviceEngine/LaunchGuard.h" // AVPN (self-update v2)
+#include "core/serviceEngine/NetAwait.h" // AVPN (android5): TribeNetworkAccessManager
 #endif
 
 #include <QClipboard>
@@ -67,7 +68,12 @@ AmneziaApplication::AmneziaApplication(int &argc, char *argv[]) : AMNEZIA_BASE_C
 #endif
 
     m_settings = new SecureQSettings(ORGANIZATION_NAME, APPLICATION_NAME, this);
+#ifdef AVPN_ENGINE_ENABLED
+    // AVPN (android5 H1/H3): one connection pool per tunnel generation; a transition never waits for Qt's HTTP thread
+    m_nam = new avpn::TribeNetworkAccessManager(this);
+#else
     m_nam = new QNetworkAccessManager(this);
+#endif
 }
 
 AmneziaApplication::~AmneziaApplication()

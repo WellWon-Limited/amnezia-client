@@ -10,7 +10,13 @@
 #       wires the protocol back (restoreConnection) and reports Connected; the facade adopts it with the session's identity;
 #   Q3  a stop the owner gave up leaves no dead view: the engine says so (takeStopGivenUp), the facade asks the service
 #       for a status snapshot (AndroidController::requestStatus -> activity requestStatus) and resolves its view by
-#       androidStatusAction - ConfirmOwnStop applies Disconnected as the end of our own stop and reconciles.
+#       androidStatusAction - ConfirmOwnStop applies Disconnected as the end of our own stop and reconciles;
+#   R3  (review R3) a stop of a start intent Android accepted goes as an intent (ACTION_DISCONNECT, handled in
+#       onStartCommand), never kept for a bind; the STATUS entry decides by androidStatusDecision (the native entry's
+#       adoptObservedTunnel inside) before it touches the intent;
+#   G4  (android4 G4) on return the activity always learns the service's truth (ServiceReach.onForeground: rebind a running
+#       one, DISCONNECTED at once for one that ended); a stop with no service to give it to is never dropped
+#       (ServiceReach.unsentStop); a destroyed service removes its notification.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -41,7 +47,7 @@ has "$act" 'isInBoundState = Intent(this, proto.serviceClass).let {' || bad "R1:
 has "$act" '        dropServiceCommands("unbind")' || bad "R1: every unbind drops what was kept for that bind"
 [ "$(count "$act" 'vpnServiceMessenger.send(Action.DISCONNECT)')" = "1" ] \
     || bad "Q1: DISCONNECT may be sent only by sendServiceCommand"
-has "$act" 'serviceCommands.offer(command, bound = isServiceConnected, binding = isInBoundState && !isServiceConnected)' \
+has "$act" 'serviceCommands.offer(command, bound = isServiceConnected, binding = isInBoundState && !isServiceConnected,' \
     || bad "Q1: the queue must know whether the service is bound or a bind is in progress"
 
 # ---- Q2 ----
@@ -73,9 +79,41 @@ has "$fac" 'if (m_engine.takeStopGivenUp()) {' && has "$fac" 'AndroidController:
 has "$(body "$JNI" 'void AndroidController::requestStatus()')" 'callActivityMethod("requestStatus", "()V");' \
     || bad "Q3: AndroidController::requestStatus must ask the activity"
 has "$act" 'fun requestStatus() {' || bad "Q3: the activity must answer requestStatus"
-has "$fac" 'const AndroidStatusAction action = androidStatusAction(' || bad "Q3: the status handler must decide by androidStatusAction"
+has "$fac" 'const AndroidStatusAction action = androidStatusDecision(' || bad "Q3: the status handler must decide by androidStatusAction (inside androidStatusDecision)"
 has "$fac" 'applyNativeState(Vpn::Disconnected, /*confirmsOwnStop=*/true);' || bad "Q3: ConfirmOwnStop must end our own stop"
 has "$fac" '|| confirmsOwnStop; // android3: the end of the owner' || bad "Q3: the end of our own stop is not a loss"
+
+# ---- R3 ----
+SVC="$CLIENT/android/src/org/amnezia/vpn/AmneziaVpnService.kt"
+has "$act" 'afterStartIntent = command is ServiceCommand.Disconnect && startIntentAccepted)) {' \
+    && has "$act" 'ServiceCommandQueue.Disposition.AS_INTENT -> sendStopIntent()' \
+    || bad "R3: a stop after an accepted start intent must go as an intent"
+has "$act" 'ContextCompat.startForegroundService(this, Intent(this, proto.serviceClass).setAction(ACTION_DISCONNECT))' \
+    || bad "R3: the stop intent must go to the service the start went to"
+has "$act" '                startIntentAccepted = true // review R3' && has "$act" 'startIntentAccepted = false // review R3' \
+    || bad "R3: the accepted start intent is known until a bind completes"
+has "$(code "$SVC")" 'if (intent?.action == ACTION_DISCONNECT) {' || bad "R3: the service must take the stop intent"
+status="$(code "$FACADE" | awk '/&AndroidController::status, this,/{f=1} f{print} f&&/Qt::QueuedConnection\);/{exit}')"
+has "$status" 'const AndroidStatusAction action = androidStatusDecision(' && has "$status" 'm_latch.awaitingStopConfirm, m_wantConnected);' \
+    || bad "R3: the STATUS entry must decide by the person's-will rule"
+stopit="$(printf '%s\n' "$status" | grep -nF 'if (action == AndroidStatusAction::StopIt) {' | head -1 | cut -d: -f1)"
+want="$(printf '%s\n' "$status" | grep -nF 'm_wantConnected = true;' | head -1 | cut -d: -f1)"
+[ -n "$stopit" ] && [ -n "$want" ] && [ "$stopit" -lt "$want" ] || bad "R3: StopIt must be decided before the intent is touched"
+has "$(code "$HERE/../DebugSnapshot.h")" 'if (a == AndroidStatusAction::Adopt && adoptObservedTunnel(ourStopPending, wantConnected) == ObservedTunnelAdoption::StopIt)' \
+    || bad "R3: the STATUS rule must be the native entry's rule"
+
+# ---- G4 ----
+NOTIF="$CLIENT/android/src/org/amnezia/vpn/ServiceNotification.kt"
+has "$act" 'when (ServiceReach.onForeground(knownService = vpnProto != null, running = isServiceRunning(),' \
+    && has "$act" 'ServiceReach.OnForeground.GONE -> {' || bad "G4: onStart must learn the service's truth"
+[ "$(count "$act" 'QtAndroidController.onVpnStateChanged(ProtocolState.DISCONNECTED.ordinal)')" -ge "3" ] \
+    || bad "G4: a gone service and a stop with nothing to stop must tell DISCONNECTED"
+has "$act" 'ServiceCommandQueue.Disposition.NO_SERVICE -> giveUnsentCommand(command)' \
+    && has "$act" 'when (ServiceReach.unsentStop(running = isServiceRunning())) {' || bad "G4: a stop must never go into the void"
+dest="$(code "$SVC" | awk '/override fun onDestroy\(\)/{f=1} f{print} f&&/^    }$/{exit}')"
+has "$dest" 'serviceNotification.cancel()' && has "$dest" 'ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)' \
+    || bad "G4: a destroyed service must remove its notification"
+has "$(code "$NOTIF")" 'notificationManager.cancel(NOTIFICATION_ID)' || bad "G4: the notification must be cancellable"
 
 [ "$fail" = "0" ] && echo "check_android_service_order_wiring: OK"
 exit "$fail"

@@ -102,6 +102,11 @@ class ServiceNotification(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
+    // AVPN (android4 G4): the service ended - its notification must not outlive it
+    fun cancel() {
+        notificationManager.cancel(NOTIFICATION_ID)
+    }
+
     fun updateSpeed(speed: TrafficData) {
         if (context.isNotificationPermissionGranted()) {
             notificationManager.notify(NOTIFICATION_ID, buildNotification(speed))

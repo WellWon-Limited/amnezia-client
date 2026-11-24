@@ -478,22 +478,19 @@ static void wave4UpstreamBehaviour()
     CHECK(classifyApiOutcome(0, true, true, now - 20000, now - 1000, -1, now) == ApiOutcome::Ignore); // начат до разморозки
     CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 3000, now) == ApiOutcome::Ignore); // рядом со своим переходом
     CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 9000, now) == ApiOutcome::Failure); // окно вышло
-    // Owner test 06.11: clearConnectionCache() strands requests in flight. Our clear - only on a real
-    // transition; abort whenever someone cleared: we, or upstream on EVERY Connected (adoption too).
+    // One owner of "the API path changed" (android5 H1/H3, review R1 of 5c354b603): a new API generation on a real
+    // transition and on every Connected (where upstream cleared); never on a first non-Connected status or a repeat.
     {
-        const auto act = [](ObservedTunnel p, ObservedTunnel n) {
-            const TransitionNetAction a = transitionNetAction(p, n);
-            return QByteArray(a.clearCache ? "C" : "-") + (a.abortInFlight ? "A" : "-");
-        };
-        CHECK(act(ObservedTunnel::Transitional, ObservedTunnel::Connected) == "CA");  // tunnel up
-        CHECK(act(ObservedTunnel::Disconnected, ObservedTunnel::Connected) == "CA");
-        CHECK(act(ObservedTunnel::Connected, ObservedTunnel::Disconnected) == "CA");  // tunnel down
-        CHECK(act(ObservedTunnel::Transitional, ObservedTunnel::Disconnected) == "CA");
-        CHECK(act(ObservedTunnel::Unknown, ObservedTunnel::Disconnected) == "--");    // cold start, tunnel off
-        CHECK(act(ObservedTunnel::Unknown, ObservedTunnel::Connected) == "-A");       // adoption: upstream cleared
-        CHECK(act(ObservedTunnel::Connected, ObservedTunnel::Connected) == "-A");     // repeat: upstream cleared
-        CHECK(act(ObservedTunnel::Connected, ObservedTunnel::Transitional) == "--");
-        CHECK(act(ObservedTunnel::Disconnected, ObservedTunnel::Disconnected) == "--");
+        const auto gen = [](ObservedTunnel p, ObservedTunnel n) { return newApiGeneration(p, n); };
+        CHECK(gen(ObservedTunnel::Transitional, ObservedTunnel::Connected));  // tunnel up
+        CHECK(gen(ObservedTunnel::Disconnected, ObservedTunnel::Connected));
+        CHECK(gen(ObservedTunnel::Connected, ObservedTunnel::Disconnected));  // tunnel down
+        CHECK(gen(ObservedTunnel::Transitional, ObservedTunnel::Disconnected));
+        CHECK(!gen(ObservedTunnel::Unknown, ObservedTunnel::Disconnected));   // cold start, tunnel off
+        CHECK(gen(ObservedTunnel::Unknown, ObservedTunnel::Connected));       // adoption
+        CHECK(gen(ObservedTunnel::Connected, ObservedTunnel::Connected));     // repeat
+        CHECK(!gen(ObservedTunnel::Connected, ObservedTunnel::Transitional));
+        CHECK(!gen(ObservedTunnel::Disconnected, ObservedTunnel::Disconnected));
     }
     CHECK(reissueAfterOwnAbort(true, false));   // our abort on a transition -> re-issue once
     CHECK(!reissueAfterOwnAbort(true, true));   // our 15 s timeout -> no
@@ -1360,6 +1357,48 @@ static void r2LateConnectedAfterThePersonsStop()
     CHECK(adoptObservedTunnel(false, false) == A::Adopt);
 }
 
+// Review R3 (21.11): Connect, Stop during the first bind, the app to the background; on return the service's STATUS said
+// "connected" and the STATUS entry adopted it - setting the intent on before the person's-will rule was asked. Both
+// entries (native state, STATUS) now decide by the same rule.
+static void r3StatusAdoptionObeysThePersonsStop()
+{
+    using A = AndroidStatusAction;
+    // STATUS connected, the person's OFF with our stop unconfirmed: stop it, the intent stays off
+    CHECK(androidStatusDecision(/*serviceConnected=*/true, false, /*engineConnected=*/false, ObservedTunnel::Transitional,
+                                false, /*ourStopPending=*/true, /*wantConnected=*/false) == A::StopIt);
+    // the stop was the engine's (no network: the request is kept on): adopted
+    CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Transitional, false, /*ourStopPending=*/false,
+                                /*wantConnected=*/true) == A::Adopt);
+    CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Transitional, false, true, true) == A::Adopt);
+    // found at launch, nothing of ours pending: adopted as before
+    CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Unknown, false, false, false) == A::Adopt);
+    // the other answers are androidStatusAction's, unchanged
+    CHECK(androidStatusDecision(false, true, false, ObservedTunnel::Transitional, false, true, false) == A::ConfirmOwnStop);
+    CHECK(androidStatusDecision(false, true, true, ObservedTunnel::Connected, false, false, true) == A::Disconnected);
+    // one rule for both entries: the STATUS StopIt is exactly the native entry's StopIt
+    for (const bool pending : { false, true })
+        for (const bool want : { false, true })
+            CHECK((androidStatusDecision(true, false, false, ObservedTunnel::Transitional, false, pending, want) == A::StopIt)
+                  == (adoptObservedTunnel(pending, want) == ObservedTunnelAdoption::StopIt));
+}
+
+// android4 G4 (21.11): the service ended while the app was in the background (the notification's «Отключиться»). The
+// activity now tells the app DISCONNECTED at once on its return (ServiceReach, Kotlin) and for a stop with no service to
+// give it to. What that DISCONNECTED means to the facade - the person's belief vs what runs:
+static void g4ServiceGoneOnReturn()
+{
+    // the app believed a live session, nothing of ours in flight: an external end - the intent goes off (not a loss to
+    // recover from: the person ended it from the notification), and a start is possible at once
+    CHECK(classifyLoss(/*weAreOperating=*/false, QStringLiteral("connected"), false, false, /*uplinkUp=*/true)
+          == LossClass::External);
+    CHECK(reconcileActionable(ObservedTunnel::Disconnected, TeardownLatch{}));
+    // the person's tap was a stop (our operation): it is confirmed - no 10 s wait for a stop that has nothing to stop
+    CHECK(classifyLoss(/*weAreOperating=*/true, QStringLiteral("connected"), false, false, true) == LossClass::Own);
+    // the same truth as a status snapshot: a session the service no longer runs is the honest Disconnected
+    CHECK(androidStatusAction(false, /*serviceDisconnected=*/true, /*engineConnected=*/true, ObservedTunnel::Connected, false)
+          == AndroidStatusAction::Disconnected);
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1826,6 +1865,8 @@ int main()
     f2UnknownAfterOffline();
     android3StatusResolvesAGivenUpStop();
     r2LateConnectedAfterThePersonsStop();
+    r3StatusAdoptionObeysThePersonsStop();
+    g4ServiceGoneOnReturn();
     a1ErrorDoesNotLatchAdoption();
     a4AdoptNewSessionAfterOff();
     rev1UnconfirmedStopIsDriven();

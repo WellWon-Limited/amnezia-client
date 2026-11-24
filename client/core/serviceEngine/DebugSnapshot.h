@@ -227,7 +227,7 @@ inline ReconcileGate reconcileGate(const TeardownLatch &latch, ObservedTunnel s,
 //                   Before, the view stayed transitional forever: reconcile waited for a terminal, and both the uplink's
 //                   return and a tap did nothing;
 //  Nothing        - the views agree, or the snapshot is in between (its terminal state comes as an event).
-enum class AndroidStatusAction { Nothing, Adopt, Disconnected, ConfirmOwnStop };
+enum class AndroidStatusAction { Nothing, Adopt, Disconnected, ConfirmOwnStop, StopIt };
 inline AndroidStatusAction androidStatusAction(bool serviceConnected, bool serviceDisconnected, bool engineConnected,
                                                ObservedTunnel facadeView, bool attemptRunning)
 {
@@ -238,6 +238,21 @@ inline AndroidStatusAction androidStatusAction(bool serviceConnected, bool servi
     if (serviceDisconnected && facadeView == ObservedTunnel::Transitional && !attemptRunning)
         return AndroidStatusAction::ConfirmOwnStop;
     return AndroidStatusAction::Nothing;
+}
+
+// The STATUS entry's decision (review R3, 21.11): androidStatusAction, and an Adopt obeys the person's last will by the
+// SAME rule as the native-state entry (adoptObservedTunnel) - asked before anything touches the intent. Connect, Stop during
+// the first bind, the app to the background: on return STATUS said "connected" and the STATUS entry set the intent on
+// first; the person's cancel was lost and the VPN was on. StopIt: the tunnel is stopped, the intent stays off.
+inline AndroidStatusAction androidStatusDecision(bool serviceConnected, bool serviceDisconnected, bool engineConnected,
+                                                 ObservedTunnel facadeView, bool attemptRunning, bool ourStopPending,
+                                                 bool wantConnected)
+{
+    const AndroidStatusAction a =
+        androidStatusAction(serviceConnected, serviceDisconnected, engineConnected, facadeView, attemptRunning);
+    if (a == AndroidStatusAction::Adopt && adoptObservedTunnel(ourStopPending, wantConnected) == ObservedTunnelAdoption::StopIt)
+        return AndroidStatusAction::StopIt;
+    return a;
 }
 
 inline bool reconcileActionable(ObservedTunnel s, const TeardownLatch &latch)
@@ -831,28 +846,20 @@ inline ApiOutcome classifyApiOutcome(int httpCode, bool canceled, bool timedOut,
     return ApiOutcome::Failure;
 }
 
-// QNetworkAccessManager::clearConnectionCache() strands every request in flight: Qt destroys its
-// HTTP thread and the reply never finishes - only our 15 s armTimeout ends it (measured on Qt 6.11.1;
-// owner's journal 06.11 10:31:21, build 134: /v1/config, /v1/edges, /v1/bypass-lists, support and
-// announcements started at launch all timed out at 15 s after the adoption of a live tunnel, so the
-// process stayed on the cached config with Xray frozen). Two parties clear the shared QNAM:
-//  - we, on a real tunnel transition to Connected/Disconnected (keep-alive connections of the old
-//    path are dead); not on the first status a process observes (Unknown -> X: no tunnel of ours
-//    carried them), not on a repeat of the same state;
-//  - upstream ConnectionUiController, on EVERY Connected (adoption and repeats included).
-// Whoever cleared, the requests in flight at that moment are aborted right away (their owners
-// re-issue them over the new path) instead of hanging for 15 s. Decision 2026-11-05 + owner test 06.11.
-struct TransitionNetAction {
-    bool clearCache = false;
-    bool abortInFlight = false;
-};
-inline TransitionNetAction transitionNetAction(ObservedTunnel previous, ObservedTunnel now)
+// Who decides that the API path changed (android5 H1/H3; review R1 of 5c354b603): ONE owner - the engine's native-state
+// handler (AvpnEngineQml::applyNativeState). Upstream ConnectionUiController's own clear on every Connected runs only in
+// the AVPN_ENGINE=OFF build. A new API generation (NetAwait.h TribeNetworkAccessManager: requests from now on on a manager
+// with no connection; the requests in flight aborted on the next turn and re-issued by their owners) on:
+//  - a real transition to Connected or Disconnected (keep-alive connections of the old path are dead);
+//  - every Connected - adoption (Unknown -> Connected) and repeats included - which is where upstream cleared;
+// not on the first status a process observes when it is not Connected (no tunnel of ours carried those requests; 133/134
+// stranded /v1/config here), not on a repeat of Disconnected, not on a transitional state. A double call is harmless: a
+// generation is never reused.
+inline bool newApiGeneration(ObservedTunnel previous, ObservedTunnel now)
 {
-    TransitionNetAction a;
-    a.clearCache = previous != ObservedTunnel::Unknown && previous != now
-                   && (now == ObservedTunnel::Connected || now == ObservedTunnel::Disconnected);
-    a.abortInFlight = a.clearCache || now == ObservedTunnel::Connected;
-    return a;
+    const bool realTransition = previous != ObservedTunnel::Unknown && previous != now
+                                && (now == ObservedTunnel::Connected || now == ObservedTunnel::Disconnected);
+    return realTransition || now == ObservedTunnel::Connected;
 }
 
 // A request we aborted ourselves (OperationCanceled without our timeout mark) is re-issued once by
