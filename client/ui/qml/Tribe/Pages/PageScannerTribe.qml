@@ -530,7 +530,7 @@ PageType {
                         }
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: ScanTexts.ringAvailable
+                            text: ScanTexts.available(root.foundCount)
                             textFormat: Text.PlainText
                             color: Theme.color.text2
                             font.family: Theme.font.body
@@ -1190,7 +1190,7 @@ PageType {
                 spacing: 2
                 Text {
                     anchors.right: parent.right
-                    text: scopeRow.slot ? ScanTexts.slotWorks.arg(Number(scopeRow.slot.works || 0)) : ""
+                    text: scopeRow.slot ? ScanTexts.slotAvailable(Number(scopeRow.slot.works || 0)) : ""
                     textFormat: Text.PlainText
                     color: Theme.color.accent
                     font.family: Theme.font.body
@@ -1226,7 +1226,7 @@ PageType {
         Accessible.role: Accessible.RadioButton
         Accessible.checked: chosen
         Accessible.name: title + (subtitle !== "" ? ", " + subtitle : "")
-                         + (slot ? ", " + ScanTexts.slotWorks.arg(Number(slot.works || 0)) + ", " + root.slotAgo(slot) : "")
+                         + (slot ? ", " + ScanTexts.slotAvailable(Number(slot.works || 0)) + ", " + root.slotAgo(slot) : "")
         Accessible.onPressAction: root.select(scope)
         onClicked: root.select(scope)
     }
