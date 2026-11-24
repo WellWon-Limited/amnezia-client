@@ -643,7 +643,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // Overlay: наш файл, апстрим main.cpp/amneziaApplication.cpp не трогаем.
 #if AVPN_UPSTREAM_GUI_OWNER // macOS desktop; Windows since release C (the GUI owns the lease there too)
     // AVPN upstream nodes (point 15, owner 15.11): a REAL quit of the GUI ends an upstream session through the
-    // normal user stop (release + stop, bounded); own nodes keep BUG-6. Every deliberate quit ends in
+    // normal user stop (release + stop, bounded); own AmneziaWG keeps BUG-6, own Xray ends in ~AmneziaApplication
+    // (UpstreamEngine.h, AppExitKind). Every deliberate quit ends in
     // quit()/exit() and so here - closing/hiding the window never does. Overlay: hooked from our file, the
     // upstream amneziaApplication.cpp is untouched (as the iOS guard below).
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this] { endUpstreamSessionOnQuit(); });

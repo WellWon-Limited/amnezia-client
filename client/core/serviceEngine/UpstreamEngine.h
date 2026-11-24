@@ -258,8 +258,10 @@ inline UpstreamEarlyRetry decideUpstreamEarlyRetry(bool notYet, int retriesSoFar
 // the engine's normal user stop: the lease is released with its final report (the existing 1.5 s bound) and
 // the tunnel goes down, so the seat is free at once and no unaccounted provider session outlives the GUI that
 // owns its lease. Closing or hiding the window, minimising, app nap and sleep never quit the process -
-// nothing changes. Own nodes (AWG, own Xray) keep BUG-6 / CONNECT-INVARIANTS §19: the service holds the
-// tunnel after the GUI quits. A restart for a self-update or a rollback is not a quit (the new copy adopts
+// nothing changes. Own AmneziaWG keeps BUG-6 / CONNECT-INVARIANTS §19: the service holds the tunnel after
+// the GUI quits. An own Xray session (and an upstream one past this bound) is ended by ~AmneziaApplication on
+// macOS - the app controls it and no launch can adopt it (24.11.2026); a lost client is ended by the service
+// (IpcServer::onProcessControllerLost). A restart for a self-update or a rollback is not a quit (the new copy adopts
 // the session by its lease record). A crash or a force kill cannot run this: the seat is freed at TTL and the
 // next start adopts the session by the lease record (point 9) - no watchdog for it.
 enum class AppExitKind {
