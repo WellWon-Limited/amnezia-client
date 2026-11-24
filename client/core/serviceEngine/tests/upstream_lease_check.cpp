@@ -1238,10 +1238,45 @@ static void releaseAfterStop()
     CHECK(direct.apiBase.isEmpty() && direct.renewToken == QLatin1String("renew-token"));
 }
 
+// Device round air-C 24.11 (iPhone Air, 21:53 UTC): after a Stop the seat release went 12 times to the primary API host, each
+// try cut at its 1.5 s bound, and gave up while the second host answered. ONE host rule for every lease request on the direct
+// route (UpstreamLeaseWire.h::upstreamDirectBase): after a silent try on the walk's edge the next request goes to the next edge.
+static void hostRule()
+{
+    using O = UpstreamHostOutcome;
+    CHECK(upstreamHostOutcome(204, true, false, false) == O::Answered);
+    CHECK(upstreamHostOutcome(502, true, false, false) == O::Answered); // the API answered (a restart): resent to the same host
+    CHECK(upstreamHostOutcome(403, false, false, false) == O::Silent);  // a foreign answer (a blocking proxy) is not the API's
+    CHECK(upstreamHostOutcome(0, false, false, false) == O::Silent);    // no HTTP answer (refused, reset, no route)
+    CHECK(upstreamHostOutcome(0, false, true, true) == O::Silent);      // the request's own bound (net_error 5 + avpn_timed_out)
+    CHECK(upstreamHostOutcome(0, false, true, false) == O::NoVerdict);  // the app's own abort (a transition's API reset, a stop)
+    const QString P = QStringLiteral("https://primary.example"), F = QStringLiteral("https://fallback.example");
+    const qint64 t = 1000000;
+    UpstreamEdgeMark m;
+    CHECK(upstreamDirectBase(P, F, m, t) == P);                         // nothing marked: the walk's edge
+    m = upstreamEdgeMarkAfter(m, P, O::Silent, t);
+    CHECK(m.base == P && m.atMs == t);
+    CHECK(upstreamDirectBase(P, F, m, t + 1800) == F);                  // the resend after a silent try: the other host
+    CHECK(upstreamDirectBase(P, QString(), m, t + 1800) == P && upstreamDirectBase(P, P, m, t + 1800) == P); // nowhere else
+    CHECK(upstreamDirectBase(P, F, m, t + kUpstreamEdgeMarkMs - 1) == F);
+    CHECK(upstreamDirectBase(P, F, m, t + kUpstreamEdgeMarkMs) == P);   // a mark is only so old
+    CHECK(upstreamDirectBase(P, F, m, t - 1) == P);                     // a clock that went back: no mark
+    CHECK(upstreamDirectBase(F, P, m, t + 10) == F);                    // the walk moved on: its new edge is not marked
+    CHECK(upstreamEdgeMarkAfter(m, F, O::Answered, t + 2000).base == P); // an answer elsewhere keeps the mark
+    const UpstreamEdgeMark cleared = upstreamEdgeMarkAfter(m, P, O::Answered, t + 2000);
+    CHECK(cleared.base.isEmpty() && upstreamDirectBase(P, F, cleared, t + 2001) == P); // the marked host answered: its turn again
+    const UpstreamEdgeMark kept = upstreamEdgeMarkAfter(m, P, O::NoVerdict, t + 2000);
+    CHECK(kept.base == P && kept.atMs == t);                            // the app's own abort says nothing
+    const UpstreamEdgeMark other = upstreamEdgeMarkAfter(m, F, O::Silent, t + 3000); // the other host silent too:
+    CHECK(other.base == F && upstreamDirectBase(P, F, other, t + 3300) == P);        // the tries alternate
+    CHECK(upstreamEdgeMarkAfter(m, QString(), O::Silent, t + 5).base == P);
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     std::setvbuf(stdout, nullptr, _IONBF, 0); // FAIL lines survive a crash of a mutated build
+    hostRule();
     releaseAfterStop();
     signature();
     wire();

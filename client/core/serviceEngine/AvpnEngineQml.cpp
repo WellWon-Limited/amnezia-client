@@ -1172,6 +1172,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->activeBaseUrl() : m_baseUrl; },
                                kConfigPubKeyHex,
                                [this]() { return authToken(); });
+    // Device round air-C 24.11: a lease request whose last try on the walk's edge got no answer goes to the walk's next edge -
+    // ONE host rule for acquire, renew and release (UpstreamLeaseWire.h::upstreamDirectBase); the walk itself is not moved.
+    if (avpn::UpstreamLeaseClient *lease = m_tunnel.upstreamClient())
+        lease->setNextDirectBase([this](const QString &base) { return m_configSvc ? m_configSvc->nextEdgeAfter(base) : QString(); });
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
     // уже вырезает каждый вход, поэтому смена edge не требует перезапуска туннеля.
     resolveApiCarveHosts(avpn::edgeHosts(avpn::edgeCandidates(avpn::ConfigStore::loadEdges(), kBakedEdges)));
@@ -4297,6 +4301,7 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
         reliabilityEvent(QStringLiteral("adopt_identity_pending"));
     }
     identifyAdoptedSession();
+    m_tunnel.adoptUpstreamSession(); // C3 of 24.11 (iOS): the seat of an adopted provider session is this app's again
     reliabilityEvent(QStringLiteral("adopt_%1 verdict=%2 node=%3")
                          .arg(QLatin1String(why)).arg(int(verdict)).arg(m_engine.currentNodeId()));
     syncAttempt();
@@ -4347,8 +4352,10 @@ void AvpnEngineQml::identifyAdoptedSession()
     m_engine.adoptTunnelConnected(metadata.value(QStringLiteral("node_id")).toString(), proto, endpoint);
     if (!m_engine.currentIdentityKnown())
         m_engine.tryIdentifyCurrentNode(); // по endpoint-подсказке сессии (K5/B3)
-    if (m_engine.currentIdentityKnown())
+    if (m_engine.currentIdentityKnown()) {
         reliabilityEvent(QStringLiteral("adopt_identity_resolved node=%1").arg(m_engine.currentNodeId()));
+        m_tunnel.adoptUpstreamSession(); // C3 of 24.11: the metadata came after the adoption
+    }
 #endif
 }
 

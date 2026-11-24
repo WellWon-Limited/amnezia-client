@@ -623,6 +623,14 @@ bool ConfigService::reportSubscriptionOutcome(const QString &requestBase, bool f
     return switchToNextEdge();
 }
 
+QString ConfigService::nextEdgeAfter(const QString &base) const
+{
+    if (m_pinned || base.isEmpty())
+        return QString();
+    const QString next = nextEdge(edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges), base);
+    return next == base ? QString() : next;
+}
+
 bool ConfigService::switchToNextEdge()
 {
     if (m_pinned)

@@ -15,6 +15,9 @@
 //    terminal answer, the record for adoption after a GUI restart. Without it (iOS / macOS NE: the
 //    extension renews, decision B) the owner is done once the lease is in the envelope (direct) or handed
 //    over (HandOver, provisional) - it never renews or releases a lease it handed over.
+//  - keepRecord (iOS, device round 24.11 C3): the extension renews, this process still keeps the record (no token) and a
+//    relaunched app that adopted the live tunnel restores the owner handed over (adoptHandedOver): the seat goes back after
+//    the session's confirmed stop (ReleaseAfterStop) like the seat of a session the app started.
 //  - Byte counters (contract §4): cumulative since tunnel start. RestartByteCounters of a fresh bring-up
 //    needs nothing (the adapter's counters start at 0 with the tunnel); a rebaseline or an adoption
 //    re-bases on the current totals (counters that cannot restart), so the next report carries only the
@@ -48,8 +51,8 @@ enum class UpstreamOwnerEventKind {
     Leave,            // code: a running session must leave the node (dead-session path)
     LeaseConfirmed,   // a provisional session got its seat
     HandOver,         // lease (contract §1 upstream_lease) for the tunnel owner (iOS: upstream_lease_set)
-    Persist,          // record (keepOwnership): write the lease record
-    ClearRecord,      // the session ended: drop the record
+    Persist,          // record (keepOwnership, keepRecord): write the lease record
+    ClearRecord,      // the session ended: drop the record (keepOwnership, keepRecord)
     RevisionChanged,  // revision: refetch the subscription once
     ConfigChanged,    // the profile changed on the server: applies at the next connect, never interrupts
     Prepared,         // config: a seat taken BEFORE the switch (prepare) is in hand - check the profile, then switch
@@ -98,6 +101,10 @@ class UpstreamLeaseOwner
 public:
     struct Options {
         bool keepOwnership = false;
+        // iOS (device round 24.11, C3): the tunnel owner renews, but this process keeps the session's record (Persist once the
+        // lease is in the tunnel owner's hands, ClearRecord at the session's end) so a relaunched app restores the seat's owner
+        // (adoptHandedOver). Off elsewhere: Android and the GUI owners emit exactly what they did.
+        bool keepRecord = false;
         MeterScope scope = MeterScope::Tunnel;
         qint64 provisionalConfirmBudgetMs = 18000;
     };
@@ -187,6 +194,41 @@ public:
                                          r.revision, upstreamAdoptConfirmBudgetMs(r, nowWallMs), nowMs),
               nowMs, ev, /*silentReady=*/true);
         apply(m_machine.tunnelUp(nowMs), nowMs, ev);
+        return ev;
+    }
+
+    // iOS (device round 24.11, C3: after a force-quit and a relaunch the app adopted the live provider tunnel, and the Stop sent
+    // no release - the seat stayed held until its TTL): the extension runs THE session this app started (the caller matched the
+    // record to the live session: UpstreamEngine.h::upstreamHandedOverRecordMatches). The seat is this process's again, in the
+    // state it had before the relaunch: handed over (the extension renews and reports - nothing is sent from here, no tick is
+    // due), the tunnel up. So every end of the session (the user's stop, a switch, a failover, a Disconnected nobody asked for)
+    // goes through endSession like a session this process started: ReleaseAfterStop after the confirmed teardown, kept in the
+    // ledger; and a switch sees a live provider session (no seat-first prepare beside it). No acquire: a new start would take
+    // the seat over from the extension (contract 1.19.0) and the extension's renewals would be refused. The release carries no
+    // renew token (the record keeps none): the device token authenticates and the lease id names the one tenure it ends.
+    QVector<UpstreamOwnerEvent> adoptHandedOver(const UpstreamLeaseRecord &r, qint64 nowMs)
+    {
+        QVector<UpstreamOwnerEvent> ev;
+        if (m_active || m_opt.keepOwnership || !upstreamLeaseIdValid(r.leaseId))
+            return ev;
+        const LeaseStep s = m_machine.adoptHeld(r.profileId, r.leaseId, LeaseRoute{QString(), upstreamApiBaseNormalized(r.apiBase)},
+                                                upstreamEffectiveScope(r.scope, r.meterTags), r.revision, nowMs);
+        if (s.inert)
+            return ev;
+        resetSession();
+        m_lastNowMs = nowMs;
+        m_sessionOrder = r.sessionOrder; // the running start's (no new start is made)
+        m_nodeId = r.nodeId;
+        m_profileId = r.profileId;
+        m_stubSha = r.configSha256;
+        m_wallAtStart = r.startedWallMs;
+        m_monoAtStart = nowMs;
+        m_adoptedStartedWallMs = r.startedWallMs;
+        m_active = true;
+        m_adopted = true;
+        m_tunnelIsUp = true;
+        m_handedOver = true;
+        m_wakeAtMs = -1;
         return ev;
     }
 
@@ -528,7 +570,7 @@ private:
             if (registerRelease(a->profileId, a->leaseId, a->route, a->requestId, UpstreamMeter{}))
                 ev << r;
         }
-        if (m_opt.keepOwnership) {
+        if (keepsRecord()) {
             UpstreamOwnerEvent c;
             c.kind = UpstreamOwnerEventKind::ClearRecord;
             ev << c;
@@ -557,8 +599,11 @@ private:
         r.revision = m_machine.knownRevision();
         r.scope = m_machine.meterScope();
         r.meterTags = currentMeterTags();
+        r.sessionOrder = m_sessionOrder;
         return p;
     }
+    // The session's record is kept by this process: the GUI owner (macOS / Windows) or, with the extension renewing, iOS.
+    bool keepsRecord() const { return m_opt.keepOwnership || m_opt.keepRecord; }
 
     // An INERT step (LeaseStep::inert: the answer of a request the current start does not own, or an ignored call) never writes the
     // session's state (schedule, release flag, phase-driven events). The only thing such a step may do is give back the lease IT names:
@@ -653,6 +698,8 @@ private:
                     h.lease = leaseJson(nowMs);
                     ev << h;
                     m_handedOver = true;
+                    if (m_opt.keepRecord)
+                        ev << persistEvent(nowMs, 0); // iOS: the seat confirmed through the tunnel is named by the record from now
                 }
                 break;
             }
@@ -681,7 +728,7 @@ private:
                 l.code = a.reason;
                 l.detail = a.detail;
                 ev << l;
-                if (m_opt.keepOwnership) {
+                if (keepsRecord()) {
                     UpstreamOwnerEvent c;
                     c.kind = UpstreamOwnerEventKind::ClearRecord;
                     ev << c;
@@ -743,6 +790,10 @@ private:
     // The BringUp of a granted (not provisional) session: the lease travels in the envelope.
     void readyEvents(qint64 nowMs, QVector<UpstreamOwnerEvent> &ev)
     {
+        // iOS: the record goes BEFORE the bring-up - a bring-up the adapter refuses ends the session inside BringUp, and its
+        // ClearRecord must come after the record, never before it.
+        if (m_opt.keepRecord && !m_opt.keepOwnership)
+            ev << persistEvent(nowMs, 0);
         UpstreamOwnerEvent b;
         b.kind = UpstreamOwnerEventKind::BringUp;
         b.config = m_grant.config;

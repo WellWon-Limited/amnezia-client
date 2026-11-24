@@ -114,6 +114,10 @@ public:
     // for a stop that bypasses down()'s own deferred disconnect (macOS adopted-without-protocol path).
     void runAfterUpstreamRelease(std::function<void()> fn);
     void retryUpstreamAdoption();
+    // iOS (device round 24.11, C3): the engine adopted the live tunnel after a relaunch. When the session is THE provider start
+    // the record names (node and start order, UpstreamEngine.h::upstreamHandedOverRecordMatches), the seat's owner is restored
+    // handed over (the extension renews; the app releases after the confirmed stop). No-op elsewhere and when nothing matches.
+    void adoptUpstreamSession();
     // Seat first (owner's iPhone 16.11, D4): the user picked provider node `node` while another node's tunnel works.
     // The seat is acquired now, through that live tunnel, and the profile checked by the connect's own rule; the
     // answer comes back as upstreamPrepared(nodeId, ok, code) and the facade switches only on ok. The next up() of
@@ -150,7 +154,8 @@ public:
     // Milliseconds of a clock that keeps running while the device sleeps (contract §7): Darwin
     // clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); elsewhere the boot-time clock of the platform.
     static qint64 upstreamClockMs();
-    // macOS lease record for adoption after a GUI restart (QSettings avpn/upstreamLease; no token).
+    // The lease record for adoption after a GUI restart / an app relaunch (QSettings avpn/upstreamLease; no token): macOS and
+    // Windows GUI owners, and iOS (keepRecord, C3 of 24.11).
     static constexpr const char *kUpstreamLeaseRecordKey = "avpn/upstreamLease";
     // The last start order (UpstreamLeaseWire.h::UpstreamSessionOrder): persisted so it only ever grows, across relaunches and
     // clock jumps backwards (contract 1.20.0: the server refuses an acquire whose order is behind the highest it has seen).
