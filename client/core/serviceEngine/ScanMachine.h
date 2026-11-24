@@ -726,14 +726,20 @@ public:
         return s;
     }
 
-    // «Остановить» (owner 24.11): the scan is cancelled and the screen STAYS open - the page goes back to its country
-    // choice; the scope's fresh result comes back on the list as on open (the rows of the cancelled scan are dropped).
-    // Leaving the screen is closed().
+    // «Остановить» (owner 24.11, one screen: the rings stop with the number found so far). A scan that already found
+    // a working server besides the live connection (Reach / Data): it stops where it is and KEEPS what it found -
+    // frozen and ended like at its deadline (stopStage2: what the stop cut is «Не проверено», never a failure),
+    // stop_reason "cancel"; its rows are the scope's fresh result (cache, slot, «Найти ещё») and the screen stays on
+    // them. Nothing found yet (the manifest, the scan's own connect, probes without a verdict): nothing to keep - the
+    // scan is cancelled (that connect too), the scope's fresh result of before comes back as on open and the page goes
+    // back to its choice. The screen STAYS open either way; leaving it is closed() (always a cancel).
     ScanStep stopTapped(qint64 now)
     {
         now = clock(now);
         ScanStep s;
-        if (scanPhaseScanning(m_phase)) {
+        if ((m_phase == ScanPhase::Reach || m_phase == ScanPhase::Data) && foundBesidesLive()) {
+            stopStage2(now, QStringLiteral("cancel"), s);
+        } else if (scanPhaseScanning(m_phase)) {
             cancelScan(now, s);
             showCachedScope(m_scope, now);
             m_listRebuild = true; // the list of the cancelled scan is gone: built again from what is shown now (syncList)
@@ -3191,6 +3197,15 @@ private:
         m_outcomes.add(o);
     }
 
+    // a fresh working row of this scan other than the live connection's (what «Остановить» keeps)
+    bool foundBesidesLive() const
+    {
+        for (const Row &r : m_rows)
+            if (!r.cached && scanClassWorking(r.base) && rowVerified(r) && !(m_current.working() && r.id == m_current.nodeId))
+                return true;
+        return false;
+    }
+
     int freshWorkingCount() const
     {
         int n = 0;
@@ -3644,8 +3659,7 @@ private:
             s.actions << p;
         }
         recordScanEnd(now, s);
-        if (m_phase == ScanPhase::Done && working > 0)
-            s.actions << shade(ShadeTone::Info, QStringLiteral("scan_found"), {QString::number(working)});
+        // no «Найдено N …» shade: the rings say the count in their core (owner 24.11, one screen)
         if (m_checkAfterScan)
             startReportCheck(s);
     }

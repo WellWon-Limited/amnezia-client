@@ -7,23 +7,32 @@ import ".."              // Theme, ScanTexts, ScanSwitches, Haptic
 import "../components"
 import "../../Controls2" // PageType
 
-// AVPN: the Scanner («Сканер») — ONE page with two views (owner 24.11, the same on every platform):
-//  - «Выбор» (choosing): the page always opens here and never scans by itself. The live connection's row first under
-//    «ВАШЕ ПОДКЛЮЧЕНИЕ» (when there is one), then «ВЫБЕРИТЕ СТРАНУ»: «Белые списки» when the pool has them and every
-//    country of the pool with its servers (bar.scope_countries / scope_whitelist); a scope with a fresh result of this
-//    network (view.slots) says « · M доступно · K мин назад». Pinned: «Сканировать все страны». A tap shows the fresh
-//    result of that scope without a scan, or scans it at once; during the 30 s pause / the cellular hour the rows that
-//    would scan and the button are disabled and the hint line says why.
-//  - «Результат»: header = the scope's name with the back arrow to «Выбор»; the two status chips (last check,
-//    network); the rings with one status line and a thin bar while scanning - the first item of the scrolling list,
-//    collapsing in 360 ms once the scan ends; the machine's rows in its order (the live connection first, drawn like
-//    the others); «Найти ещё», the crowd legend; the pinned bar («Остановить» = stop and back to «Выбор»,
-//    «Сканировать снова» / its countdown). The empty result and the «Скан сейчас невозможен» reasons are drawn from
-//    the same kit parts.
+// AVPN: the Scanner («Сканер») - ONE screen (owner 24.11, the same on every platform):
+//  - header: back arrow left, the title at the right edge («Сканер» on the choice, the scope's name on its result);
+//    under it two badges of one kind (TribePill): the servers of the selected scope left («69 серверов»), the network
+//    right («Wi‑Fi» / «LTE»);
+//  - the rings: the scrolling list's FIRST item in every state, never removed (a long list scrolls them away, no
+//    band stays). Before a scan (the choice) they are drawn small and still with the radar glyph (Theme.scan.heroIdle:
+//    the rings and four countries fit above the button on a phone); a scan grows them to Theme.scan.hero and they
+//    move; a result keeps them there, still, with the number of available servers in the core (0 too) and the check's
+//    age under them; «Остановить» keeps what was found (the same count, «Скан остановлен»); a refused scan («Скан
+//    сейчас невозможен») greys them with the reason's icon in the core;
+//  - under the rings EITHER the choice: the live connection's row first (when there is one), then «ВЫБЕРИТЕ СТРАНУ»:
+//    «Все страны» (selected when the page opens), «Белые списки» when the pool has them, every country of the pool;
+//    a tap only SELECTS (the kit's selection: chipSelected + accent border + the «Авто» card's check circle), a scope
+//    with a fresh result of this network says « · M доступно · K мин назад» - OR the result of the scope that was
+//    scanned / shown: the machine's rows in its order (the live connection first), «Найти ещё», the crowd legend, the
+//    empty result's advice, the refused scan's reason;
+//  - ONE pinned button that says what a press does now: the choice - «Сканировать» the selected scope (its countdown
+//    during the 30 s pause / the cellular hour), «Показать результат» when no scan can run and the scope has a fresh
+//    result, «Подключиться и проверить»; the result - «Остановить», «Сканировать снова» / its countdown.
+// The back arrow (and the edge swipe, Android Back, Escape) goes from a result back to the choice, from the choice
+// out of the Scanner. Opening the page never scans.
 // The screen only DRAWS the view: TribeScanner.view = ScanView JSON (ScanMachine.h scanViewToJson); every decision
-// (order, row lifetime, scope, stop, cooldown, budget, shades) is the pure machine's.
-// Non-tab page (goToTabBarPageUrl); back from «Выбор» returns to where it was opened from. After a row tap the user
-// STAYS here.
+// (order, row lifetime, scope, stop, cooldown, budget, shades) is the pure machine's. The selection is the page's own
+// until the button: then chooseCountry(scope) + retry() / showSlot(scope) / connectAndScan().
+// Non-tab page (goToTabBarPageUrl); back from the choice returns to where it was opened from. After a row tap the
+// user STAYS here.
 PageType {
     id: root
 
@@ -39,14 +48,13 @@ PageType {
     readonly property string phase: view.phase || "idle"
     readonly property bool scanning: phase === "preparing" || phase === "connecting" || phase === "reach"
                                      || phase === "data"
-    readonly property bool hero: view.hero === true
     readonly property var barView: view.bar || ({})
     readonly property var emptyView: view.empty || ({})
     readonly property string reason: emptyView.reason || ""
     readonly property bool noScan: phase === "no_scan"
     // NoScan: every reason of the coordinator's vocabulary is mapped in ScanTexts.noScan() (one table): "list" = the
-    // last result + the bar with the view's buttons; "blocked" = «Скан сейчас невозможен» (figures 21-26): icon,
-    // title, text, one action, the last result below, no bar
+    // last result + the bar with the view's buttons; "blocked" = «Скан сейчас невозможен» (figures 21-26): the reason's
+    // icon in the rings, title, text, one action, the last result below, no bar
     readonly property var block: noScan ? ScanTexts.noScan(reason) : ({ layout: "list" })
     readonly property bool blocked: block.layout === "blocked"
     // desktop service states (24, 25): the engine's existing service step (TribeEngine.scannerEnsureService(), the end
@@ -97,14 +105,16 @@ PageType {
         }
     }
     readonly property bool emptyResult: phase === "empty"
-    // the bar is up on the choice, and on the result in every state but blocked / empty
+    // the bar is up on the choice, and on the result in every state but blocked / empty (they carry their own action)
     readonly property bool showBar: choosing || (!blocked && !emptyResult)
 
-    // ── the two views (owner 24.11) ──
-    property string pane: "choose"       // "choose" = «Выбор», "result" = «Результат»
+    // ── the choice and the result: one screen, one list under the rings ──
+    property string pane: "choose"       // "choose" = the country choice, "result" = the scanned / shown scope
     readonly property bool choosing: pane === "choose"
-    // view.slots: [{scope, works, ago_min}] - this network's fresh results, one per scope (ScanMachine.h scopeSlots):
-    // a choice row with one shows it without a scan
+    // the choice's selected scope: "" = «Все страны» (every page open starts here), "whitelist", a country code. Only
+    // the button hands it to the machine (chooseCountry / showSlot): a row tap never scans nor navigates.
+    property string selected: ""
+    // view.slots: [{scope, works, ago_min}] - this network's fresh results, one per scope (ScanMachine.h scopeSlots)
     readonly property var slotList: Array.isArray(view.slots) ? view.slots : []
     function slotOf(sc) {
         for (let i = 0; i < slotList.length; ++i)
@@ -115,57 +125,98 @@ PageType {
     readonly property int poolWhitelist: Number(barView.scope_whitelist || 0)
     // the machine refuses a scan now (the 30 s pause, the cellular hour): nothing that would scan is offered
     readonly property bool scanGated: bar.gated
+    // what the choice's button does with the selected scope: connect (VPN off and the switch scanner_connect_on_open
+    // off: the view's own button), show (no scan can run now and the scope has a fresh result), else scan (disabled
+    // with its countdown while gated)
+    readonly property string chooseAction: bar.kind === "connect_and_scan" ? "connect"
+                                           : (scanGated && slotOf(selected) !== null) ? "show" : "scan"
     function slotAgo(slot) {
         return slot ? ScanTexts.ago(Number(slot.ago_min || 0), Number(view.now_ms || Date.now())) : ""
     }
-    // a scope tapped on the choice: its fresh result is shown as it is (showSlot: also out of a failed re-scan of the
-    // same scope - review round 36, F3), else that scope is scanned at once
-    function pick(sc) {
-        if (!hasScanner) return
-        const fresh = slotOf(sc) !== null
-        if (!fresh && scanGated) return
-        showResult()
-        if (fresh && typeof TribeScanner.showSlot === "function") {
-            TribeScanner.showSlot(sc)
-            return
-        }
-        TribeScanner.chooseCountry(sc)
-        if (!fresh) TribeScanner.retry()
+    // a row tap: the selection only
+    function select(sc) {
+        if (selected === sc) return
+        Haptic.play("selection")
+        selected = sc
     }
-    // «Сканировать все страны»: the whole pool, always a scan
+    // the choice's button: scan the selected scope (a new list of that scope), show its fresh result, or connect and scan
+    function scanSelected() {
+        if (!hasScanner || scanGated) return
+        TribeScanner.chooseCountry(selected)
+        showResult()
+        TribeScanner.retry()
+    }
+    function showSelected() {
+        if (!hasScanner) return
+        showResult()
+        TribeScanner.showSlot(selected)
+    }
+    function connectSelected() {
+        if (!hasScanner) return
+        TribeScanner.chooseCountry(selected)
+        showResult()
+        TribeScanner.connectAndScan()
+    }
+    // the empty country result's «Сканировать все страны»: the whole pool, always a scan
     function scanAll() {
         if (!hasScanner || scanGated) return
-        showResult()
+        selected = ""
         TribeScanner.chooseCountry("")
+        showResult()
         TribeScanner.retry()
+    }
+    function retryScan() {
+        if (hasScanner) TribeScanner.retry()
     }
     function showResult() {
         list.contentY = 0
+        stoppedByUser = false
         pane = "result"
     }
-    // back to the choice; a running scan is stopped (the machine keeps the screen open: ScanMachine::stopTapped)
+    // back to the choice; a running scan is stopped (it keeps what it found: that scope's fresh result)
     function showChoice() {
+        stopPending = false
         if (scanning && hasScanner) TribeScanner.stop()
+        list.contentY = 0
+        stoppedByUser = false
         pane = "choose"
     }
+    // «Остановить»: the machine keeps what the scan found (Done / Empty, its count in the rings); stopped before anything
+    // was probed it is idle again - nothing to show, the page goes back to the choice
+    property bool stopPending: false
+    property bool stoppedByUser: false
+    function stopScan() {
+        if (!hasScanner) return
+        stopPending = true
+        TribeScanner.stop()
+    }
+    onScanningChanged: {
+        if (scanning) {
+            stopPending = false
+            stoppedByUser = false
+            return
+        }
+        if (!stopPending) return
+        stopPending = false
+        if (phase === "done" || phase === "empty") stoppedByUser = true
+        else if (!choosing) showChoice()
+    }
     // Owner 19.11 (device test, iPhone Air): the country is the SCOPE of the next scan over the whole pool, never a
-    // filter of rows found before. A scope the shown result does not cover = the machine's list is empty: only the
-    // scope's summary («Германия · 12 серверов») and the Scan button; its own result appears after its scan.
+    // filter of rows found before. The result shows the machine's scope.
     readonly property string scope: String(barView.scope || "")
-    // nothing of this scope on the screen yet (page open without results, or a scope not scanned): its summary
+    // the result shows nothing of its scope (a scan the machine refused at once, a network change): its summary
     // (the live connection's row, when there is one, is always above it and does not count)
-    readonly property bool scopeStart: !scanning && !blocked && !emptyResult && otherCount === 0
+    readonly property bool scopeStart: !choosing && !scanning && !blocked && !emptyResult && otherCount === 0
     function scopeCount(cc) {
         if (cc === "whitelist")
             return Number(barView.scope_whitelist || 0)
-        const list = Array.isArray(barView.scope_countries) ? barView.scope_countries : []
         let n = 0
-        for (let i = 0; i < list.length; ++i)
-            if (cc === "" || list[i].cc === cc) n += Number(list[i].count || 0)
+        for (let i = 0; i < poolCountries.length; ++i)
+            if (cc === "" || poolCountries[i].cc === cc) n += Number(poolCountries[i].count || 0)
         return n
     }
-    readonly property bool showMark: phase === "done" || phase === "empty"
     property bool allCache: false         // every shown row is a cached one (set by syncRows)
+    property int cacheWorks: 0            // the working rows of a cached result on the list (set by syncRows)
     readonly property bool lastResult: !scanning && otherCount > 0 && (blocked || allCache)
     // the live connection's row (view.rows[0] with the «current» flag) is drawn first, above everything else of the list;
     // otherCount = the rows besides it (set by syncRows)
@@ -176,6 +227,36 @@ PageType {
     readonly property int otherCount: rowsModel.count - (liveFirst ? 1 : 0)
     property bool anyCrowd: false
     property bool leaving: false
+
+    // ── the rings: what they show ──
+    // idle: the choice, or a result pane with nothing yet (radar, still); scan: a scan runs (radar, moving); count: a
+    // result (the found number, still); alert: a refused scan (grey rings, the reason's icon)
+    readonly property string ringMode: choosing ? "idle"
+                                       : scanning ? "scan"
+                                       : blocked ? "alert"
+                                       : (phase === "done" || emptyResult || otherCount > 0) ? "count"
+                                       : "idle"
+    // the found number: a fresh result counts its verified rows (ScanView.verified: the machine's count, cached rows
+    // never count); a cached result shown as it is - its slot's working rows, else the rows drawn as working
+    readonly property int foundCount: {
+        if (!allCache) return Number(view.verified || 0)
+        const s = slotOf(String(barView.scanned_scope ?? scope))
+        return s ? Number(s.works || 0) : cacheWorks
+    }
+    readonly property string agoText: ScanTexts.ago(Number(view.checked_ago_min ?? -1), Number(view.now_ms || Date.now()))
+    readonly property string stageText: {
+        switch (view.stage) {
+        case "connecting": return ScanTexts.stageConnecting
+        case "reach": return ScanTexts.stageReach.arg(view.stage_count || 0).arg(view.stage_total || 0)
+        case "data": return ScanTexts.stageData.arg(view.stage_count || 0).arg(view.stage_total || 0)
+        }
+        return ScanTexts.stageReachShort
+    }
+    // the line under the rings: the stage while scanning; a result - stopped, or the check's age
+    readonly property string ringLine: ringMode === "scan" ? stageText
+                                       : ringMode !== "count" ? ""
+                                       : stoppedByUser ? ScanTexts.stoppedLine
+                                       : agoText !== "" ? ScanTexts.agoName.arg(agoText) : ""
 
     // ── navigation ──
     function goBack() {
@@ -194,7 +275,6 @@ PageType {
     function systemBack() { navBack() }
 
     Component.onCompleted: {
-        heroFrac = hero ? 1 : 0
         syncRows()
         completed = true
         refreshServiceAction()
@@ -204,9 +284,11 @@ PageType {
             if (typeof TribeScanner.show === "function") TribeScanner.show()
             else TribeScanner.open(false)
         }
-        // owner 24.11: the page opens on the choice; only a scan that already runs (Support's check started it with
-        // the page closed) is shown as it goes
+        // owner 24.11: the page opens on the choice with «Все страны» selected; only a scan that already runs (Support's
+        // check started it with the page closed) is shown as it goes
         pane = scanning ? "result" : "choose"
+        heroFrac = choosing ? 0 : 1
+        heroReady = true
     }
     // leaving the screen = closed(): a running scan stops, a pending connect the scan started is cancelled (S19)
     Component.onDestruction: if (hasScanner) TribeScanner.close()
@@ -264,8 +346,9 @@ PageType {
     }
     // The list is the machine's (ScanMachine.h syncList, owner 19.11): between two builds of it (view.list_build) its
     // rows only join its END - a row keeps its index until the list is built again (page open, a scope change, a new
-    // network, or a scan the person starts: «Сканировать» clears the old rows and builds from empty) and never leaves while a scan runs; «Не проверено» rows join only once final. So the model follows the
-    // view index by index: a row changes in place, a new one is appended; a new build replaces the model.
+    // network, or a scan the person starts: «Сканировать» clears the old rows and builds from empty) and never leaves
+    // while a scan runs; «Не проверено» rows join only once final. So the model follows the view index by index: a
+    // row changes in place, a new one is appended; a new build replaces the model.
     property real listBuild: -1
     function sameItem(a, b) {
         for (const k in a)
@@ -280,11 +363,12 @@ PageType {
             rowsModel.clear()
             listBuild = build
         }
-        let cacheAll = true, crowd = false
+        let cacheAll = true, crowd = false, works = 0
         for (let i = 0; i < src.length; ++i) {
             const it = toItem(src[i], vmap)
             cacheAll = cacheAll && it.fromCache
             crowd = crowd || it.crowd
+            if (it.fromCache && (it.rstate === "works" || it.rstate === "slow")) works += 1
             if (i >= rowsModel.count) rowsModel.append(it)
             else if (rowsModel.get(i).rid !== it.rid) { rowsModel.remove(i, rowsModel.count - i); rowsModel.append(it) }
             else if (!sameItem(it, rowsModel.get(i))) rowsModel.set(i, it)
@@ -295,38 +379,21 @@ PageType {
             if (rowsModel.get(k).current === true) live = k
         liveIndex = live
         allCache = src.length > 0 && cacheAll
+        cacheWorks = works
         anyCrowd = crowd
     }
 
-    // ── rings collapse (360 ms) into the header mark, and grow back the same way on «Сканировать снова» ──
-    // heroFrac 1 = rings + status line shown, 0 = gone. The block is the FIRST item of the scrolling list (owner 24.11:
-    // after a scan the rows move up into the place the rings held - no empty band stays at the top).
-    // Device round 13, A5 (rows jumped up under the finger) is kept as a rule, not as a held band:
-    //  - the block collapses only while the list is at rest: a finger on it, a drag or a flick defers the collapse until
-    //    it settles;
-    //  - a scrolled list keeps the rows on the screen still: the block's change of height is taken out of contentY
-    //    (heroBox.onHeightChanged), so only a list at its top moves up.
+    // ── the rings' size: small on the choice, full on a result (one rule, every screen) ──
+    // heroFrac 0 = Theme.scan.heroIdle (the choice), 1 = Theme.scan.hero + the status line (a scan and its result). It
+    // changes only with the view (a scan starts from the choice / back to the choice): the list is at its top then, so
+    // only the content under the rings moves, once, smoothly. A scan that ends keeps the size - nothing collapses.
     property real heroFrac: 0
-    property bool heroPending: false            // the scan ended under a finger / a moving list: collapse once it rests
-    readonly property bool listHeld: list.moving || listFinger.active
-    function applyHero() {
-        const want = hero ? 1 : 0
-        if (!hero && listHeld && heroFrac > 0) {
-            heroPending = true
-            return
-        }
-        heroPending = false
-        if (heroAnim.running && heroAnim.to === want) return
-        if (!heroAnim.running && heroFrac === want) return
-        heroAnim.to = want
+    property bool heroReady: false
+    onChoosingChanged: {
+        if (!heroReady) return
+        heroAnim.to = choosing ? 0 : 1
         heroAnim.restart()
     }
-    onHeroChanged: applyHero()
-    onListHeldChanged: if (!listHeld && heroPending) applyHero()
-    // a deferred collapse: the rings and the status line fade out at once (the scan has ended), the block keeps its
-    // height until the list rests
-    property real heroFade: heroPending ? 0 : 1
-    Behavior on heroFade { NumberAnimation { duration: Theme.motion.reduceMotion ? 0 : Theme.motion.fast } }
     NumberAnimation {
         id: heroAnim
         target: root; property: "heroFrac"
@@ -338,7 +405,7 @@ PageType {
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
     TribeEdgeBack { onTriggered: root.navBack() }
 
-    // ── header: «Сканер» on the choice, the scope's name on the result ──
+    // ── header: back left, the title at the right edge (owner 24.11) ──
     TribeHeader {
         id: header
         anchors.top: parent.top
@@ -346,24 +413,15 @@ PageType {
         anchors.left: parent.left
         anchors.right: parent.right
         title: root.choosing ? ScanTexts.title : bar.countryName(root.scope)
+        titleAlignment: Qt.AlignRight
         showBack: true
         onBackClicked: root.navBack()
-        rightItem: SignalRing {
-            anchors.verticalCenter: parent.verticalCenter
-            compact: true
-            visible: opacity > 0
-            opacity: (root.showMark && !root.choosing) ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Theme.motion.reduceMotion ? 0 : Theme.motion.slow } }
-            Accessible.role: Accessible.Graphic
-            Accessible.name: ScanTexts.markName
-        }
     }
 
-    // ── the two status chips (owner 18.11, his sketch): the last check top-left and the network top-right, in the
-    // corners of the radar block. The row is fixed under the header: the rings sit under it while scanning and
-    // collapse away, the chips never move (scan running, finished, blocked, empty - the same place).
+    // ── the two badges under the header, one component (TribePill): the servers of the selected scope left (owner
+    // 24.11: «как бейдж Wi‑Fi»), the network right. The row is fixed under the header in every state.
     Item {
-        id: chipsRow
+        id: badgesRow
         anchors.top: header.bottom
         anchors.left: parent.left
         anchors.right: parent.right
@@ -371,104 +429,121 @@ PageType {
         anchors.rightMargin: Theme.space.xl
         height: Theme.scan.chip
         z: 2
-        // checked_ago_min: the finished scan, or the cached rows shown while a new scan runs / no scan can run
-        readonly property string agoText: ScanTexts.ago(Number(root.view.checked_ago_min ?? -1),
-                                                        Number(root.view.now_ms || Date.now()))
+        // the choice: the selected scope; the result: the scope it shows (0 = the pool's counts are not here yet)
+        readonly property int count: root.scopeCount(root.choosing ? root.selected : root.scope)
         readonly property string netText: ScanTexts.netCaption(root.view.net || "", root.view.net_radio || "")
         TribePill {
+            objectName: "scannerCountBadge"
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            visible: opacity > 0
-            // the choice says each scope's age on its own row: the chip belongs to the result
-            opacity: (chipsRow.agoText !== "" && !root.choosing) ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Theme.motion.reduceMotion ? 0 : Theme.motion.fast } }
-            icon: "clock"
-            text: chipsRow.agoText
-            Accessible.name: ScanTexts.agoName.arg(chipsRow.agoText)
+            visible: badgesRow.count > 0
+            icon: "globe"
+            text: ScanTexts.servers(badgesRow.count)
         }
         TribePill {
+            objectName: "scannerNetBadge"
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            visible: chipsRow.netText !== ""
+            visible: badgesRow.netText !== ""
             icon: ScanTexts.netIcon(root.view.net || "")
-            text: chipsRow.netText
-            Accessible.name: ScanTexts.netName.arg(chipsRow.netText)
+            text: badgesRow.netText
+            Accessible.name: ScanTexts.netName.arg(badgesRow.netText)
         }
     }
 
-    // ── the list: caption, rows, wait line, legend (all inside the scroll) ──
+    // ── the scrolling list: the rings first, then the choice or the result ──
     Item {
         id: listArea
-        // the empty result draws its own block below; the rings still collapse here when a scan ends empty
-        visible: !root.choosing && (!root.emptyResult || root.heroFrac > 0)
-        // under the chips row, in every phase: the rings scroll with the list (their block is its first item)
-        y: chipsRow.y + chipsRow.height
+        y: badgesRow.y + badgesRow.height
         height: (root.showBar ? bar.y : root.height) - y
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
 
-        // a Flickable + Column (the list holds <= 12 rows + 2 «Не проверено»): the caption and the rows
-        // scroll together; rows keep their delegates across view updates (ListModel diff) and animate in once
         Flickable {
             id: list
+            objectName: "scannerList"
             anchors.fill: parent
             clip: true
             boundsBehavior: Flickable.StopAtBounds
-            readonly property real padTop: Theme.space.md   // one value in every phase: no step when the rings go
+            readonly property real padTop: Theme.space.md
             readonly property real padBottom: Theme.space.lg
             contentWidth: width
-            contentHeight: heroBox.height + content.height + padTop + padBottom
+            contentHeight: content.y + content.height + padBottom
 
-            // ── rings + one status line + a thin bar: ONE block, the list's first item, that grows and collapses as a
-            // whole, so the rows under it move once, smoothly (owner 18.11 «передёргивание»: the status line used to vanish
-            // at once and the list jumped by its height before the rings collapsed)
+            // ── the rings + one status line + a thin bar: ONE block, the list's first item ──
             Item {
-                id: heroBox
+                id: ringsBox
+                objectName: "scannerRings"
                 y: list.padTop
                 width: list.width
-                // + the gap to the first row (the list's top padding), so it goes with the block
-                readonly property real full: Theme.scan.hero + status.implicitHeight + list.padTop
-                height: full * root.heroFrac
-                clip: true
-                visible: height > 0
-                // A5: a scrolled list keeps its visible rows still while the block changes height
-                property real lastHeight: 0
-                onHeightChanged: {
-                    const d = height - lastHeight
-                    lastHeight = height
-                    if (d !== 0 && list.contentY > 0)
-                        list.contentY = Math.max(0, list.contentY + d)
-                }
-                SignalRing {
+                readonly property real band: Theme.scan.heroIdle + (Theme.scan.hero - Theme.scan.heroIdle) * root.heroFrac
+                // + the gap to the first item under it
+                height: band + status.implicitHeight * root.heroFrac + Theme.space.md
+                Accessible.role: Accessible.Graphic
+                Accessible.name: root.ringMode === "scan" ? root.stageText
+                                 : root.ringMode === "count" ? ScanTexts.ringName.arg(root.foundCount)
+                                 : root.ringMode === "alert" ? (root.block.title || "")
+                                 : ScanTexts.title
+                // the rings at their own 250, scaled to the band (the found number and the icon scale with them)
+                Item {
+                    width: 250
+                    height: 250
                     x: (parent.width - width) / 2
-                    y: (Theme.scan.hero - height) / 2
-                    ringState: "scanning"
-                    visible: root.heroFrac > 0
-                    opacity: root.heroFrac * root.heroFade
-                    scale: 0.07 + 0.93 * root.heroFrac
-                    transform: Translate { x: (1 - root.heroFrac) * 150; y: -(1 - root.heroFrac) * 150 }
+                    y: (ringsBox.band - height) / 2
+                    scale: ringsBox.band / Theme.scan.hero
+                    SignalRing {
+                        anchors.centerIn: parent
+                        ringState: root.ringMode === "alert" ? "off" : "scanning"
+                        still: root.ringMode !== "scan"
+                        showGlyph: root.ringMode === "scan" || root.ringMode === "idle"
+                        tappable: false
+                    }
+                    Column {
+                        anchors.centerIn: parent
+                        visible: root.ringMode === "count"
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: String(root.foundCount)
+                            textFormat: Text.PlainText
+                            color: Theme.color.text1
+                            font.family: Theme.font.display
+                            font.pixelSize: Theme.font.displayL
+                            font.weight: Theme.font.wBold
+                        }
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: ScanTexts.ringAvailable
+                            textFormat: Text.PlainText
+                            color: Theme.color.text2
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.badge.text
+                            font.weight: Theme.font.wSemibold
+                        }
+                    }
+                    TribeStrokeIcon {
+                        anchors.centerIn: parent
+                        width: 24; height: 24
+                        scale: 1.45
+                        visible: root.ringMode === "alert"
+                        icon: root.block.icon || "alert-circle"
+                        tint: Theme.color.warning
+                        weight: 1.7
+                    }
                 }
                 ColumnLayout {
                     id: status
-                    y: Theme.scan.hero
+                    y: ringsBox.band
                     width: parent.width
-                    opacity: root.heroFrac * root.heroFade
+                    opacity: root.heroFrac
+                    visible: opacity > 0
                     spacing: Theme.space.sm
                     Text {
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignHCenter
                         elide: Text.ElideRight
-                        text: {
-                            const v = root.view
-                            switch (v.stage) {
-                            case "connecting": return ScanTexts.stageConnecting
-                            case "reach": return ScanTexts.stageReach.arg(v.stage_count || 0).arg(v.stage_total || 0)
-                            case "data": return ScanTexts.stageData.arg(v.stage_count || 0).arg(v.stage_total || 0)
-                            }
-                            return ScanTexts.stageReachShort
-                        }
+                        text: root.ringLine
                         textFormat: Text.PlainText
                         color: Theme.color.text2
                         font.family: Theme.font.body
@@ -477,8 +552,10 @@ PageType {
                         lineHeight: 17
                         lineHeightMode: Text.FixedHeight
                     }
+                    // kept in every state of the full block (transparent when no scan runs): the list never steps
                     TribeProgressBar {
                         Layout.fillWidth: true
+                        opacity: root.ringMode === "scan" ? 1 : 0
                         percent: (root.view.stage === "connecting" || root.view.stage === "preparing" || Number(root.view.progress) < 0)
                                  ? -1 : Math.round(100 * Number(root.view.progress || 0))
                     }
@@ -487,532 +564,464 @@ PageType {
 
             Column {
                 id: content
-                y: list.padTop + heroBox.height
+                y: ringsBox.y + ringsBox.height
                 width: list.width
-                spacing: Theme.space.sm
-                visible: !root.emptyResult
 
-                // «Скан сейчас невозможен»: the empty-state pattern (amber icon, title, text, one action)
+                // ── the choice: the live connection, then every scope of the pool (owner 24.11) ──
                 Column {
-                    visible: root.blocked
+                    id: chooseCol
+                    visible: root.choosing
                     width: parent.width
-                    topPadding: Theme.space.lg
-                    bottomPadding: Theme.space.sm + Theme.space.xs   // + the button's 4 px shift below
-                    spacing: Theme.space.md
-                    // service states: the per-action act (ensure / retry / none); others: the table's action
-                    readonly property string act: root.block.action !== "ensureService" ? (root.block.action || "")
-                        : (root.svc.act === "ensure" && !root.hasEnsure ? "retry" : (root.svc.act || ""))
-                    readonly property bool ensure: act === "ensure"
-                    TribeStrokeIcon {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        width: 40; height: 40
-                        icon: root.block.icon || "alert-circle"
-                        tint: Theme.color.warning
-                        weight: 1.8
+                    spacing: Theme.space.sm
+                    ChoiceCaption {
+                        visible: root.liveIndex >= 0
+                        text: ScanTexts.liveCaption
                     }
-                    Heading {
-                        maxWidth: parent.width - 2 * Theme.space.lg
-                        x: (parent.width - width) / 2
-                        text: root.block.title || ""
-                        textFormat: Text.PlainText
-                        color: Theme.color.text1
-                        font.family: Theme.font.display
-                        font.pixelSize: Theme.font.h3
-                        font.weight: Theme.font.wBold
-                        lineHeight: 24
-                        lineHeightMode: Text.FixedHeight
-                    }
-                    Text {
-                        visible: text !== ""
-                        x: Theme.space.lg
-                        width: parent.width - 2 * Theme.space.lg
-                        horizontalAlignment: Text.AlignHCenter
-                        wrapMode: Text.WordWrap
-                        text: root.block.action === "ensureService" ? (root.svc.text || "") : (root.block.text || "")
-                        textFormat: Text.PlainText
-                        color: Theme.color.text2
-                        font.family: Theme.font.body
-                        font.pixelSize: Theme.font.bodyS
-                        lineHeight: 20
-                        lineHeightMode: Text.FixedHeight
-                    }
-                    TribeButton {
-                        visible: parent.act !== "none"
-                        x: Theme.space.lg
-                        width: parent.width - 2 * Theme.space.lg
-                        // .blocked .t-btn margin-top 4 over the column gap 12
-                        transform: Translate { y: Theme.space.xs }
-                        variant: root.block.primary === false ? "glass" : "primary"
-                        // gotIt / ensureService: the state's own button; retry: the view's button (no countdown of its own)
-                        // the service flow running: the button says so and waits (the artboard's busy pattern, «Проверяем…»)
-                        text: root.block.action === "gotIt" ? (root.block.actionText || "")
-                              : parent.ensure ? (root.serviceBusy ? (root.svc.busy || "") : (root.svc.button || ""))
-                              : parent.act === "retryNow" ? ScanTexts.scanScope
-                              : bar.retryText
-                        enabled: (root.block.action === "gotIt" || parent.act === "retryNow") ? true
-                                 : (parent.ensure ? !root.serviceBusy : bar.retryEnabled)
-                        onClicked: {
-                            Haptic.play("light")
-                            if (root.block.action === "gotIt") {
-                                if (root.hasScanner) TribeScanner.gotIt()
-                                root.goBack()
-                            } else if (parent.ensure) {
-                                root.ensureService()
-                            } else if (root.hasScanner) {
-                                TribeScanner.retry()
+                    // the live connection's row, drawn as on the result - found by its «current» flag, at any place of
+                    // the result (F4)
+                    Item {
+                        id: chooseLive
+                        visible: root.liveIndex >= 0
+                        width: parent.width
+                        height: root.liveIndex >= 0 ? Theme.scan.rowHeight : 0
+                        Repeater {
+                            model: rowsModel
+                            delegate: ScanRowSlot {
+                                liveSlot: true
+                                liveAt: root.liveIndex
+                                liveFirst: root.liveFirst
+                                scanning: root.scanning
+                                rowWidth: chooseLive.width
+                                pitch: Theme.scan.rowHeight + chooseCol.spacing
+                                gap: chooseCol.spacing
+                                onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
                             }
                         }
                     }
-                }
-
-                // the live connection's row: always the first thing of the list, drawn like every other row
-                Item {
-                    id: liveBox
-                    visible: root.liveFirst
-                    width: parent.width
-                    height: root.liveFirst ? Theme.scan.rowHeight : 0
+                    ChoiceCaption {
+                        // under the live row: the result's section label spacing (.sec-label.in-list margin-top 4)
+                        topPadding: root.liveIndex >= 0 ? Theme.space.xs : 0
+                        text: ScanTexts.chooseCaption
+                    }
+                    // «Все страны»: always the first scope, selected when the page opens
+                    ScopeRow {
+                        scope: ""
+                        name: ScanTexts.allCountries
+                        count: root.scopeCount("")
+                    }
+                    ScopeRow {
+                        visible: root.poolWhitelist > 0
+                        scope: "whitelist"
+                        name: ScanTexts.whitelists
+                        count: root.poolWhitelist
+                        whitelist: true
+                    }
                     Repeater {
-                        model: rowsModel
-                        delegate: ScanRowSlot {
-                            liveSlot: true
-                            liveFirst: root.liveFirst
-                            scanning: root.scanning
-                            rowWidth: liveBox.width
-                            pitch: Theme.scan.rowHeight + content.spacing
-                            gap: content.spacing
-                            onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
+                        model: root.poolCountries
+                        delegate: ScopeRow {
+                            required property var modelData
+                            scope: String(modelData.cc || "")
+                            cc: String(modelData.cc || "")
+                            name: String(modelData.name || modelData.cc || "")
+                            count: Number(modelData.count || 0)
                         }
+                    }
+                    // before the pool answers (or when it cannot): «Все страны» still checks everything
+                    Text {
+                        visible: root.poolCountries.length === 0 && root.poolWhitelist <= 0
+                        width: parent.width
+                        topPadding: Theme.space.sm
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
+                        text: ScanTexts.poolWait
+                        textFormat: Text.PlainText
+                        color: Theme.color.text3
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.bodyS
+                        lineHeight: 20
+                        lineHeightMode: Text.FixedHeight
                     }
                 }
 
-                // «Все страны · 46 серверов» / «Германия · 12 серверов» + what the Scan button does: page open
-                // without results, or a scope the shown result does not cover (the kit's empty-state pattern: icon,
-                // title, text; the action is the bar's Scan button - one button, one meaning)
+                // ── the result ──
                 Column {
-                    visible: root.scopeStart
+                    id: resultCol
+                    visible: !root.choosing
                     width: parent.width
-                    topPadding: Theme.space.xxl
-                    bottomPadding: Theme.space.lg
-                    spacing: Theme.space.md
-                    readonly property int count: root.scopeCount(root.scope)
-                    TribeStrokeIcon {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        width: 40; height: 40
-                        icon: "radar"
-                        tint: Theme.color.accent
-                        weight: 1.8
+                    spacing: Theme.space.sm
+
+                    // «Скан сейчас невозможен»: the reason's icon is in the rings; title, text, one action
+                    Column {
+                        visible: root.blocked
+                        width: parent.width
+                        bottomPadding: Theme.space.sm + Theme.space.xs   // + the button's 4 px shift below
+                        spacing: Theme.space.md
+                        // service states: the per-action act (ensure / retry / none); others: the table's action
+                        readonly property string act: root.block.action !== "ensureService" ? (root.block.action || "")
+                            : (root.svc.act === "ensure" && !root.hasEnsure ? "retry" : (root.svc.act || ""))
+                        readonly property bool ensure: act === "ensure"
+                        Heading {
+                            maxWidth: parent.width - 2 * Theme.space.lg
+                            x: (parent.width - width) / 2
+                            text: root.block.title || ""
+                            textFormat: Text.PlainText
+                            color: Theme.color.text1
+                            font.family: Theme.font.display
+                            font.pixelSize: Theme.font.h3
+                            font.weight: Theme.font.wBold
+                            lineHeight: 24
+                            lineHeightMode: Text.FixedHeight
+                        }
+                        Text {
+                            visible: text !== ""
+                            x: Theme.space.lg
+                            width: parent.width - 2 * Theme.space.lg
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.WordWrap
+                            text: root.block.action === "ensureService" ? (root.svc.text || "") : (root.block.text || "")
+                            textFormat: Text.PlainText
+                            color: Theme.color.text2
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.bodyS
+                            lineHeight: 20
+                            lineHeightMode: Text.FixedHeight
+                        }
+                        TribeButton {
+                            visible: parent.act !== "none"
+                            x: Theme.space.lg
+                            width: parent.width - 2 * Theme.space.lg
+                            // .blocked .t-btn margin-top 4 over the column gap 12
+                            transform: Translate { y: Theme.space.xs }
+                            variant: root.block.primary === false ? "glass" : "primary"
+                            // gotIt / ensureService: the state's own button; retry: the view's button (no countdown of its own)
+                            // the service flow running: the button says so and waits (the artboard's busy pattern, «Проверяем…»)
+                            text: root.block.action === "gotIt" ? (root.block.actionText || "")
+                                  : parent.ensure ? (root.serviceBusy ? (root.svc.busy || "") : (root.svc.button || ""))
+                                  : parent.act === "retryNow" ? ScanTexts.scanScope
+                                  : bar.retryText
+                            enabled: (root.block.action === "gotIt" || parent.act === "retryNow") ? true
+                                     : (parent.ensure ? !root.serviceBusy : bar.retryEnabled)
+                            onClicked: {
+                                Haptic.play("light")
+                                if (root.block.action === "gotIt") {
+                                    if (root.hasScanner) TribeScanner.gotIt()
+                                    root.goBack()
+                                } else if (parent.ensure) {
+                                    root.ensureService()
+                                } else {
+                                    root.retryScan()
+                                }
+                            }
+                        }
                     }
-                    Heading {
-                        maxWidth: parent.width - 2 * Theme.space.lg
+
+                    // the live connection's row: always the first thing of the result, drawn like every other row
+                    Item {
+                        id: liveBox
+                        visible: root.liveFirst
+                        width: parent.width
+                        height: root.liveFirst ? Theme.scan.rowHeight : 0
+                        Repeater {
+                            model: rowsModel
+                            delegate: ScanRowSlot {
+                                liveSlot: true
+                                liveFirst: root.liveFirst
+                                scanning: root.scanning
+                                rowWidth: liveBox.width
+                                pitch: Theme.scan.rowHeight + resultCol.spacing
+                                gap: resultCol.spacing
+                                onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
+                            }
+                        }
+                    }
+
+                    // «Все страны · 46 серверов» / «Германия · 12 серверов» + what the Scan button does: the result shows
+                    // nothing of its scope (the kit's empty-state pattern: title, text; the action is the bar's Scan
+                    // button - one button, one meaning; the radar is the rings')
+                    Column {
+                        visible: root.scopeStart
+                        width: parent.width
+                        bottomPadding: Theme.space.lg
+                        spacing: Theme.space.md
+                        readonly property int count: root.scopeCount(root.scope)
+                        Heading {
+                            maxWidth: parent.width - 2 * Theme.space.lg
+                            x: (parent.width - width) / 2
+                            text: parent.count > 0
+                                  ? ScanTexts.scopeTitle.arg(bar.countryName(root.scope)).arg(ScanTexts.servers(parent.count))
+                                  : ScanTexts.startTitle
+                            textFormat: Text.PlainText
+                            color: Theme.color.text1
+                            font.family: Theme.font.display
+                            font.pixelSize: Theme.font.h3
+                            font.weight: Theme.font.wBold
+                            lineHeight: 24
+                            lineHeightMode: Text.FixedHeight
+                        }
+                        Text {
+                            x: Theme.space.lg
+                            width: parent.width - 2 * Theme.space.lg
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.WordWrap
+                            text: parent.count > 0 ? ScanTexts.scopeText : ScanTexts.startText
+                            textFormat: Text.PlainText
+                            color: Theme.color.text2
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.bodyS
+                            lineHeight: 20
+                            lineHeightMode: Text.FixedHeight
+                        }
+                    }
+
+                    Text {
+                        id: sectionLabel
+                        visible: root.otherCount > 0
+                        // under the connected row (when there is one) .sec-label.in-list margin-top 4; else the list's first child
+                        topPadding: root.liveFirst ? Theme.space.xs : 0
+                        text: root.lastResult ? ScanTexts.sectionLast : ScanTexts.sectionNow
+                        textFormat: Text.PlainText
+                        color: Theme.color.text3
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.caption
+                        font.weight: Theme.font.wSemibold
+                        font.letterSpacing: Theme.font.trackCaption * Theme.font.caption
+                        lineHeight: 15
+                        lineHeightMode: Text.FixedHeight
+                    }
+                    // The other rows place THEMSELVES: y = place x pitch (place = index, less the live row above). Rows only
+                    // join the end (the machine's list), so an index never changes while the list lives. A new row fades in
+                    // at its own place, rising from one gap below (never over a row). One delegate (ScanRowSlot) serves the
+                    // live row's repeater above and this one: a slot shows itself or hides by index 0 + liveFirst.
+                    Item {
+                        id: rowsBox
+                        readonly property real pitch: Theme.scan.rowHeight + resultCol.spacing
+                        visible: root.otherCount > 0
+                        width: parent.width
+                        height: Math.max(0, root.otherCount * pitch - resultCol.spacing)
+                        // the lines under the rows (wait line, legend, «Найти ещё») slide with the list's growth
+                        Behavior on height {
+                            enabled: !Theme.motion.reduceMotion
+                            NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutCubic }
+                        }
+                        Repeater {
+                            model: rowsModel
+                            delegate: ScanRowSlot {
+                                liveSlot: false
+                                liveFirst: root.liveFirst
+                                scanning: root.scanning
+                                rowWidth: rowsBox.width
+                                pitch: rowsBox.pitch
+                                gap: resultCol.spacing
+                                onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
+                            }
+                        }
+                    }
+
+                    // «Доступные серверы появятся здесь» / «Ищем ещё… до N с»
+                    Text {
+                        readonly property string w: root.view.wait || "none"
+                        visible: w !== "none" && !root.blocked && !root.emptyResult
+                        width: parent.width
+                        topPadding: rowsModel.count === 0 ? Theme.space.lg : Theme.space.xxl - resultCol.spacing
+                        horizontalAlignment: Text.AlignHCenter
+                        text: w === "rows_appear_here" ? ScanTexts.waitRows : ScanTexts.waitMore.arg(root.view.wait_s || 0)
+                        textFormat: Text.PlainText
+                        color: Theme.color.text3
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.bodyS
+                        lineHeight: 20
+                        lineHeightMode: Text.FixedHeight
+                    }
+                    // «Найти ещё» (owner 18.11): a finished scan continues with the next batch of paths and ADDS its rows
+                    // to this list - no second mode, no other screen. view.more = {state: available | running |
+                    // exhausted} and TribeScanner.findMore(); without them nothing is drawn.
+                    Item {
+                        id: moreBox
+                        readonly property string st: (root.view.more && root.view.more.state) ? String(root.view.more.state) : ""
+                        readonly property int unshown: (root.view.more && root.view.more.unshown) ? Number(root.view.more.unshown) : 0
+                        readonly property bool canAsk: root.hasScanner && typeof TribeScanner.findMore === "function"
+                        // the engine's one gate (view.more.blocked): a limit is said on the button, never a dead tap
+                        readonly property string limit: (root.view.more && root.view.more.blocked) ? String(root.view.more.blocked) : ""
+                        visible: !root.blocked && !root.emptyResult && rowsModel.count > 0
+                                 && (st === "available" || st === "running" || st === "exhausted")
+                        width: parent.width
+                        height: st === "exhausted" ? moreDone.implicitHeight + Theme.space.sm : moreBtn.implicitHeight + Theme.space.sm
+                        TribeButton {
+                            id: moreBtn
+                            objectName: "scannerMoreButton"
+                            visible: moreBox.st !== "exhausted"
+                            y: Theme.space.sm
+                            width: parent.width
+                            variant: "glass"
+                            strokeIcon: moreBox.st === "running" ? "" : "radar"
+                            text: moreBox.st === "running" ? ScanTexts.moreRunning
+                                  : moreBox.limit === "budget" ? ScanTexts.moreInMin.arg(root.view.more.retry_min || 1)
+                                  : ScanTexts.more
+                            enabled: moreBox.st === "available" && moreBox.limit === "" && moreBox.canAsk
+                            onClicked: { Haptic.play("light"); root.stoppedByUser = false; TribeScanner.findMore() }
+                        }
+                        Text {
+                            id: moreDone
+                            visible: moreBox.st === "exhausted"
+                            y: Theme.space.sm
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.WordWrap
+                            // a country scope: every server of that country was checked («Найти ещё» has nothing left)
+                            // (the menu counted more servers than the list shows: it says how many did not answer here)
+                            text: root.scope !== "" && root.scope === String(root.barView.scanned_scope || "")
+                                  ? (Number(moreBox.unshown) > 0
+                                     ? ScanTexts.moreExhaustedUnshown.arg(bar.countryName(root.scope)).arg(moreBox.unshown)
+                                     : ScanTexts.moreExhaustedScope.arg(bar.countryName(root.scope)))
+                                  : ScanTexts.moreExhausted
+                            textFormat: Text.PlainText
+                            color: Theme.color.text3
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.bodyS
+                            lineHeight: 20
+                            lineHeightMode: Text.FixedHeight
+                        }
+                    }
+                    // the people mark's one-line legend, only while a visible row carries it
+                    Row {
+                        visible: root.anyCrowd && !root.blocked && !root.emptyResult
+                        topPadding: 2   // .legend padding 2 4 0, after the 8 gap
+                        leftPadding: Theme.space.xs
+                        rightPadding: Theme.space.xs
+                        spacing: 6
+                        width: parent.width
+                        TribeStrokeIcon {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 12; height: 12
+                            icon: "users"
+                            tint: Theme.color.accent
+                        }
+                        Text {
+                            width: parent.width - 12 - 6 - 2 * Theme.space.xs
+                            text: ScanTexts.legend
+                            textFormat: Text.PlainText
+                            wrapMode: Text.WordWrap
+                            color: Theme.color.text3
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.badge.text
+                            lineHeight: 13
+                            lineHeightMode: Text.FixedHeight
+                        }
+                    }
+                    // a finished scan WITH rows and no live connection (desktop with the VPN off) still sends its results
+                    // to support - the empty state's link, the view's empty.report_link (ScanMachine reportLinkOffered;
+                    // lab seam S7, no artboard frame)
+                    ReportLink {
+                        visible: root.phase === "done" && root.emptyView.report_link === true
                         x: (parent.width - width) / 2
-                        text: parent.count > 0
-                              ? ScanTexts.scopeTitle.arg(root.scope === "" ? ScanTexts.allCountries : bar.countryName(root.scope))
-                                                    .arg(ScanTexts.servers(parent.count))
-                              : ScanTexts.startTitle
-                        textFormat: Text.PlainText
-                        color: Theme.color.text1
-                        font.family: Theme.font.display
-                        font.pixelSize: Theme.font.h3
-                        font.weight: Theme.font.wBold
-                        lineHeight: 24
-                        lineHeightMode: Text.FixedHeight
+                        topPadding: Theme.space.md   // 12 + the column's 8 = the empty state's 16 + 4
+                        sending: root.emptyView.report_sending === true
+                        onTapped: if (root.hasScanner) TribeScanner.tapReportLink()
                     }
-                    Text {
-                        x: Theme.space.lg
-                        width: parent.width - 2 * Theme.space.lg
-                        horizontalAlignment: Text.AlignHCenter
-                        wrapMode: Text.WordWrap
-                        text: parent.count > 0 ? ScanTexts.scopeText : ScanTexts.startText
-                        textFormat: Text.PlainText
-                        color: Theme.color.text2
-                        font.family: Theme.font.body
-                        font.pixelSize: Theme.font.bodyS
-                        lineHeight: 20
-                        lineHeightMode: Text.FixedHeight
-                    }
-                }
 
-                Text {
-                    id: sectionLabel
-                    visible: root.otherCount > 0
-                    // under the connected row (when there is one) .sec-label.in-list margin-top 4; else the list's first child
-                    topPadding: root.liveFirst ? Theme.space.xs : 0
-                    text: root.lastResult ? ScanTexts.sectionLast : ScanTexts.sectionNow
-                    textFormat: Text.PlainText
-                    color: Theme.color.text3
-                    font.family: Theme.font.body
-                    font.pixelSize: Theme.font.caption
-                    font.weight: Theme.font.wSemibold
-                    font.letterSpacing: Theme.font.trackCaption * Theme.font.caption
-                    lineHeight: 15
-                    lineHeightMode: Text.FixedHeight
-                }
-                // The other rows place THEMSELVES: y = place x pitch (place = index, less the live row above). Rows only
-                // join the end (the machine's list), so an index never changes while the list lives. A new row fades in
-                // at its own place, rising from one gap below (never over a row). One delegate (ScanRowSlot) serves the
-                // live row's repeater above and this one: a slot shows itself or hides by index 0 + liveFirst.
-                Item {
-                    id: rowsBox
-                    readonly property real pitch: Theme.scan.rowHeight + content.spacing
-                    visible: root.otherCount > 0
-                    width: parent.width
-                    height: Math.max(0, root.otherCount * pitch - content.spacing)
-                    // the lines under the rows (wait line, legend, «Найти ещё») slide with the list's growth
-                    Behavior on height {
-                        enabled: !Theme.motion.reduceMotion
-                        NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutCubic }
-                    }
-                    Repeater {
-                        model: rowsModel
-                        delegate: ScanRowSlot {
-                            liveSlot: false
-                            liveFirst: root.liveFirst
-                            scanning: root.scanning
-                            rowWidth: rowsBox.width
-                            pitch: rowsBox.pitch
-                            gap: content.spacing
-                            onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
+                    // ── empty result: the advice under the rings' «0», «Понял…» / «Сканировать все страны», the second
+                    // button, the report link (the kit's empty-state pattern; the rings are its picture) ──
+                    ColumnLayout {
+                        id: emptyBlock
+                        visible: root.emptyResult
+                        x: Theme.space.sm
+                        width: parent.width - 2 * Theme.space.sm
+                        spacing: Theme.space.lg
+                        readonly property bool cell: (root.view.net || "") === "cellular"
+                        // a country scan found nothing (owner 18.11, the country as the scan's scope): view.empty.scope_cc;
+                        // the country's name comes from bar.scope_countries (else the result's countries)
+                        readonly property string scopeCc: String(root.emptyView.scope_cc || "")
+                        readonly property bool scoped: scopeCc !== ""
+                        Heading {
+                            maxWidth: emptyBlock.width
+                            Layout.preferredWidth: width
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.topMargin: root.liveFirst ? Theme.space.sm : 0
+                            text: emptyBlock.scoped ? ScanTexts.emptyScopeTitle.arg(bar.countryName(emptyBlock.scopeCc))
+                                  : emptyBlock.cell ? ScanTexts.emptyCellTitle : ScanTexts.emptyWifiTitle
+                            textFormat: Text.PlainText
+                            color: Theme.color.text1
+                            font.family: Theme.font.display
+                            font.pixelSize: Theme.font.h3
+                            font.weight: Theme.font.wBold
+                            lineHeight: 24
+                            lineHeightMode: Text.FixedHeight
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.WordWrap
+                            text: emptyBlock.scoped ? ScanTexts.emptyScopeText
+                                  : emptyBlock.cell ? ScanTexts.emptyCellText : ScanTexts.emptyWifiText
+                            textFormat: Text.PlainText
+                            color: Theme.color.text2
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.bodyS
+                            lineHeight: 20
+                            lineHeightMode: Text.FixedHeight
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.topMargin: Theme.space.sm
+                            spacing: Theme.space.md
+                            // a country found nothing: the pause after its scan says why «Сканировать все страны» waits (the bar's hint style)
+                            Text {
+                                visible: emptyBlock.scoped && bar.gateText !== ""
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                text: bar.gateText
+                                textFormat: Text.PlainText
+                                color: Theme.color.text3
+                                font.family: Theme.font.body
+                                font.pixelSize: Theme.font.caption
+                                lineHeight: 15
+                                lineHeightMode: Text.FixedHeight
+                            }
+                            TribeButton {
+                                objectName: "scannerEmptyPrimary"
+                                Layout.fillWidth: true
+                                variant: "primary"
+                                text: emptyBlock.scoped ? ScanTexts.scanAll
+                                      : emptyBlock.cell ? ScanTexts.emptyCellOk : ScanTexts.emptyWifiOk
+                                enabled: !emptyBlock.scoped || !root.scanGated
+                                onClicked: {
+                                    Haptic.play("light")
+                                    if (emptyBlock.scoped) {            // the whole pool: the scope «Все страны», then a scan
+                                        root.scanAll()
+                                        return
+                                    }
+                                    if (root.hasScanner) TribeScanner.gotIt()
+                                    root.goBack()
+                                }
+                            }
+                            TribeButton {
+                                objectName: "scannerEmptySecondary"
+                                Layout.fillWidth: true
+                                variant: "glass"
+                                // a country: back to the choice; the whole pool: the same scan again
+                                text: emptyBlock.scoped ? ScanTexts.chooseOther : bar.retryText
+                                enabled: emptyBlock.scoped || bar.retryEnabled
+                                onClicked: {
+                                    Haptic.play("light")
+                                    if (emptyBlock.scoped) root.showChoice()
+                                    else root.retryScan()
+                                }
+                            }
+                        }
+                        ReportLink {
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.topMargin: Theme.space.xs
+                            sending: root.emptyView.report_sending === true
+                            onTapped: if (root.hasScanner) TribeScanner.tapReportLink()
                         }
                     }
                 }
-
-                // «Рабочие ноды появятся здесь» / «Ищем ещё… до N с»; alone in the list it sits in the middle
-                Text {
-                    readonly property string w: root.view.wait || "none"
-                    visible: w !== "none" && !root.blocked
-                    width: parent.width
-                    // alone in the list it sits in the middle (artboard .list.empty: centred with its 32 margin)
-                    topPadding: rowsModel.count === 0
-                                ? Math.max(Theme.space.xxl, (list.height - list.padTop - list.padBottom - 20 + Theme.space.xxl) / 2)
-                                : Theme.space.xxl - content.spacing
-                    horizontalAlignment: Text.AlignHCenter
-                    text: w === "rows_appear_here" ? ScanTexts.waitRows : ScanTexts.waitMore.arg(root.view.wait_s || 0)
-                    textFormat: Text.PlainText
-                    color: Theme.color.text3
-                    font.family: Theme.font.body
-                    font.pixelSize: Theme.font.bodyS
-                    lineHeight: 20
-                    lineHeightMode: Text.FixedHeight
-                }
-                // «Найти ещё» (owner 18.11): a finished scan continues with the next batch of paths and ADDS its rows
-                // to this list - no second mode, no other screen. WAITS FOR THE ENGINE: view.more = {state:
-                // available | running | exhausted} and TribeScanner.findMore(); without them nothing is drawn.
-                Item {
-                    id: moreBox
-                    readonly property string st: (root.view.more && root.view.more.state) ? String(root.view.more.state) : ""
-                    readonly property int unshown: (root.view.more && root.view.more.unshown) ? Number(root.view.more.unshown) : 0
-                    readonly property bool canAsk: root.hasScanner && typeof TribeScanner.findMore === "function"
-                    // the engine's one gate (view.more.blocked): a limit is said on the button, never a dead tap
-                    readonly property string limit: (root.view.more && root.view.more.blocked) ? String(root.view.more.blocked) : ""
-                    visible: !root.blocked && rowsModel.count > 0 && (st === "available" || st === "running" || st === "exhausted")
-                    width: parent.width
-                    height: st === "exhausted" ? moreDone.implicitHeight + Theme.space.sm : moreBtn.implicitHeight + Theme.space.sm
-                    TribeButton {
-                        id: moreBtn
-                        visible: moreBox.st !== "exhausted"
-                        y: Theme.space.sm
-                        width: parent.width
-                        variant: "glass"
-                        strokeIcon: moreBox.st === "running" ? "" : "radar"
-                        text: moreBox.st === "running" ? ScanTexts.moreRunning
-                              : moreBox.limit === "budget" ? ScanTexts.moreInMin.arg(root.view.more.retry_min || 1)
-                              : ScanTexts.more
-                        enabled: moreBox.st === "available" && moreBox.limit === "" && moreBox.canAsk
-                        onClicked: { Haptic.play("light"); TribeScanner.findMore() }
-                    }
-                    Text {
-                        id: moreDone
-                        visible: moreBox.st === "exhausted"
-                        y: Theme.space.sm
-                        width: parent.width
-                        horizontalAlignment: Text.AlignHCenter
-                        wrapMode: Text.WordWrap
-                        // a country scope: every server of that country was checked («Найти ещё» has nothing left)
-                        // (the menu counted more servers than the list shows: it says how many did not answer here)
-                        text: root.scope !== "" && root.scope === String(root.barView.scanned_scope || "")
-                              ? (Number(moreBox.unshown) > 0
-                                 ? ScanTexts.moreExhaustedUnshown.arg(bar.countryName(root.scope)).arg(moreBox.unshown)
-                                 : ScanTexts.moreExhaustedScope.arg(bar.countryName(root.scope)))
-                              : ScanTexts.moreExhausted
-                        textFormat: Text.PlainText
-                        color: Theme.color.text3
-                        font.family: Theme.font.body
-                        font.pixelSize: Theme.font.bodyS
-                        lineHeight: 20
-                        lineHeightMode: Text.FixedHeight
-                    }
-                }
-                // the people mark's one-line legend, only while a visible row carries it
-                Row {
-                    visible: root.anyCrowd && !root.blocked
-                    topPadding: 2   // .legend padding 2 4 0, after the 8 gap
-                    leftPadding: Theme.space.xs
-                    rightPadding: Theme.space.xs
-                    spacing: 6
-                    width: parent.width
-                    TribeStrokeIcon {
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 12; height: 12
-                        icon: "users"
-                        tint: Theme.color.accent
-                    }
-                    Text {
-                        width: parent.width - 12 - 6 - 2 * Theme.space.xs
-                        text: ScanTexts.legend
-                        textFormat: Text.PlainText
-                        wrapMode: Text.WordWrap
-                        color: Theme.color.text3
-                        font.family: Theme.font.body
-                        font.pixelSize: Theme.badge.text
-                        lineHeight: 13
-                        lineHeightMode: Text.FixedHeight
-                    }
-                }
-                // a finished scan WITH rows and no live connection (desktop with the VPN off) still sends its results to support - the empty state's link, the view's
-                // empty.report_link (ScanMachine reportLinkOffered; lab seam S7, no artboard frame)
-                ReportLink {
-                    visible: root.phase === "done" && root.emptyView.report_link === true
-                    x: (parent.width - width) / 2
-                    topPadding: Theme.space.md   // 12 + the column's 8 = the empty state's 16 + 4
-                    sending: root.emptyView.report_sending === true
-                    onTapped: if (root.hasScanner) TribeScanner.tapReportLink()
-                }
-            }
-        }
-        // a finger on the list (a row press included - a MouseArea takes it before the Flickable would): the rings wait
-        // with their collapse until it lifts (A5). A passive grab: rows, «Найти ещё» and the scroll get the touch as before.
-        Item {
-            anchors.fill: parent
-            PointHandler { id: listFinger; target: null }
-        }
-    }
-
-    // ── empty result: the live connection's row first, then the advice ──
-    Item {
-        id: emptyLive
-        visible: !root.choosing && root.emptyResult && root.liveFirst
-        y: chipsRow.y + chipsRow.height + list.padTop
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: Theme.space.xl
-        anchors.rightMargin: Theme.space.xl
-        height: Theme.scan.rowHeight
-        Repeater {
-            model: rowsModel
-            delegate: ScanRowSlot {
-                liveSlot: true
-                liveFirst: root.liveFirst
-                scanning: root.scanning
-                rowWidth: emptyLive.width
-                pitch: Theme.scan.rowHeight + Theme.space.sm
-                gap: Theme.space.sm
-                onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
             }
         }
     }
 
-    // ── empty result: advice, «Понял…», «Повторить», the report link ──
-    ColumnLayout {
-        id: emptyBlock
-        visible: !root.choosing && root.emptyResult
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: Theme.space.xxl
-        anchors.rightMargin: Theme.space.xxl
-        readonly property real topEdge: emptyLive.visible ? emptyLive.y + emptyLive.height + Theme.space.md : chipsRow.y + chipsRow.height
-        y: topEdge + (root.height - topEdge - implicitHeight) / 2
-        spacing: Theme.space.lg
-        readonly property bool cell: (root.view.net || "") === "cellular"
-        // a country scan found nothing (owner 18.11, the menu as the scan's scope). WAITS FOR THE ENGINE:
-        // view.empty.scope_cc; the country's name comes from bar.scope_countries (else the result's countries)
-        readonly property string scopeCc: String(root.emptyView.scope_cc || "")
-        readonly property bool scoped: scopeCc !== ""
-        TribeStrokeIcon {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: 48; Layout.preferredHeight: 48
-            icon: "wifi-off"
-            tint: Theme.color.warning
-            weight: 1.8
-        }
-        Heading {
-            maxWidth: emptyBlock.width
-            Layout.preferredWidth: width
-            Layout.alignment: Qt.AlignHCenter
-            text: emptyBlock.scoped ? ScanTexts.emptyScopeTitle.arg(bar.countryName(emptyBlock.scopeCc))
-                  : emptyBlock.cell ? ScanTexts.emptyCellTitle : ScanTexts.emptyWifiTitle
-            textFormat: Text.PlainText
-            color: Theme.color.text1
-            font.family: Theme.font.display
-            font.pixelSize: Theme.font.h3
-            font.weight: Theme.font.wBold
-            lineHeight: 24
-            lineHeightMode: Text.FixedHeight
-        }
-        Text {
-            Layout.fillWidth: true
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-            text: emptyBlock.scoped ? ScanTexts.emptyScopeText
-                  : emptyBlock.cell ? ScanTexts.emptyCellText : ScanTexts.emptyWifiText
-            textFormat: Text.PlainText
-            color: Theme.color.text2
-            font.family: Theme.font.body
-            font.pixelSize: Theme.font.bodyS
-            lineHeight: 20
-            lineHeightMode: Text.FixedHeight
-        }
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.topMargin: Theme.space.sm
-            spacing: Theme.space.md
-            // a country found nothing: the pause after its scan says why «Сканировать все страны» waits (the bar's hint style)
-            Text {
-                visible: emptyBlock.scoped && bar.gateText !== ""
-                Layout.fillWidth: true
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-                text: bar.gateText
-                textFormat: Text.PlainText
-                color: Theme.color.text3
-                font.family: Theme.font.body
-                font.pixelSize: Theme.font.caption
-                lineHeight: 15
-                lineHeightMode: Text.FixedHeight
-            }
-            TribeButton {
-                Layout.fillWidth: true
-                variant: "primary"
-                text: emptyBlock.scoped ? ScanTexts.scanAll
-                      : emptyBlock.cell ? ScanTexts.emptyCellOk : ScanTexts.emptyWifiOk
-                enabled: !emptyBlock.scoped || !root.scanGated
-                onClicked: {
-                    Haptic.play("light")
-                    if (emptyBlock.scoped) {            // the whole pool: the scope «Все страны», then a scan
-                        root.scanAll()
-                        return
-                    }
-                    if (root.hasScanner) TribeScanner.gotIt()
-                    root.goBack()
-                }
-            }
-            TribeButton {
-                Layout.fillWidth: true
-                variant: "glass"
-                // a country: back to the choice; the whole pool: the same scan again
-                text: emptyBlock.scoped ? ScanTexts.chooseOther : bar.retryText
-                enabled: emptyBlock.scoped || bar.retryEnabled
-                onClicked: {
-                    Haptic.play("light")
-                    if (emptyBlock.scoped) root.showChoice()
-                    else if (root.hasScanner) TribeScanner.retry()
-                }
-            }
-        }
-        ReportLink {
-            id: reportLink
-            Layout.alignment: Qt.AlignHCenter
-            Layout.topMargin: Theme.space.xs
-            sending: root.emptyView.report_sending === true
-            onTapped: if (root.hasScanner) TribeScanner.tapReportLink()
-        }
-    }
-
-    // ── «Выбор»: the live connection, then every scope of the pool (owner 24.11) ──
-    Item {
-        id: chooseArea
-        visible: root.choosing
-        y: chipsRow.y + chipsRow.height
-        height: bar.y - y
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: Theme.space.xl
-        anchors.rightMargin: Theme.space.xl
-        Flickable {
-            id: chooseList
-            anchors.fill: parent
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-            contentWidth: width
-            contentHeight: chooseCol.height + list.padTop + list.padBottom
-            Column {
-                id: chooseCol
-                y: list.padTop
-                width: chooseList.width
-                spacing: Theme.space.sm
-                ChoiceCaption {
-                    visible: root.liveIndex >= 0
-                    text: ScanTexts.liveCaption
-                }
-                // the live connection's row, drawn as on the result - found by its «current» flag, at any place of the
-                // result (F4)
-                Item {
-                    id: chooseLive
-                    visible: root.liveIndex >= 0
-                    width: parent.width
-                    height: root.liveIndex >= 0 ? Theme.scan.rowHeight : 0
-                    Repeater {
-                        model: rowsModel
-                        delegate: ScanRowSlot {
-                            liveSlot: true
-                            liveAt: root.liveIndex
-                            liveFirst: root.liveFirst
-                            scanning: root.scanning
-                            rowWidth: chooseLive.width
-                            pitch: Theme.scan.rowHeight + chooseCol.spacing
-                            gap: chooseCol.spacing
-                            onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
-                        }
-                    }
-                }
-                ChoiceCaption {
-                    // under the live row: the result's section label spacing (.sec-label.in-list margin-top 4)
-                    topPadding: root.liveIndex >= 0 ? Theme.space.xs : 0
-                    text: ScanTexts.chooseCaption
-                }
-                // a fresh result of the whole pool («Сканировать все страны» before): it stays one tap away
-                ScopeRow {
-                    visible: root.slotOf("") !== null
-                    scope: ""
-                    name: ScanTexts.allCountries
-                    count: root.scopeCount("")
-                }
-                ScopeRow {
-                    visible: root.poolWhitelist > 0
-                    scope: "whitelist"
-                    name: ScanTexts.whitelists
-                    count: root.poolWhitelist
-                    whitelist: true
-                }
-                Repeater {
-                    model: root.poolCountries
-                    delegate: ScopeRow {
-                        required property var modelData
-                        scope: String(modelData.cc || "")
-                        cc: String(modelData.cc || "")
-                        name: String(modelData.name || modelData.cc || "")
-                        count: Number(modelData.count || 0)
-                    }
-                }
-                // before the pool answers (or when it cannot): the pinned button still checks everything
-                Text {
-                    visible: root.poolCountries.length === 0 && root.poolWhitelist <= 0
-                    width: parent.width
-                    topPadding: Theme.space.lg
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.WordWrap
-                    text: ScanTexts.poolWait
-                    textFormat: Text.PlainText
-                    color: Theme.color.text3
-                    font.family: Theme.font.body
-                    font.pixelSize: Theme.font.bodyS
-                    lineHeight: 20
-                    lineHeightMode: Text.FixedHeight
-                }
-            }
-        }
-    }
-
-    // ── pinned bar ──
+    // ── the one pinned button ──
     TribeScanBar {
         id: bar
         z: 10
@@ -1022,14 +1031,18 @@ PageType {
         anchors.bottom: parent.bottom
         bar: root.barView
         choosing: root.choosing
-        again: root.otherCount > 0
+        chooseAction: root.chooseAction
+        again: !root.choosing && root.otherCount > 0
         cooldownEndsAtMs: Number(root.view.cooldown_ends_at_ms || 0)
         viewNowMs: Number(root.view.now_ms || 0)
-        // owner 24.11: «Остановить» cancels the scan and goes back to the choice (the Scanner stays open)
-        onStopTapped: root.showChoice()
-        onRetryTapped: if (root.hasScanner) TribeScanner.retry()
-        onConnectAndScanTapped: if (root.hasScanner) TribeScanner.connectAndScan()
-        onScanAllTapped: root.scanAll()
+        onStopTapped: root.stopScan()
+        onRetryTapped: root.retryScan()
+        onConnectAndScanTapped: {
+            if (root.choosing) root.connectSelected()
+            else if (root.hasScanner) TribeScanner.connectAndScan()
+        }
+        onScanTapped: root.scanSelected()
+        onShowTapped: root.showSelected()
     }
 
     // One list row (flag, name, badges, bars, ms) with its arrive animation, for the model's row at `index`. liveSlot:
@@ -1106,8 +1119,8 @@ PageType {
     }
 
     // One scope of the choice (the kit's list row, 66 like the server list): flag, name, «N серверов» (+ the fresh
-    // result's « · M доступно · K мин назад»), chevron. A scope without a fresh result is disabled while the machine
-    // refuses a scan (the 30 s pause, the cellular hour); one with a result stays tappable - it only shows it.
+    // result's «M доступно» over «K мин назад»), the «Авто» card's check circle. A tap SELECTS it (owner 24.11: no
+    // navigation, no scan); the chosen row wears the kit's selection (chipSelected + accent border, filled circle).
     component ScopeRow: TribeListRow {
         id: scopeRow
         property string scope: ""
@@ -1116,14 +1129,13 @@ PageType {
         property int count: 0
         property bool whitelist: false
         readonly property var slot: root.slotOf(scope)
-        readonly property bool canTap: slot !== null || !root.scanGated
+        readonly property bool chosen: root.selected === scope
+        objectName: "scannerScope_" + (scope === "" ? "all" : scope)
         width: parent ? parent.width : 0
         height: Theme.scan.rowHeight
-        interactive: canTap
-        opacity: canTap ? 1 : 0.45   // TribeButton's disabled look
-        Behavior on opacity { NumberAnimation { duration: Theme.motion.fast } }
+        selected: chosen
         title: name
-        subtitle: ScanTexts.servers(count)
+        subtitle: count > 0 ? ScanTexts.servers(count) : ""
         monoSubtitle: false
         leftItem: Item {
             width: Theme.scan.flag
@@ -1152,10 +1164,10 @@ PageType {
                 }
             }
         }
-        // a fresh result: «M доступно» over its age, as the server row's bars over its ms; then the chevron
+        // a fresh result: «M доступно» over its age, as the server row's bars over its ms; then the choice mark
         rightItem: Row {
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Theme.space.sm
+            spacing: Theme.space.md
             Column {
                 visible: scopeRow.slot !== null
                 anchors.verticalCenter: parent.verticalCenter
@@ -1178,18 +1190,29 @@ PageType {
                     font.pixelSize: Theme.font.caption
                 }
             }
-            TribeStrokeIcon {
+            // the «Авто» card's choice mark (PageServersTribe): accent with the check when chosen, surface3 when not
+            Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
-                width: Theme.space.lg
-                height: Theme.space.lg
-                icon: "chevron-right"
-                tint: Theme.color.text3
+                width: 22; height: 22
+                radius: Theme.radius.pill
+                color: scopeRow.chosen ? Theme.color.accent : Theme.color.surface3
+                Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+                TribeStrokeIcon {
+                    anchors.centerIn: parent
+                    width: 12; height: 12
+                    visible: scopeRow.chosen
+                    icon: "check-mark"
+                    tint: Theme.color.bg800
+                    weight: 2.6
+                }
             }
         }
-        Accessible.role: Accessible.Button
-        Accessible.name: title + ", " + subtitle
+        Accessible.role: Accessible.RadioButton
+        Accessible.checked: chosen
+        Accessible.name: title + (subtitle !== "" ? ", " + subtitle : "")
                          + (slot ? ", " + ScanTexts.slotWorks.arg(Number(slot.works || 0)) + ", " + root.slotAgo(slot) : "")
-        onClicked: { Haptic.play("light"); root.pick(scope) }
+        Accessible.onPressAction: root.select(scope)
+        onClicked: root.select(scope)
     }
 
     // titles wrap balanced (artboard text-wrap: balance): the narrowest width that keeps the greedy line count,
