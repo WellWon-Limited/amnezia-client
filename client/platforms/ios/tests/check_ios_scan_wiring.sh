@@ -104,7 +104,8 @@ before(start_tunnel, "let completionHandler = tribeStartSlot.begin(tribeScanReop
 xray = code(read(f"{ios}/PacketTunnelProvider+Xray.swift"))
 stop_xray = body(xray, "func stopXray(") or ""
 gate = body(stop_xray, "xrayNativeLifecycleGate.withExclusive") or ""
-before(gate, "tribeScanStopAllIfUsed(", "Socks5Tunnel.quit()", "stopXray: stop-all inside the gate, before hev stops")
+# (review R43 F1: hev stops through XrayHevStop - the non-blocking quit of a hev that runs)
+before(gate, "tribeScanStopAllIfUsed(", "XrayHevStop.execute(", "stopXray: stop-all inside the gate, before hev stops")
 before(gate, "tribeScanStopAllIfUsed(", "LibXrayStopXray", "stopXray: stop-all inside the gate, before the core stops")
 before(gate, "tribeScanStopAllIfUsed(", "retireXrayCallback", "stopXray: stop-all before the callback teardown")
 upstream = code(read(f"{ios}/PacketTunnelProvider+Upstream.swift"))

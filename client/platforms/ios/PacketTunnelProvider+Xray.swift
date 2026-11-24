@@ -415,9 +415,14 @@ extension PacketTunnelProvider {
             let active = xrayRuntimeSession.snapshot()
             let identity = XraySocketCallbackIdentity(generation: active.generation,
                                                       sessionId: active.sessionId)
-            let stopGeneration = xrayRuntimeSession.beginStop()
+            // AVPN (review R43 F1): the generation move and "did a hev worker enter" in one decision; the blocking hev
+            // quit waited for ever for a hev that never started (24.11) - only the non-blocking quit, only for a hev
+            // that runs (XrayHevStop). The core and callback teardown below are reached on every path.
+            let stopping = xrayRuntimeSession.beginStopReportingHev()
+            let stopGeneration = stopping.generation
             tribeScanStopAllIfUsed(reason: "core_stop") // AVPN (Scanner §2.3): inside the gate, before the core stops
-            Socks5Tunnel.quit()
+            let hevStop = XrayHevStop.execute(hevRunning: stopping.hevRunning, hev: LiveHevControl())
+            xrayLog(.info, message: "Tribe stop (xray): hev \(hevStop)")
             let done: Bool
             if let identity, xraySocketCallbackRegistry.value(for: identity) != nil {
                 done = retireXrayCallback(identity: identity, stopCore: true)
@@ -763,14 +768,22 @@ extension PacketTunnelProvider {
         // готовностью ядра и стартом hev не может быть догнан поздним адаптером.
         let accepted: Bool = xrayNativeLifecycleGate.withExclusive {
             guard xrayRuntimeSession.isCurrent(generation: sessionGeneration),
-                  xrayRuntimeSession.transition(to: .running, generation: sessionGeneration) else {
+                  xrayRuntimeSession.transition(to: .running, generation: sessionGeneration),
+                  xrayRuntimeSession.queueHev(generation: sessionGeneration) else { // AVPN (review R43 F1/F2)
                 return false
             }
             DispatchQueue.global().async { [weak self] in
+                // AVPN (review R43 F2): a stop may have come after the queueing. Under the session's lock (the one its
+                // generation move takes): a stopped generation neither answers success nor attaches nor runs hev.
+                guard self?.xrayRuntimeSession.enterHev(generation: sessionGeneration) == true else {
+                    completionHandler(XrayErrors.supersededSession)
+                    return
+                }
                 xrayLog(.info, message: "Hev socks started")
                 self?.startTribeStatsTimer() // AVPN (build 141): `Tribe stats (xray)` line with mem=, diagnostics only
                 completionHandler(nil)
                 let exitCode = Socks5Tunnel.run(withConfig: configurationFilePath)
+                self?.xrayRuntimeSession.exitHev(generation: sessionGeneration) // AVPN (review R43 F1): no hev to stop now
                 self?.handleTun2socksExit(exitCode, generation: sessionGeneration)
             }
             return true

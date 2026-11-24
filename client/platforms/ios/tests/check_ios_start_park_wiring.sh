@@ -10,7 +10,12 @@
 #   P2  the facade hands both reports to the engine's local-build entry with the leg the native stream is at;
 #   P3  the extension: one answer per startTunnel, and the stop answers a running start after its native stop and
 #       before its own answer, writing its duration into the stop record; the app logs that record;
-#   P4  the owner never records no_handshake for a leg in its local phase.
+#   P4  the owner never records no_handshake for a leg in its local phase; a second local phase of the same leg is
+#       taken (begun/ended pairs, review R43 F5) and the local bound counts all phases together;
+#   P5  (review R43 F1/F2) the Xray stop never calls the blocking hev quit: the generation move reports whether a hev
+#       worker entered, and only that hev gets the non-blocking quit; the worker re-checks the generation before it
+#       answers, attaches or runs; the renewer is taken and closed in one step at the stop and attached only through
+#       that slot.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -71,8 +76,8 @@ start="$(sbody "$PTP" 'override func startTunnel(')"
 before "$start" 'let completionHandler = tribeStartSlot.begin(tribeScanReopenOnSuccess(completionHandler))' 'switch protoType' \
     || bad "P3: startTunnel must route every start path through the one-answer slot"
 stop="$(sbody "$PTP" 'override func stopTunnel(')"
-before "$stop" 'let startPendingAtStop = tribeStartSlot.pending' 'switch protoType' \
-    || bad "P3: stopTunnel must note whether a start was unanswered when it came"
+before "$stop" 'let startPendingAtStop = tribeStartSlot.stopBegan()' 'switch protoType' \
+    || bad "P3: stopTunnel must mark the stop at entry (a later start answer is an error)"
 wrap="$(printf '%s\n' "$stop" | awk 'index($0, "let completionHandler: () -> Void = {") > 0 { on = 1 } on { print } on && /^        }$/ { exit }')"
 before "$wrap" '_ = tribeStartSlot.abortForStop()' 'completionHandler()' \
     || bad "P3: a running start is answered after the native stop, before the stop's own answer"
@@ -93,7 +98,38 @@ own="$(code "$OWNER" | awk 'index($0, "void report(PathOutcome o, int connectMs,
 has "$own" 'if (o == PathOutcome::NoHandshake && m_leg.buildSince >= 0)' && has "$own" 'o = PathOutcome::Inconclusive;' \
     || bad "P4: report() must never record no_handshake for a leg in its local phase"
 
+eng="$(body "$CLIENT/core/serviceEngine/ServiceEngine.cpp" 'bool ServiceEngine::onLocalBuild(LocalBuildReport report, quint64 leg)')"
+has "$eng" 'if (again && m_owner.legBuilding())' || bad "P4: a 'building' after the leg's 'built' must open a second local phase"
+has "$(code "$OWNER")" 'm_leg.deadline = m_awake + std::max<qint64>(0, m_t.localBuildMs - m_leg.localMs);' \
+    || bad "P4: the local bound counts every local phase of a leg together"
+
+# ---- P5 ----
+XRAY="$IOS/PacketTunnelProvider+Xray.swift"
+UP="$IOS/PacketTunnelProvider+Upstream.swift"
+stopx="$(sbody "$XRAY" 'func stopXray(completionHandler: () -> Void) {')"
+before "$stopx" 'let stopping = xrayRuntimeSession.beginStopReportingHev()' 'XrayHevStop.execute(hevRunning: stopping.hevRunning, hev: LiveHevControl())' \
+    || bad "P5: stopXray must decide the hev stop from the generation move"
+before "$stopx" 'XrayHevStop.execute(hevRunning: stopping.hevRunning, hev: LiveHevControl())' 'retireXrayCallback(identity: identity, stopCore: true)' \
+    || bad "P5: the core and callback teardown come after the hev decision"
+prov="$(code "$XRAY"; code "$UP"; code "$PTP")"
+if printf '%s\n' "$prov" | grep -F 'Socks5Tunnel.quit()' > /dev/null; then bad "P5: no provider path may call the blocking hev quit"; fi
+has "$(code "$IOS/XraySocketCallbackLifecycle.swift")" 'let rc = hev.tryQuit()' || bad "P5: the hev stop uses the non-blocking quit"
+tun="$(sbody "$XRAY" 'private func setupAndRunTun2socks(')"
+has "$tun" 'xrayRuntimeSession.queueHev(generation: sessionGeneration) else {' || bad "P5: the worker is queued under the gate for the current generation"
+before "$tun" 'self?.xrayRuntimeSession.enterHev(generation: sessionGeneration) == true else {' 'completionHandler(nil)' \
+    || bad "P5: the worker re-checks the generation before it answers success"
+before "$tun" 'self?.xrayRuntimeSession.enterHev(generation: sessionGeneration) == true else {' 'Socks5Tunnel.run(withConfig: configurationFilePath)' \
+    || bad "P5: the worker re-checks the generation before hev runs"
+before "$tun" 'Socks5Tunnel.run(withConfig: configurationFilePath)' 'self?.xrayRuntimeSession.exitHev(generation: sessionGeneration)' \
+    || bad "P5: the worker says when hev returned"
+up="$(code "$UP")"
+has "$(sbody "$UP" 'func stopXrayThenReleaseUpstream(')" 'guard let renewer = tribeUpstream.takeRenewerForStop() else {' \
+    || bad "P5: the stop takes the renewer and closes its slot in one step"
+has "$(sbody "$UP" 'func attachUpstreamRenewer(')" 'guard tribeUpstream.attachRenewer(renewer) else {' \
+    || bad "P5: a renewer attaches only while the session's stop has not taken the slot"
+has "$(sbody "$UP" 'func beginUpstreamMeter(')" 'tribeUpstream.openRenewerSlot()' || bad "P5: a fresh tunnel start opens the slot"
+
 if [ "$fail" -ne 0 ]; then
     exit 1
 fi
-echo "ios start park wiring: OK (P1 controller, P2 facade, P3 extension + app log, P4 owner)"
+echo "ios start park wiring: OK (P1 controller, P2 facade, P3 extension + app log, P4 owner + engine, P5 hev stop + renewer)"

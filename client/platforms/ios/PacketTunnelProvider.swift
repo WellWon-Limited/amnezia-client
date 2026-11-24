@@ -417,14 +417,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             store.record(source: "ne", event: "stop", fields: stop)
         }
 
-        // AVPN (device round air-B 24.11): when the native stop is done, a start that is still unanswered is answered by
-        // the stop (TunnelStartSlot in TunnelRuntimeStatus.swift) - never before: the start's native steps are over or
-        // fenced by then, so nothing of this session runs when the system hears of its end. The stop record gets the
-        // stop's own duration and whether a start was unanswered when the stop came, before the system hears the stop
-        // is done - the app logs both with the Disconnected ("NE last stop"). iOS only: the macOS NE target (not built
-        // by Tribe) keeps its stop as it was.
+        // AVPN (device round air-B 24.11; review R43 F3): one ordered decision for the two answers (TunnelStartSlot in
+        // TunnelRuntimeStatus.swift). From here a start can only be answered with an error; when the native stop is
+        // done (it no longer waits for a hev that never ran: XrayHevStop), a start still unanswered is answered and one
+        // being delivered is waited for - the start's answer always reaches the system before the stop's. The stop
+        // record gets the stop's own duration and whether a start was unanswered when the stop came, before the system
+        // hears the stop is done - the app logs both with the Disconnected ("NE last stop"). Nothing of the session
+        // runs any more by then, so the settings it applied go with the session (the system removes the tunnel's
+        // virtual interface once the stop is answered; "pass nil to clear" is for a provider that keeps its tunnel -
+        // review R43 F4). iOS only: the macOS NE target (not built by Tribe) keeps its stop as it was.
 #if os(iOS)
-        let startPendingAtStop = tribeStartSlot.pending
+        let startPendingAtStop = tribeStartSlot.stopBegan()
         let completionHandler: () -> Void = { [tribeStartSlot] in
             _ = tribeStartSlot.abortForStop()
             var done = stop

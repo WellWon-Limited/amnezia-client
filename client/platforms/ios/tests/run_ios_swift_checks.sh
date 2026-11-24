@@ -35,6 +35,14 @@ xcrun --sdk macosx swiftc -Onone -parse-as-library \
     "$SCRIPT_DIR/XraySocketCallbackLifecycleTests.swift"
 "$WORK_DIR/xray_lifecycle_tests"
 
+# AVPN (review R43 F3): the order of startTunnel's and stopTunnel's answers (TunnelStartSlot).
+echo "== 1-slot хостовый Swift-тест порядка ответов старта и стопа =="
+xcrun --sdk macosx swiftc -Onone -parse-as-library \
+    -o "$WORK_DIR/tunnel_start_slot_order_tests" \
+    "$IOS_DIR/TunnelRuntimeStatus.swift" \
+    "$SCRIPT_DIR/TunnelStartSlotOrderTests.swift"
+"$WORK_DIR/tunnel_start_slot_order_tests"
+
 # AVPN (floor 19.11): the RU split of an own Xray session as one routing rule of the core (XrayDirectSplit.swift).
 echo "== 1a хостовый Swift-тест разделения РФ внутри ядра Xray =="
 xcrun --sdk macosx swiftc -Onone -parse-as-library \

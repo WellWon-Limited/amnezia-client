@@ -169,3 +169,38 @@ enum XraySocketCallbackTeardown {
         return retireContext()
     }
 }
+
+// AVPN (review R43 F1): the hev (tun2socks) part of an Xray stop.
+//
+// hev 2.15.0's quit (hev_socks5_tunnel_quit -> hev_socks5_tunnel_stop) loops `for (;;)` until hev's event fd exists,
+// sleeping 100 ms - it waits for a hev that was started and has initialised. A stop that came before hev ran (24.11:
+// 0.2 s into an Xray start, the start still waiting for its network settings) waited there for ever, inside the native
+// gate, and after the stop's generation move hev may never start: neither the start nor the stop answered (the
+// session reached Disconnected 25 s later, most likely when the system gave up on the stuck extension). The recipe's
+// patch 0001 (recipes/hev-socks5-tunnel) adds hev_socks5_tunnel_try_quit: "Request tunnel shutdown without waiting for
+// asynchronous initialization. This function never blocks. Callers may retry while initialization is in progress.
+// Returns: zero when the request was queued, -EAGAIN when the tunnel is not ready, otherwise a negative errno value."
+// It first sets stop_requested, which hev_socks5_tunnel_run checks right after `run = 1` (a stop during hev's own
+// initialisation is kept, hev quits as soon as it runs), and hev_socks5_tunnel_fini / a failed init clear it.
+// The decision: hev not started (no worker, or one still queued - enterHev refuses it after the generation move) ->
+// nothing to quit; hev entered (initialising or running) -> the non-blocking quit, once. The blocking quit is never
+// called from a stop. Everything after it (the core stop, the callback teardown) is reached on every path.
+protocol XrayHevControl {
+    /// hev_socks5_tunnel_try_quit (never blocks).
+    func tryQuit() -> Int32
+    /// hev_socks5_tunnel_quit: blocks until hev's event fd exists - never from a stop.
+    func quitBlocking()
+}
+
+enum XrayHevStop: Equatable {
+    case notRunning       // no hev of this session to stop
+    case quitQueued       // hev was running: its event loop ends now
+    case quitDeferred(Int32) // hev still initialising (-EAGAIN) or another refusal: kept in stop_requested, it quits as it runs
+
+    /// Inside stopXray's native gate, right after TunnelRuntimeSession.beginStopReportingHev().
+    static func execute(hevRunning: Bool, hev: XrayHevControl) -> XrayHevStop {
+        guard hevRunning else { return .notRunning }
+        let rc = hev.tryQuit()
+        return rc == 0 ? .quitQueued : .quitDeferred(rc)
+    }
+}
