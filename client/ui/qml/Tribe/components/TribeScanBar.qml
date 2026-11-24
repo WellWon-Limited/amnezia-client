@@ -51,10 +51,14 @@ Item {
     // taken relative to now_ms, so a skew between the coordinator's clock and Date.now() does not matter
     property double cooldownEndsAtMs: 0
     property double viewNowMs: 0
+    // Reads the bar it is given, never the derived kind / countdown: onBarChanged can run before those bindings follow
+    // (device round air-C, D5: right after «Остановить» the old kind "stop" said "no countdown", the end was dropped
+    // and «Сканировать снова» showed enabled until the next view).
     function anchorCountdown() {
-        if (!countdown) { endsAtMs = 0; return }
-        const unit = kind === "retry_in_min" ? 60000 : 1000
-        const target = (kind === "retry_in_s" && cooldownEndsAtMs > 0 && viewNowMs > 0)
+        const k = String(bar.button || "retry")
+        if (k !== "retry_in_s" && k !== "retry_in_min") { endsAtMs = 0; return }
+        const unit = k === "retry_in_min" ? 60000 : 1000
+        const target = (k === "retry_in_s" && cooldownEndsAtMs > 0 && viewNowMs > 0)
                        ? Date.now() + Math.max(0, cooldownEndsAtMs - viewNowMs)
                        : Date.now() + Number(bar.button_value || 0) * unit
         nowMs = Date.now()
