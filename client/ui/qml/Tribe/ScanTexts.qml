@@ -158,6 +158,7 @@ QtObject {
     readonly property string slotWorksOne: qsTr("%1 доступно", "a choice row's fresh result: the one form")
     readonly property string slotWorksFew: qsTr("%1 доступно", "a choice row's fresh result: the few form")
     readonly property string slotWorksMany: qsTr("%1 доступно", "a choice row's fresh result: the many form")
+    readonly property string slotStopped: qsTr("остановлен · %1")                            // under it, a stopped scan's result (%1 = its age), review F5
     readonly property string showResult: qsTr("Показать результат")                         // the choice's button: the selected scope has a fresh result and no scan can run now
     // under the found count in the rings' core, by the number (see plural())
     readonly property string ringAvailableOne: qsTr("доступно", "under the number in the rings: the one form")
@@ -165,6 +166,7 @@ QtObject {
     readonly property string ringAvailableMany: qsTr("доступно", "under the number in the rings: the many form")
     readonly property string ringName: qsTr("Доступно серверов: %1")                         // screen reader name of the rings with a result
     readonly property string stoppedLine: qsTr("Скан остановлен")                           // the line under the rings after «Остановить» (what was found stays)
+    readonly property string stoppedAgo: qsTr("Скан остановлен · %1")                     // the same with the result's age («только что», «3 мин назад»)
     readonly property string poolWait: qsTr("Список стран пока не загружен — можно проверить все страны сразу.") // the choice before the pool answers (NO FRAME)
     // ELSEWHERE: «Не удалось сохранить отчёт на устройстве — он не отправлен» - chat toast, TribeSupportChat.cpp (queue lane)
     // NO FRAME, existing texts reused (no new wording; listed so the owner sees every fallback):

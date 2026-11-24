@@ -2228,6 +2228,11 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>%1 disponibles</translation>
     </message>
     <message>
+        <location line="+1"/>
+        <source>остановлен · %1</source>
+        <translation>detenido · %1</translation>
+    </message>
+    <message>
         <location line="+3"/>
         <source>доступно</source>
         <comment>under the number in the rings: the one form</comment>
@@ -2246,13 +2251,18 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>disponibles</translation>
     </message>
     <message>
-        <location line="+92"/>
+        <location line="+3"/>
+        <source>Скан остановлен · %1</source>
+        <translation>Escaneo detenido · %1</translation>
+    </message>
+    <message>
+        <location line="+90"/>
         <source>ru</source>
         <comment>plural rule of this translation: ru (one/few/many) or en (one/other)</comment>
         <translation>en</translation>
     </message>
     <message>
-        <location line="-159"/>
+        <location line="-161"/>
         <source>Подключаться к VPN можно как обычно, а Сканеру нужна обновлённая служба.</source>
         <translation>Puede conectarse a la VPN como siempre, pero el escáner necesita el servicio actualizado.</translation>
     </message>
@@ -2422,7 +2432,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Próximo escaneo en %1 s</translation>
     </message>
     <message>
-        <location line="+6"/>
+        <location line="+7"/>
         <source>Показать результат</source>
         <translation>Mostrar resultado</translation>
     </message>
@@ -2437,12 +2447,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Escaneo detenido</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Список стран пока не загружен — можно проверить все страны сразу.</source>
         <translation>La lista de países aún no se ha cargado: puede escanear todos los países ahora mismo.</translation>
     </message>
     <message>
-        <location line="-26"/>
+        <location line="-28"/>
         <source>Проверить подключение и отправить отчёт</source>
         <translation>Comprobar la conexión y enviar un informe</translation>
     </message>

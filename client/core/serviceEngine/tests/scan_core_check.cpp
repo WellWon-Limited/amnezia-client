@@ -4563,6 +4563,7 @@ static void stopKeepsWhatItFound()
     CHECK(countActions(d, ScanActionKind::PersistResults) >= 1); // + one per later proof by exclusion
     const QJsonArray fresh = v.value(QLatin1String("slots")).toArray();
     CHECK(fresh.size() == 1 && fresh.at(0).toObject().value(QLatin1String("works")).toInt() == kept);
+    CHECK(v.value(QLatin1String("available")).toInt() == kept && v.value(QLatin1String("partial")).toBool());
     CHECK(countActions(d, ScanActionKind::FreezeHostScan) == 1 && countActions(d, ScanActionKind::StopHostScan) == 1);
     CHECK(countActions(d, ScanActionKind::CloseScreen) == 0 && d.m.screenOpen());
     CHECK(d.m.lastSummary().value(QLatin1String("stop_reason")).toString() == QLatin1String("cancel"));
@@ -4722,6 +4723,103 @@ static void secondRowTapTakesOver()
     ScanMachine &m = d.m;
     m.rowTapped(ids.at(2), t + 3000);
     CHECK(!m.rowTapped(ids.at(2), t + 3100).has(ScanActionKind::ConnectRow));
+}
+
+// F5: «Остановить» stays honest. (b) a stopped scan never replaces the scope's COMPLETE fresh result: that one stays
+// the stored result, the stopped scan's proven rows go out as evidence only (store false), and showing the scope's
+// result again shows the complete one. (c) without one, the partial result is stored marked partial; the mark survives
+// the store and a restore, a scope switch, and every view of it says so (view.partial, slots[].partial).
+static void stoppedResultStaysHonest()
+{
+    // (b): a full scan, then the same scope scanned again and stopped once it found something
+    {
+        World w = baseWorld("stop_after_complete", hostMac(), ScanNetKind::Wifi);
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        w.script << qMakePair(qint64(40000), at("retry"));
+        w.runMs = 52000;
+        const qint64 found = firstFoundAt(w, 40000);
+        CHECK(found > 40000);
+        World ws = w;
+        ws.script << qMakePair(found + 1, at("stop"));
+        Driver plain(w);
+        plain.run();
+        const int complete = lastView(plain).value(QLatin1String("verified")).toInt();
+        Driver d(ws);
+        d.run();
+        const ScanAction *p = lastAction(d, ScanActionKind::PersistResults);
+        CHECK(p && scanActionToJson(*p).value(QLatin1String("store")).toBool(true) == false && p->cached.partial);
+        const QJsonObject v = lastView(d);
+        CHECK(phaseOf(v) == QLatin1String("done") && v.value(QLatin1String("partial")).toBool());
+        const QJsonArray sl = v.value(QLatin1String("slots")).toArray();
+        CHECK(sl.size() == 1 && sl.at(0).toObject().value(QLatin1String("works")).toInt() == complete
+              && !sl.at(0).toObject().value(QLatin1String("partial")).toBool());
+        // «Показать результат» of that scope: the stored complete result, not the stopped one
+        const qint64 t = d.now + 1000;
+        d.m.slotChosen(QString(), t);
+        const QJsonObject c = viewJson(d.m, t);
+        CHECK(!c.value(QLatin1String("partial")).toBool() && c.value(QLatin1String("available")).toInt() == complete);
+    }
+    // (c): no complete result of the scope: the stopped one is stored, marked
+    {
+        World w = baseWorld("stop_first", hostMac(), ScanNetKind::Wifi);
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        w.runMs = 12000;
+        const qint64 found = firstFoundAt(w, 0);
+        World ws = w;
+        ws.script << qMakePair(found + 1, at("stop"));
+        Driver d(ws);
+        d.run();
+        const ScanAction *p = lastAction(d, ScanActionKind::PersistResults);
+        CHECK(p && scanActionToJson(*p).value(QLatin1String("store")).toBool(true) && p->cached.partial);
+        const QJsonObject v = lastView(d);
+        CHECK(v.value(QLatin1String("partial")).toBool());
+        const QJsonArray sl = v.value(QLatin1String("slots")).toArray();
+        CHECK(sl.size() == 1 && sl.at(0).toObject().value(QLatin1String("partial")).toBool());
+        if (!p)
+            return;
+        // the store and a restore keep the mark (and in another scope's slot too)
+        ScanCachedResult stored = scanCachedResultFromJson(scanCachedResultToJson(p->cached));
+        CHECK(stored.partial);
+        ScanCachedResult other = stored;
+        other.scope = QStringLiteral("DE");
+        other.savedAtMs = stored.savedAtMs + 1000;
+        other.partial = false;
+        other.otherScopes = {stored};
+        const ScanCachedResult back = scanCachedResultFromJson(scanCachedResultToJson(other));
+        CHECK(!back.partial && back.otherScopes.size() == 1 && back.otherScopes.at(0).partial);
+        // a page opened later on that stored result: the slot and the shown result say «stopped»
+        ScanOpen o = openOf(w, QString(), false);
+        o.cached = stored;
+        ScanMachine m(w.caps);
+        const qint64 t = stored.savedAtMs + 60000;
+        m.shown(o, t);
+        QJsonObject r = viewJson(m, t);
+        const QJsonArray rs = r.value(QLatin1String("slots")).toArray();
+        CHECK(!rs.isEmpty() && rs.at(0).toObject().value(QLatin1String("partial")).toBool());
+        m.slotChosen(QString(), t + 10);
+        r = viewJson(m, t + 10);
+        CHECK(r.value(QLatin1String("partial")).toBool() && r.value(QLatin1String("available")).toInt() > 0);
+    }
+    // the server list's figures: a newer narrower (stopped) result never wipes the figures of rows it did not reach
+    {
+        ScanCachedResult full;
+        full.networkKey = QStringLiteral("wifi:asn:64500");
+        full.fingerprint = QStringLiteral("fp");
+        full.savedAtMs = kT0 - 4 * 60000;
+        full.rows << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa01"), QStringLiteral("DE"), ScanClass::Works)
+                  << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa02"), QStringLiteral("NL"), ScanClass::Works);
+        full.rows[0].ms = 90;
+        full.rows[1].ms = 70;
+        ScanCachedResult stopped = full;
+        stopped.scope = QStringLiteral("DE");
+        stopped.partial = true;
+        stopped.savedAtMs = kT0 - 60000;
+        stopped.rows = {full.rows.at(0)};
+        stopped.rows[0].ms = 50;
+        stopped.otherScopes = {full};
+        const QHash<QString, int> fig = scanListFigures(stopped, QStringLiteral("fp"), kT0, 600);
+        CHECK(fig.value(QStringLiteral("up:aaaaaaaaaaaaaa01"), -1) == 50 && fig.value(QStringLiteral("up:aaaaaaaaaaaaaa02"), -1) == 70);
+    }
 }
 
 // F2: a scope the machine refuses (here the white lists of a pool without them) leaves the old scope - and the
@@ -5279,6 +5377,7 @@ int main(int argc, char **argv)
     stopKeepsWhatItFound();
     availableIsWhatTheListShows();
     secondRowTapTakesOver();
+    stoppedResultStaysHonest();
     refusedScopeNeverScansAnother();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();

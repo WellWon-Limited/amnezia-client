@@ -114,7 +114,7 @@ PageType {
     // the choice's selected scope: "" = «Все страны» (every page open starts here), "whitelist", a country code. Only
     // the button hands it to the machine (chooseCountry / showSlot): a row tap never scans nor navigates.
     property string selected: ""
-    // view.slots: [{scope, works, ago_min}] - this network's fresh results, one per scope (ScanMachine.h scopeSlots)
+    // view.slots: [{scope, works, ago_min, partial}] - this network's fresh results, one per scope (ScanMachine.h scopeSlots)
     readonly property var slotList: Array.isArray(view.slots) ? view.slots : []
     function slotOf(sc) {
         for (let i = 0; i < slotList.length; ++i)
@@ -146,6 +146,11 @@ PageType {
                                            : (scanGated && slotOf(selected) !== null) ? "show" : "scan"
     function slotAgo(slot) {
         return slot ? ScanTexts.ago(Number(slot.ago_min || 0), Number(view.now_ms || Date.now())) : ""
+    }
+    // a fresh result's second line on its row: its age, marked when it is a stopped scan's
+    function slotLine(slot) {
+        if (!slot) return ""
+        return slot.partial === true ? ScanTexts.slotStopped.arg(slotAgo(slot)) : slotAgo(slot)
     }
     // a row tap: the selection only
     function select(sc) {
@@ -192,7 +197,6 @@ PageType {
     }
     function showResult() {
         list.contentY = 0
-        stoppedByUser = false
         pane = "result"
     }
     // back to the choice; a running scan is stopped (it keeps what it found: that scope's fresh result)
@@ -200,13 +204,11 @@ PageType {
         stopPending = false
         if (scanning && hasScanner) TribeScanner.stop()
         list.contentY = 0
-        stoppedByUser = false
         pane = "choose"
     }
-    // «Остановить»: the machine keeps what the scan found (Done / Empty, its count in the rings); stopped before anything
-    // was probed it is idle again - nothing to show, the page goes back to the choice
+    // «Остановить»: the machine keeps what the scan found (Done, its count in the rings, view.partial); stopped before
+    // anything was found it is idle again - nothing to show, the page goes back to the choice
     property bool stopPending: false
-    property bool stoppedByUser: false
     function stopScan() {
         if (!hasScanner) return
         stopPending = true
@@ -215,13 +217,11 @@ PageType {
     onScanningChanged: {
         if (scanning) {
             stopPending = false
-            stoppedByUser = false
             return
         }
         if (!stopPending) return
         stopPending = false
-        if (phase === "done" || phase === "empty") stoppedByUser = true
-        else if (!choosing) showChoice()
+        if (phase !== "done" && phase !== "empty" && !choosing) showChoice()
     }
     // Owner 19.11 (device test, iPhone Air): the country is the SCOPE of the next scan over the whole pool, never a
     // filter of rows found before. The result shows the machine's scope.
@@ -261,6 +261,8 @@ PageType {
     // the number in the rings: the rows the list shows as available in the shown scope - the machine's one count
     // (view.available: fresh and cached rows, the proven live connection of the scope, never «Не удалось»)
     readonly property int foundCount: Number(view.available || 0)
+    // the shown result was cut short by «Остановить» (view.partial: right after the stop, and the stored result later)
+    readonly property bool partialResult: view.partial === true
     readonly property string agoText: ScanTexts.ago(Number(view.checked_ago_min ?? -1), Number(view.now_ms || Date.now()))
     readonly property string stageText: {
         switch (view.stage) {
@@ -270,10 +272,10 @@ PageType {
         }
         return ScanTexts.stageReachShort
     }
-    // the line under the rings: the stage while scanning; a result - stopped, or the check's age
+    // the line under the rings: the stage while scanning; a result - its check's age, «Скан остановлен» for a stopped one
     readonly property string ringLine: ringMode === "scan" ? stageText
                                        : ringMode !== "count" ? ""
-                                       : stoppedByUser ? ScanTexts.stoppedLine
+                                       : partialResult ? (agoText !== "" ? ScanTexts.stoppedAgo.arg(agoText) : ScanTexts.stoppedLine)
                                        : agoText !== "" ? ScanTexts.agoName.arg(agoText) : ""
 
     // ── navigation ──
@@ -874,7 +876,7 @@ PageType {
                                   : moreBox.limit === "budget" ? ScanTexts.moreInMin.arg(root.view.more.retry_min || 1)
                                   : ScanTexts.more
                             enabled: moreBox.st === "available" && moreBox.limit === "" && moreBox.canAsk
-                            onClicked: { Haptic.play("light"); root.stoppedByUser = false; TribeScanner.findMore() }
+                            onClicked: { Haptic.play("light"); TribeScanner.findMore() }
                         }
                         Text {
                             id: moreDone
@@ -1197,9 +1199,10 @@ PageType {
                     font.pixelSize: Theme.font.caption
                     font.weight: Theme.font.wSemibold
                 }
+                // a stopped scan's result says so (review F5): «остановлен · 3 мин назад»
                 Text {
                     anchors.right: parent.right
-                    text: root.slotAgo(scopeRow.slot)
+                    text: root.slotLine(scopeRow.slot)
                     textFormat: Text.PlainText
                     color: Theme.color.text3
                     font.family: Theme.font.body
@@ -1226,7 +1229,7 @@ PageType {
         Accessible.role: Accessible.RadioButton
         Accessible.checked: chosen
         Accessible.name: title + (subtitle !== "" ? ", " + subtitle : "")
-                         + (slot ? ", " + ScanTexts.slotAvailable(Number(slot.works || 0)) + ", " + root.slotAgo(slot) : "")
+                         + (slot ? ", " + ScanTexts.slotAvailable(Number(slot.works || 0)) + ", " + root.slotLine(slot) : "")
         Accessible.onPressAction: root.select(scope)
         onClicked: root.select(scope)
     }

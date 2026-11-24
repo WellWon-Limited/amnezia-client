@@ -2228,6 +2228,11 @@ You can attach a photo or video.</translation>
         <translation>%1 available</translation>
     </message>
     <message>
+        <location line="+1"/>
+        <source>остановлен · %1</source>
+        <translation>stopped · %1</translation>
+    </message>
+    <message>
         <location line="+3"/>
         <source>доступно</source>
         <comment>under the number in the rings: the one form</comment>
@@ -2246,13 +2251,18 @@ You can attach a photo or video.</translation>
         <translation>available</translation>
     </message>
     <message>
-        <location line="+92"/>
+        <location line="+3"/>
+        <source>Скан остановлен · %1</source>
+        <translation>Scan stopped · %1</translation>
+    </message>
+    <message>
+        <location line="+90"/>
         <source>ru</source>
         <comment>plural rule of this translation: ru (one/few/many) or en (one/other)</comment>
         <translation>en</translation>
     </message>
     <message>
-        <location line="-159"/>
+        <location line="-161"/>
         <source>Подключаться к VPN можно как обычно, а Сканеру нужна обновлённая служба.</source>
         <translation>You can connect to the VPN as usual, but the Scanner needs the updated service.</translation>
     </message>
@@ -2422,7 +2432,7 @@ You can attach a photo or video.</translation>
         <translation>Next scan in %1 s</translation>
     </message>
     <message>
-        <location line="+6"/>
+        <location line="+7"/>
         <source>Показать результат</source>
         <translation>Show result</translation>
     </message>
@@ -2437,12 +2447,12 @@ You can attach a photo or video.</translation>
         <translation>Scan stopped</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Список стран пока не загружен — можно проверить все страны сразу.</source>
         <translation>The country list has not loaded yet — you can scan all countries right away.</translation>
     </message>
     <message>
-        <location line="-26"/>
+        <location line="-28"/>
         <source>Проверить подключение и отправить отчёт</source>
         <translation>Check the connection and send a report</translation>
     </message>

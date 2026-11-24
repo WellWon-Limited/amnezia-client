@@ -327,7 +327,13 @@ void TribeScanner::execute(const ScanAction &a)
         doOutcomes(a);
         break;
     case ScanActionKind::PersistResults:
-        persistCache(a.cached);
+        if (a.storeResult) {
+            persistCache(a.cached);
+        } else if (onResultsSaved && !a.cached.networkKey.isEmpty()) {
+            // a stopped scan whose scope keeps its complete stored result: its proven rows are evidence, nothing is stored
+            onResultsSaved(a.cached);
+            emitLog(QStringLiteral("action persist_results store=0 rows=%1").arg(a.cached.rows.size()));
+        }
         break;
     case ScanActionKind::PersistBudget:
         m_store->write(QLatin1String(kScanBudgetStoreKey), compactArray(a.ledger));

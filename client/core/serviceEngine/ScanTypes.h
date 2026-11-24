@@ -829,6 +829,7 @@ struct ScanCachedResult {
     QString fingerprint;      // the weak local fingerprint of that scan's network (stored on the device only)
     qint64 savedAtMs = 0;     // wall clock of the end of that scan
     QString scope;            // the scope that scan covered ("" = all countries, a country code, "whitelist")
+    bool partial = false;     // «Остановить» cut that scan short: its rows are what it found before the stop
     QList<ScanCachedRow> rows;
     QList<ScanCachedFailure> failures;
     // The results of this network's OTHER scopes, newest first (one slot per scope scanned; a cached result is shown
@@ -904,6 +905,8 @@ inline QJsonObject scanCachedResultToJson(const ScanCachedResult &c)
     o.insert(QStringLiteral("saved_at_ms"), double(c.savedAtMs));
     if (!c.scope.isEmpty())
         o.insert(QStringLiteral("scope"), c.scope);
+    if (c.partial)
+        o.insert(QStringLiteral("partial"), true);
     QJsonArray rows, fails;
     for (const ScanCachedRow &r : c.rows)
         rows << scanCachedRowToJson(r);
@@ -935,6 +938,7 @@ inline ScanCachedResult scanCachedResultFromJson(const QJsonObject &o)
     c.fingerprint = o.value(QLatin1String("fingerprint")).toString();
     c.savedAtMs = qint64(o.value(QLatin1String("saved_at_ms")).toDouble(0));
     c.scope = o.value(QLatin1String("scope")).toString();
+    c.partial = o.value(QLatin1String("partial")).toBool(false);
     for (const QJsonValue &v : o.value(QLatin1String("rows")).toArray()) {
         ScanCachedRow r;
         if (scanCachedRowFromJson(v.toObject(), r))
@@ -978,10 +982,12 @@ inline void scanDropLegacyLabels(ScanCachedResult &c, const QJsonObject &stored)
 }
 
 // The server list's figure of a node from the Scanner (owner 17.11: provider rows have no ICMP target). Source:
-// the persisted result of the network the device is on now - the same weak fingerprint (the network's identity;
-// the reporting key may have been refined since, ScanNetwork::sameNetwork) - and
-// only while the Scanner itself would show that result when no scan can run (ScanMachine::cachedVisible outside
-// a scan: at most worksTtlS (scan_cache_works_ttl_s) old; a clock up to 60 s behind tolerated, as rowShownAt).
+// the persisted results of the network the device is on now - the newest one and its other scopes' results, the
+// newest figure of a node first (a stopped or a narrower scan never wipes the figures of rows it did not reach) -
+// the same weak fingerprint (the network's identity; the reporting key may have been refined since,
+// ScanNetwork::sameNetwork) - each only while the Scanner itself would show it when no scan can run
+// (ScanMachine::cachedVisible outside a scan: at most worksTtlS (scan_cache_works_ttl_s) old; a clock up to 60 s
+// behind tolerated, as rowShownAt).
 // Only working rows (works / slow) are ever persisted, so a failed or «Не проверено» node gets nothing; a row
 // without a figure (ms -1) is left out. The figure is the row's ms: rtt_ms of the data probe through that node
 // (first byte of a second request on the same connection - one full-path round trip), ttfb1 when rtt is
@@ -990,14 +996,19 @@ inline QHash<QString, int> scanListFigures(const ScanCachedResult &c, const QStr
                                            int worksTtlS)
 {
     QHash<QString, int> out;
-    if (!c.present() || fingerprint.isEmpty() || c.fingerprint != fingerprint)
-        return out;
-    const qint64 age = nowMs - c.savedAtMs;
-    if (age < -60000 || age > qint64(worksTtlS) * 1000)
-        return out;
-    for (const ScanCachedRow &r : c.rows)
-        if (scanClassWorking(r.cls) && r.ms >= 0)
-            out.insert(r.id, r.ms);
+    const auto take = [&out, &fingerprint, nowMs, worksTtlS](const ScanCachedResult &x) {
+        if (!x.present() || fingerprint.isEmpty() || x.fingerprint != fingerprint)
+            return;
+        const qint64 age = nowMs - x.savedAtMs;
+        if (age < -60000 || age > qint64(worksTtlS) * 1000)
+            return;
+        for (const ScanCachedRow &r : x.rows)
+            if (scanClassWorking(r.cls) && r.ms >= 0 && !out.contains(r.id))
+                out.insert(r.id, r.ms);
+    };
+    take(c);
+    for (const ScanCachedResult &o : c.otherScopes)
+        take(o);
     return out;
 }
 
