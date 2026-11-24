@@ -170,6 +170,9 @@ PageType {
     // the live connection's row (view.rows[0] with the «current» flag) is drawn first, above everything else of the list;
     // otherCount = the rows besides it (set by syncRows)
     property bool liveFirst: false
+    // the live connection's row wherever the result has it (review round 36, F4: a row connected from the list keeps
+    // its place - rows never jump - and the choice still shows it under «ВАШЕ ПОДКЛЮЧЕНИЕ»); -1 = none (set by syncRows)
+    property int liveIndex: -1
     readonly property int otherCount: rowsModel.count - (liveFirst ? 1 : 0)
     property bool anyCrowd: false
     property bool leaving: false
@@ -287,6 +290,10 @@ PageType {
             else if (!sameItem(it, rowsModel.get(i))) rowsModel.set(i, it)
         }
         liveFirst = rowsModel.count > 0 && rowsModel.get(0).current === true
+        let live = -1
+        for (let k = 0; k < rowsModel.count && live < 0; ++k)
+            if (rowsModel.get(k).current === true) live = k
+        liveIndex = live
         allCache = src.length > 0 && cacheAll
         anyCrowd = crowd
     }
@@ -933,19 +940,21 @@ PageType {
                 width: chooseList.width
                 spacing: Theme.space.sm
                 ChoiceCaption {
-                    visible: root.liveFirst
+                    visible: root.liveIndex >= 0
                     text: ScanTexts.liveCaption
                 }
-                // the live connection's row, drawn as on the result (the model's first row while liveFirst)
+                // the live connection's row, drawn as on the result - found by its «current» flag, at any place of the
+                // result (F4)
                 Item {
                     id: chooseLive
-                    visible: root.liveFirst
+                    visible: root.liveIndex >= 0
                     width: parent.width
-                    height: root.liveFirst ? Theme.scan.rowHeight : 0
+                    height: root.liveIndex >= 0 ? Theme.scan.rowHeight : 0
                     Repeater {
                         model: rowsModel
                         delegate: ScanRowSlot {
                             liveSlot: true
+                            liveAt: root.liveIndex
                             liveFirst: root.liveFirst
                             scanning: root.scanning
                             rowWidth: chooseLive.width
@@ -957,7 +966,7 @@ PageType {
                 }
                 ChoiceCaption {
                     // under the live row: the result's section label spacing (.sec-label.in-list margin-top 4)
-                    topPadding: root.liveFirst ? Theme.space.xs : 0
+                    topPadding: root.liveIndex >= 0 ? Theme.space.xs : 0
                     text: ScanTexts.chooseCaption
                 }
                 // a fresh result of the whole pool («Сканировать все страны» before): it stays one tap away
@@ -1032,12 +1041,14 @@ PageType {
         required property int index
         property bool liveSlot: false
         property bool liveFirst: false
+        property int liveAt: 0          // the live slot shows the model's row at this index (the result: 0 while liveFirst)
         property bool scanning: false
         property real rowWidth: 0
         property real pitch: 0
         property real gap: 0
         signal rowTapped(string rid)
-        readonly property bool mine: liveSlot ? (liveFirst && index === 0) : !(liveFirst && index === 0)
+        readonly property bool mine: liveSlot ? (liveAt === 0 ? (liveFirst && index === 0) : (liveAt > 0 && index === liveAt))
+                                              : !(liveFirst && index === 0)
         width: rowWidth
         height: Theme.scan.rowHeight
         y: liveSlot ? 0 : (index - (liveFirst ? 1 : 0)) * pitch
