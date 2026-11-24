@@ -1155,12 +1155,12 @@
     </message>
     <message>
         <location line="+1"/>
-        <location line="+545"/>
+        <location line="+547"/>
         <source>Проверяем трафик…</source>
         <translation>Comprobando el tráfico…</translation>
     </message>
     <message>
-        <location line="-543"/>
+        <location line="-545"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>El tráfico iba por fuera de la VPN: probando otra ruta</translation>
     </message>
@@ -1176,12 +1176,12 @@
     </message>
     <message>
         <location line="+3"/>
-        <location line="+536"/>
+        <location line="+538"/>
         <source>Отключаемся…</source>
         <translation>Desconectando…</translation>
     </message>
     <message>
-        <location line="-535"/>
+        <location line="-537"/>
         <source>Проверяем…</source>
         <translation>Verificando…</translation>
     </message>
@@ -1338,7 +1338,7 @@
         <translation>El servicio elige el nodo más rápido</translation>
     </message>
     <message>
-        <location line="+271"/>
+        <location line="+273"/>
         <location line="+4"/>
         <source>Заменить сервер</source>
         <translation>Cambiar servidor</translation>
@@ -1349,8 +1349,8 @@
         <translation>Instalando…</translation>
     </message>
     <message>
-        <location line="-535"/>
-        <location line="+536"/>
+        <location line="-537"/>
+        <location line="+538"/>
         <source>Подключаемся…</source>
         <translation>Conectando…</translation>
     </message>
@@ -1360,7 +1360,7 @@
         <translation>Eligiendo un servidor…</translation>
     </message>
     <message>
-        <location line="-63"/>
+        <location line="-65"/>
         <source>Доктор</source>
         <translation>Doctor</translation>
     </message>

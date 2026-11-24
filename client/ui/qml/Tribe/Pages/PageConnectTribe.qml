@@ -1374,13 +1374,15 @@ PageType {
 
         // кнопка «Обновить коннект» → round-robin на следующую живую ноду (TribeEngine.rotateNext,
         // круговой обход от текущей с заворотом). Активна только при подключении; на время свитча — busy. // AVPN
+        // Off / an ended attempt: opens the server choice (round 142, air-C) - see the MouseArea below.
         Rectangle {
             id: refreshBtn
             width: parent.width - (doctorBtn.visible ? doctorBtn.width + parent.spacing : 0)
                                 - (scannerBtn.visible ? scannerBtn.width + parent.spacing : 0)
             height: 49; radius: 16
             // AVPN (2026-07-17): без opacity-приглушения — единый стиль с кнопкой «Доктор»
-            // (реш. владельца: обе кнопки строки выглядят идентично). Действие при !isOn = старт.
+            // (реш. владельца: обе кнопки строки выглядят идентично). Действие при !isOn - the server choice
+            // (round 142, air-C: it was a start).
             color: refreshMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
             border.width: 1
             border.color: refreshMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5) : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8)
@@ -1429,11 +1431,16 @@ PageType {
             }
             MouseArea {
                 id: refreshMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                // Device round of 142 (air-C): with the VPN off this press connected at once to the pinned server
+                // (TribeEngine.start). The button replaces the server of a live connection (rotateNext,
+                // CONNECT-INVARIANTS §11); with nothing to replace - off, or an attempt that ended - it opens the
+                // server choice. It never starts a connection by itself: the orb does. Busy (connecting, switching,
+                // stopping): nothing.
                 onClicked: {
                     if (!root.hasEngine) return
                     if (TribeEngine.busy) return
-                    if (!root.isOn) {     // не подключены — обычный старт вместо ротации
-                        TribeEngine.start()
+                    if (!root.isOn) {
+                        root.requestServerPicker()
                         return
                     }
                     TribeEngine.rotateNext()   // round-robin на следующую живую ноду (заворот) // AVPN
