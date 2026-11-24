@@ -4610,6 +4610,66 @@ static qint64 firstFoundAt(const World &w, qint64 from)
     return -1;
 }
 
+// F1: the number in the rings is the machine's view.available - the rows the list shows as available in the shown
+// scope, counted in one place: cached rows too, a row that failed after a tap no more.
+static void availableIsWhatTheListShows()
+{
+    // a cached result of 3 working rows shown while the VPN is connected (its proof not taken yet): 3, not 0 / 1
+    {
+        World w = baseWorld("available", hostMac(), ScanNetKind::Wifi);
+        ScanOpen o = openOf(w, QStringLiteral("1"), true);
+        ScanCachedResult all;
+        all.networkKey = o.network.key;
+        all.fingerprint = o.network.fingerprint;
+        all.savedAtMs = kT0 - 5 * 60000;
+        all.rows << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa01"), QStringLiteral("DE"), ScanClass::Works)
+                 << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa02"), QStringLiteral("NL"), ScanClass::Slow)
+                 << choiceRow(QStringLiteral("up:aaaaaaaaaaaaaa03"), QStringLiteral("FI"), ScanClass::Works);
+        o.cached = all;
+        ScanMachine m(w.caps);
+        m.shown(o, kT0);
+        const QJsonObject v = viewJson(m, kT0);
+        CHECK(rowsInState(v, "works") + rowsInState(v, "slow") == 3 && rowsInState(v, "connected") == 1);
+        CHECK(v.value(QLatin1String("available")).toInt() == 3);
+    }
+    // a finished scan: every working row of the list; a row tapped and failed is «Не удалось» and no more counted
+    {
+        World w = baseWorld("available_done", hostMac(), ScanNetKind::Wifi);
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        w.runMs = 9000;
+        Driver d(w);
+        d.run();
+        const QJsonObject v = lastView(d);
+        const int shown = rowsInState(v, "works") + rowsInState(v, "slow");
+        CHECK(phaseOf(v) == QLatin1String("done") && shown > 1 && v.value(QLatin1String("available")).toInt() == shown);
+        QString a;
+        for (const QJsonValue &x : v.value(QLatin1String("rows")).toArray())
+            if (a.isEmpty() && x.toObject().value(QLatin1String("state")).toString() == QLatin1String("works"))
+                a = x.toObject().value(QLatin1String("id")).toString();
+        const qint64 t = d.now + 1000;
+        d.m.rowTapped(a, t);
+        CHECK(viewJson(d.m, t).value(QLatin1String("available")).toInt() == shown); // «Подключение…» is still available
+        d.m.exactRowFailed(a, t + 100);
+        const QJsonObject f = viewJson(d.m, t + 100);
+        CHECK(rowOf(f, a).value(QLatin1String("state")).toString() == QLatin1String("failed"));
+        CHECK(f.value(QLatin1String("available")).toInt() == shown - 1);
+    }
+    // nothing works: 0
+    {
+        World w = baseWorld("available_zero", hostMacMinimal(), ScanNetKind::Wifi);
+        w.nodes = ownOnly(w.nodes);
+        for (auto it = w.out.begin(); it != w.out.end(); ++it)
+            it.value().reachOk = false, it.value().works = false;
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        w.runMs = 12000;
+        Driver d(w);
+        d.run();
+        const QJsonObject v = lastView(d);
+        CHECK(!scanPhaseNameScanning(phaseOf(v)) && v.contains(QLatin1String("available"))
+              && v.value(QLatin1String("available")).toInt() == 0);
+    }
+}
+
 // F6 (device round, iPhone): a second row tapped while the first still connects. The server list's rule - the newest
 // pick wins (PageStart.onPickNode -> AvpnEngineQml::pinAndReconnect, no guard while a connect runs) - holds here too:
 // the new row connects, the older one's request ends without a verdict (no «Не удалось», no outcome), and its late
@@ -4662,6 +4722,26 @@ static void secondRowTapTakesOver()
     ScanMachine &m = d.m;
     m.rowTapped(ids.at(2), t + 3000);
     CHECK(!m.rowTapped(ids.at(2), t + 3100).has(ScanActionKind::ConnectRow));
+}
+
+// F2: a scope the machine refuses (here the white lists of a pool without them) leaves the old scope - and the
+// «Сканировать» after it scans nothing, never that old scope; a scope it takes scans again.
+static void refusedScopeNeverScansAnother()
+{
+    World w = baseWorld("refused_scope", hostMac(), ScanNetKind::Wifi);
+    ScanMachine m(w.caps);
+    m.shown(openOf(w, QString(), false), kT0);
+    ScanPoolView pool;
+    pool.countries = {ScanPoolView::Country{QStringLiteral("DE"), 3, 0}, ScanPoolView::Country{QStringLiteral("SE"), 1, 0}};
+    pool.whitelist = 0;
+    m.poolReady(pool, kT0 + 10);
+    m.filterChosen(QStringLiteral("DE"), kT0 + 20);
+    CHECK(m.view(kT0 + 20).bar.scope == QLatin1String("DE"));
+    m.filterChosen(QStringLiteral("whitelist"), kT0 + 30);
+    CHECK(m.view(kT0 + 30).bar.scope == QLatin1String("DE")); // refused: the old scope stays
+    CHECK(!m.retryTapped(kT0 + 40).has(ScanActionKind::RequestManifest) && !m.view(kT0 + 40).scanning);
+    m.filterChosen(QStringLiteral("SE"), kT0 + 50);
+    CHECK(m.retryTapped(kT0 + 60).has(ScanActionKind::RequestManifest));
 }
 
 static void refusedEndsScope()
@@ -5197,7 +5277,9 @@ int main(int argc, char **argv)
     countrylessRows();
     choiceSlotsAndStopStays();
     stopKeepsWhatItFound();
+    availableIsWhatTheListShows();
     secondRowTapTakesOver();
+    refusedScopeNeverScansAnother();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();

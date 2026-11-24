@@ -9,7 +9,9 @@
 #    still means the same, a double tap delivers only a Stop;
 #  - the rings are the list's first item in every state (no conditional block, no header mark), and the machine shows
 #    no «Найдено N …» shade (the rings say the count); «Остановить» keeps what a scan found;
-#  - the Scanner's words say «серверы», never «ноды».
+#  - the Scanner's words say «серверы», never «ноды»;
+#  review of 24.11: the rings' number is the machine's one count (view.available); the button acts only on a scope
+#  shown as selected and taken by the machine (a vanished selection falls back to «Все страны»); «Все страны» counts
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CLIENT="$(cd "$HERE/../../.." && pwd)"
@@ -43,7 +45,9 @@ printf '%s\n' "$open" | grep -qE 'retry\(|connectAndScan\(|open\(true\)|chooseCo
 grep -qE '^\s*property string selected: ""' "$PAGE" || bad "the choice must start on «Все страны» (selected: \"\")"
 
 scan="$(body_of 'function scanSelected(' "$PAGE")"
-printf '%s\n' "$scan" | awk '/TribeScanner.chooseCountry\(selected\)/ { c = NR } /TribeScanner.retry\(\)/ { r = NR } END { exit !(c && r && c < r) }' \
+take="$(body_of 'function takeSelected(' "$PAGE")"
+printf '%s\n' "$take" | grep -qF 'TribeScanner.chooseCountry(selected)' \
+    && printf '%s\n' "$scan" | awk '/takeSelected\(\)/ { c = NR } /TribeScanner.retry\(\)/ { r = NR } END { exit !(c && r && c < r) }' \
     || bad "Scan must hand the selected scope (chooseCountry(selected)) before retry()"
 show="$(body_of 'function showSelected(' "$PAGE")"
 printf '%s\n' "$show" | grep -q 'TribeScanner.showSlot(selected)' || bad "«Показать результат» must open the selected scope's fresh result"
@@ -71,6 +75,19 @@ printf '%s\n' "$stop" | grep -qF 'foundBesidesLive()) {' && printf '%s\n' "$stop
 
 grep -n 'qsTr(' "$TEXTS" | grep -iE 'нод[аыуе]?[^а-я]|нод"' && bad "the Scanner's words say «серверы», not «ноды» (lines above)"
 
+# review of 24.11
+grep -qE '^\s*readonly property int foundCount: Number\(view\.available \|\| 0\)\s*$' "$PAGE" \
+    || bad "F1: the number in the rings must be the machine's view.available"
+grep -qF 'o.insert(QStringLiteral("available"), v.availableCount);' "$MACHINE" || bad "F1: the view must carry available"
+printf '%s\n' "$take" | grep -qF 'if (!listed(selected)) {' && printf '%s\n' "$take" | grep -qF 'return String(barView.scope || "") === selected' \
+    || bad "F2: the button acts only on a listed scope the machine took"
+printf '%s\n' "$scan" | grep -qF '!takeSelected()' || bad "F2: Scan must go through takeSelected()"
+grep -qF 'onSelectedListedChanged: if (!selectedListed) Qt.callLater(dropUnlistedSelection)' "$PAGE" \
+    || bad "F2: a selection whose row left the list must fall back to «Все страны»"
+retry="$(body_of 'ScanStep retryTapped(qint64 now)' "$MACHINE")"
+printf '%s\n' "$retry" | grep -qF '!m_scopeRefused' || bad "F2: retry() after a refused scope choice must not scan"
+cnt="$(body_of 'function scopeCount(' "$PAGE")"
+printf '%s\n' "$cnt" | grep -qF 'let n = cc === "" ? Math.max(0, poolWhitelist) : 0' || bad "F3: «Все страны» must count the white lists"
 tap="$(body_of 'ScanStep rowTapped(const QString &id, qint64 now)' "$MACHINE")"
 printf '%s\n' "$tap" | grep -qF '!m_connectingId.isEmpty() ||' && bad "F6: a second row tap while one connects must not be dropped"
 printf '%s\n' "$tap" | grep -qF 'endChain(s, false);' || bad "F6: the superseded row's request must end without a verdict"

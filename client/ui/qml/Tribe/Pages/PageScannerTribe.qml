@@ -123,6 +123,20 @@ PageType {
     }
     readonly property var poolCountries: Array.isArray(barView.scope_countries) ? barView.scope_countries : []
     readonly property int poolWhitelist: Number(barView.scope_whitelist || 0)
+    // a scope with its row on the choice: «Все страны» always, «Белые списки» while the pool has them, a pool country
+    function listed(sc) {
+        if (sc === "") return true
+        if (sc === "whitelist") return poolWhitelist > 0
+        for (let i = 0; i < poolCountries.length; ++i)
+            if (String(poolCountries[i].cc || "") === sc) return true
+        return false
+    }
+    // review F2 (24.11): the button acts only on the scope shown as selected - a selection whose row left the list (a
+    // pool answer without it, another network's pool) falls back to «Все страны», visibly
+    readonly property bool selectedListed: listed(selected)
+    // deferred: the selection is not written from inside its own binding's change
+    onSelectedListedChanged: if (!selectedListed) Qt.callLater(dropUnlistedSelection)
+    function dropUnlistedSelection() { if (!listed(selected)) selected = "" }
     // the machine refuses a scan now (the 30 s pause, the cellular hour): nothing that would scan is offered
     readonly property bool scanGated: bar.gated
     // what the choice's button does with the selected scope: connect (VPN off and the switch scanner_connect_on_open
@@ -139,21 +153,29 @@ PageType {
         Haptic.play("selection")
         selected = sc
     }
-    // the choice's button: scan the selected scope (a new list of that scope), show its fresh result, or connect and scan
-    function scanSelected() {
-        if (!hasScanner || scanGated) return
+    // the choice's button: scan the selected scope (a new list of that scope), show its fresh result, or connect and scan.
+    // Only a scope shown as selected, and only once the machine took it as its scope (it refuses one it cannot scan:
+    // then nothing scans - never the scope it had before).
+    function takeSelected() {
+        if (!listed(selected)) {
+            selected = ""
+            return false
+        }
         TribeScanner.chooseCountry(selected)
+        return String(barView.scope || "") === selected
+    }
+    function scanSelected() {
+        if (!hasScanner || scanGated || !takeSelected()) return
         showResult()
         TribeScanner.retry()
     }
     function showSelected() {
-        if (!hasScanner) return
+        if (!hasScanner || !listed(selected)) return
         showResult()
         TribeScanner.showSlot(selected)
     }
     function connectSelected() {
-        if (!hasScanner) return
-        TribeScanner.chooseCountry(selected)
+        if (!hasScanner || !takeSelected()) return
         showResult()
         TribeScanner.connectAndScan()
     }
@@ -207,16 +229,16 @@ PageType {
     // the result shows nothing of its scope (a scan the machine refused at once, a network change): its summary
     // (the live connection's row, when there is one, is always above it and does not count)
     readonly property bool scopeStart: !choosing && !scanning && !blocked && !emptyResult && otherCount === 0
+    // the servers of a scope: «Все страны» scans every row of the pool - the countries AND the white lists (review F3)
     function scopeCount(cc) {
         if (cc === "whitelist")
-            return Number(barView.scope_whitelist || 0)
-        let n = 0
+            return Math.max(0, poolWhitelist)
+        let n = cc === "" ? Math.max(0, poolWhitelist) : 0
         for (let i = 0; i < poolCountries.length; ++i)
             if (cc === "" || poolCountries[i].cc === cc) n += Number(poolCountries[i].count || 0)
         return n
     }
     property bool allCache: false         // every shown row is a cached one (set by syncRows)
-    property int cacheWorks: 0            // the working rows of a cached result on the list (set by syncRows)
     readonly property bool lastResult: !scanning && otherCount > 0 && (blocked || allCache)
     // the live connection's row (view.rows[0] with the «current» flag) is drawn first, above everything else of the list;
     // otherCount = the rows besides it (set by syncRows)
@@ -236,13 +258,9 @@ PageType {
                                        : blocked ? "alert"
                                        : (phase === "done" || emptyResult || otherCount > 0) ? "count"
                                        : "idle"
-    // the found number: a fresh result counts its verified rows (ScanView.verified: the machine's count, cached rows
-    // never count); a cached result shown as it is - its slot's working rows, else the rows drawn as working
-    readonly property int foundCount: {
-        if (!allCache) return Number(view.verified || 0)
-        const s = slotOf(String(barView.scanned_scope ?? scope))
-        return s ? Number(s.works || 0) : cacheWorks
-    }
+    // the number in the rings: the rows the list shows as available in the shown scope - the machine's one count
+    // (view.available: fresh and cached rows, the proven live connection of the scope, never «Не удалось»)
+    readonly property int foundCount: Number(view.available || 0)
     readonly property string agoText: ScanTexts.ago(Number(view.checked_ago_min ?? -1), Number(view.now_ms || Date.now()))
     readonly property string stageText: {
         switch (view.stage) {
@@ -363,12 +381,11 @@ PageType {
             rowsModel.clear()
             listBuild = build
         }
-        let cacheAll = true, crowd = false, works = 0
+        let cacheAll = true, crowd = false
         for (let i = 0; i < src.length; ++i) {
             const it = toItem(src[i], vmap)
             cacheAll = cacheAll && it.fromCache
             crowd = crowd || it.crowd
-            if (it.fromCache && (it.rstate === "works" || it.rstate === "slow")) works += 1
             if (i >= rowsModel.count) rowsModel.append(it)
             else if (rowsModel.get(i).rid !== it.rid) { rowsModel.remove(i, rowsModel.count - i); rowsModel.append(it) }
             else if (!sameItem(it, rowsModel.get(i))) rowsModel.set(i, it)
@@ -379,7 +396,6 @@ PageType {
             if (rowsModel.get(k).current === true) live = k
         liveIndex = live
         allCache = src.length > 0 && cacheAll
-        cacheWorks = works
         anyCrowd = crowd
     }
 

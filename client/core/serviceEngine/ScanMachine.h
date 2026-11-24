@@ -509,6 +509,10 @@ struct ScanView {
     // view.slots: this network's results a scope choice shows without a scan (ScanMachine::slotFresh), newest first;
     // the country choice says «M доступно · K мин назад» on their rows and opens them as they are
     QList<ScanSlotView> scopeSlots;
+    // The rows the list shows as available in the shown scope (owner 24.11, the number in the rings): working rows,
+    // fresh or cached, a tapped row while it connects and the proven live connection of that scope; never a
+    // «Не удалось» / «Не проверено» row (view.available). One count for the page and any other reader.
+    int availableCount = 0;
 };
 
 // PathOutcomeItem.probe / DoctorScanRow.probe of a probe kind.
@@ -626,6 +630,16 @@ inline QString scanScopeOf(const QString &raw)
 // A row of a result belongs to a scope: "" = every row, "whitelist" = a row without a country, else its country. The
 // live tunnel is probed in every scope and saved in that scope's result: it never counts for another country (review
 // round 36, F2).
+// A row the list shows as available (view.available): a proven working row - fresh or cached, a tapped row while it
+// connects, the proven live connection; never «Не удалось» (a failed probe or tap) nor «Не проверено».
+inline bool scanRowShownAvailable(const ScanRowView &r)
+{
+    if (r.unavailable || !r.verified)
+        return false;
+    return r.state == ScanRowState::Works || r.state == ScanRowState::Slow || r.state == ScanRowState::Connecting
+           || r.state == ScanRowState::Connected;
+}
+
 inline bool scanRowInScope(const QString &countryCode, const QString &scope)
 {
     if (scope.isEmpty())
@@ -651,6 +665,7 @@ public:
         now = clock(now);
         ScanStep s;
         m_screenOpen = true;
+        m_scopeRefused = false; // a page that opens chooses its scope again
         m_listRebuild = true; // the page opens: its list is built from empty (syncList)
         m_connectOnOpen = o.connectOnOpen;
         m_net.radio = o.network.radio; // display only, never part of the identity
@@ -696,6 +711,7 @@ public:
         now = clock(now);
         ScanStep s;
         m_screenOpen = true;
+        m_scopeRefused = false; // a page that opens chooses its scope again
         m_listRebuild = true; // the page opens: its list is built from empty (syncList)
         m_connectOnOpen = o.connectOnOpen;
         m_net.radio = o.network.radio; // display only, never part of the identity
@@ -752,8 +768,8 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!scanPhaseScanning(m_phase) && now >= m_cooldownUntil && now >= m_lastManifestAt + kScanManifestBackoffMs
-            && !budgetBlocked(now).hourly) {
+        if (!scanPhaseScanning(m_phase) && !m_scopeRefused && now >= m_cooldownUntil
+            && now >= m_lastManifestAt + kScanManifestBackoffMs && !budgetBlocked(now).hourly) {
             m_tapScan = true;
             beginScan(now, s);
             m_tapScan = false;
@@ -767,7 +783,7 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!scanPhaseScanning(m_phase) && m_caps.needsVpn && !m_current.working() && now >= m_cooldownUntil
+        if (!scanPhaseScanning(m_phase) && !m_scopeRefused && m_caps.needsVpn && !m_current.working() && now >= m_cooldownUntil
             && now >= m_lastManifestAt + kScanManifestBackoffMs && !budgetBlocked(now).hourly) {
             m_tapScan = true;
             beginScan(now, s, true);
@@ -839,6 +855,9 @@ public:
                 inPool = inPool || c.countryCode == scope;
             if (inPool || present)
                 m_scope = scope;
+            // review F2 (24.11): a scope the machine cannot take (not in the pool, no such rows) leaves the old one -
+            // and the next «Сканировать» must not scan that old scope for a caller who asked for another
+            m_scopeRefused = m_scope != scope;
             if (m_scope != scopeBefore) {
                 // A result is shown only for the scope it covered: the new scope shows its own slot, else nothing.
                 if (!m_completed)
@@ -864,6 +883,7 @@ public:
         const QString scope = scanScopeOf(cc);
         if (!scanPhaseScanning(m_phase) && slotShown(scope, now)) {
             const bool onScreen = m_completed && m_phase == ScanPhase::Done && m_scannedScope == scope;
+            m_scopeRefused = false;
             m_scope = scope;
             m_filter.clear();
             if (!onScreen) {
@@ -1758,6 +1778,8 @@ public:
         if (m_phase == ScanPhase::Empty)
             v.empty.scopeCc = m_scannedScope;
         for (const ScanRowView &r : v.rows) {
+            if (scanRowShownAvailable(r) && (!r.current || scanRowInScope(r.countryCode, m_listScope)))
+                ++v.availableCount; // the rings' number: what the list shows as available, cached rows too
             if (r.unavailable)
                 continue; // failed now: on the screen, never counted
             if (r.verified && !r.fromCache)
@@ -4576,6 +4598,7 @@ private:
     bool m_startedVpn = false;
     bool m_checkAfterScan = false;
     QString m_stopReason;
+    bool m_scopeRefused = false;  // the last scope choice was refused: no scan until a choice is taken (review F2)
     QString m_emptyReason;
     QString m_noScanReason;
     ScanOutcomeCollector m_outcomes;
@@ -4779,6 +4802,7 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     o.insert(QStringLiteral("list_build"), double(v.listBuild));
     o.insert(QStringLiteral("verified"), v.verifiedCount);
     o.insert(QStringLiteral("unverified"), v.unverifiedCount);
+    o.insert(QStringLiteral("available"), v.availableCount);
     o.insert(QStringLiteral("more_available"), v.moreAvailable);
     o.insert(QStringLiteral("batch"), v.batch);
     o.insert(QStringLiteral("more_country"), v.moreCountry);
