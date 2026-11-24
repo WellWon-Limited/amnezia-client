@@ -15,7 +15,8 @@
 #   Q6  the service binds a child to its controlling connections and, when a tun2socks loses its client without
 #       a stop, ends that Xray session in XrayProtocol::stop's order, then the child; not during its shutdown;
 #   Q7  macOS quit: a session the daemon does not hold by itself (not WireguardProtocol) is ended on the
-#       VpnConnection thread while it runs; Windows/Linux keep upstream's disconnect;
+#       VpnConnection thread while it runs; an AmneziaWG session is released to the daemon there without a
+#       deactivate (round mac-B: the protocol's destructor tore it down); Windows/Linux keep upstream's disconnect;
 #   Q8  (review F1) a failing step ends its session through failSession, which reports the error only when the
 #       object outlived the teardown; nothing follows a stop() in this file; the destructor emits nothing;
 #   Q9  (review F2) the lost-client teardown is bound to the session: xrayStart/xrayStop move the ledger, a
@@ -132,8 +133,15 @@ dtor="$(body "$APP" 'AmneziaApplication::~AmneziaApplication()')"
 nm=$(at "$dtor" '#ifndef Q_OS_MACOS')
 up=$(at "$dtor" 'QMetaObject::invokeMethod(m_vpnConnection.get(), "disconnectFromVpn", Qt::BlockingQueuedConnection);')
 el=$(at "$dtor" '#else')
-keep=$(at "$dtor" 'if (protocol && !qobject_cast<WireguardProtocol *>(protocol.data()))')
+keep=$(at "$dtor" 'else if (protocol)')
 dis=$(at "$dtor" 'connection->disconnectFromVpn();')
+# round mac-B: the AmneziaWG session is released to the daemon there (no deactivate from the teardown), before the rest
+rel=$(at "$dtor" 'wg->releaseSessionToDaemon();')
+[ "$rel" -gt "$el" ] && [ "$keep" -gt "$rel" ] || bad "Q7: macOS quit does not release an AmneziaWG session to the daemon first"
+WGP="$ROOT/client/core/protocols/wireGuardProtocol.cpp"
+relb="$(body "$WGP" 'void WireguardProtocol::releaseSessionToDaemon()')"
+has "$relb" 'm_impl.reset();' && ! has "$relb" 'deactivate' || bad "Q7: releaseSessionToDaemon sends a deactivate or keeps the controller"
+has "$(body "$WGP" 'ErrorCode WireguardProtocol::stopMzImpl()')" 'if (m_impl)' || bad "Q7: a released protocol's stop() is not guarded"
 quit=$(at "$dtor" 'm_vpnConnectionThread.quit();')
 [ "$nm" -gt 0 ] && [ "$up" -gt "$nm" ] && [ "$el" -gt "$up" ] || bad "Q7: Windows/Linux no longer disconnect on quit as upstream"
 [ "$keep" -gt "$el" ] && [ "$dis" -gt "$keep" ] || bad "Q7: macOS quit does not end a session the daemon does not hold"

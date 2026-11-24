@@ -27,6 +27,10 @@ public:
     // AVPN (волна-3): §16-сторож VpnConnection спрашивает демона напрямую ({"type":"status"});
     // ответ приходит как statusUpdated → bytesChanged — это и есть признак живого демона.
     void requestStatus();
+    // AVPN (BUG-6, macOS, round mac-B): the app quits and the daemon keeps the AmneziaWG session - the controller (its
+    // daemon socket) is released WITHOUT a deactivate; this protocol's stop() / destructor then sends nothing. Called on
+    // the protocol's own thread by ~AmneziaApplication only.
+    void releaseSessionToDaemon();
 
 signals:
     // AVPN (волна-4): проброс ControllerImpl::daemonSocketLost к VpnConnection::daemonLost.

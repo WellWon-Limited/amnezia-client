@@ -98,12 +98,17 @@ AmneziaApplication::~AmneziaApplication()
         // was torn down from the main thread except for tun2socks: the quit hung 30 s on the tun2socks replica
         // of the stopped thread and tun2socks stayed as an orphan. It ends here, on its own thread while that
         // thread still runs, as upstream ends every session on quit.
+        // AVPN (round mac-B, test Mac 25.11.2026): the AmneziaWG session itself was torn down on quit all the same - the
+        // protocol outlived this call and its destructor (stop() -> "deactivate") ran in the teardown. It is released to
+        // the daemon here, on its own thread: the daemon socket closes without a deactivate (releaseSessionToDaemon).
         VpnConnection *connection = m_vpnConnection.get();
         QMetaObject::invokeMethod(
                 connection,
                 [connection]() {
                     const QSharedPointer<VpnProtocol> protocol = connection->vpnProtocol();
-                    if (protocol && !qobject_cast<WireguardProtocol *>(protocol.data()))
+                    if (auto *wg = qobject_cast<WireguardProtocol *>(protocol.data()))
+                        wg->releaseSessionToDaemon();
+                    else if (protocol)
                         connection->disconnectFromVpn();
                 },
                 Qt::BlockingQueuedConnection);

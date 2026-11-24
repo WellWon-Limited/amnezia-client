@@ -69,8 +69,21 @@ ErrorCode WireguardProtocol::startMzImpl()
 
 ErrorCode WireguardProtocol::stopMzImpl()
 {
-    m_impl->deactivate();
+    if (m_impl) // AVPN (BUG-6): released to the daemon at quit - nothing to stop from here
+        m_impl->deactivate();
     return ErrorCode::NoError;
+}
+
+// AVPN (BUG-6, macOS, round mac-B: quit with AmneziaWG connected tore the tunnel down - the app's teardown destroyed
+// this protocol and ~WireguardProtocol's stop() sent "deactivate", although ~AmneziaApplication no longer calls
+// disconnectFromVpn). The controller goes without a word to the daemon: ~LocalSocketController closes the socket, the
+// daemon keeps the interface, the next launch adopts it (probeDaemonTunnelOnStartup).
+void WireguardProtocol::releaseSessionToDaemon()
+{
+    if (!m_impl)
+        return;
+    m_impl->disconnect(this);
+    m_impl.reset();
 }
 
 
