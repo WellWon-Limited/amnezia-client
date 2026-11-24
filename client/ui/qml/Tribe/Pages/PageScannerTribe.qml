@@ -1097,28 +1097,31 @@ PageType {
                     NumberAnimation { target: rowWrap; property: "opacity"; from: 0; to: 1; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                     NumberAnimation { target: lift; property: "y"; from: slot.gap; to: 0; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                 }
+                // Every role read with its default (device round air-C, D8): a new list build clears the model, and
+                // a row being removed reads its roles as undefined once more before it goes ("Unable to assign
+                // [undefined] to bool" at the start of a scope's scan).
                 TribeScanRow {
                     anchors.fill: parent
                     transform: Translate { id: lift }
-                    label: slot.model.label
-                    countryCode: slot.model.cc
-                    transport: slot.model.transport
-                    version: slot.model.version
-                    rowState: slot.model.rstate
-                    speed: slot.model.speed
-                    bars: slot.model.bars
-                    ms: slot.model.ms
+                    label: slot.model.label ?? ""
+                    countryCode: slot.model.cc ?? ""
+                    transport: slot.model.transport ?? "xray"
+                    version: slot.model.version ?? ""
+                    rowState: slot.model.rstate ?? "works"
+                    speed: slot.model.speed ?? "none"
+                    bars: slot.model.bars ?? 0
+                    ms: slot.model.ms ?? -1
                     // a cached row is drawn as cache whenever no scan runs: the whole last result, or a row of it the
                     // finished scan did not judge again (it stays in its place)
-                    cached: slot.model.fromCache && !slot.scanning
-                    dimmed: slot.model.dimmed
-                    tappable: slot.model.tappable
-                    verifying: slot.model.verifying
-                    liveUnverified: slot.model.liveUnverified
-                    unverified: slot.model.unverified
-                    crowd: slot.model.crowd
+                    cached: (slot.model.fromCache ?? false) && !slot.scanning
+                    dimmed: slot.model.dimmed ?? false
+                    tappable: slot.model.tappable ?? false
+                    verifying: slot.model.verifying ?? false
+                    liveUnverified: slot.model.liveUnverified ?? false
+                    unverified: slot.model.unverified ?? false
+                    crowd: slot.model.crowd ?? false
                     whitelist: slot.model.cc === ""
-                    onTapped: slot.rowTapped(slot.model.rid)
+                    onTapped: slot.rowTapped(slot.model.rid ?? "")
                 }
             }
         }
