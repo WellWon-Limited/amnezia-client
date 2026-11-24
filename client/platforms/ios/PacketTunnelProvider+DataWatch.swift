@@ -35,6 +35,8 @@ extension PacketTunnelProvider {
             sanityCheck: { [weak self] targets, completion in
                 TribeSanityRunner.run(targets, interface: { self?.tribeCurrentPhysicalInterface() }, completion: completion)
             },
+            // awg-apple tribe.17: the same number the stall ladder deducts (WGConfig.roamingPolicy).
+            sessionHandshakeTxBytes: { [weak self] in self?.wgAdapter?.roamingPolicy.serviceTraffic.handshakeTxBytes ?? 0 },
             readState: {
                 let state = TribeSharedState.appGroup?.read(TribeWatchPlan.stateFileName) ?? [:]
                 return state.isEmpty ? nil : state

@@ -1,4 +1,26 @@
 patches:
+  "3.1.4-tribe.17":
+    # tribe.16's patches byte for byte (0017 included). The change is TribeRoaming.swift (review of
+    # tribe.16): demand never counts the session's own service traffic (TribeServiceTraffic, computed
+    # from its AmneziaWG configuration by the provider), at every stage; a minute without demand ends
+    # an open episode; a sampling gap is not silence; dataQuietSeconds is reported only while the
+    # ladder sees a stall right now (the provider replies it as data_stall_s).
+    - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
+    - patch_file: "patches/0002-xray-socket-protection-result.patch"
+    - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
+    - patch_file: "patches/0006-tribe-persistent-heal-soft-restart.patch"
+    - patch_file: "patches/0007-tribe-fresh-port-on-return.patch"
+    - patch_file: "patches/0008-tribe-logger-context-loss-gate.patch"
+    - patch_file: "patches/0009-tribe-userspace-direct-split.patch"
+    - patch_file: "patches/0010-tribe-upstream-http.patch"
+    - patch_file: "patches/0011-tribe-outbound-stats.patch"
+    - patch_file: "patches/0012-tribe-data-watch.patch"
+    - patch_file: "patches/0013-tribe-scan-probe.patch"
+    - patch_file: "patches/0014-tribe-scan-awg.patch"
+    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"
+    - patch_file: "patches/0016-tribe-data-watch-adapter.patch"
+    - patch_file: "patches/0017-tribe-data-quiet-export.patch"
   "3.1.4-tribe.16":
     # tribe.15's patches byte for byte + 0017 (last): the adapter's roamingCounters() also hands over
     # TribeRecoveryArbiter.dataQuietSeconds (how long inbound data has not proved the path), which the

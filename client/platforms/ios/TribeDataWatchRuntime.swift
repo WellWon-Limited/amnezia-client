@@ -48,6 +48,10 @@ struct TribeDataWatchDeps {
     /// One check of the physical network: asks the targets and calls back exactly once.
     var sanityCheck: (_ targets: [TribeSanityTarget], _ completion: @escaping (TribeSanityResult) -> Void) -> Void
     var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// AVPN (awg-apple tribe.17): what one handshake of THIS session sends (its junk, special junk and
+    /// paddings; TribeServiceTraffic in the package, the stall ladder's own number). The watch deducts at
+    /// least that much from a handshake sample's outbound bytes. 0 = unknown: the plan's value alone.
+    var sessionHandshakeTxBytes: () -> UInt64 = { 0 }
     var nowMs: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
     /// Stage 2: TribeWatchState.json as the previous run of the extension left it (its list of
     /// nodes judged dead); nil = no file. Read only when the plan permits switching.
@@ -372,6 +376,8 @@ final class TribeDataWatchRuntime {
         switch parsed {
         case .success(let plan):
             next = plan.policy
+            // tribe.17: never less than the session's own handshake (a heavy-junk config sends kilobytes).
+            next.handshakeTxAllowanceBytes = Swift.max(next.handshakeTxAllowanceBytes, deps.sessionHandshakeTxBytes())
             nextTargets = (plan.sanityTargets.isEmpty ? TribeSanityTarget.builtIn : plan.sanityTargets).compactMap { TribeSanityTarget(url: $0) }
             state = next.enabled ? "on" : "off"
             lock.lock()
