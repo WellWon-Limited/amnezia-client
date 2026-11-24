@@ -240,8 +240,8 @@ PageType {
     }
     property bool allCache: false         // every shown row is a cached one (set by syncRows)
     readonly property bool lastResult: !scanning && otherCount > 0 && (blocked || allCache)
-    // the live connection's row (view.rows[0] with the «current» flag) is drawn first, above everything else of the list;
-    // otherCount = the rows besides it (set by syncRows)
+    // the live connection's row is view.rows[0] (the «current» flag) when the machine built the list with it; otherCount =
+    // the rows besides it - the result's own rows (set by syncRows)
     property bool liveFirst: false
     // the live connection's row wherever the result has it (review round 36, F4: a row connected from the list keeps
     // its place - rows never jump - and the choice still shows it under «ВАШЕ ПОДКЛЮЧЕНИЕ»); -1 = none (set by syncRows)
@@ -733,28 +733,54 @@ PageType {
                         }
                     }
 
-                    // the live connection's row: always the first thing of the result, drawn like every other row
+                    Text {
+                        id: sectionLabel
+                        visible: root.otherCount > 0
+                        text: root.lastResult ? ScanTexts.sectionLast : ScanTexts.sectionNow
+                        textFormat: Text.PlainText
+                        color: Theme.color.text3
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.caption
+                        font.weight: Theme.font.wSemibold
+                        font.letterSpacing: Theme.font.trackCaption * Theme.font.caption
+                        lineHeight: 15
+                        lineHeightMode: Text.FixedHeight
+                    }
+                    // The rows place THEMSELVES: y = index x pitch. Rows only join the end (the machine's list), so an index
+                    // never changes while the list lives. A new row fades in at its own place, rising from one gap below
+                    // (never over a row).
+                    // The live connection (device round air-C, D4) is one of these rows, drawn the one way every list draws
+                    // it (TribeScanRow «Подключено», highlighted) - never a separate card above the caption. Where it stands
+                    // is the machine's list rule: first in a list that is built (page open, a scan, a scope, a network), and
+                    // in its own place when it was connected from the list the person is looking at - it never jumps under
+                    // the finger; it moves to the top when the result is next built.
                     Item {
-                        id: liveBox
-                        visible: root.liveFirst
+                        id: rowsBox
+                        readonly property real pitch: Theme.scan.rowHeight + resultCol.spacing
+                        visible: rowsModel.count > 0
                         width: parent.width
-                        height: root.liveFirst ? Theme.scan.rowHeight : 0
+                        height: Math.max(0, rowsModel.count * pitch - resultCol.spacing)
+                        // the lines under the rows (wait line, legend, «Найти ещё») slide with the list's growth
+                        Behavior on height {
+                            enabled: !Theme.motion.reduceMotion
+                            NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutCubic }
+                        }
                         Repeater {
                             model: rowsModel
                             delegate: ScanRowSlot {
-                                liveSlot: true
-                                liveFirst: root.liveFirst
+                                liveSlot: false
+                                liveFirst: false
                                 scanning: root.scanning
-                                rowWidth: liveBox.width
-                                pitch: Theme.scan.rowHeight + resultCol.spacing
+                                rowWidth: rowsBox.width
+                                pitch: rowsBox.pitch
                                 gap: resultCol.spacing
                                 onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
                             }
                         }
                     }
 
-                    // «Все страны · 46 серверов» / «Германия · 12 серверов» + what the Scan button does: the result shows
-                    // nothing of its scope (the kit's empty-state pattern: title, text; the action is the bar's Scan
+                    // «Все страны · 46 серверов» / «Германия · 12 серверов» + what the Scan button does, under the live
+                    // connection's row when there is one: the result shows nothing of its scope (the kit's empty-state pattern: title, text; the action is the bar's Scan
                     // button - one button, one meaning; the radar is the rings')
                     Column {
                         visible: root.scopeStart
@@ -788,50 +814,6 @@ PageType {
                             font.pixelSize: Theme.font.bodyS
                             lineHeight: 20
                             lineHeightMode: Text.FixedHeight
-                        }
-                    }
-
-                    Text {
-                        id: sectionLabel
-                        visible: root.otherCount > 0
-                        // under the connected row (when there is one) .sec-label.in-list margin-top 4; else the list's first child
-                        topPadding: root.liveFirst ? Theme.space.xs : 0
-                        text: root.lastResult ? ScanTexts.sectionLast : ScanTexts.sectionNow
-                        textFormat: Text.PlainText
-                        color: Theme.color.text3
-                        font.family: Theme.font.body
-                        font.pixelSize: Theme.font.caption
-                        font.weight: Theme.font.wSemibold
-                        font.letterSpacing: Theme.font.trackCaption * Theme.font.caption
-                        lineHeight: 15
-                        lineHeightMode: Text.FixedHeight
-                    }
-                    // The other rows place THEMSELVES: y = place x pitch (place = index, less the live row above). Rows only
-                    // join the end (the machine's list), so an index never changes while the list lives. A new row fades in
-                    // at its own place, rising from one gap below (never over a row). One delegate (ScanRowSlot) serves the
-                    // live row's repeater above and this one: a slot shows itself or hides by index 0 + liveFirst.
-                    Item {
-                        id: rowsBox
-                        readonly property real pitch: Theme.scan.rowHeight + resultCol.spacing
-                        visible: root.otherCount > 0
-                        width: parent.width
-                        height: Math.max(0, root.otherCount * pitch - resultCol.spacing)
-                        // the lines under the rows (wait line, legend, «Найти ещё») slide with the list's growth
-                        Behavior on height {
-                            enabled: !Theme.motion.reduceMotion
-                            NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutCubic }
-                        }
-                        Repeater {
-                            model: rowsModel
-                            delegate: ScanRowSlot {
-                                liveSlot: false
-                                liveFirst: root.liveFirst
-                                scanning: root.scanning
-                                rowWidth: rowsBox.width
-                                pitch: rowsBox.pitch
-                                gap: resultCol.spacing
-                                onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
-                            }
                         }
                     }
 
