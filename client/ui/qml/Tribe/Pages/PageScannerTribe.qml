@@ -418,6 +418,23 @@ PageType {
         duration: Theme.motion.reduceMotion ? 0 : Theme.motion.slow
         // in-out: the list under the block starts moving gently (OutCubic moved it 35 px in the first frame)
         easing.type: Easing.InOutCubic
+        // back on the choice, the rings small again: the selected row in view (device round air-C, D7)
+        onStopped: if (root.choosing) root.revealSelected()
+    }
+    // the choice's selected row brought into the list's view (Back from a result of a country far down the list left it
+    // off screen); nothing moves when it is already in view
+    function revealSelected() {
+        let row = null
+        for (let i = 0; i < chooseCol.children.length && !row; ++i)
+            if (chooseCol.children[i].objectName === "scannerScope_" + (selected === "" ? "all" : selected))
+                row = chooseCol.children[i]
+        if (!row || !row.visible) return
+        const top = row.mapToItem(list.contentItem, 0, 0).y
+        const bottom = top + row.height
+        if (top < list.contentY)
+            list.contentY = Math.max(0, top - list.padTop)
+        else if (bottom > list.contentY + list.height)
+            list.contentY = Math.max(0, Math.min(list.contentHeight - list.height, bottom - list.height + list.padBottom))
     }
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
