@@ -279,9 +279,9 @@ public struct TribeDataWatchPolicy: Equatable {
     /// Subtracted from the rx growth of a sample in which the handshake time changed: a handshake
     /// response is exactly 92 B in rx_bytes, an initiation (the server re-keys) 148 B. Anything
     /// above that next to a handshake is data.
-    public var handshakeRxAllowanceBytes: UInt64 = 148
+    public var handshakeRxAllowanceBytes: UInt64 = 148 // = TribeDataFlow.handshakeRxBytes (tribe.16, pinned by the ladder test)
     /// Subtracted from the tx growth of a sample in which the handshake time changed.
-    public var handshakeTxAllowanceBytes: UInt64 = 1024
+    public var handshakeTxAllowanceBytes: UInt64 = 1024 // = TribeDataFlow.handshakeTxBytes (tribe.16, pinned by the ladder test)
     /// Quiet time after a path change.
     public var pathStableSeconds: TimeInterval = 20
     /// Quiet time after a device start or a peer switch.

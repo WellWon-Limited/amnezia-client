@@ -164,6 +164,14 @@ final class Rig {
     }
 }
 
+// 0. tribe.16: one definition of "data is flowing" (TribeDataFlow in TribeRoaming.swift): the watch
+// deducts the same handshake bytes as the ladder (its own file compiles alone, so the value is pinned
+// here, where both are compiled together).
+check(TribeDataWatchPolicy().handshakeRxAllowanceBytes == TribeDataFlow.handshakeRxBytes,
+      "rx allowance of the watch = TribeDataFlow.handshakeRxBytes: \(TribeDataWatchPolicy().handshakeRxAllowanceBytes)")
+check(TribeDataWatchPolicy().handshakeTxAllowanceBytes == TribeDataFlow.handshakeTxBytes,
+      "tx allowance of the watch = TribeDataFlow.handshakeTxBytes: \(TribeDataWatchPolicy().handshakeTxAllowanceBytes)")
+
 // 1. The path of 13.11 (handshake passes every 15 s, not one data packet) at low demand: the
 // ladder does not step at all, and the verdict is reached all the same.
 for rate in [60.0, 120.0, 200.0, 260.0] {

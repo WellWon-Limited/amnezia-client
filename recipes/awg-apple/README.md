@@ -8,7 +8,9 @@ and macOS Network Extension targets compile.
 
 | Version | Patches | Notes |
 |---|---|---|
-| `3.1.4-tribe.14` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 + 0009 + 0010 + 0011 + 0012 + 0013 + 0014 + 0015 + 0016 (+ the engine and vendored patches of tribe.12) | current (iOS 5.1.111 / 141, not released); tribe.12 + the data watch in two patches: 0012 = the Go half, the in-tunnel probe (`tribeprobe.go`), in the slot tribe.12 left for it; 0016 = the adapter half (`TribeDataWatch.swift` fed on the stall tick, the arbiter's commands; the engine stop of an in-place switch runs through 0015's backend hook). Off unless the app's plan file enables it. Two patches because the recipe's patch tool matches hunks at exact line numbers and 0015 was recorded on an adapter without the data watch. `3.1.4-tribe.13` was the data watch branch's own number before the merge and is not kept |
+| `3.1.4-tribe.16` | the patches of tribe.15 + 0017 | current (iOS 142, not released); one definition of "data is flowing" for the stall ladder, its budget and the app's failover (`TribeDataFlow` in `TribeRoaming.swift`, section "tribe.16 behaviour"); 0017 = the adapter's `roamingCounters()` also reads `dataQuietSeconds`, the provider replies it as `data_quiet_s`. tribe.14 and tribe.15 were never released: no `TribeRoaming.swift` snapshot is frozen for them (rebuilt from this recipe they get tribe.16's ladder) |
+| `3.1.4-tribe.15` | the patches of tribe.14 (+ engine patch 0014, host limits) | built into 5.1.111 / 142 dev builds before tribe.16, not released |
+| `3.1.4-tribe.14` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 + 0009 + 0010 + 0011 + 0012 + 0013 + 0014 + 0015 + 0016 (+ the engine and vendored patches of tribe.12) | iOS 5.1.111 / 141, not released; tribe.12 + the data watch in two patches: 0012 = the Go half, the in-tunnel probe (`tribeprobe.go`), in the slot tribe.12 left for it; 0016 = the adapter half (`TribeDataWatch.swift` fed on the stall tick, the arbiter's commands; the engine stop of an in-place switch runs through 0015's backend hook). Off unless the app's plan file enables it. Two patches because the recipe's patch tool matches hunks at exact line numbers and 0015 was recorded on an adapter without the data watch. `3.1.4-tribe.13` was the data watch branch's own number before the merge and is not kept |
 | `3.1.4-tribe.12` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 + 0009 + 0010 + 0011 + 0013 + 0014 (+ before vendoring: engine 0012-tribe-scan-engine; vendored: core 0004-261101 + 0008-261101 + 0011-261101, libxray 0005 + 0006 + 0007) | built into 5.1.110 / 140; Xray core v1.261101.0 on Go 1.27.4, 0010 = `LibXrayTribeHTTP`, 0011 = `LibXrayTribeOutboundStats` (libxray 0007, core 0008), 0013 = the Scanner's probe engine (`LibXrayTribeScanMessage` / `LibXrayTribeScanStopAll`, core 0011), 0014 = its AmneziaWG mini-session runner (`awg_mini`, no new export), libxray 0005 = FreeOSMemory loop once per process, libxray 0006 = StopXray restores the Go memory settings. 0015 (in `conandata.yml`) = the adapter's backend-restart hook. Slot 0012 was left for the data watch; merged with it this version became `3.1.4-tribe.14` |
 | `3.1.4-tribe.11` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 + 0009 | shipped (5.1.109 / 139); 0009 = userspace direct split (`directsplit.go`), off unless the app configures it |
 | `3.1.4-tribe.10` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 | shipped (iOS 5.1.98-5.1.99); 0008 = immortal logger context (NE crash), real-loss gate, no stale flag |
@@ -879,6 +881,53 @@ offline tooling (not exported): the replay of a tester journal through the real 
 (aggregates only) and the mutation run of the rule
 (`python3 recipes/awg-apple/replay/tribe_data_watch_mutants.py`).
 
+## tribe.16 behaviour: one definition of "data is flowing" (TribeRoaming.swift, patch 0017)
+
+Device round 24.11, case B1 (iPhone Air, AmneziaWG, LTE -> Wi-Fi): after the roam fresh port the
+path passed about 1 s of data after every new local port and then nothing, for 8 minutes, while
+handshakes kept completing. tribe.4-15 counted that burst (and every handshake) as inbound progress
+and reset the ladder to its first step: 17 fresh ports, `soft_restarts=0`, `recovery_denied` 0 -> 15
+(the same-kind cooldown and the rolling cap). The app's probe failover waited for a handshake older
+than 135 s, which never came while handshakes passed.
+
+- `TribeDataFlow`: data = rx growth minus one handshake (148 B) in a sample whose handshake time
+  moved; demand = tx growth minus one handshake (1024 B). The data watch deducts the same amounts
+  (`TribeDataWatchPolicy` defaults, pinned by `TribeDataWatchLadderTests`: its file compiles alone).
+- Data proves the path only when it still arrives `stallRebindSeconds` (10 s) after the last repair
+  step of any origin (watchdog, GUI, roam fresh port; not a same-port bump). Earlier data is the echo
+  of that step: it restarts the stall clock and the demand count, the stage and the stage-3 backoff
+  stay. So after a fresh port that brings back only a burst the next step is the soft restart
+  (B1 replay: soft restart 15 s after the roam; tribe.15 on the same replay: 17 fresh ports, none).
+- A handshake is no longer progress. It only proves an idle tunnel: a handshake while less than
+  `stallMinTxBytes` (its own 1024 B not counted) went out since the last baseline starts the demand
+  count over (the stall clock keeps running). Below ~270 B/s of demand per 15 s re-key the ladder
+  stays as still as in tribe.15 (the data watch judges such paths); an idle tunnel never steps.
+- Stage 3 steps also need a current stall (`stallProbeSeconds` without data): with a server-set
+  second stage longer than the backoff the echo could otherwise coincide with a due step.
+- The budget re-arms its episode on the same rule (`observe(_:proofWindow:)`, the arbiter passes its
+  policy's second stage); a handshake alone no longer re-arms it. Since the echo window (10 s) is not
+  shorter than the same-kind cooldown (8-10 s), the watchdog's fresh port right after another fresh
+  port can no longer be refused by the cooldown.
+- Rates (unchanged caps: 4 interventions per 120 s, cooldown 8-10 s per kind, one fresh port and one
+  soft restart per episode, stage-3 backoff 30/60/120 s): within one episode the soft restarts come
+  at +0, +90, +330 s ... (at most 2 per 120 s); a new episode needs data that outlasts the echo
+  window and then a new stall of 14 s without any data under 8 KB of demand. Without roams at most 2
+  soft restarts per 120 s (each episode spends 2 of the 4 interventions), with a roam fresh port
+  (not capped) before every episode at most 4. A path whose inbound gaps are shorter than 14 s never
+  gets one (replays: data every 7 s / 13 s for 20 min: fresh ports within the cap, no soft restart).
+- `TribeRecoveryArbiter.dataQuietSeconds(at:)`: seconds since data last proved the path (from the
+  first sample when none has), -1 without a sample in the last 12 s (paused backend, stopped
+  watchdog, a tick skipped while the data watch's arbiter owns recovery). Patch 0017 copies it into
+  `TribeRoamingCounters.dataQuietSeconds` in `roamingCounters()`; it is a reading, never part of
+  `asDictionary` / `summary` (journaled on every change). The provider replies it at top level as
+  `data_quiet_s` (absent when -1). The app (iOS only) uses it in `HealthLoop::probeDeadCorroborated`:
+  4 failed in-tunnel probes, outside the network-change grace, and either the handshake older than
+  135 s (as in 141) or `awg_probe_dead_quiet_s` (45 s) without data. An older extension sends no
+  key: the app keeps the rule of 141; an older app ignores the key.
+- Tests: `TribeRoamingTests` (B1 replay, healthy roam, two slow paths, idle re-keying for 2 h, echo
+  vs data at stage 3, the export) and the existing vectors with the expectations that changed by
+  design; the B1 replay section uses only the API of tribe.15 and is run against both files.
+
 ## Rebuilding the package (isolated Conan home, nothing in the global cache changes)
 
 ```sh
@@ -946,7 +995,7 @@ v4-only VPN (sum.golang.org writes fail), point Go at an already verified module
 `GOPROXY=file://<GOPATH>/pkg/mod/cache/download GOSUMDB=off GOTOOLCHAIN=local`.
 
 The app build picks the package up through the root `conanfile.py`
-(`self.requires("awg-apple/3.1.4-tribe.14")`); CMake configure exports all `recipes/` itself
+(`self.requires("awg-apple/3.1.4-tribe.16")`); CMake configure exports all `recipes/` itself
 (`client/cmake/recipes_bootstrap.cmake`), so use the same `CONAN_HOME` for configure. Rollback =
 pin the root requirement back to `awg-apple/3.1.4-tribe.12` (then drop `TribeDataWatch.swift` and the
 three data-watch provider files from the two `networkextension/CMakeLists.txt` and their calls from

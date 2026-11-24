@@ -54,7 +54,11 @@ class AwgApple(ConanFile):
     # tribe.15: tribe.14 + the engine's host limits (../amnezia-libxray/patches/0014-tribe-scan-host-limits.patch,
     # after 0012): the host's own probe pools in its host options, so the iOS app process (the in-app probe host)
     # runs several full-profile probes and composites while the extension keeps its compiled single instance.
-    version = "3.1.4-tribe.15"
+    # tribe.16: tribe.15 + 0017 (the adapter exports dataQuietSeconds) and TribeRoaming.swift's one
+    # definition of "data is flowing" (TribeDataFlow: no handshake bytes, no echo of a repair step), so
+    # a fresh port that brings back only a burst is followed by the soft restart (device round 24.11, B1).
+    # tribe.14 and tribe.15 were never released: no snapshot of TribeRoaming.swift is frozen for them.
+    version = "3.1.4-tribe.16"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
@@ -111,6 +115,8 @@ class AwgApple(ConanFile):
     _xray_pins["3.1.4-tribe.15"] = dict(_xray_pins["3.1.4-tribe.14"],
                                         engine_patches=("0012-tribe-scan-engine.patch",
                                                         "0014-tribe-scan-host-limits.patch"))
+    # tribe.16 = tribe.15 + package patch 0017 and the new TribeRoaming.swift; everything else identical.
+    _xray_pins["3.1.4-tribe.16"] = _xray_pins["3.1.4-tribe.15"]
 
     @property
     def _pins(self):
