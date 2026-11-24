@@ -242,6 +242,8 @@ QtObject {
         case "host_other":
         case "host_awg_live_peer_unknown":
             return engine               // state 23
+        case "candidates_unavailable":  // the scope's servers did not come (POST /v1/scan/candidates failed) and the
+                                        // device has none of its own there: nothing was checked (device round air-C, D2)
         case "not_entitled":            // NO FRAME (server side): state 23 texts
         case "over_quota":
         case "manifest_invalid":

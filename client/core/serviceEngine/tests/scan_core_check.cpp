@@ -4901,6 +4901,43 @@ static void oneVerdictPerRow()
     CHECK(rowOf(viewJson(m, t + 10), QStringLiteral("4:xray")).value(QLatin1String("state")).toString() == QLatin1String("works"));
 }
 
+// D2 (device round air-C, Latvia on Wi-Fi): POST /v1/scan/candidates timed out after 15.2 s ("api candidates status=0
+// nodes=0"), the scope has no row of the device's own - the old machine ended the scan Empty and stored it
+// ("persist_results rows=0", «Латвия: доступных серверов сейчас нет»). One rule with a failed manifest (the LTE case):
+// a scan that checked nothing could not start - NoScan, nothing stored, no cooldown, the scope's old result untouched.
+static void failedCandidatesAreNoResult()
+{
+    World w = baseWorld("cand_failed", hostMac(), ScanNetKind::Wifi);
+    const auto actionOf = [](const ScanStep &s, ScanActionKind k) {
+        for (const ScanAction &a : s.actions)
+            if (a.kind == k)
+                return a;
+        return ScanAction();
+    };
+    for (const char *reason : {"timeout", "unsupported"}) {
+        ScanMachine m(w.caps);
+        m.opened(openOf(w, QString(), false), kT0);
+        m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+        m.tick(kT0 + 50 + 8100);
+        m.poolReady(ScanPoolView{{}, 3, 1}, kT0 + 8300);
+        m.filterChosen(QStringLiteral("whitelist"), kT0 + 8300); // a scope with none of the device's own rows
+        m.retryTapped(kT0 + 40000);
+        const ScanAction rc = actionOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 40050), ScanActionKind::RequestCandidates);
+        CHECK(!rc.requestId.isEmpty());
+        const ScanStep f = m.candidatesUnavailable(rc.requestId, QLatin1String(reason), 300, kT0 + 55250);
+        const ScanView v = m.view(kT0 + 55250);
+        CHECK(!f.has(ScanActionKind::PersistResults) && !f.has(ScanActionKind::StartHostScan));
+        CHECK(v.phase == ScanPhase::NoScan && v.empty.reason == QLatin1String("candidates_unavailable"));
+        bool slot = false;
+        for (const ScanSlotView &sv : v.scopeSlots)
+            slot = slot || sv.scope == QLatin1String(kScanScopeWhitelist);
+        CHECK(!slot); // never stored as that scope's result
+        // no host started: no cooldown armed by it - «Сканировать» is offered again
+        CHECK(v.bar.button == ScanBarButton::Retry && v.bar.buttonEnabled);
+        CHECK(m.retryTapped(kT0 + 56500).has(ScanActionKind::RequestManifest));
+    }
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -5439,6 +5476,7 @@ int main(int argc, char **argv)
     stoppedResultStaysHonest();
     refusedScopeNeverScansAnother();
     oneVerdictPerRow();
+    failedCandidatesAreNoResult();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();

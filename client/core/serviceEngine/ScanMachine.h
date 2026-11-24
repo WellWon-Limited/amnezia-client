@@ -1107,8 +1107,12 @@ public:
         s.actions << appRequestDone(requestId, apiBytes, now).actions;
         if (reason == QLatin1String("scanner_off") || reason == QLatin1String("invalid") || reason == QLatin1String("unsupported"))
             m_serverBatch = ServerBatch::No;
-        if (current)
+        if (current) {
+            // the scope's servers did not come: the scan goes on with the device's own rows of the scope - and with none,
+            // nothing is checked: startHost ends it as a scan that could not start (review air-C, D2)
+            m_candFailed = reason == QLatin1String("scanner_off") ? QStringLiteral("scanner_off") : QStringLiteral("candidates_unavailable");
             startHost(now, s);
+        }
         finishStep(s, now);
         return s;
     }
@@ -2670,6 +2674,7 @@ private:
         m_exclusionDone = false;
         m_exclusionWhy.clear();
         m_stopReason.clear(); // this scan's own reason (a Stop's "cancel" never leaks into the next summary)
+        m_candFailed.clear();
         m_userStopped = false;
         m_seatsRequested = 0;
         m_exclusionRows = 0;
@@ -2958,6 +2963,15 @@ private:
         bool anyHost = false;
         for (const Cand &c : m_cands)
             anyHost = anyHost || (!c.finalDone && (!c.c.needsLease || c.lease == Lease::Requested));
+        // Device round air-C, D2 (Latvia, Wi-Fi): POST /v1/scan/candidates timed out, the scope has no row of the device's
+        // own - nothing was checked, yet the scan ended Empty («Латвия: доступных серверов сейчас нет») and was stored as
+        // the country's fresh result. One rule with a failed manifest (manifestUnavailable, the LTE case): the scan could
+        // not start - NoScan, never a result, nothing stored; no host was started, so no cooldown is armed by it.
+        if (!anyHost && !m_candFailed.isEmpty() && !m_appSideOnly && !m_continuation) {
+            m_hostDone = true;
+            toNoScan(m_candFailed, now, s);
+            return;
+        }
         if (!anyHost) {
             m_hostDone = true;
             stopStage2(now, m_appSideOnly ? QStringLiteral("budget") : QStringLiteral("nothing_to_probe"), s);
@@ -4676,6 +4690,7 @@ private:
     QString m_stopReason;
     QSet<QString> m_tunnelNoData; // rows whose real tunnel carried no data on this network (tunnelNoDataHere)
     bool m_userStopped = false;   // «Остановить» ended this scan keeping what it found (stopTapped)
+    QString m_candFailed;         // this scan's /v1/scan/candidates request failed: the NoScan reason if nothing is left
     bool m_scopeRefused = false;  // the last scope choice was refused: no scan until a choice is taken (review F2)
     bool m_resultPartial = false; // the finished result on the screen is a stopped scan's (view.partial)
     bool m_resultStored = true;   // ... and it is the stored result of its scope (persistResult)
