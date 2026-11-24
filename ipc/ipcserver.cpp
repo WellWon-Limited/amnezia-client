@@ -32,6 +32,15 @@ IpcServer::IpcServer(QObject *parent) : IpcInterfaceSource(parent)
     connect(this, &IpcServer::wakeup, this, [this]() { m_scanHost.notePathEvent(true); });
 }
 
+#ifndef Q_OS_WIN
+IpcServer::~IpcServer()
+{
+    // AVPN: the descriptors' sockets close as m_processes goes; that is not a lost client (the service's
+    // shutdown is unchanged: launchd/systemd end the children with the job).
+    m_closing = true;
+}
+#endif
+
 int IpcServer::createPrivilegedProcess()
 {
 #ifdef MZ_DEBUG
@@ -50,12 +59,23 @@ int IpcServer::createPrivilegedProcess()
     }
 
     // Make sure any connections are handed to QtRO
-    QObject::connect(pd.localServer.data(), &QLocalServer::newConnection, this, [pd]() {
+    QObject::connect(pd.localServer.data(), &QLocalServer::newConnection, this, [this, pd]() {
         qDebug() << "IpcServer new connection";
+        QLocalSocket *socket = pd.localServer->nextPendingConnection();
         if (pd.serverNode) {
-            pd.serverNode->addHostSideConnection(pd.localServer->nextPendingConnection());
+            pd.serverNode->addHostSideConnection(socket);
             pd.serverNode->enableRemoting(pd.ipcProcess.data());
         }
+#ifndef Q_OS_WIN
+        // AVPN (macOS/Linux): this connection controls the child; when the last one closes (the client stopped
+        // it, quit or crashed) the child is not left running with nobody able to stop it.
+        if (socket) {
+            IpcServerProcess *process = pd.ipcProcess.data();
+            process->controllerConnected();
+            QObject::connect(socket, &QLocalSocket::disconnected, this,
+                             [this, process]() { onProcessControllerLost(process); }, Qt::SingleShotConnection);
+        }
+#endif
     });
 
     QObject::connect(pd.serverNode.data(), &QRemoteObjectHost::error, this,
@@ -67,6 +87,43 @@ int IpcServer::createPrivilegedProcess()
 
     return m_localpid;
 }
+
+#ifndef Q_OS_WIN
+// AVPN (macOS quit/crash with own Xray up, 24.11.2026): a tun2socks whose client went away without stopping it
+// (the app crashed, or quit while its VpnConnection thread could no longer reach the service) leaves the Xray
+// session of that client behind: the core, the kill switch, the resolvers, the routes and the TUN device - on
+// the owner's Mac for hours after a crash, with no app to show or stop it and the next start failing on the
+// busy device. The session cannot be adopted by the next launch (the GUI owns its control: the tun2socks
+// replica, the routes, DNS and the kill switch are set from there), so it ends the way XrayProtocol::stop ends
+// it - in the same order, then what VpnConnection does on Disconnected. disableKillSwitch keeps a strict kill
+// switch (KillSwitch::disableKillSwitch). A client that stops its session asks for the end (terminate/close)
+// before it lets the replica go, so this runs only for a lost client.
+void IpcServer::onProcessControllerLost(IpcServerProcess *process)
+{
+    if (m_closing)
+        return;
+    const avpn::ControllerLoss loss = process->controllerLost();
+    if (loss == avpn::ControllerLoss::Keep)
+        return;
+    const bool xraySession =
+            loss == avpn::ControllerLoss::Abandoned && process->program() == amnezia::PermittedProcess::Tun2Socks;
+    if (xraySession) {
+        qWarning() << "IpcServer: tun2socks lost its client without a stop - ending its Xray session";
+        disableKillSwitch();
+        StartRoutingIpv6();
+        restoreResolvers();
+        const QString device = process->tunDevice();
+        if (!device.isEmpty())
+            deleteTun(device);
+        xrayStop();
+    }
+    process->endChild(); // after the teardown, as XrayProtocol::stop ends it
+    if (xraySession) {
+        clearSavedRoutes();
+        flushDns();
+    }
+}
+#endif
 
 int IpcServer::routeAddList(const QString &gw, const QStringList &ips)
 {

@@ -18,6 +18,9 @@ class IpcServer : public IpcInterfaceSource
 {
 public:
     explicit IpcServer(QObject *parent = nullptr);
+#ifndef Q_OS_WIN
+    ~IpcServer() override; // AVPN
+#endif
     virtual int createPrivilegedProcess() override;
 
     virtual int routeAddList(const QString &gw, const QStringList &ips) override;
@@ -53,6 +56,11 @@ public:
     avpn::TribeScanHost *scanHost() { return &m_scanHost; }
 
 private:
+#ifndef Q_OS_WIN
+    void onProcessControllerLost(IpcServerProcess *process); // AVPN
+    bool m_closing = false; // AVPN: the service shuts down - its own sockets close, no client was lost
+#endif
+
     int m_localpid = 0;
     avpn::TribeScanHost m_scanHost{avpn::tribeScanServiceDeps()}; // AVPN (Scanner)
 

@@ -20,11 +20,17 @@ IpcServerProcess::IpcServerProcess(QObject *parent) :
         qDebug() << "IpcServerProcess errorOccurred " << error;
     });
 
+#ifndef Q_OS_WIN
+    avpn::OwnedChildren::service().add(m_process.data(), m_program); // AVPN
+#endif
 }
 
 IpcServerProcess::~IpcServerProcess()
 {
     qDebug() << "IpcServerProcess::~IpcServerProcess";
+#ifndef Q_OS_WIN
+    avpn::OwnedChildren::service().remove(m_process.data()); // AVPN
+#endif
 }
 
 void IpcServerProcess::start()
@@ -33,7 +39,16 @@ void IpcServerProcess::start()
         qDebug() << "IpcServerProcess failed to start, program is empty";
     }
 
+#ifdef Q_OS_WIN
     Utils::killProcessByName(m_process->program());
+#else
+    // AVPN (macOS orphan tun2socks 24.11.2026): the previous instance of this program is one of our own
+    // children - ended by its handle and reaped before the start, so its TUN device is free. Never a search by
+    // name: pkill <full path> matched nothing, a name would match other users' and other products' processes.
+    if (const int ended = avpn::OwnedChildren::service().endOthersOf(m_program, m_process.data()))
+        qDebug() << "IpcServerProcess ended the previous instance(s):" << ended;
+    m_control.onStarted();
+#endif
     m_process->start();
     qDebug() << "IpcServerProcess started, " << m_process->program() << m_process->arguments();
 
@@ -41,17 +56,58 @@ void IpcServerProcess::start()
 }
 
 void IpcServerProcess::terminate() {
+#ifndef Q_OS_WIN
+    m_control.onEndRequested(); // AVPN
+#endif
     m_process->terminate();
 }
 
 void IpcServerProcess::kill() {
+#ifndef Q_OS_WIN
+    m_control.onEndRequested(); // AVPN
+#endif
     m_process->kill();
 }
 
 void IpcServerProcess::close()
 {
+#ifndef Q_OS_WIN
+    m_control.onEndRequested(); // AVPN
+#endif
     m_process->close();
 }
+
+#ifndef Q_OS_WIN
+void IpcServerProcess::controllerConnected()
+{
+    m_control.onControllerConnected();
+}
+
+avpn::ControllerLoss IpcServerProcess::controllerLost()
+{
+    const avpn::ControllerLoss loss = m_control.onControllerLost(m_process->state() != QProcess::NotRunning);
+    if (loss != avpn::ControllerLoss::Keep)
+        qWarning() << "IpcServerProcess: the last controller left a running" << m_process->program()
+                   << (loss == avpn::ControllerLoss::Abandoned ? "(abandoned)" : "(end requested)");
+    return loss;
+}
+
+void IpcServerProcess::endChild()
+{
+    avpn::endChildLater(m_process.data());
+}
+
+QString IpcServerProcess::tunDevice() const
+{
+    if (m_program != amnezia::PermittedProcess::Tun2Socks)
+        return {};
+    const QStringList args = m_process->arguments();
+    const qsizetype i = args.indexOf(QStringLiteral("-device"));
+    if (i < 0 || i + 1 >= args.size() || !args.at(i + 1).startsWith(QStringLiteral("tun://")))
+        return {};
+    return args.at(i + 1).mid(int(qstrlen("tun://")));
+}
+#endif
 
 void IpcServerProcess::setArguments(const QStringList &arguments)
 {
@@ -82,6 +138,9 @@ void IpcServerProcess::setProgram(int programId)
     m_program = static_cast<amnezia::PermittedProcess>(programId);
     m_process->setProgram(amnezia::permittedProcessPath(m_program));
     m_process->setArguments({});
+#ifndef Q_OS_WIN
+    avpn::OwnedChildren::service().setProgram(m_process.data(), m_program); // AVPN
+#endif
 }
 
 void IpcServerProcess::setWorkingDirectory(const QString &dir)

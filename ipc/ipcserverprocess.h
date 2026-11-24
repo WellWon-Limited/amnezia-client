@@ -6,6 +6,9 @@
 
 #ifndef Q_OS_IOS
 #include "rep_ipc_process_interface_source.h"
+#ifndef Q_OS_WIN
+#include "ipcprocessowner.h" // AVPN
+#endif
 
 class IpcServerProcess : public IpcProcessInterfaceSource
 {
@@ -35,11 +38,27 @@ public:
     bool waitForFinished() override;
     bool waitForFinished(int msecs) override;
 
+#ifndef Q_OS_WIN
+    // AVPN (macOS/Linux, ipcprocessowner.h): the child lives as long as a client controls it.
+    void controllerConnected();
+    // A controlling connection closed. Not Keep: the last one is gone while the child runs (Abandoned - no
+    // controller had asked to end it: its client quit or crashed) and the caller ends it with endChild().
+    avpn::ControllerLoss controllerLost();
+    // SIGTERM now, SIGKILL after a grace if it still runs; never blocks.
+    void endChild();
+    amnezia::PermittedProcess program() const { return m_program; }
+    // The device of a tun2socks child ("-device tun://utun22" -> "utun22"); empty for other programs.
+    QString tunDevice() const;
+#endif
+
 signals:
 
 private:
     amnezia::PermittedProcess m_program = amnezia::PermittedProcess::Invalid;
     QSharedPointer<QProcess> m_process;
+#ifndef Q_OS_WIN
+    avpn::ChildControl m_control; // AVPN
+#endif
 };
 
 #else
