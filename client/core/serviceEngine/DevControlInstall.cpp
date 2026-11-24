@@ -1,5 +1,6 @@
 // AVPN (desktop test rig): the app's test command channel over its QML engine (DevControlApp.h install). App only:
 // the host test (tests/dev_control_check.cpp) builds App + Server against fakes instead.
+#include "AvpnEngineQml.h"
 #include "DevControlApp.h"
 #include "TribeJournal.h"
 
@@ -34,6 +35,12 @@ Server *install(QQmlEngine *qml, QObject *parent)
     env.journalActive = [] { return TribeJournal::active(); };
     env.log = [](const QString &line) { qInfo().noquote() << line; };
     env.quit = [] { QCoreApplication::quit(); }; // the tray's «Quit» (systemTrayNotificationHandler.cpp)
+    // the system-sleep gate's proof of a person (SystemAwake.h): the engine's one entry, never a faked input event
+    env.personPresent = [q] {
+        QObject *o = q ? q->rootContext()->contextProperty(QStringLiteral("TribeEngine")).value<QObject *>() : nullptr;
+        if (auto *engine = qobject_cast<avpn::AvpnEngineQml *>(o))
+            engine->notePersonPresent();
+    };
 
     auto *app = new App(env, parent);
     auto *server = new Server(env.dataDir, app, app);

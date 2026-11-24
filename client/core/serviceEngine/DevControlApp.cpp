@@ -202,6 +202,18 @@ int tabIndex(const QString &page)
     return -1;
 }
 
+// The commands that act for the person: the engine is told a person is here before each (SystemAwake.h).
+const QStringList &personCommands()
+{
+    static const QStringList l{QStringLiteral("connect"), QStringLiteral("stop"), QStringLiteral("nav"),
+                               QStringLiteral("servers"), QStringLiteral("choose"), QStringLiteral("auto"),
+                               QStringLiteral("mode"), QStringLiteral("scan.open"), QStringLiteral("scan.select"),
+                               QStringLiteral("scan.start"), QStringLiteral("scan.stop"), QStringLiteral("scan.rows"),
+                               QStringLiteral("scan.connect"), QStringLiteral("scan.back"), QStringLiteral("window.show"),
+                               QStringLiteral("quit")};
+    return l;
+}
+
 const QStringList &actionCommands()
 {
     static const QStringList l{QStringLiteral("connect"), QStringLiteral("stop"), QStringLiteral("nav"),
@@ -400,6 +412,8 @@ void App::handle(const QString &cmd, const QJsonObject &args, QObject *ctx, cons
         if (m_env.journal)
             m_env.journal(QStringLiteral("dev_cmd"), {{QStringLiteral("cmd"), cmd}});
     }
+    if (personCommands().contains(cmd) && m_env.personPresent)
+        m_env.personPresent(); // the engine's one "a person is here" entry, before the button's call
     if (cmd == QLatin1String("wait"))
         return cmdWait(args, ctx, done);
     if (cmd == QLatin1String("quit"))

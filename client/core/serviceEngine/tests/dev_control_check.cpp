@@ -252,6 +252,9 @@ int main(int argc, char **argv)
     env.journalActive = [] { return true; };
     env.log = [&logLines](const QString &l) { logLines << l; };
     env.quit = [&quitCalled] { quitCalled = true; };
+    int present = 0;            // AvpnEngineQml::notePersonPresent stand-in
+    qsizetype presentAt = -1;   // how many engine calls had been made when the person was noted
+    env.personPresent = [&present, &presentAt, &eng] { ++present; presentAt = eng.calls.size(); };
     App app(env);
     Server server(data, &app);
     app.setServer(&server);
@@ -349,9 +352,11 @@ int main(int argc, char **argv)
     // ---- connect / stop: the orb -------------------------------------------------------------------------------
     {
         eng.calls.clear();
+        const int present0 = present;
         QJsonObject r = c.cmd("connect");
         CHECK(ok(r) && res(r).value("tapped").toBool() && eng.calls == QStringList{"orbTap"},
               qPrintable("connect taps the orb once: " + eng.calls.join(',')));
+        CHECK(present == present0 + 1 && presentAt == 0, "connect: the person is noted once, before the orb's call");
         CHECK(res(r).value("after").toObject().value("face").toString() == "connecting", "connect: connecting after");
         eng.calls.clear();
         r = c.cmd("connect");
@@ -718,10 +723,31 @@ int main(int argc, char **argv)
         CHECK(rc == 0 && out.startsWith("{\"id\":\"nc\",\"ok\":true"), "a one-shot nc -U gets its reply");
     }
 
+    // ---- the person: noted for the commands that act for one, never for a read ----------------------------------
+    {
+        eng.set("disconnected", false);
+        int before = present;
+        c.cmd("state");
+        c.cmd("help");
+        c.cmd("mark", {{"text", "x"}});
+        c.cmd("shot", {{"path", "p"}}, 8000);
+        c.cmd("wait", {{"for", "off"}, {"timeout_ms", 100}});
+        CHECK(present == before, qPrintable(QStringLiteral("read commands note no person (%1)").arg(present - before)));
+        before = present;
+        c.cmd("nav", {{"page", "connect"}});
+        c.cmd("stop");
+        c.cmd("servers");
+        c.cmd("scan.rows");
+        c.cmd("window.show");
+        CHECK(present == before + 5, qPrintable(QStringLiteral("acting commands note the person (%1 of 5)").arg(present - before)));
+    }
+
     // ---- quit ------------------------------------------------------------------------------------------------------
     {
+        const int before = present;
         const QJsonObject r = c.cmd("quit");
-        CHECK(ok(r) && res(r).value("quitting").toBool() && !quitCalled, "quit: the reply comes first");
+        CHECK(ok(r) && res(r).value("quitting").toBool() && !quitCalled && present == before + 1,
+              "quit: the person is noted, the reply comes first");
         pump(400);
         CHECK(quitCalled, "quit: then the tray's quit path");
     }

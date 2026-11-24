@@ -15,6 +15,7 @@
 #       after its build.
 #   BUILD_DIR=<macOS build tree, ninja or make> (default ~/avpn-build/lead-142-mac-xray-mac-build, else
 #   ~/amnezia-client/deploy/build-macos-desktop); without one D4 is reported SKIPPED, D1-D3 still decide.
+#   KEEP_OBJECTS=<dir> keeps the objects there instead of a temporary directory.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CLIENT="$(cd "$HERE/../../.." && pwd)"
@@ -96,8 +97,12 @@ else
   # sources from THIS checkout; what a worktree lacks (the 3rd/ submodules) from the tree's own checkout, searched last
   INCS="${INCS//$ORIG/$CLIENT} -I$ORIG -I$ORIG/3rd/qtkeychain"
   QT_BIN_DIR="${QT_ROOT:-$HOME/Qt/6.11.1/macos}"
-  W="$(mktemp -d "${TMPDIR:-/tmp}/avpn_devctl_rel.XXXXXX")"
-  trap 'rm -rf "${W:?}"' EXIT
+  if [ -n "${KEEP_OBJECTS:-}" ]; then # objects kept for a look (nm, strings)
+    W="$KEEP_OBJECTS"; mkdir -p "$W"
+  else
+    W="$(mktemp -d "${TMPDIR:-/tmp}/avpn_devctl_rel.XXXXXX")"
+    trap 'rm -rf "${W:?}"' EXIT
+  fi
   compile() { # <out.o> <extra defines> <source> [extra flags]
     eval clang++ $FLAGS $DEFS $2 $INCS ${4:-} -Wno-deprecated-declarations -c "\"$3\"" -o "\"$1\"" 2>"$W/err.txt"
   }

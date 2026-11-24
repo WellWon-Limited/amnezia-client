@@ -22,6 +22,9 @@
 //                    Escape key, which the Scanner page answers with its systemBack(); open = nav scanner.
 //   window.show      PageController.raiseMainWindow() - the tray's «Show».
 //   quit             QCoreApplication::quit() - what the tray's «Quit» does (systemTrayNotificationHandler.cpp).
+// Before every command that acts for the person (connect, stop, nav, servers, choose, auto, mode, scan.*, window.show,
+// quit) the channel tells the engine that a person is here (AppEnv::personPresent = notePersonPresent: the system-sleep
+// gate holds a programmatic start until then); it never posts an input event.
 // Read-only: state, servers, scan.rows, shot, mark, wait, help. state is a WHITELIST of fields (no key, token, UUID,
 // endpoint, IP or credential); node and row ids other than our own numeric node ids go out as an 8-hex hash (ref).
 #pragma once
@@ -54,6 +57,9 @@ struct AppEnv {
     std::function<bool()> journalActive;
     std::function<void(const QString &line)> log; // one line into the app log
     std::function<void()> quit;                   // the tray «Quit»: QCoreApplication::quit
+    // AvpnEngineQml::notePersonPresent() - the engine's one entry for "a person is here" (SystemAwake.h): called
+    // before every command that acts for the person, never a faked input event
+    std::function<void()> personPresent;
 };
 
 class App : public QObject, public Handler {

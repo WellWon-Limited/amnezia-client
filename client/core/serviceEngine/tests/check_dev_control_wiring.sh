@@ -117,5 +117,26 @@ done
 n="$(code "$APP" | grep -cE '\bmetaCall\(' || true)"
 [ "$n" = 5 ] || bad "W5: metaCall is used $n times (its definition + js/cpp/sig/read only)"
 
+# ---- W6 ------------------------------------------------------------------------------------------------------------
+# A command that acts for the person tells the engine first, through its one entry (notePersonPresent, SystemAwake.h);
+# no input event is ever made up.
+h="$(body "$APP" 'void App::handle(const QString &cmd, const QJsonObject &args, QObject *ctx, const Done &done)')"
+pp=$(printf '%s\n' "$h" | grep -nF 'm_env.personPresent();' | head -1 | cut -d: -f1)
+d1=$(printf '%s\n' "$h" | grep -nF 'return cmdWait(args, ctx, done);' | head -1 | cut -d: -f1)
+[ -n "$pp" ] && [ -n "$d1" ] && [ "$pp" -lt "$d1" ] || bad "W6: handle() does not note the person before it dispatches"
+pc="$(code "$APP" | awk '/^const QStringList &personCommands\(\)/ { on = 1 } on { print } on && /^}$/ { exit }')"
+for c in connect stop nav servers choose auto mode scan.open scan.select scan.start scan.stop scan.connect scan.back window.show quit; do
+  printf '%s\n' "$pc" | grep -qF "QStringLiteral(\"$c\")" || bad "W6: $c does not note the person"
+done
+for c in state shot mark wait help; do
+  printf '%s\n' "$pc" | grep -qF "QStringLiteral(\"$c\")" && bad "W6: the read command $c notes a person"
+done
+grep -qF 'engine->notePersonPresent();' "$ROOT/client/core/serviceEngine/DevControlInstall.cpp" \
+  || bad "W6: the app's personPresent is not AvpnEngineQml::notePersonPresent"
+grep -qE '^    void notePersonPresent\(\);' "$ENGINE_H" || bad "W6: the engine has no notePersonPresent()"
+grep -lE 'sendEvent|postEvent|QMouseEvent|QKeyEvent|QTest|sendSpontaneous|QWindowSystemInterface' \
+  "$ROOT"/client/core/serviceEngine/DevControl*.cpp "$ROOT"/client/core/serviceEngine/DevControl*.h 2>/dev/null \
+  | while read -r f; do echo "FAIL: W6: $(basename "$f") makes up an input event"; done | grep . && fail=1
+
 [ "$fail" = 0 ] && echo "check_dev_control_wiring: OK ($(printf '%s\n' "$mapped" | wc -l | tr -d ' ') functions, $(grep -c '^chain' "$MAP") chain strings)"
 exit "$fail"
