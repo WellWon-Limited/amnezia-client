@@ -4577,6 +4577,93 @@ static void stopKeepsWhatItFound()
     CHECK(countActions(e, ScanActionKind::PersistResults) == 0 && e.m.screenOpen());
 }
 
+// --- review of the one-screen Scanner (24.11) ------------------------------------------------------------------
+
+static QJsonObject viewJson(const ScanMachine &m, qint64 now) { return scanViewToJson(m.view(now)); }
+
+static int rowsInState(const QJsonObject &v, const char *state)
+{
+    int n = 0;
+    for (const QJsonValue &x : v.value(QLatin1String("rows")).toArray())
+        n += x.toObject().value(QLatin1String("state")).toString() == QLatin1String(state) ? 1 : 0;
+    return n;
+}
+
+static const ScanAction *lastAction(const Driver &d, ScanActionKind k)
+{
+    for (int i = d.steps.size() - 1; i >= 0; --i)
+        if (const ScanAction *a = d.steps.at(i).step.find(k))
+            return a;
+    return nullptr;
+}
+
+// The first moment a scan of `w` shows a verified row while it still runs, after `from` (ms from kT0); -1 = none.
+static qint64 firstFoundAt(const World &w, qint64 from)
+{
+    Driver plain(w);
+    plain.run();
+    for (const Recorded &r : plain.steps) {
+        const qint64 at = qint64(r.event.value(QLatin1String("now_ms")).toDouble()) - kT0;
+        if (at > from && scanPhaseNameScanning(phaseOf(r.view)) && r.view.value(QLatin1String("verified")).toInt() > 0)
+            return at;
+    }
+    return -1;
+}
+
+// F6 (device round, iPhone): a second row tapped while the first still connects. The server list's rule - the newest
+// pick wins (PageStart.onPickNode -> AvpnEngineQml::pinAndReconnect, no guard while a connect runs) - holds here too:
+// the new row connects, the older one's request ends without a verdict (no «Не удалось», no outcome), and its late
+// failure fails nothing.
+static void secondRowTapTakesOver()
+{
+    World w = baseWorld("tap_takes_over", hostMac(), ScanNetKind::Wifi);
+    w.current = QStringLiteral("1");
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
+    w.runMs = 9000;
+    Driver d(w);
+    d.run();
+    QStringList ids;
+    for (const QJsonValue &x : lastView(d).value(QLatin1String("rows")).toArray()) {
+        const QJsonObject r = x.toObject();
+        if (r.value(QLatin1String("state")).toString() == QLatin1String("works")
+            && !r.value(QLatin1String("flags")).toArray().contains(QStringLiteral("not_tappable")))
+            ids << r.value(QLatin1String("id")).toString();
+    }
+    CHECK(ids.size() >= 3);
+    if (ids.size() < 3)
+        return;
+    const QString a = ids.at(0), b = ids.at(1);
+    const qint64 t = d.now + 1000;
+    const ScanStep sa = d.m.rowTapped(a, t);
+    CHECK(sa.has(ScanActionKind::ConnectRow) && sa.find(ScanActionKind::ConnectRow)->nodeId == a);
+    const ScanStep sb = d.m.rowTapped(b, t + 400);
+    const ScanAction *cb = sb.find(ScanActionKind::ConnectRow);
+    CHECK(cb && cb->nodeId == b && !cb->ids.contains(a) && cb->userOrigin && cb->forceConnect);
+    for (const ScanAction &x : sb.actions)
+        CHECK(x.kind != ScanActionKind::ShowShade);
+    QJsonObject v = viewJson(d.m, t + 400);
+    CHECK(rowOf(v, a).value(QLatin1String("state")).toString() == QLatin1String("works"));
+    CHECK(rowOf(v, b).value(QLatin1String("state")).toString() == QLatin1String("connecting") && d.m.connectingId() == b);
+    // the superseded row's late failure is not the running chain's
+    d.m.connectFailed(a, t + 800);
+    d.m.exactRowFailed(a, t + 850);
+    v = viewJson(d.m, t + 850);
+    CHECK(rowOf(v, a).value(QLatin1String("state")).toString() == QLatin1String("works") && d.m.connectingId() == b);
+    // the new row comes up: its chain reports it working, nothing is reported for the superseded row
+    const ScanStep up = d.m.vpnState(liveOf(w, b, true), t + 2500);
+    const ScanAction *o = up.find(ScanActionKind::SendOutcomes);
+    bool bWorks = false, aAny = false;
+    for (const ScanOutcomeItem &it : o ? o->outcomes : QList<ScanOutcomeItem>()) {
+        bWorks = bWorks || ((it.id == b || QStringLiteral("up:") + it.id == b) && it.outcome == ScanClass::Works);
+        aAny = aAny || it.id == a || QStringLiteral("up:") + it.id == a;
+    }
+    CHECK(bWorks && !aAny && d.m.connectingId().isEmpty());
+    // the same row tapped again while it connects: nothing new
+    ScanMachine &m = d.m;
+    m.rowTapped(ids.at(2), t + 3000);
+    CHECK(!m.rowTapped(ids.at(2), t + 3100).has(ScanActionKind::ConnectRow));
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -5110,6 +5197,7 @@ int main(int argc, char **argv)
     countrylessRows();
     choiceSlotsAndStopStays();
     stopKeepsWhatItFound();
+    secondRowTapTakesOver();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();

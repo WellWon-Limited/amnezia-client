@@ -1558,10 +1558,18 @@ public:
             if (e.id == id && e.row.tappable)
                 found = true;
         const bool currentRow = m_current.working() && m_current.nodeId == id;
-        if (!found || !m_connectingId.isEmpty() || currentRow || m_tapFailed.contains(id)) {
+        if (!found || id == m_connectingId || currentRow || m_tapFailed.contains(id)) {
             finishStep(s, now);
             return s;
         }
+        // Device round on the iPhone (24.11): a second row tapped while the first still connects was dropped. The server
+        // list's rule holds here too - the newest pick wins (PageServersTribe -> PageStart.onPickNode ->
+        // AvpnEngineQml::pinAndReconnect, no guard while a connect runs): the older row's request ends WITHOUT a verdict
+        // (never «Не удалось», no outcome for it - the engine keeps its result off the new row by the row's intent epoch,
+        // AvpnEngineQml::connectToNode), what its chain already proved goes out, and the new row connects.
+        const QString superseded = m_connectingId;
+        if (!superseded.isEmpty())
+            endChain(s, false);
         m_connectingId = id; // before the finish below: the tapped row is kept whatever its age
         if (scanPhaseScanning(m_phase)) {
             // The tap stops the scan at once and keeps what it found (artboard `connect`).
@@ -1583,7 +1591,8 @@ public:
         QStringList order;
         for (int k = 1; k < m_list.size(); ++k) {
             const ScanRowView &r = m_list.at((at + k) % m_list.size()).row;
-            if (r.id == id || m_tapFailed.contains(r.id) || r.unavailable || (m_current.working() && r.id == m_current.nodeId))
+            if (r.id == id || r.id == superseded || m_tapFailed.contains(r.id) || r.unavailable
+                || (m_current.working() && r.id == m_current.nodeId))
                 continue;
             order << r.id;
         }
@@ -1606,7 +1615,7 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!m_connectingId.isEmpty()) {
+        if (ofRunningChain(nodeId)) {
             m_tapFailed.insert(nodeId);
             addChainOutcome(nodeId, ScanClass::NoData);
             QString next;
@@ -1633,7 +1642,7 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!m_connectingId.isEmpty()) {
+        if (ofRunningChain(nodeId)) {
             m_tapFailed.insert(nodeId.isEmpty() ? m_connectingId : nodeId);
             addChainOutcome(nodeId.isEmpty() ? m_connectingId : nodeId, ScanClass::NoData);
             endChain(s, true);
@@ -1662,6 +1671,13 @@ public:
         }
         finishStep(s, now);
         return s;
+    }
+
+    // A failure the engine reports belongs to the running chain only when it names the chain's row or one of its
+    // attempt order ("" = the chain's own): the late failure of a row a newer tap superseded fails nothing.
+    bool ofRunningChain(const QString &nodeId) const
+    {
+        return !m_connectingId.isEmpty() && (nodeId.isEmpty() || nodeId == m_connectingId || m_chainOrder.contains(nodeId));
     }
 
     // The engine's attempt ended in an error (engine Error) while a tap's chain ran.

@@ -71,5 +71,9 @@ printf '%s\n' "$stop" | grep -qF 'foundBesidesLive()) {' && printf '%s\n' "$stop
 
 grep -n 'qsTr(' "$TEXTS" | grep -iE 'нод[аыуе]?[^а-я]|нод"' && bad "the Scanner's words say «серверы», not «ноды» (lines above)"
 
+tap="$(body_of 'ScanStep rowTapped(const QString &id, qint64 now)' "$MACHINE")"
+printf '%s\n' "$tap" | grep -qF '!m_connectingId.isEmpty() ||' && bad "F6: a second row tap while one connects must not be dropped"
+printf '%s\n' "$tap" | grep -qF 'endChain(s, false);' || bad "F6: the superseded row's request must end without a verdict"
+
 [ "$fail" = 0 ] && echo "scanner page wiring: ok"
 exit "$fail"
