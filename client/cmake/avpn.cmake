@@ -189,6 +189,9 @@ if(APPLE AND NOT IOS AND NOT MACOS_NE)
     # AVPN (P-ANN): бейдж непрочитанных на иконке дока (NSApp.dockTile).
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnDockBadge.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnDockBadge.mm)
+    # AVPN (24.11.2026, cause F): the app's observations of the system's sleep (core/serviceEngine/SystemAwake.h).
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnSystemSleep.mm)
+    list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnSystemSleep.mm)
 endif()
 
 # AVPN Scanner (plan scanner-client-plan.md §2.4, §2.6, §5.4; after L6a's entries): the desktop probe host

@@ -11,6 +11,7 @@
 #define AVPN_PATH_PROBER_FACADE 1
 #include "ServiceProbe.h"    // AVPN backend-first (Task 4): ServiceProbeConfig — m_svcCfgsAll (kill-switch чипов)
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
+#include "SystemAwake.h"     // AVPN (24.11.2026, cause F): the fact "the system is fully awake" and its gate
 #include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
 #include "LaunchGuard.h"     // AVPN (self-update v2): безопасный запуск после обновления + откат
 #include "TunnelWatchResume.h" // AVPN (iOS data watch, 141): the hand-over at a return of the app (tested)
@@ -1283,9 +1284,23 @@ private:
     void onDaemonWakeup();            // сигнал wakeup реплики демона (queued)
     void onDaemonNetworkChanged();    // сигнал networkChanged реплики (та же обработка)
     void daemonWakeEvent(const char *why);
-    void wakeLivenessProbe();         // async HEAD через туннель; мёртв → needsRestart+reconcile
+    void wakeLivenessProbe(int epoch); // async HEAD через туннель; мёртв → needsRestart+reconcile; epoch: the chain's
     void wakeKick();                  // ретрай подъёма по появлению сети (кап tries)
 #endif
+    // AVPN (owner's Mac 24.11.2026, cause F; SystemAwake.h): the one fact "the system is fully awake" and the one gate
+    // of the engine's own automation. heldBySystemSleep(what) is called once at the entry of each automatic mechanism
+    // (reconcile, daemonWakeEvent, wakeKick, onTick, measureLiveProbe, startDataPathVerification); true = do nothing
+    // now. The attempt owner reads the same fact in its context (ServiceEngine::setSystemAwake). Sources: the macOS
+    // desktop app only (AvpnSystemSleep.mm, the service's wakeup); elsewhere the gate is a constant false.
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    bool heldBySystemSleep(avpn::SleepHeld what);
+    bool noteSleepSignal(avpn::SleepSignal s); // true: this observation was the awake edge (its evaluation ran)
+    void enterSystemSleep();
+    void leaveSystemSleep();
+#else
+    static constexpr bool heldBySystemSleep(avpn::SleepHeld) { return false; } // no "will sleep" source here
+#endif
+    avpn::SystemAwake m_systemAwake;
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (BUG-6, адопция при перезапуске GUI): демон держит туннель после выхода GUI, но на
     // холодном старте протокол (LocalSocketController) не создаётся до клика Connect — факт
@@ -1729,6 +1744,7 @@ private:
     // wakeTries — счётчик против капа wakeRestartMaxTriesTuned. Не-macOS: не используются.
     bool                         m_wakeProbing = false;
     int                          m_wakeProbeAttempt = 0;   // AVPN seamless roaming: повторы пробы до рестарта
+    int                          m_wakeProbeEpoch = 0;     // AVPN (24.11.2026): the probe chain in flight; a sleep ends it
     bool                         m_wakeRestartPending = false;
     int                          m_wakeTries = 0;
     bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)
