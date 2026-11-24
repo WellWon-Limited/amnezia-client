@@ -534,31 +534,11 @@ QString WireguardUtilsMacos::waitForTunnelName(const QString& filename) {
 
 void WireguardUtilsMacos::applyFirewallRules(FirewallParams& params)
 {
-  // double-check + ensure our firewall is installed and enabled. This is necessary as
-  // other software may disable pfctl before re-enabling with their own rules (e.g other VPNs)
-  if (!MacOSFirewall::isInstalled()) MacOSFirewall::install();
-
-  MacOSFirewall::ensureRootAnchorPriority();
-  MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-  MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), params.blockAll);
-  MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), params.allowNets);
-  MacOSFirewall::setAnchorTable(QStringLiteral("110.allowNets"), params.allowNets,
-                                QStringLiteral("allownets"), params.allowAddrs);
-
-  MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), params.blockNets);
-  MacOSFirewall::setAnchorTable(QStringLiteral("120.blockNets"), params.blockNets,
-                                QStringLiteral("blocknets"), params.blockAddrs);
-
-  // AVPN (волна-3): пропускать наружу только СВОЙ utun. Статический файл пропускал utun0–utun30 —
-  // трафик, ушедший в чужой VPN (см. монитор маршрутов), kill switch не ловил.
-  if (!m_ifname.isEmpty())
-    MacOSFirewall::setAnchorWithRules(QStringLiteral("200.allowVPN"), true,
-                                      { QStringLiteral("pass out on %1 flags any no state").arg(m_ifname) });
-  else
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), true);
-  MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
-  MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), true);
-  MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), true);
-  MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), true);
-  MacOSFirewall::setAnchorTable(QStringLiteral("310.blockDNS"), true, QStringLiteral("dnsaddr"), params.dnsServers);
+  // AVPN (pf state ownership, macospfanchors.h): the kill-switch session of this tunnel - opened in
+  // KillSwitch (closed by deleteInterface -> disableKillSwitch), every tribe/* anchor written by one call.
+  // 200.allowVPN passes only this tunnel's utun (wave 3: the static file passed utun0-utun30, so traffic
+  // routed into a foreign VPN was not caught). The AmneziaWG kill switch never passes the service's group
+  // (400.allowPIA off): an earlier Xray session's pass is not inherited.
+  params.allowPIA = false;
+  KillSwitch::instance()->openTunnelSession(params, m_ifname);
 }

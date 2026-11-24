@@ -224,7 +224,14 @@ bool IpcServer::createTun(const QString &dev, const QString &subnet)
     qDebug() << "IpcServer::createTun";
 #endif
 
-    return Router::createTun(dev, subnet);
+    const bool created = Router::createTun(dev, subnet);
+#ifdef Q_OS_MACOS
+    // AVPN (pf state ownership): a tun brought up for the session being built; the session's kill switch
+    // takes it and passes only it (KillSwitch::tunnelCreated, killswitch.h).
+    if (created)
+        KillSwitch::instance()->tunnelCreated(dev);
+#endif
+    return created;
 }
 
 bool IpcServer::deleteTun(const QString &dev)
