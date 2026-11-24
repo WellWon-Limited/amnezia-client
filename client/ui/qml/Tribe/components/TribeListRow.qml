@@ -20,7 +20,7 @@ Rectangle {
     implicitHeight: 60
     radius: Theme.radius.md
     color: selected ? Theme.color.chipSelected
-                    : (ma.containsMouse && interactive ? Theme.color.surface2 : Theme.color.surface1)
+                    : (hover.hovered && interactive ? Theme.color.surface2 : Theme.color.surface1)
     border.width: 1
     border.color: selected ? Theme.color.accent : Theme.color.border
     Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
@@ -79,12 +79,19 @@ Rectangle {
         height: parent.height
     }
 
+    // The hover look only for a pointer that hovers (mouse, trackpad - TribeButton's pattern): a touch that scrolled the
+    // list and lifted on a row left MouseArea.containsMouse true, and the row kept a «pressed» background (device round
+    // air-C, D7, English list, the Poland row).
+    HoverHandler {
+        id: hover
+        enabled: rowRoot.interactive
+        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+        cursorShape: Qt.PointingHandCursor
+    }
     MouseArea {
         id: ma
         anchors.fill: parent
-        hoverEnabled: true
         enabled: rowRoot.interactive
-        cursorShape: rowRoot.interactive ? Qt.PointingHandCursor : Qt.ArrowCursor
         onClicked: rowRoot.clicked()
     }
 }

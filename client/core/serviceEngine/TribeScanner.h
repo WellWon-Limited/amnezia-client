@@ -157,7 +157,8 @@ public:
     // the Scanner never shows «Serbia 1» where the list shows «Сербия 1» (cached rows included). "" = not in the
     // pool now: the row keeps its own label.
     // S6 (device round 5): the ledger's rule on the screen - a row whose real tunnel came up and carried no data on
-    // this network (and has not carried data since) is not shown «Доступно» on a later light probe.
+    // this network (and has not carried data since) is not shown «Доступно» on a later light probe. Read for the
+    // machine's rows and handed to it (ScanMachine::tunnelNoDataHere): the row's label and the count are one verdict.
     virtual bool rowFailedInTunnelHere(const QString &rowId) const
     {
         Q_UNUSED(rowId)
@@ -455,6 +456,9 @@ private:
     void dispatch(const ScanStep &s);
     void execute(const ScanAction &a);
     void afterStep();
+    void syncTunnelFacts();          // the ledger's S6 fact on the machine's rows (tunnelNoDataHere)
+    QStringList m_tunnelNoData;      // the set last handed over
+    bool m_syncingTunnelFacts = false;
     void reschedule();
     void refreshView();
     void emitLog(const QString &line) const;

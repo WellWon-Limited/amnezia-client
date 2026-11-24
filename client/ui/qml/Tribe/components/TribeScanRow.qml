@@ -35,8 +35,10 @@ Rectangle {
     readonly property bool notVerified: unverified && rowState !== "connected"
     readonly property bool hideFigures: notVerified || liveUnverified
 
-    readonly property string badgeText: rowState === "works" ? ScanTexts.rowWorks
-        : rowState === "slow" ? ScanTexts.rowSlow
+    // A slow row works: it reads «Доступно» like every working row (device round air-C, D1: the amber «Медленно» read as
+    // another category and the eye left it out of the rings' «N доступно»); its speed is in its bars and ms.
+    readonly property bool available: rowState === "works" || rowState === "slow"
+    readonly property string badgeText: available ? ScanTexts.rowWorks
         : rowState === "not_verified" ? ScanTexts.rowNotVerified
         : rowState === "connecting" ? ScanTexts.rowConnecting
         : rowState === "connected" ? ScanTexts.rowConnected
@@ -45,14 +47,14 @@ Rectangle {
     // «Подключено» on the only highlighted row - "available" and "connected now" cannot be confused. Owner 18.11:
     // the filled «Подключено» is green (Theme.color.connected, the connection-status tone), «Доступно» stays blue.
     readonly property bool connectedNow: rowState === "connected"
-    readonly property color badgeFg: rowState === "works" ? Theme.color.accent
+    readonly property color badgeFg: available ? Theme.color.accent
         : connectedNow ? Theme.color.bg800
-        : (rowState === "slow" || rowState === "connecting") ? Theme.color.warning
+        : rowState === "connecting" ? Theme.color.warning
         : rowState === "failed" ? Theme.color.danger
         : Theme.color.text3
-    readonly property color badgeFill: rowState === "works" ? Theme.color.badgeAccent
+    readonly property color badgeFill: available ? Theme.color.badgeAccent
         : connectedNow ? Theme.color.connected
-        : (rowState === "slow" || rowState === "connecting") ? Theme.color.badgeWarn
+        : rowState === "connecting" ? Theme.color.badgeWarn
         : rowState === "failed" ? Theme.color.badgeOff
         : Theme.color.glass
     // the speed word is gone (the bars and ms say it); the «Не проверено» badge says what its reason said (device round 3:

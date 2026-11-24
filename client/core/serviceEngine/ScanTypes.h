@@ -816,6 +816,8 @@ struct ScanCachedRow {
     bool crowdWorks = false;
     int batch = 0;            // the batch of the series the row was shown in (0 = unknown: the newest); a reopened
                               // list keeps each batch's own cap, so every row the person saw comes back
+    bool fullProof = false;   // proven through its own full path (AWG mini / Xray full profile: a handshake and a
+                              // data download; the live tunnel) - not by a light probe (ScanMachine::tunnelNoDataHere)
 };
 
 struct ScanCachedFailure {
@@ -866,6 +868,8 @@ inline QJsonObject scanCachedRowToJson(const ScanCachedRow &r)
     o.insert(QStringLiteral("ms"), r.ms);
     if (r.crowdWorks)
         o.insert(QStringLiteral("crowd_works"), true);
+    if (r.fullProof)
+        o.insert(QStringLiteral("full"), true);
     if (r.batch > 0)
         o.insert(QStringLiteral("batch"), r.batch);
     return o;
@@ -890,6 +894,7 @@ inline bool scanCachedRowFromJson(const QJsonObject &o, ScanCachedRow &r)
     r.ms = o.value(QLatin1String("ms")).toInt(-1);
     r.crowdWorks = o.value(QLatin1String("crowd_works")).toBool(false);
     r.batch = qBound(0, o.value(QLatin1String("batch")).toInt(0), kScanCacheBatchMax);
+    r.fullProof = o.value(QLatin1String("full")).toBool(false);
     // Only working rows are cached as rows.
     return scanClassWorking(r.cls);
 }
