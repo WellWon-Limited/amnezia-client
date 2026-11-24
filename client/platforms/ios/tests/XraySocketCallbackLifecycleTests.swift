@@ -218,10 +218,13 @@ private func testIPv6RouteSpec() {
            "malformed CIDR is rejected")
 }
 
-// AVPN (device round air-B 24.11): the one answer to startTunnel (TunnelStartSlot). The system's two completions are
-// modelled by counters; the provider's order (PacketTunnelProvider.stopTunnel: `pending` at entry, the native stop,
-// then abortForStop() right before the stop's own answer) is replayed against a start whose setTunnelNetworkSettings
-// never calls back - the case the stop of the 25 s Disconnected hit.
+// AVPN (device round air-B 24.11; review R43 F1-F3): the stop of an Xray session that is still starting, through the
+// real decisions (TunnelRuntimeSession's generation + hev phase, XrayHevStop, TunnelStartSlot, StopClosableSlot) and
+// the provider's order (stopTunnel: stopBegan at entry; stopXray: under the native gate the generation move, then the
+// hev decision; then abortForStop right before the stop's own answer; the hev worker: enterHev before it answers or
+// runs). hev itself is a faithful double of hev 2.15.0 + recipe patch 0001: its blocking quit loops until run() has
+// created the event fd (100 ms sleeps); try_quit sets stop_requested, answers -EAGAIN until hev runs, and a hev that
+// reaches run with stop_requested set quits at once.
 private final class SystemCompletions: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var startAnswers: [String] = []
@@ -246,86 +249,250 @@ private final class SystemCompletions: @unchecked Sendable {
 
 private enum FakeStartError: Error { case superseded }
 
-private func testTunnelStartAnswer() {
-    // 1. A start that answers itself: the stop finds nothing to answer.
-    do {
-        let system = SystemCompletions()
-        let slot = TunnelStartSlot()
-        let startAnswer = slot.begin { system.start($0) }
-        expect(slot.pending, "a begun start is pending")
-        startAnswer(nil)
-        expect(!slot.pending, "an answered start is not pending")
-        expect(!slot.abortForStop(), "the stop of an answered start answers nothing")
-        startAnswer(FakeStartError.superseded)
-        expect(system.snapshot().starts == ["ok"], "exactly one answer reaches the system: \(system.snapshot().starts)")
-    }
-    // 2. The 24.11 case: the stop comes 0.2 s into an Xray start whose settings never call back. The stop answers the
-    //    start when its native stop is done, before its own answer; the start's late answer is dropped.
-    do {
-        let system = SystemCompletions()
-        let slot = TunnelStartSlot()
-        let startAnswer = slot.begin { system.start($0) }
-        let gate = XrayNativeLifecycleGate()
-        let session = TunnelRuntimeSession()
-        let generation = session.beginSession(protocolName: "xray", preservingCounters: false)
-        // setTunnelNetworkSettings is pending: its callback is held and never released in this case
-        var settingsCallback: (() -> Void)? = {
-            if !session.isCurrent(generation: generation) { startAnswer(FakeStartError.superseded) }
+private final class FakeHev: XrayHevControl, @unchecked Sendable {
+    private let lock = NSLock()
+    private var running = false
+    private var eventFd = false      // hev's event_fds[1] >= 0
+    private var stopRequested = false
+    private var quitEvent = false
+    private(set) var mains = 0
+    private(set) var exited = 0
+    let initMs: Int
+    init(initMs: Int) { self.initMs = initMs }
+
+    // Socks5Tunnel.run: init creates the event fd after initMs, then run (= 1; stop_requested -> try_quit), the
+    // event loop until the quit event, then fini.
+    func main() {
+        lock.lock(); mains += 1; lock.unlock()
+        Thread.sleep(forTimeInterval: Double(initMs) / 1000)
+        lock.lock(); eventFd = true; running = true; let requested = stopRequested; lock.unlock()
+        if requested { _ = tryQuit() }
+        while true {
+            lock.lock(); let q = quitEvent; lock.unlock()
+            if q { break }
+            usleep(5_000)
         }
-        let began = DispatchTime.now()
-        let stopDone = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            let pendingAtStop = slot.pending
-            let stopCompletion: () -> Void = {
-                _ = slot.abortForStop()
-                system.stop()
-                stopDone.signal()
+        lock.lock(); running = false; eventFd = false; stopRequested = false; quitEvent = false; exited += 1; lock.unlock()
+    }
+
+    // hev_socks5_tunnel_stop: `for (;;) { if fd >= 0 break; usleep(100 ms) }` then the event.
+    func quitBlocking() {
+        while true {
+            lock.lock()
+            if eventFd { quitEvent = true; lock.unlock(); return }
+            lock.unlock()
+            usleep(100_000)
+        }
+    }
+
+    // hev_socks5_tunnel_try_quit (patch 0001).
+    func tryQuit() -> Int32 {
+        lock.lock(); defer { lock.unlock() }
+        stopRequested = true
+        guard running, eventFd else { return -EAGAIN }
+        quitEvent = true
+        return 0
+    }
+
+    var state: (mains: Int, exited: Int) { lock.lock(); defer { lock.unlock() }; return (mains, exited) }
+}
+
+private final class FakeRenewer {}
+
+// One Xray session of the provider, modelled on its real order (PacketTunnelProvider.swift / +Xray.swift / +Upstream).
+private final class ProviderModel: @unchecked Sendable {
+    let system = SystemCompletions()
+    let slot = TunnelStartSlot()
+    let gate = XrayNativeLifecycleGate()
+    let session = TunnelRuntimeSession()
+    let renewers = StopClosableSlot<FakeRenewer>()
+    let hev: FakeHev
+    let workers = DispatchGroup()
+    var startAnswer: (Error?) -> Void = { _ in }
+    var generation: UInt64 = 0
+    var hevStop: XrayHevStop?
+
+    init(hev: FakeHev) {
+        self.hev = hev
+        startAnswer = slot.begin { [system] in system.start($0) } // startTunnel
+        renewers.reopen()                                          // beginUpstreamMeter
+        generation = session.beginSession(protocolName: "xray")    // startXray
+    }
+
+    // setupAndRunTun2socks: under the gate the worker is queued; the worker enters (or finds the stop), answers the
+    // start, attaches the renewer, runs hev.
+    func queueHevWorker(beforeEnter: (() -> Void)? = nil) {
+        let gen = generation
+        let queued: Bool = gate.withExclusive {
+            guard session.isCurrent(generation: gen), session.transition(to: .running, generation: gen),
+                  session.queueHev(generation: gen) else { return false }
+            return true
+        }
+        guard queued else { startAnswer(FakeStartError.superseded); return }
+        workers.enter()
+        DispatchQueue.global().async { [self] in
+            defer { workers.leave() }
+            beforeEnter?()
+            guard session.enterHev(generation: gen) else {
+                startAnswer(FakeStartError.superseded)
+                return
             }
-            gate.withExclusive { _ = session.beginStop() } // stopXray's generation flip under the native gate
-            expect(pendingAtStop, "the stop sees the start still unanswered")
-            stopCompletion()
+            if renewers.attach(FakeRenewer()) {} // attachUpstreamRenewer (refused after the stop took the slot)
+            startAnswer(nil)
+            hev.main()
+            session.exitHev(generation: gen)
         }
-        expect(stopDone.wait(timeout: .now() + 1) == .success, "the stop completes without the settings callback")
-        let ms = Double(DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1_000_000
-        expect(ms < 1000, "the stop of a starting session is answered within a second (\(ms) ms)")
-        let snap = system.snapshot()
-        expect(snap.starts == ["stopped_during_start"] && snap.stopped, "the start is answered by the stop: \(snap)")
-        expect(snap.order == ["start:stopped_during_start", "stop"], "the start's answer comes before the stop's: \(snap.order)")
-        settingsCallback?() // the system calls the settings back after all: the start's own answer is dropped
-        settingsCallback = nil
-        expect(system.snapshot().starts == ["stopped_during_start"], "a late start answer never reaches the system")
     }
-    // 3. The start's own answer and the stop race on many threads: exactly one answer per start, every time.
+
+    // stopTunnel -> stopXrayThenReleaseUpstream -> stopXray, then the completion wrapper. Returns how long it took (ms)
+    // or nil when it did not return within `bound`.
+    func stop(bound: TimeInterval = 2) -> Double? {
+        let done = DispatchSemaphore(value: 0)
+        let began = DispatchTime.now()
+        DispatchQueue.global().async { [self] in
+            _ = slot.stopBegan()
+            _ = renewers.take()
+            gate.withExclusive {
+                let stopping = session.beginStopReportingHev()
+                hevStop = XrayHevStop.execute(hevRunning: stopping.hevRunning, hev: hev)
+            }
+            _ = slot.abortForStop()
+            system.stop()
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + bound) == .success else { return nil }
+        return Double(DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1_000_000
+    }
+}
+
+private func testStopDuringXrayStart() {
+    // Control: the double is faithful - the blocking quit of a hev that never started does not return (this is what
+    // stopXray did on 24.11, inside the native gate).
+    do {
+        let hev = FakeHev(initMs: 0)
+        let returned = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { hev.quitBlocking(); returned.signal() }
+        expect(returned.wait(timeout: .now() + 0.6) == .timedOut, "control: the blocking quit of a hev never started returned")
+    }
+    // 1. The 24.11 case: the stop comes while the start waits for its network settings (no hev worker yet); the
+    //    settings never call back. The stop returns at once, the start gets exactly one answer (an error) before the
+    //    stop's, no hev runs, no renewer attaches.
+    do {
+        let m = ProviderModel(hev: FakeHev(initMs: 50))
+        let ms = m.stop()
+        expect(ms != nil, "the stop of a start still waiting for its settings did not return within 2 s")
+        expect((ms ?? 99_999) < 500, "the stop took \(ms ?? -1) ms")
+        expect(m.hevStop == .notRunning, "no hev to stop: \(String(describing: m.hevStop))")
+        let snap = m.system.snapshot()
+        expect(snap.starts == ["stopped_during_start"] && snap.order == ["start:stopped_during_start", "stop"],
+               "one start answer, an error, before the stop's: \(snap)")
+        m.queueHevWorker() // the settings call back after all: the stopped generation queues nothing
+        expect(m.workers.wait(timeout: .now() + 2) == .success, "no worker left")
+        expect(m.hev.state.mains == 0 && m.renewers.current == nil && m.system.snapshot().starts.count == 1,
+               "a late settings callback started hev, attached a renewer or answered again")
+    }
+    // 2. (F2) The hev worker is queued, the stop comes before it runs: the worker finds the stop - it neither answers
+    //    success nor attaches nor runs hev.
+    do {
+        let m = ProviderModel(hev: FakeHev(initMs: 50))
+        let release = DispatchSemaphore(value: 0)
+        m.queueHevWorker(beforeEnter: { _ = release.wait(timeout: .now() + 2) })
+        let ms = m.stop()
+        release.signal()
+        usleep(100_000) // the worker runs now
+        expect(m.hev.state.mains == 0, "a queued worker ran hev after the stop")
+        expect(m.workers.wait(timeout: .now() + 2) == .success, "the queued worker ended")
+        expect(ms != nil && (ms ?? 99_999) < 500 && m.hevStop == .notRunning, "stop with a queued worker: \(ms ?? -1) ms")
+        expect(m.renewers.current == nil, "a queued worker attached a renewer after the stop")
+        expect(m.system.snapshot().starts == ["stopped_during_start"], "start answers: \(m.system.snapshot().starts)")
+    }
+    // 3. hev has entered and is still initialising (400 ms) when the stop comes: the non-blocking quit is deferred,
+    //    the stop returns at once, hev quits as soon as it runs.
+    do {
+        let m = ProviderModel(hev: FakeHev(initMs: 400))
+        let entered = DispatchSemaphore(value: 0)
+        m.queueHevWorker()
+        DispatchQueue.global().async { while m.session.hevPhaseNow != .running { usleep(1_000) }; entered.signal() }
+        expect(entered.wait(timeout: .now() + 2) == .success, "the worker entered")
+        let ms = m.stop()
+        expect(ms != nil && (ms ?? 99_999) < 300, "the stop of an initialising hev waited \(ms ?? -1) ms")
+        expect(m.hevStop == .quitDeferred(-EAGAIN), "the quit is deferred while hev initialises: \(String(describing: m.hevStop))")
+        expect(m.workers.wait(timeout: .now() + 2) == .success && m.hev.state.exited == 1, "hev quit once it ran")
+        expect(m.session.hevPhaseNow == .none, "no hev left after its exit")
+        let snap = m.system.snapshot()
+        expect(snap.starts.count == 1 && snap.order.last == "stop", "one start answer before the stop's: \(snap)")
+        // the renewer this start attached before the stop was taken by the stop - nothing outlives it
+        expect(m.renewers.current == nil, "a renewer outlived the stop")
+    }
+    // 4. hev runs: the quit is queued at once and hev exits.
+    do {
+        let m = ProviderModel(hev: FakeHev(initMs: 10))
+        m.queueHevWorker()
+        while m.system.snapshot().starts.isEmpty { usleep(1_000) }
+        usleep(50_000)
+        let ms = m.stop()
+        expect(ms != nil && m.hevStop == .quitQueued, "the stop of a running hev: \(String(describing: m.hevStop))")
+        expect(m.workers.wait(timeout: .now() + 2) == .success && m.hev.state.exited == 1, "a running hev quit")
+        expect(m.system.snapshot().starts == ["ok"], "the start that came up answered success once")
+    }
+    // 5. hev exited by itself earlier: a later stop does not quit (the blocking quit would wait for ever: fds closed).
+    do {
+        let m = ProviderModel(hev: FakeHev(initMs: 10))
+        m.queueHevWorker()
+        while m.session.hevPhaseNow != .running { usleep(1_000) }
+        usleep(30_000)
+        _ = m.hev.tryQuit() // hev ends on its own (tun2socks exit)
+        expect(m.workers.wait(timeout: .now() + 2) == .success, "hev ended on its own")
+        let ms = m.stop()
+        expect(ms != nil && m.hevStop == .notRunning, "a stop after hev exited: \(String(describing: m.hevStop))")
+    }
+}
+
+// (F3) After the stop began, a start that would report success reports an error.
+private func testSuccessAfterStopBegan() {
+    let system = SystemCompletions()
+    let slot = TunnelStartSlot()
+    let startAnswer = slot.begin { system.start($0) }
+    expect(slot.stopBegan(), "the start is still unanswered when the stop begins")
+    startAnswer(nil)
+    _ = slot.abortForStop()
+    system.stop()
+    expect(system.snapshot().order == ["start:stopped_during_start", "stop"], "\(system.snapshot().order)")
+    // many threads race the start's answer and the stop: exactly one answer, always before the stop's
     for round in 0..<200 {
-        let system = SystemCompletions()
-        let slot = TunnelStartSlot()
-        let startAnswer = slot.begin { system.start($0) }
+        let sys = SystemCompletions()
+        let s = TunnelStartSlot()
+        let answer = s.begin { sys.start($0) }
         let group = DispatchGroup()
-        for i in 0..<8 {
+        for i in 0..<6 {
             DispatchQueue.global().async(group: group) {
-                if i % 2 == 0 { startAnswer(i == 0 ? nil : FakeStartError.superseded) } else { _ = slot.abortForStop() }
+                if i % 2 == 0 { answer(i == 0 ? nil : FakeStartError.superseded) } else { _ = s.stopBegan(); _ = s.abortForStop(); sys.stop() }
             }
         }
         expect(group.wait(timeout: .now() + 2) == .success, "round \(round) finished")
-        expect(system.snapshot().starts.count == 1, "round \(round): one answer, got \(system.snapshot().starts)")
-        expect(!slot.pending, "round \(round): nothing pending after the race")
+        let snap = sys.snapshot()
+        expect(snap.starts.count == 1 && snap.order.first?.hasPrefix("start:") == true,
+               "round \(round): one start answer, first: \(snap.order)")
     }
-    // 4. A newer start replaces the slot: the stop answers the newest unanswered start only.
-    do {
-        let system = SystemCompletions()
-        let slot = TunnelStartSlot()
-        let first = slot.begin { system.start($0) }
-        first(nil)
-        _ = slot.begin { system.start($0) }
-        expect(slot.abortForStop(), "the newest start is answered by the stop")
-        expect(system.snapshot().starts == ["ok", "stopped_during_start"], "each start answered once")
-    }
+}
+
+// (F2) The renewer slot: a stop takes and closes, an attach after it is refused, a new session opens it again.
+private func testStopClosableSlot() {
+    let slot = StopClosableSlot<FakeRenewer>()
+    let first = FakeRenewer()
+    expect(slot.attach(first) && slot.current === first, "attach while the session runs")
+    expect(slot.take() === first && slot.current == nil, "the stop takes it")
+    expect(!slot.attach(FakeRenewer()) && slot.current == nil, "nothing attaches after the stop")
+    slot.reopen()
+    expect(slot.attach(FakeRenewer()), "a new session attaches again")
 }
 
 @main
 private struct XraySocketCallbackLifecycleTests {
     static func main() throws {
-        testTunnelStartAnswer()
+        testStopDuringXrayStart()
+        testSuccessAfterStopBegan()
+        testStopClosableSlot()
         testTrafficAccumulator()
         testRuntimeSession()
         testIPv4RouteSpec()

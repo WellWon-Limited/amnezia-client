@@ -71,4 +71,17 @@ public enum Socks5Tunnel {
     public static func quit() {
         hev_socks5_tunnel_quit()
     }
+
+    // AVPN (review R43 F1): the non-blocking stop of recipes/hev-socks5-tunnel patch 0001 (quit() above waits for hev's
+    // event fd without a bound - never call it from a stop). 0 = queued, -EAGAIN = hev still initialising (the request
+    // is kept and hev quits as it starts running), another negative errno = refused.
+    public static func tryQuit() -> Int32 {
+        hev_socks5_tunnel_try_quit()
+    }
+}
+
+// AVPN (review R43 F1): the live hev for XrayHevStop (XraySocketCallbackLifecycle.swift).
+struct LiveHevControl: XrayHevControl {
+    func tryQuit() -> Int32 { Socks5Tunnel.tryQuit() }
+    func quitBlocking() { Socks5Tunnel.quit() }
 }
