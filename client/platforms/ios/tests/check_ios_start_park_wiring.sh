@@ -12,10 +12,12 @@
 #       before its own answer, writing its duration into the stop record; the app logs that record;
 #   P4  the owner never records no_handshake for a leg in its local phase; a second local phase of the same leg is
 #       taken (begun/ended pairs, review R43 F5) and the local bound counts all phases together;
-#   P5  (review R43 F1/F2) the Xray stop never calls the blocking hev quit: the generation move reports whether a hev
-#       worker entered, and only that hev gets the non-blocking quit; the worker re-checks the generation before it
-#       answers, attaches or runs; the renewer is taken and closed in one step at the stop and attached only through
-#       that slot.
+#   P5  (reviews R43 F1/F2, R46 R1/R2) the Xray stop never calls the blocking hev quit: the generation move reports
+#       which hev run entered, only that run gets the non-blocking request, driven again until that run returned; the
+#       worker takes the process's run slot before it enters (no run beside an earlier one) and gives it back when its
+#       run returned; it re-checks the generation before it answers, attaches or runs; the renewer is taken and closed
+#       in one step at the stop and attached only through that slot; the hev package is the one whose patch scopes a
+#       request to one run.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -107,27 +109,37 @@ has "$(code "$OWNER")" 'm_leg.deadline = m_awake + std::max<qint64>(0, m_t.local
 XRAY="$IOS/PacketTunnelProvider+Xray.swift"
 UP="$IOS/PacketTunnelProvider+Upstream.swift"
 stopx="$(sbody "$XRAY" 'func stopXray(completionHandler: () -> Void) {')"
-before "$stopx" 'let stopping = xrayRuntimeSession.beginStopReportingHev()' 'XrayHevStop.execute(hevRunning: stopping.hevRunning, hev: LiveHevControl())' \
-    || bad "P5: stopXray must decide the hev stop from the generation move"
-before "$stopx" 'XrayHevStop.execute(hevRunning: stopping.hevRunning, hev: LiveHevControl())' 'retireXrayCallback(identity: identity, stopCore: true)' \
-    || bad "P5: the core and callback teardown come after the hev decision"
+before "$stopx" 'let stopping = xrayRuntimeSession.beginStopReportingHev()' 'XrayHevStop.execute(run: stopping.hevRun, runs: XrayHevRuns.shared, hev: LiveHevControl())' \
+    || bad "P5: stopXray must stop the hev run the generation move reported"
+before "$stopx" 'XrayHevStop.execute(run: stopping.hevRun, runs: XrayHevRuns.shared, hev: LiveHevControl())' 'retireXrayCallback(identity: identity, stopCore: true)' \
+    || bad "P5: the core and callback teardown come after hev's return"
 prov="$(code "$XRAY"; code "$UP"; code "$PTP")"
 if printf '%s\n' "$prov" | grep -F 'Socks5Tunnel.quit()' > /dev/null; then bad "P5: no provider path may call the blocking hev quit"; fi
-has "$(code "$IOS/XraySocketCallbackLifecycle.swift")" 'let rc = hev.tryQuit()' || bad "P5: the hev stop uses the non-blocking quit"
+life="$(code "$IOS/XraySocketCallbackLifecycle.swift")"
+has "$life" 'lastRc = hev.tryQuit()' || bad "P5: the hev stop uses the non-blocking quit"
+has "$life" 'while runs.inProgress(run) {' && has "$life" 'if runs.waitReturn(run, until: next) { break }' \
+    || bad "P5: the request is driven again until the run returned (bounded)"
 tun="$(sbody "$XRAY" 'private func setupAndRunTun2socks(')"
 has "$tun" 'xrayRuntimeSession.queueHev(generation: sessionGeneration) else {' || bad "P5: the worker is queued under the gate for the current generation"
-before "$tun" 'self?.xrayRuntimeSession.enterHev(generation: sessionGeneration) == true else {' 'completionHandler(nil)' \
+before "$tun" 'guard let run = XrayHevRuns.shared.enter(waitSeconds: XrayHevStop.exitLimitSeconds) else {' 'self?.xrayRuntimeSession.enterHev(generation: sessionGeneration, run: run) == true else {' \
+    || bad "P5: the worker takes the process's run slot before it enters"
+before "$tun" 'self?.xrayRuntimeSession.enterHev(generation: sessionGeneration, run: run) == true else {' 'completionHandler(nil)' \
     || bad "P5: the worker re-checks the generation before it answers success"
-before "$tun" 'self?.xrayRuntimeSession.enterHev(generation: sessionGeneration) == true else {' 'Socks5Tunnel.run(withConfig: configurationFilePath)' \
+before "$tun" 'self?.xrayRuntimeSession.enterHev(generation: sessionGeneration, run: run) == true else {' 'Socks5Tunnel.run(withConfig: configurationFilePath)' \
     || bad "P5: the worker re-checks the generation before hev runs"
-before "$tun" 'Socks5Tunnel.run(withConfig: configurationFilePath)' 'self?.xrayRuntimeSession.exitHev(generation: sessionGeneration)' \
-    || bad "P5: the worker says when hev returned"
+before "$tun" 'Socks5Tunnel.run(withConfig: configurationFilePath)' 'XrayHevRuns.shared.exit(run) // AVPN (review R46 R1)' \
+    || bad "P5: the worker gives the run slot back when its run returned"
 up="$(code "$UP")"
 has "$(sbody "$UP" 'func stopXrayThenReleaseUpstream(')" 'guard let renewer = tribeUpstream.takeRenewerForStop() else {' \
     || bad "P5: the stop takes the renewer and closes its slot in one step"
 has "$(sbody "$UP" 'func attachUpstreamRenewer(')" 'guard tribeUpstream.attachRenewer(renewer) else {' \
     || bad "P5: a renewer attaches only while the session's stop has not taken the slot"
 has "$(sbody "$UP" 'func beginUpstreamMeter(')" 'tribeUpstream.openRenewerSlot()' || bad "P5: a fresh tunnel start opens the slot"
+
+REC="$CLIENT/../recipes/hev-socks5-tunnel"
+grep -F '"patches/0002-run-scoped-stop.patch"' "$REC/conandata.yml" > /dev/null || bad "P5: the hev recipe applies the run-scoped stop (patch 0002)"
+grep -F 'self.requires("hev-socks5-tunnel/2.15.0-tribe.1"' "$CLIENT/../conanfile.py" > /dev/null || bad "P5: the app pins the hev package with patch 0002"
+grep -F 'if (!run_scope) {' "$REC/patches/0002-run-scoped-stop.patch" > /dev/null || bad "P5: a request is kept only inside a run"
 
 if [ "$fail" -ne 0 ]; then
     exit 1

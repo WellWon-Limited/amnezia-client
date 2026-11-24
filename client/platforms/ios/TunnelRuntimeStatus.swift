@@ -164,6 +164,7 @@ final class TunnelRuntimeSession {
     enum HevPhase { case none, queued, running }
     private var hevPhase: HevPhase = .none
     private var hevGeneration: UInt64 = 0
+    private var hevRun: UInt64 = 0 // the process-wide epoch of the entered run (XrayHevRuns), 0 = none
 
     /// Under the native gate, when the hev worker is handed to its queue: only for the current generation.
     func queueHev(generation expectedGeneration: UInt64) -> Bool {
@@ -175,35 +176,40 @@ final class TunnelRuntimeSession {
         return true
     }
 
-    /// In the worker, before it answers the start or runs hev: false = a stop came after the queueing - nothing of
-    /// that generation may answer success or run.
-    func enterHev(generation expectedGeneration: UInt64) -> Bool {
+    /// In the worker, once it holds the process's run slot (`run`, XrayHevRuns.enter) and before it answers the start
+    /// or runs hev: false = a stop came after the queueing - nothing of that generation may answer success or run
+    /// (the worker then gives the run slot back).
+    func enterHev(generation expectedGeneration: UInt64, run: UInt64) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard generation == expectedGeneration, hevGeneration == expectedGeneration, hevPhase == .queued else {
             return false
         }
         hevPhase = .running
+        hevRun = run
         return true
     }
 
-    /// In the worker, when Socks5Tunnel.run returned.
+    /// In the worker, when Socks5Tunnel.run returned (or when it never got a run slot).
     func exitHev(generation expectedGeneration: UInt64) {
         lock.lock()
         defer { lock.unlock() }
-        if hevGeneration == expectedGeneration { hevPhase = .none }
+        if hevGeneration == expectedGeneration {
+            hevPhase = .none
+            hevRun = 0
+        }
     }
 
-    /// The stop's generation move, and whether a hev worker had entered at that moment (only then is there a hev to
-    /// stop; a worker still queued finds the new generation in enterHev and never runs).
-    func beginStopReportingHev() -> (generation: UInt64, hevRunning: Bool) {
+    /// The stop's generation move, and the run epoch of the hev worker that had entered at that moment (0 = none: a
+    /// worker still queued finds the new generation in enterHev and never runs - nothing to stop, nothing to wait for).
+    func beginStopReportingHev() -> (generation: UInt64, hevRun: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         generation = nextGeneration(generation)
         state = .stopping
-        let running = hevPhase == .running
+        let run = hevPhase == .running ? hevRun : 0
         if hevPhase == .queued { hevPhase = .none }
-        return (generation, running)
+        return (generation, run)
     }
 
     var hevPhaseNow: HevPhase {
@@ -328,8 +334,9 @@ final class TunnelRuntimeSession {
 //  - stopBegan() at stopTunnel entry: from then on the start can only be answered with an error - a start that would
 //    report success after the stop began reports TunnelStartAbort.stoppedDuringStart;
 //  - abortForStop() when the native stop is done, right before the stop's own answer: a start still unanswered is
-//    answered now (the error), and an answer already being delivered is waited for (bounded) - so the start's answer,
-//    whichever, always reaches the system before the stop's;
+//    answered now (the error), and an answer already being delivered is waited for (bounded). What a delivery delivers
+//    is decided at its call, under the delivery lock (review R46 R3): after stopBegan() it is an error even if the call
+//    comes late; only a success decided before the stop began can still be under way (its call is waited for, bounded);
 //  - a second begin() answers the first start, if it is still unanswered (supersededByNewStart).
 // Exactly one answer per startTunnel. The start goes on to its next checkpoint, where the stop's new generation ends
 // it (TunnelRuntimeSession.isCurrent / enterHev); the stop still takes the native gate (one tunnel session at a time).
@@ -340,60 +347,71 @@ enum TunnelStartAbort: Error {
     case supersededByNewStart
 }
 
-/// The answer to ONE startTunnel. Thread-safe; the handler runs outside the lock, at most once.
+/// The answer to ONE startTunnel. Thread-safe, at most once. What is delivered is decided at the call itself (review
+/// R46 R3): the delivery lock is held from the last read of `stopping` through the handler call, and stopBegan() sets
+/// `stopping` at once - so once the stop began no success can be decided any more; the bounded waits below only bound
+/// how long the stop waits for a delivery already under way, never what it delivers.
 final class TunnelStartAnswer {
-    static let deliveryWaitSeconds: TimeInterval = 1 // an answer in flight is the system's completion call (microseconds)
-    private let cond = NSCondition()
+    static let deliveryWaitSeconds: TimeInterval = 1
+    private let state = NSLock()             // handler, stopping
+    private let delivery = NSRecursiveLock() // held from the decision through the handler call
     private var handler: ((Error?) -> Void)?
-    private var delivering = false
     private var stopping = false
+    /// Tests only: runs after a delivery took its answer and before it decides and calls (a preempted thread).
+    var testHookBeforeDecision: (() -> Void)?
 
     init(_ handler: @escaping (Error?) -> Void) {
         self.handler = handler
     }
 
     /// true: this call answered the start (the first one); false: it was answered already, this answer is dropped.
-    /// After stopBegan() a success becomes stoppedDuringStart.
+    /// After stopBegan() a success becomes stoppedDuringStart, whenever the call happens.
     @discardableResult
     func answer(_ error: Error?) -> Bool {
-        cond.lock()
+        delivery.lock()
+        defer { delivery.unlock() }
+        state.lock()
         guard let pending = handler else {
-            cond.unlock()
+            state.unlock()
             return false
         }
         handler = nil
-        delivering = true
-        let delivered: Error? = stopping ? (error ?? TunnelStartAbort.stoppedDuringStart) : error
-        cond.unlock()
-        pending(delivered)
-        cond.lock()
-        delivering = false
-        cond.broadcast()
-        cond.unlock()
+        state.unlock()
+        testHookBeforeDecision?()
+        state.lock()
+        let stopNow = stopping
+        state.unlock()
+        pending(stopNow ? (error ?? TunnelStartAbort.stoppedDuringStart) : error)
         return true
     }
 
-    /// The stop began. true: the start was not answered yet (or its answer is being delivered).
+    /// The stop began: from now on nothing but an error can be decided. Then waits (bounded) for a delivery already
+    /// under way. true: the start was not answered yet, or its answer was being delivered.
     func stopBegan() -> Bool {
-        cond.lock()
-        defer { cond.unlock() }
+        state.lock()
         stopping = true
-        return handler != nil || delivering
+        let unanswered = handler != nil
+        state.unlock()
+        let inFlight = !delivery.try()
+        if inFlight {
+            if delivery.lock(before: Date().addingTimeInterval(Self.deliveryWaitSeconds)) { delivery.unlock() }
+        } else {
+            delivery.unlock()
+        }
+        return unanswered || inFlight
     }
 
-    /// The stop's own answer is next: a start still unanswered is answered now; one being delivered is waited for.
+    /// The stop's own answer is next: a start still unanswered is answered now (an error); a delivery under way is
+    /// waited for (bounded - past the bound it can only deliver an error, decided after stopBegan()).
     func abortForStop() -> Bool {
-        let answered = answer(TunnelStartAbort.stoppedDuringStart)
-        cond.lock()
-        let deadline = Date().addingTimeInterval(Self.deliveryWaitSeconds)
-        while delivering && cond.wait(until: deadline) {}
-        cond.unlock()
-        return answered
+        guard delivery.lock(before: Date().addingTimeInterval(Self.deliveryWaitSeconds)) else { return false }
+        defer { delivery.unlock() }
+        return answer(TunnelStartAbort.stoppedDuringStart)
     }
 
     var answered: Bool {
-        cond.lock()
-        defer { cond.unlock() }
+        state.lock()
+        defer { state.unlock() }
         return handler == nil
     }
 }
@@ -403,6 +421,8 @@ final class TunnelStartAnswer {
 final class TunnelStartSlot {
     private let lock = NSLock()
     private var current: TunnelStartAnswer?
+    /// Tests only: handed to every start begun after it is set (TunnelStartAnswer.testHookBeforeDecision).
+    var testHookBeforeDecision: (() -> Void)?
 
     /// A start began and is not answered yet.
     var pending: Bool {
@@ -416,6 +436,7 @@ final class TunnelStartSlot {
     /// now (supersededByNewStart): no start is left without its answer.
     func begin(_ handler: @escaping (Error?) -> Void) -> (Error?) -> Void {
         let start = TunnelStartAnswer(handler)
+        start.testHookBeforeDecision = testHookBeforeDecision
         lock.lock()
         let previous = current
         current = start
