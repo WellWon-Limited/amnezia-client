@@ -1167,10 +1167,15 @@ void IosController::reportDisconnected()
             // Разбор журнала 25.09: запись NE о последнем стопе — в лог, даже когда она не отнесена к
             // этой сессии (ночной стоп при холодном старте уходил в unknown_external без причины;
             // reason — NEProviderStopReason: 11 другой VPN, 16 обновление приложения).
-            qInfo().noquote() << QStringLiteral("[ios lifecycle] NE last stop reason=%1 intentional=%2 age_s=%3 -> %4")
+            // AVPN (device round air-B 24.11): how long the extension's own stop took (stopTunnel -> its completion)
+            // and whether a start was still unanswered when the stop came - with age_s this tells whether a slow
+            // Disconnected was spent in our stop or by the system after it (-1: an extension without these fields).
+            qInfo().noquote() << QStringLiteral("[ios lifecycle] NE last stop reason=%1 intentional=%2 age_s=%3 stop_ms=%4 start_pending=%5 -> %6")
                                          .arg(in.neStop.reason)
                                          .arg(in.neStop.intentional ? 1 : 0)
                                          .arg((in.nowMs - in.neStop.utcMs) / 1000)
+                                         .arg(stop.value(QStringLiteral("stop_ms"), -1).toLongLong())
+                                         .arg(stop.value(QStringLiteral("start_pending"), -1).toInt())
                                          .arg(QString::fromStdString(decision.reason));
         }
         emitDisconnectReason(QString::fromStdString(decision.reason), decision.intentional);

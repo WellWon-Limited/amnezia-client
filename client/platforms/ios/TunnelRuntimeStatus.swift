@@ -263,3 +263,83 @@ final class TunnelRuntimeSession {
         value == UInt64.max ? 1 : value + 1
     }
 }
+
+// AVPN (device round air-B 24.11): the one answer to startTunnel, for every protocol.
+//
+// The system calls stopTunnel while a start may still be running (the app stops a leg it raised a moment ago). In that
+// round the stop record shows stopTunnel entered within 20 ms of the app's stop of an Xray leg 0.2 s into its start,
+// yet the session reached Disconnected 25 s later; every stop of a tunnel already up took 0.4-1.0 s. The Xray start
+// waits, without a bound, for setTunnelNetworkSettings to call back, and the system does not always call it back (the
+// AmneziaWG adapter bounds the same wait to 5 s for that reason: WireGuardAdapter.setNetworkSettings): such a start
+// never answers, and the system can hold the session for it. Inferred, not proven - the extension's log of that round
+// was not readable; the stop record's stop_ms / start_pending (PacketTunnelProvider.stopTunnel) tell it next time.
+// So a start still unanswered is answered by the stop itself, with `TunnelStartAbort.stoppedDuringStart`, as soon as
+// the native stop is done (right before the stop's own answer: nothing of the session runs any more when the system
+// hears of either); the start's own later answer is dropped. Exactly one answer reaches the system per startTunnel.
+// The start goes on to its next checkpoint, where the stop's new generation ends it (the Xray path:
+// TunnelRuntimeSession.isCurrent after the settings, inside the native gate before the core and before hev); the stop
+// still takes the native gate, so the core and hev are never touched by two at once (one tunnel session at a time).
+enum TunnelStartAbort: Error {
+    case stoppedDuringStart
+}
+
+/// The answer to ONE startTunnel. Thread-safe; the handler runs outside the lock, at most once.
+final class TunnelStartAnswer {
+    private let lock = NSLock()
+    private var handler: ((Error?) -> Void)?
+
+    init(_ handler: @escaping (Error?) -> Void) {
+        self.handler = handler
+    }
+
+    /// true: this call answered the start (the first one); false: it was answered already, this answer is dropped.
+    @discardableResult
+    func answer(_ error: Error?) -> Bool {
+        lock.lock()
+        let pending = handler
+        handler = nil
+        lock.unlock()
+        guard let pending else { return false }
+        pending(error)
+        return true
+    }
+
+    var answered: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return handler == nil
+    }
+}
+
+/// Per provider: the start in flight. begin() at startTunnel; at stopTunnel `pending` (for the stop record) and, once
+/// the native stop is done, abortForStop().
+final class TunnelStartSlot {
+    private let lock = NSLock()
+    private var current: TunnelStartAnswer?
+
+    /// A start began and is not answered yet.
+    var pending: Bool {
+        lock.lock()
+        let start = current
+        lock.unlock()
+        return start.map { !$0.answered } ?? false
+    }
+
+    /// The completion to hand to the protocol's start: the first of it and abortForStop() answers the system.
+    func begin(_ handler: @escaping (Error?) -> Void) -> (Error?) -> Void {
+        let start = TunnelStartAnswer(handler)
+        lock.lock()
+        current = start
+        lock.unlock()
+        return { error in start.answer(error) }
+    }
+
+    /// stopTunnel: a start still unanswered is answered now (stoppedDuringStart). true: there was one.
+    func abortForStop() -> Bool {
+        lock.lock()
+        let start = current
+        current = nil
+        lock.unlock()
+        return start?.answer(TunnelStartAbort.stoppedDuringStart) ?? false
+    }
+}

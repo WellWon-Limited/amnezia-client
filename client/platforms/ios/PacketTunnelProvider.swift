@@ -137,6 +137,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // AVPN (upstream nodes): lease renewer, SOCKS endpoint of the core, terminal stop (decision E) -
     // PacketTunnelProvider+Upstream.swift.
     let tribeUpstream = TribeUpstreamState()
+    // AVPN (device round air-B 24.11): the answer to startTunnel - a stop answers a start still running
+    // (TunnelRuntimeStatus.swift, TunnelStartSlot).
+    let tribeStartSlot = TunnelStartSlot()
 
     func openVPNPacketFlow() -> OpenVPNAdapterPacketFlow {
         openVPNPacketFlowAdapter
@@ -325,7 +328,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String : NSObject]? = nil,
                               completionHandler: @escaping ((any Error)?) -> Void) {
-        let completionHandler = tribeScanReopenOnSuccess(completionHandler) // AVPN (Scanner, review F1): a started tunnel reopens the scan host
+        // AVPN (Scanner, review F1): a started tunnel reopens the scan host. AVPN (air-B 24.11): one answer per start,
+        // and a stop answers a start that is still running (tribeStartSlot).
+        let completionHandler = tribeStartSlot.begin(tribeScanReopenOnSuccess(completionHandler))
         tribeRuntimeGeneration = UUID().uuidString
         let metadata = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
         // Кто поднял туннель: приложение и наши команды передают tribeStartSource, iOS (Настройки,
@@ -393,6 +398,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
   
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+#if os(iOS)
+        let stopBegan = DispatchTime.now() // AVPN (air-B 24.11): the stop's own duration goes into the stop record
+#endif
         let generation = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any]
         let stop: [String: Any] = ["generation": tribeRuntimeGeneration, "configuration_generation": generation?["generation"] ?? "legacy", "reason": reason.rawValue,
                                    "intentional": reason == .userInitiated || reason == .configurationDisabled || reason == .configurationRemoved || reason == .superceded,
@@ -408,6 +416,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             } catch {}
             store.record(source: "ne", event: "stop", fields: stop)
         }
+
+        // AVPN (device round air-B 24.11): when the native stop is done, a start that is still unanswered is answered by
+        // the stop (TunnelStartSlot in TunnelRuntimeStatus.swift) - never before: the start's native steps are over or
+        // fenced by then, so nothing of this session runs when the system hears of its end. The stop record gets the
+        // stop's own duration and whether a start was unanswered when the stop came, before the system hears the stop
+        // is done - the app logs both with the Disconnected ("NE last stop"). iOS only: the macOS NE target (not built
+        // by Tribe) keeps its stop as it was.
+#if os(iOS)
+        let startPendingAtStop = tribeStartSlot.pending
+        let completionHandler: () -> Void = { [tribeStartSlot] in
+            _ = tribeStartSlot.abortForStop()
+            var done = stop
+            done["stop_ms"] = Int64((DispatchTime.now().uptimeNanoseconds - stopBegan.uptimeNanoseconds) / 1_000_000)
+            done["start_pending"] = startPendingAtStop ? 1 : 0
+            try? TribeSharedState.appGroup?.write(done, "TribeLastStop.json")
+            completionHandler()
+        }
+#endif
 
         tribeScanStopAllIfUsed(reason: "tunnel_stop", close: true) // AVPN (Scanner §2.3): probes end before any core stops; host closed
         cancelPendingOpenVPNReconnect()

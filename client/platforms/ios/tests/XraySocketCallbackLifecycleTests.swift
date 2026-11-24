@@ -218,9 +218,114 @@ private func testIPv6RouteSpec() {
            "malformed CIDR is rejected")
 }
 
+// AVPN (device round air-B 24.11): the one answer to startTunnel (TunnelStartSlot). The system's two completions are
+// modelled by counters; the provider's order (PacketTunnelProvider.stopTunnel: `pending` at entry, the native stop,
+// then abortForStop() right before the stop's own answer) is replayed against a start whose setTunnelNetworkSettings
+// never calls back - the case the stop of the 25 s Disconnected hit.
+private final class SystemCompletions: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var startAnswers: [String] = []
+    private(set) var stopAnswered = false
+    private(set) var order: [String] = []
+    func start(_ error: Error?) {
+        lock.lock(); defer { lock.unlock() }
+        let what = error == nil ? "ok" : (error is TunnelStartAbort ? "stopped_during_start" : "error")
+        startAnswers.append(what)
+        order.append("start:" + what)
+    }
+    func stop() {
+        lock.lock(); defer { lock.unlock() }
+        stopAnswered = true
+        order.append("stop")
+    }
+    func snapshot() -> (starts: [String], stopped: Bool, order: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        return (startAnswers, stopAnswered, order)
+    }
+}
+
+private enum FakeStartError: Error { case superseded }
+
+private func testTunnelStartAnswer() {
+    // 1. A start that answers itself: the stop finds nothing to answer.
+    do {
+        let system = SystemCompletions()
+        let slot = TunnelStartSlot()
+        let startAnswer = slot.begin { system.start($0) }
+        expect(slot.pending, "a begun start is pending")
+        startAnswer(nil)
+        expect(!slot.pending, "an answered start is not pending")
+        expect(!slot.abortForStop(), "the stop of an answered start answers nothing")
+        startAnswer(FakeStartError.superseded)
+        expect(system.snapshot().starts == ["ok"], "exactly one answer reaches the system: \(system.snapshot().starts)")
+    }
+    // 2. The 24.11 case: the stop comes 0.2 s into an Xray start whose settings never call back. The stop answers the
+    //    start when its native stop is done, before its own answer; the start's late answer is dropped.
+    do {
+        let system = SystemCompletions()
+        let slot = TunnelStartSlot()
+        let startAnswer = slot.begin { system.start($0) }
+        let gate = XrayNativeLifecycleGate()
+        let session = TunnelRuntimeSession()
+        let generation = session.beginSession(protocolName: "xray", preservingCounters: false)
+        // setTunnelNetworkSettings is pending: its callback is held and never released in this case
+        var settingsCallback: (() -> Void)? = {
+            if !session.isCurrent(generation: generation) { startAnswer(FakeStartError.superseded) }
+        }
+        let began = DispatchTime.now()
+        let stopDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            let pendingAtStop = slot.pending
+            let stopCompletion: () -> Void = {
+                _ = slot.abortForStop()
+                system.stop()
+                stopDone.signal()
+            }
+            gate.withExclusive { _ = session.beginStop() } // stopXray's generation flip under the native gate
+            expect(pendingAtStop, "the stop sees the start still unanswered")
+            stopCompletion()
+        }
+        expect(stopDone.wait(timeout: .now() + 1) == .success, "the stop completes without the settings callback")
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1_000_000
+        expect(ms < 1000, "the stop of a starting session is answered within a second (\(ms) ms)")
+        let snap = system.snapshot()
+        expect(snap.starts == ["stopped_during_start"] && snap.stopped, "the start is answered by the stop: \(snap)")
+        expect(snap.order == ["start:stopped_during_start", "stop"], "the start's answer comes before the stop's: \(snap.order)")
+        settingsCallback?() // the system calls the settings back after all: the start's own answer is dropped
+        settingsCallback = nil
+        expect(system.snapshot().starts == ["stopped_during_start"], "a late start answer never reaches the system")
+    }
+    // 3. The start's own answer and the stop race on many threads: exactly one answer per start, every time.
+    for round in 0..<200 {
+        let system = SystemCompletions()
+        let slot = TunnelStartSlot()
+        let startAnswer = slot.begin { system.start($0) }
+        let group = DispatchGroup()
+        for i in 0..<8 {
+            DispatchQueue.global().async(group: group) {
+                if i % 2 == 0 { startAnswer(i == 0 ? nil : FakeStartError.superseded) } else { _ = slot.abortForStop() }
+            }
+        }
+        expect(group.wait(timeout: .now() + 2) == .success, "round \(round) finished")
+        expect(system.snapshot().starts.count == 1, "round \(round): one answer, got \(system.snapshot().starts)")
+        expect(!slot.pending, "round \(round): nothing pending after the race")
+    }
+    // 4. A newer start replaces the slot: the stop answers the newest unanswered start only.
+    do {
+        let system = SystemCompletions()
+        let slot = TunnelStartSlot()
+        let first = slot.begin { system.start($0) }
+        first(nil)
+        _ = slot.begin { system.start($0) }
+        expect(slot.abortForStop(), "the newest start is answered by the stop")
+        expect(system.snapshot().starts == ["ok", "stopped_during_start"], "each start answered once")
+    }
+}
+
 @main
 private struct XraySocketCallbackLifecycleTests {
     static func main() throws {
+        testTunnelStartAnswer()
         testTrafficAccumulator()
         testRuntimeSession()
         testIPv4RouteSpec()
