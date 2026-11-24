@@ -20,11 +20,21 @@ public:
     bool resetAllowedRange(const QStringList &ranges);
     bool addAllowedRange(const QStringList &ranges);
     bool isStrictKillSwitchEnabled();
+    // AVPN (macOS pf state ownership): the tun the current service-routed session (Xray) brought up
+    // (IpcServer::createTun) until it deletes it (IpcServer::deleteTun). Its kill switch passes only this
+    // interface (200.allowVPN); empty = unknown (OpenVPN) -> the static file.
+    void setTunnelInterface(const QString &ifname) { m_tunnelIfname = ifname; }
+    void clearTunnelInterface(const QString &ifname)
+    {
+        if (m_tunnelIfname == ifname)
+            m_tunnelIfname.clear();
+    }
 
 private:
     KillSwitch(QObject* parent) {};
     QStringList m_allowedRanges;
     QSharedPointer<SecureQSettings> m_appSettigns;
+    QString m_tunnelIfname; // AVPN
 
 };
 

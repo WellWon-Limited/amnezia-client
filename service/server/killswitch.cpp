@@ -135,17 +135,10 @@ bool KillSwitch::disableKillSwitch() {
 #endif
 
 #ifdef Q_OS_MACOS
+    // AVPN (pf state ownership, macospfanchors.h): a stop leaves no session pf state. Strict: the block
+    // stays and every anchor of the session is flushed; otherwise every tribe/* anchor is flushed.
     if (isStrictKillSwitchEnabled()) {
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), true);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("400.allowPIA"), false);
+        MacOSFirewall::applyStrictBlock();
     } else {
         MacOSFirewall::uninstall();
     }
@@ -176,14 +169,9 @@ bool KillSwitch::disableAllTraffic() {
     LinuxFirewall::setAnchorEnabled(LinuxFirewall::IPv6, QStringLiteral("250.blockIPv6"), true);
 #endif
 #ifdef Q_OS_MACOS
-    // double-check + ensure our firewall is installed and enabled. This is necessary as
-    // other software may disable pfctl before re-enabling with their own rules (e.g other VPNs)
-    if (!MacOSFirewall::isInstalled())
-        MacOSFirewall::install();
-    MacOSFirewall::ensureRootAnchorPriority();
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
+    // AVPN (pf state ownership): the block with no tunnel; also flushes what a previous session or service
+    // process left (this is the service start with strict on, KillSwitch::init).
+    MacOSFirewall::applyStrictBlock();
 #endif
     m_allowedRanges.clear();
     return true;
@@ -403,24 +391,6 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
 #endif
 
 #ifdef Q_OS_MACOS
-    // double-check + ensure our firewall is installed and enabled. This is necessary as
-    // other software may disable pfctl before re-enabling with their own rules (e.g other VPNs)
-    if (!MacOSFirewall::isInstalled())
-        MacOSFirewall::install();
-
-    MacOSFirewall::ensureRootAnchorPriority();
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), blockAll);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), allowNets);
-    MacOSFirewall::setAnchorTable(QStringLiteral("110.allowNets"), allowNets, QStringLiteral("allownets"), allownets);
-
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), blockNets);
-    MacOSFirewall::setAnchorTable(QStringLiteral("120.blockNets"), blockNets, QStringLiteral("blocknets"), blocknets);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), true);
-
     QStringList dnsServers;
     if (!dns1.isEmpty())
         dnsServers.append(dns1);
@@ -429,9 +399,18 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
 
     dnsServers.append(allowedDnsServers);
 
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), true);
-    MacOSFirewall::setAnchorTable(QStringLiteral("310.blockDNS"), true, QStringLiteral("dnsaddr"), dnsServers);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("400.allowPIA"), true);
+    // AVPN (pf state ownership, macospfanchors.h): every tribe/* anchor of this session is written by one
+    // call; 200.allowVPN passes only the tun this session brought up (IpcServer::createTun), never the
+    // rule an earlier (AmneziaWG) session left in the kernel. The service's own sockets pass by 400.allowPIA.
+    FirewallParams params {};
+    params.blockAll = blockAll;
+    params.allowNets = allowNets;
+    params.allowAddrs = allownets;
+    params.blockNets = blockNets;
+    params.blockAddrs = blocknets;
+    params.dnsServers = dnsServers;
+    params.allowPIA = true;
+    MacOSFirewall::applySessionRules(params, m_tunnelIfname);
     // AVPN (diag): what the kill switch lets out - the server and the resolvers of this session.
     qDebug().noquote() << "[killswitch] split" << splitTunnelType << "allownets:" << allownets.join(QStringLiteral(", "))
                        << "| dnsaddr:" << dnsServers.join(QStringLiteral(", "));

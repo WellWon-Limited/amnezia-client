@@ -211,6 +211,7 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../client/platforms/macos/daemon/macosroutemonitor.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../../client/platforms/macos/daemon/wireguardutilsmacos.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../../client/platforms/macos/daemon/macosfirewall.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../client/platforms/macos/daemon/macospfanchors.h # AVPN (pf state ownership)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../client/platforms/macos/daemon/splitdnsresolverfiles.h # AVPN (Tribe split-DNS)
     )
 

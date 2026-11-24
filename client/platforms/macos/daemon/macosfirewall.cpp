@@ -31,6 +31,7 @@
 // along with this file. If not, see <https://www.gnu.org/licenses/>.
 
 #include "macosfirewall.h"
+#include "macospfanchors.h" // AVPN (pf state ownership)
 #include "logger.h"
 #include <QProcess>
 #include <QCoreApplication>
@@ -73,8 +74,19 @@ int waitForExitCode(QProcess& process)
         return process.exitCode();
 }
 
+// AVPN (pf state ownership): the host check's command seam (macosfirewall.h).
+static MacOSFirewall::CommandRunner s_commandRunner = nullptr;
+
+void MacOSFirewall::setCommandRunner(CommandRunner runner)
+{
+    s_commandRunner = runner;
+}
+
 int MacOSFirewall::execute(const QString& command, bool ignoreErrors)
 {
+    if (s_commandRunner) // AVPN: host check only
+        return s_commandRunner(command);
+
     QProcess p;
 
     p.start(QStringLiteral("/bin/bash"), { QStringLiteral("-c"), command }, QProcess::ReadOnly);
@@ -134,8 +146,8 @@ void MacOSFirewall::install()
 
     installRootAnchors();
     // Ensure writable directory exists, then store the token there.
-    QDir().mkpath(DaemonDataDir);
-    execute(QStringLiteral("pfctl -E 2>&1 | grep -F 'Token : ' | cut -c9- > '%1/pf.token'").arg(DaemonDataDir));
+    // AVPN (pf state ownership): mkdir in the same command, so the host check's seam sees every effect.
+    execute(QStringLiteral("mkdir -p '%1' ; pfctl -E 2>&1 | grep -F 'Token : ' | cut -c9- > '%1/pf.token'").arg(DaemonDataDir));
 }
 
 
@@ -146,6 +158,26 @@ void MacOSFirewall::uninstall()
     execute(QStringLiteral("pfctl -q -a '%1' -F all").arg(kRootAnchor));
     execute(QStringLiteral("test -f '%1/pf.token' && pfctl -X `cat '%1/pf.token'` && rm '%1/pf.token'").arg(DaemonDataDir));
     execute(QStringLiteral("test -f /etc/pf.conf && pfctl -F all -f /etc/pf.conf"));
+    // AVPN (pf state ownership, macospfanchors.h): the commands above leave every sub-anchor's rules and
+    // tables in the kernel until a reboot, and the next session took them for its own (an AWG session's
+    // 200.allowVPN broke the next Xray session). A stop leaves nothing: flush them all, after the main
+    // ruleset no longer references them (no packet sees a half-flushed set). install() runs this first too,
+    // so a fresh install never starts from a previous process's or an older build's anchors.
+    flushAnchors(avpn::pf::stopFlushList());
+}
+
+void MacOSFirewall::flushAnchors(const QStringList& anchors)
+{
+    QStringList commands;
+    for (const QString& anchor : anchors)
+        commands << QStringLiteral("pfctl -q -a '%1/%2' -F all 2> /dev/null").arg(kRootAnchor, anchor);
+    if (!commands.isEmpty())
+        execute(commands.join(QStringLiteral(" ; ")), true);
+}
+
+void MacOSFirewall::reloadAnchor(const QString& anchor)
+{
+    execute(QStringLiteral("pfctl -q -a '%1/%2' -f '%3/%1.%2.conf'").arg(kRootAnchor, anchor, ResourceDir));
 }
 
 bool MacOSFirewall::isInstalled()
@@ -175,6 +207,13 @@ bool MacOSFirewall::isRootAnchorLoaded()
 
 void MacOSFirewall::enableAnchor(const QString& anchor)
 {
+    // AVPN (pf state ownership, macospfanchors.h): "load only when empty" is exact for static rules only.
+    // Any other anchor's kernel copy belongs to whoever wrote it last: write it from the file instead.
+    if (!avpn::pf::kernelCopyIsCurrent(anchor)) {
+        logger.info() << anchor << ": written from its file (not taken over from the kernel)";
+        reloadAnchor(anchor);
+        return;
+    }
     execute(QStringLiteral("if pfctl -q -a '%1/%2' -s rules 2> /dev/null | grep -q . ; then echo '%2: ON' ; else echo '%2: OFF -> ON' ; pfctl -q -a '%1/%2' -F all -f '%3/%1.%2.conf' ; fi").arg(kRootAnchor, anchor, ResourceDir));
 }
 
@@ -230,4 +269,58 @@ int MacOSFirewall::setScanExemption(const QString& uplinkIfname)
 void MacOSFirewall::clearScanExemption()
 {
     setAnchorWithRules(kScanAnchor, false, {});
+}
+
+// AVPN (pf state ownership, 2026-11-24, macospfanchors.h): the kill switch of one tunnel session.
+static const QString kTunnelAnchor = QStringLiteral("200.allowVPN");
+
+void MacOSFirewall::setTunnelPass(const QString& tunnelIfname)
+{
+    const QStringList rules = avpn::pf::tunnelPassRules(tunnelIfname);
+    if (!rules.isEmpty()) {
+        logger.info() << kTunnelAnchor << ": pass out on" << tunnelIfname << "only";
+        setAnchorWithRules(kTunnelAnchor, true, rules);
+        return;
+    }
+    logger.warning() << kTunnelAnchor << ": the session's tunnel interface is unknown - every utun passes (static file)";
+    reloadAnchor(kTunnelAnchor);
+}
+
+void MacOSFirewall::applySessionRules(const FirewallParams& params, const QString& tunnelIfname)
+{
+    // double-check + ensure our firewall is installed and enabled. This is necessary as
+    // other software may disable pfctl before re-enabling with their own rules (e.g other VPNs)
+    if (!isInstalled())
+        install();
+
+    ensureRootAnchorPriority();
+    setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
+    setAnchorEnabled(QStringLiteral("100.blockAll"), params.blockAll);
+    setAnchorEnabled(QStringLiteral("110.allowNets"), params.allowNets);
+    setAnchorTable(QStringLiteral("110.allowNets"), params.allowNets, QStringLiteral("allownets"), params.allowAddrs);
+    setAnchorEnabled(QStringLiteral("120.blockNets"), params.blockNets);
+    setAnchorTable(QStringLiteral("120.blockNets"), params.blockNets, QStringLiteral("blocknets"), params.blockAddrs);
+    setTunnelPass(tunnelIfname);
+    setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
+    setAnchorEnabled(QStringLiteral("290.allowDHCP"), true);
+    setAnchorEnabled(QStringLiteral("300.allowLAN"), true);
+    setAnchorEnabled(QStringLiteral("310.blockDNS"), true);
+    setAnchorTable(QStringLiteral("310.blockDNS"), true, QStringLiteral("dnsaddr"), params.dnsServers);
+    // Set either way: the AmneziaWG kill switch never passes the service's group, and an Xray session's
+    // pass must not outlive it.
+    setAnchorEnabled(QStringLiteral("400.allowPIA"), params.allowPIA);
+}
+
+void MacOSFirewall::applyStrictBlock()
+{
+    // double-check + ensure our firewall is installed and enabled (as applySessionRules)
+    if (!isInstalled())
+        install();
+
+    ensureRootAnchorPriority();
+    logger.info() << "Strict kill switch: the block is reloaded, every session anchor is flushed";
+    // The block first, then the exemptions go: no moment without both.
+    for (const QString& anchor : avpn::pf::strictBlockList())
+        reloadAnchor(anchor);
+    flushAnchors(avpn::pf::strictFlushList());
 }
