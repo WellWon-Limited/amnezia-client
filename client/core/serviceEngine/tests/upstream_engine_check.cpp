@@ -15,6 +15,7 @@
 //     the lease record, the probe grant / meter tags parsing, the acquire timeout bound.
 // Build/run: build_upstream_engine.sh (QtCore/QtNetwork + libcrypto; no network, no tunnel).
 #include "../ConnectTunables.h"
+#include "../DebugSnapshot.h" // upstreamSeatFirst: no seat-first prepare beside a live (adopted) provider session
 #include "../NetAwait.h" // resetApiConnections: the app's own API reset of a tunnel transition
 #include "../NodeRanking.h" // pickerDisplay
 #include "../NodeRotation.h"
@@ -622,6 +623,317 @@ static void ownerAdoption()
     UpstreamLeaseOwner o2(&io2);
     o2.setOptions(op);
     CHECK(o2.adopt(rec, T, wall + kUpstreamRecordMaxAgeMs + 1).isEmpty() && io2.calls.isEmpty());
+}
+
+// --- iOS: the seat of a provider session adopted after a relaunch (device round 24.11, case C3) ---------------------------
+// iPhone Air, build 142 round: connect to a provider row (seat acquired, lease handed to the extension), force-quit the app,
+// relaunch - the live tunnel was adopted ("adopt_connected verdict=1 node=up:..") - press Stop: every other lease of the
+// round got DELETE 204, this one none; the seat stayed held until its 15-minute TTL (only the extension's one release, bounded
+// to 1.5 s after its core stopped, could free it). With keepRecord the app keeps the record (node, lease id, start order, no
+// token) and adoptHandedOver restores the owner handed over: the session's end gives the seat back once, after the confirmed
+// stop, naming only the adopted lease.
+static UpstreamLeaseOwner::Options iosOwnerOptions()
+{
+    UpstreamLeaseOwner::Options op; // keepOwnership false: the extension renews (decision B)
+    op.keepRecord = true;           // VpnConnectionTunnelControl under Q_OS_IOS
+    return op;
+}
+static int countEv(const QVector<UpstreamOwnerEvent> &ev, UpstreamOwnerEventKind k)
+{
+    int n = 0;
+    for (const UpstreamOwnerEvent &e : ev)
+        n += e.kind == k ? 1 : 0;
+    return n;
+}
+static int indexOfEv(const QVector<UpstreamOwnerEvent> &ev, UpstreamOwnerEventKind k)
+{
+    for (int i = 0; i < ev.size(); ++i)
+        if (ev[i].kind == k)
+            return i;
+    return -1;
+}
+static int callsOf(const FakeIo &io, const char *what)
+{
+    int n = 0;
+    for (const FakeIo::Call &c : io.calls)
+        n += c.what == QLatin1String(what) ? 1 : 0;
+    return n;
+}
+
+static void ownerHandedOverAdoption()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const SubscriptionNode b = stubOf(QStringLiteral("bbbbbbbbbbbbbbb0"));
+    const qint64 T = 5000000, wall = 1764000000000LL;
+    const QString L1 = QLatin1String(kLease);
+
+    // 1) The iOS session writes its record BEFORE its bring-up (a refused bring-up clears it after), with the lease id and the
+    //    start's order and no token; any end of the session clears it.
+    UpstreamLeaseRecord rec;
+    qint64 order = -1;
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(iosOwnerOptions());
+        o.begin(a, 1, std::nullopt, T, wall);
+        const QVector<UpstreamOwnerEvent> ev =
+            o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, a.upstream->configSha256), T + 300);
+        const int persistAt = indexOfEv(ev, UpstreamOwnerEventKind::Persist), bringUpAt = indexOfEv(ev, UpstreamOwnerEventKind::BringUp);
+        CHECK(persistAt >= 0 && bringUpAt > persistAt);
+        CHECK(persistAt >= 0 && ev[persistAt].record.leaseId == L1 && ev[persistAt].record.nodeId == a.nodeId
+              && ev[persistAt].record.sessionOrder == o.sessionOrder() && o.sessionOrder() > 0);
+        const QByteArray j = persistAt >= 0 ? ev[persistAt].record.toJson() : QByteArray();
+        CHECK(!j.isEmpty() && !j.contains("tlr1") && !j.contains("renew_token") && !j.contains("tsc1") && !j.contains("cfg"));
+        rec = UpstreamLeaseRecord::fromJson(j);
+        order = o.sessionOrder();
+        CHECK(rec.sessionOrder == order && rec.leaseId == L1);
+        o.tunnelUp(T + 2000);
+        const QVector<UpstreamOwnerEvent> end = o.disconnect(T + 9000);
+        CHECK(findEv(end, UpstreamOwnerEventKind::ClearRecord) && findEv(end, UpstreamOwnerEventKind::ReleaseAfterStop));
+    }
+    // A provisional session's record comes with its seat confirmed through the tunnel (next to the hand-over).
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(iosOwnerOptions());
+        StandbyCandidate sc;
+        sc.config = QByteArrayLiteral("{\"pack\":1}");
+        sc.configSha256 = a.upstream->configSha256;
+        sc.tunnelApiBase = QStringLiteral("https://t.example.net");
+        o.begin(a, 1, sc, T, wall);
+        QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(io.calls[0].id, failed("transport"), T + 100);
+        CHECK(findEv(ev, UpstreamOwnerEventKind::BringUp) && !findEv(ev, UpstreamOwnerEventKind::Persist));
+        ev = o.tunnelUp(T + 1500);
+        const FakeIo::Call *conf = io.last("acquire");
+        ev = conf ? o.onAcquireReply(conf->id, granted(a.upstream->profileId, a.upstream->configSha256), T + 1800) : ev;
+        const UpstreamOwnerEvent *p = findEv(ev, UpstreamOwnerEventKind::Persist);
+        CHECK(findEv(ev, UpstreamOwnerEventKind::HandOver) && p && p->record.leaseId == L1 && p->record.sessionOrder == o.sessionOrder());
+    }
+
+    // 2) Relaunch -> the record matches the live session -> adopted handed over -> the user's Stop: exactly one
+    //    ReleaseAfterStop, the adopted lease, no token and no report, nothing at once (after the confirmed stop).
+    const QJsonObject liveMeta{{QStringLiteral("schema_version"), 1}, {QStringLiteral("node_id"), a.nodeId},
+                               {QStringLiteral("proto"), QStringLiteral("xray")}, {QStringLiteral("upstream"), 1},
+                               {QLatin1String(kUpstreamSessionOrderMetaKey), double(order)}};
+    CHECK(upstreamSessionOrderOf(liveMeta) == order);
+    CHECK(upstreamHandedOverRecordMatches(rec, a.nodeId, upstreamSessionOrderOf(liveMeta), wall + 60000));
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(iosOwnerOptions());
+        CHECK(o.disconnect(T).isEmpty()); // what 4d6028cc9 did after the relaunch: no owner, the Stop gave nothing back
+        const QVector<UpstreamOwnerEvent> ad = o.adoptHandedOver(rec, T + 100);
+        CHECK(ad.isEmpty() && io.calls.isEmpty()); // no acquire, no renewal, no release: the extension renews
+        CHECK(o.active() && o.adopted() && !o.ownsRenewals() && o.wakeAtMs() < 0 && o.holdsLease(L1) && o.nodeId() == a.nodeId
+              && o.profileId() == a.upstream->profileId && o.sessionOrder() == order && !o.preparing());
+        CHECK(o.tick(T + 400000).isEmpty() && io.calls.isEmpty()); // nothing ever falls due here
+        const QVector<UpstreamOwnerEvent> stop = o.disconnect(T + 500000);
+        CHECK(countEv(stop, UpstreamOwnerEventKind::ReleaseAfterStop) == 1 && findEv(stop, UpstreamOwnerEventKind::ClearRecord));
+        const UpstreamOwnerEvent *r = findEv(stop, UpstreamOwnerEventKind::ReleaseAfterStop);
+        CHECK(r && r->leaseId == L1 && r->route.renewToken.isEmpty() && r->requestId != 0);
+        CHECK(io.calls.isEmpty() && !o.releaseSent());
+        CHECK(r && upstreamReleaseBody(UpstreamMeter{}, r->route.renewToken).isEmpty()); // no body: device token + lease id
+        CHECK(!o.active() && o.disconnect(T + 500100).isEmpty() && o.tunnelLost(T + 500200).isEmpty()); // once
+        CHECK(o.pendingReleases() == 1);
+        if (r)
+            o.onReleaseDone(r->requestId, T + 501000, true);
+        CHECK(o.pendingReleases() == 0);
+    }
+    // ... and the same through the real client against a loopback API: held while the tunnel runs, ONE DELETE of the adopted
+    //     lease after the confirmed stop, with the device token and no body (the adapter's ReleaseAfterStop path).
+    {
+        struct DeleteEdge {
+            QTcpServer server;
+            QStringList paths, auths, bodies;
+            DeleteEdge()
+            {
+                server.listen(QHostAddress::LocalHost);
+                QObject::connect(&server, &QTcpServer::newConnection, &server, [this]() {
+                    while (QTcpSocket *s = server.nextPendingConnection()) {
+                        QObject::connect(s, &QTcpSocket::readyRead, s, [this, s]() {
+                            const QByteArray rq = s->readAll();
+                            if (!rq.startsWith("DELETE "))
+                                return;
+                            paths << QString::fromLatin1(rq.mid(7, rq.indexOf(' ', 7) - 7));
+                            const int au = rq.indexOf("Authorization: ");
+                            auths << (au < 0 ? QString() : QString::fromLatin1(rq.mid(au + 15, rq.indexOf("\r\n", au) - au - 15)));
+                            const int at = rq.indexOf("\r\n\r\n");
+                            bodies << QString::fromLatin1(at < 0 ? QByteArray() : rq.mid(at + 4));
+                            s->write("HTTP/1.1 204 X\r\nX-Tribe-Api: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            s->disconnectFromHost();
+                        });
+                    }
+                });
+            }
+        } edge;
+        const QString base = QStringLiteral("http://127.0.0.1:%1").arg(edge.server.serverPort());
+        avpn::TribeNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        client.configure(&nam, [base] { return base; }, QStringLiteral("00"), [] { return QStringLiteral("devtok"); });
+        UpstreamLeaseOwner o(&client);
+        o.setOptions(iosOwnerOptions());
+        bool done = false;
+        client.onReleaseDone = [&](quint64 id, bool confirmed) {
+            done = confirmed;
+            o.onReleaseDone(id, T + 600000, confirmed);
+        };
+        const auto pump = [](int ms) {
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < ms)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        };
+        client.tunnelStarted(); // the adoption's Connected (the adapter's connectionStateChanged)
+        o.adoptHandedOver(rec, T);
+        for (const UpstreamOwnerEvent &e : o.disconnect(T + 1000)) // down(): the adapter applies ReleaseAfterStop
+            if (e.kind == UpstreamOwnerEventKind::ReleaseAfterStop) {
+                client.holdReleasesForStopIfRunning();
+                client.release(e.requestId, e.leaseId, UpstreamMeter{}, e.route);
+            }
+        pump(300);
+        CHECK(edge.paths.isEmpty() && client.heldReleases() == 1); // the stop is not confirmed yet
+        client.tunnelStopped(); // the Disconnected of that stop (upstreamTunnelDown)
+        pump(600);
+        CHECK(edge.paths == QStringList{QStringLiteral("/v1/upstream/lease/") + L1});
+        CHECK(edge.auths == QStringList{QStringLiteral("Bearer devtok")} && edge.bodies == QStringList{QString()});
+        CHECK(done && o.pendingReleases() == 0);
+    }
+
+    // 3) A stale record is not adopted (and the Stop of that session stays the extension's, as before).
+    {
+        CHECK(!upstreamHandedOverRecordMatches(rec, a.nodeId, order + 1, wall));     // another start of the same node
+        CHECK(!upstreamHandedOverRecordMatches(rec, b.nodeId, order, wall));         // another node
+        CHECK(!upstreamHandedOverRecordMatches(rec, a.nodeId, -1, wall));            // a live session started before this rule
+        CHECK(!upstreamHandedOverRecordMatches(rec, a.nodeId, order, rec.savedWallMs + kUpstreamRecordMaxAgeMs)); // too old
+        CHECK(upstreamHandedOverRecordMatches(rec, a.nodeId, order, rec.savedWallMs + kUpstreamRecordMaxAgeMs - 1));
+        CHECK(!upstreamHandedOverRecordMatches(rec, a.nodeId, order, rec.savedWallMs - 120000));       // saved "in the future"
+        UpstreamLeaseRecord old = rec;
+        old.sessionOrder = -1; // a record of a build without the order
+        CHECK(!upstreamHandedOverRecordMatches(old, a.nodeId, -1, wall) && !upstreamHandedOverRecordMatches(old, a.nodeId, order, wall));
+        UpstreamLeaseRecord bad = rec;
+        bad.leaseId = QStringLiteral("short");
+        CHECK(!upstreamHandedOverRecordMatches(bad, a.nodeId, order, wall));
+        bad = rec;
+        bad.nodeId = b.nodeId; // node and profile disagree
+        CHECK(!upstreamHandedOverRecordMatches(bad, b.nodeId, order, wall));
+        CHECK(upstreamSessionOrderOf(QJsonObject{{QLatin1String(kUpstreamSessionOrderMetaKey), QStringLiteral("17")}}) == -1);
+        CHECK(upstreamSessionOrderOf(QJsonObject{{QLatin1String(kUpstreamSessionOrderMetaKey), 1.5}}) == -1);
+        CHECK(upstreamSessionOrderOf(QJsonObject{}) == -1);
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(iosOwnerOptions());
+        UpstreamLeaseRecord noLease = rec;
+        noLease.leaseId = QStringLiteral("short");
+        CHECK(o.adoptHandedOver(noLease, T).isEmpty() && !o.active() && o.adoptHandedOver(UpstreamLeaseRecord(), T).isEmpty());
+        CHECK(o.disconnect(T + 10).isEmpty() && io.calls.isEmpty()); // not adopted: nothing released from here
+        // A start of this process runs: the record is never taken over it.
+        o.begin(b, 1, std::nullopt, T + 100, wall);
+        CHECK(o.adoptHandedOver(rec, T + 200).isEmpty() && o.nodeId() == b.nodeId && !o.holdsLease(L1));
+        // The GUI owner (macOS / Windows) has its own adoption (adopt()): this one is refused there.
+        UpstreamLeaseOwner mac(&io);
+        UpstreamLeaseOwner::Options mo;
+        mo.keepOwnership = true;
+        mac.setOptions(mo);
+        CHECK(mac.adoptHandedOver(rec, T).isEmpty() && !mac.active());
+    }
+
+    // 4) The extension released first (its DELETE at its own stop answered), and the person picked the same provider again:
+    //    the app's release of the adopted session names only that session's lease, so it cannot touch the newer start's seat.
+    //    The server's rule in miniature (contract 1.19.0): one live session lease per device, a new start = a NEW lease id
+    //    (the old one ends replaced), a DELETE ends only the lease id it names and only while it is live.
+    {
+        struct Seats {
+            QString live;
+            QStringList ended;
+            void del(const QString &id) { if (id == live) { ended << id; live.clear(); } }
+            void grantNew(const QString &id) { if (!live.isEmpty()) ended << live; live = id; }
+        } server;
+        server.live = L1;
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(iosOwnerOptions());
+        o.adoptHandedOver(rec, T);
+        server.del(L1); // the extension's own release at its stop answered first
+        const qint64 adoptedOrder = o.sessionOrder();
+        QVector<UpstreamOwnerEvent> ev = o.begin(a, 1, std::nullopt, T + 1000, wall + 1000); // the same row again: a new start
+        const UpstreamOwnerEvent *r = findEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop);
+        CHECK(r && r->leaseId == L1 && countEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop) == 1);
+        const FakeIo::Call *acq = io.last("acquire");
+        CHECK(acq && acq->profileOrLease == a.upstream->profileId && acq->order > adoptedOrder && !acq->nonce.isEmpty());
+        const QString L2 = QStringLiteral("LeaseBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+        if (acq) {
+            AcquireReply g = granted(a.upstream->profileId, a.upstream->configSha256);
+            g.grant.leaseId = L2;
+            g.grant.renewToken = QStringLiteral("tlr1.newer");
+            o.onAcquireReply(acq->id, g, T + 1300);
+            server.grantNew(L2);
+        }
+        if (r)
+            server.del(r->leaseId); // the app's release after the confirmed stop: L1 is over, nothing changes
+        CHECK(server.live == L2 && server.ended == QStringList{L1});
+        CHECK(o.holdsLease(L2) && callsOf(io, "release") == 0);
+        if (r)
+            o.onReleaseDone(r->requestId, T + 2000, true);
+        // The newer session is an ordinary one: its own end releases its own lease, once.
+        o.tunnelUp(T + 2500);
+        ev = o.disconnect(T + 9000);
+        r = findEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop);
+        CHECK(r && r->leaseId == L2 && countEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop) == 1);
+    }
+
+    // 5) Every other end after the adoption gives the seat back exactly once.
+    //    a) a switch to another provider: the adopted seat after the confirmed stop + the new node's own acquire;
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(iosOwnerOptions());
+        o.adoptHandedOver(rec, T);
+        // the switch takes the live-session path: no seat-first prepare beside an adopted provider session (the two known
+        // limits of the relaunch: prepare beside it ended the old lease as replaced)
+        CHECK(!upstreamSeatFirst(true, true, o.active()) && upstreamSeatFirst(true, true, false));
+        const QVector<UpstreamOwnerEvent> ev = o.begin(b, 1, std::nullopt, T + 1000, wall);
+        const UpstreamOwnerEvent *r = findEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop);
+        CHECK(r && r->leaseId == L1 && countEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop) == 1
+              && findEv(ev, UpstreamOwnerEventKind::ClearRecord));
+        CHECK(io.last("acquire") && io.last("acquire")->profileOrLease == b.upstream->profileId && callsOf(io, "release") == 0);
+    }
+    //    b) a switch to an own node / a failover / a leave on the status: the adapter's up() or down() ends the session;
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(iosOwnerOptions());
+        o.adoptHandedOver(rec, T);
+        const QVector<UpstreamOwnerEvent> ev = o.disconnect(T + 1000);
+        const UpstreamOwnerEvent *r = findEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop);
+        CHECK(countEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop) == 1 && r && r->leaseId == L1 && callsOf(io, "release") == 0);
+    }
+    //    c) the tunnel ended without the app (iOS Settings, the extension stopped, the app was suspended meanwhile): the
+    //       Disconnected nobody asked for ends it - the stop is already confirmed, the release goes at once.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(iosOwnerOptions());
+        o.adoptHandedOver(rec, T);
+        const QVector<UpstreamOwnerEvent> ev = o.tunnelLost(T + 1000);
+        CHECK(countEv(ev, UpstreamOwnerEventKind::ReleaseAfterStop) == 1 && !o.active() && o.tunnelLost(T + 1100).isEmpty());
+    }
+
+    // 6) Other platforms emit what they did: Android (no keepRecord) no record events at all; the GUI owner its record
+    //    after the bring-up, as before.
+    for (bool keep : {false, true}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = keep;
+        o.setOptions(op);
+        o.begin(a, 1, std::nullopt, T, wall);
+        const QVector<UpstreamOwnerEvent> ev =
+            o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, a.upstream->configSha256), T + 300);
+        const int persistAt = indexOfEv(ev, UpstreamOwnerEventKind::Persist), bringUpAt = indexOfEv(ev, UpstreamOwnerEventKind::BringUp);
+        CHECK(keep ? (persistAt > bringUpAt && bringUpAt >= 0) : persistAt < 0);
+        o.tunnelUp(T + 2000);
+        CHECK((findEv(o.disconnect(T + 9000), UpstreamOwnerEventKind::ClearRecord) != nullptr) == keep);
+    }
 }
 
 // --- 6) the data check -------------------------------------------------------------------------------
@@ -4961,6 +5273,7 @@ int main(int argc, char **argv)
     ownerSeatModel();
     ownerMacRenewals();
     ownerAdoption();
+    ownerHandedOverAdoption();
     dataCheck();
     standbyAndStatus();
     envelopeAndParsing();

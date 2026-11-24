@@ -4277,6 +4277,7 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
         reliabilityEvent(QStringLiteral("adopt_identity_pending"));
     }
     identifyAdoptedSession();
+    m_tunnel.adoptUpstreamSession(); // C3 of 24.11 (iOS): the seat of an adopted provider session is this app's again
     reliabilityEvent(QStringLiteral("adopt_%1 verdict=%2 node=%3")
                          .arg(QLatin1String(why)).arg(int(verdict)).arg(m_engine.currentNodeId()));
     syncAttempt();
@@ -4327,8 +4328,10 @@ void AvpnEngineQml::identifyAdoptedSession()
     m_engine.adoptTunnelConnected(metadata.value(QStringLiteral("node_id")).toString(), proto, endpoint);
     if (!m_engine.currentIdentityKnown())
         m_engine.tryIdentifyCurrentNode(); // по endpoint-подсказке сессии (K5/B3)
-    if (m_engine.currentIdentityKnown())
+    if (m_engine.currentIdentityKnown()) {
         reliabilityEvent(QStringLiteral("adopt_identity_resolved node=%1").arg(m_engine.currentNodeId()));
+        m_tunnel.adoptUpstreamSession(); // C3 of 24.11: the metadata came after the adoption
+    }
 #endif
 }
 

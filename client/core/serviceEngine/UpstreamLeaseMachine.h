@@ -307,6 +307,34 @@ public:
         return s;
     }
 
+    // A lease the tunnel owner holds and renews (iOS: the relaunched app restores the owner of the extension's session,
+    // UpstreamLeaseOwner::adoptHandedOver). Active with that lease id and route and nothing scheduled: the owner never ticks a
+    // handed-over session, so the only thing this session does is its end - disconnect() names the lease for the release. The
+    // deadline is an estimate (the extension extends the lease); no request is sent. Ignored while a session runs.
+    LeaseStep adoptHeld(const QString &profileId, const QString &leaseId, const LeaseRoute &route, MeterScope scope,
+                        qint64 knownRevision, qint64 nowMs)
+    {
+        LeaseStep s;
+        if (busy() || leaseId.isEmpty()) {
+            s.inert = true;
+            return s;
+        }
+        reset();
+        nowMs = clock(nowMs);
+        m_profileId = profileId;
+        m_kind = LeaseKind::Session;
+        m_scope = scope;
+        m_knownRevision = knownRevision;
+        m_leaseId = leaseId;
+        m_route = route;
+        m_ttlS = m_t.maxTtlS;
+        m_deadlineMs = nowMs + qint64(m_ttlS) * 1000;
+        m_nextRenewMs = -1;
+        m_phase = LeasePhase::Active;
+        m_ready = true;
+        return s;
+    }
+
     // The acquire in flight was refused only because the start's order was too low (UpstreamLeaseOwner: an order-floor denial of the
     // CURRENT start): the same session asks once more - a fresh request, nothing reported upward. Every state in which a session waits
     // for an acquire answer can do it: Acquiring (the first acquire), Provisional (the confirmation through the tunnel; same standby

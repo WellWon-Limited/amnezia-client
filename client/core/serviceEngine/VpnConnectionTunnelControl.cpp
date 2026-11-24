@@ -111,6 +111,9 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
 #if AVPN_UPSTREAM_GUI_OWNER
         o.keepOwnership = true;
 #endif
+#if defined(Q_OS_IOS)
+        o.keepRecord = true; // C3 of 24.11: the record lets a relaunched app own the seat of the session it adopts (adoptUpstreamSession)
+#endif
         o.scope = upstreamMeterScopeForBuild();
         m_upOwner.setOptions(o);
     }
@@ -780,12 +783,12 @@ void VpnConnectionTunnelControl::applyUpstreamEvents(const QVector<UpstreamOwner
             emit upstreamLeaseHandover(e.lease);
             break;
         case UpstreamOwnerEventKind::Persist:
-#if AVPN_UPSTREAM_GUI_OWNER
+#if AVPN_UPSTREAM_GUI_OWNER || defined(Q_OS_IOS) // iOS: the record of the handed-over session (keepRecord, C3 of 24.11)
             QSettings().setValue(QLatin1String(kUpstreamLeaseRecordKey), e.record.toJson());
 #endif
             break;
         case UpstreamOwnerEventKind::ClearRecord:
-#if AVPN_UPSTREAM_GUI_OWNER
+#if AVPN_UPSTREAM_GUI_OWNER || defined(Q_OS_IOS)
             QSettings().remove(QLatin1String(kUpstreamLeaseRecordKey));
 #endif
             break;
@@ -887,12 +890,21 @@ void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)
     in.dns = m_upStub.dns;
     in.lease = e.provisional ? QJsonObject() : e.lease;
     in.tunables = xrayTunablesFor(/*upstreamSession=*/true);
-    const QJsonObject xcfg = XrayConfigBuilder::buildUpstream(in);
+    QJsonObject xcfg = XrayConfigBuilder::buildUpstream(in);
     if (xcfg.isEmpty()) {
         applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
         failUpstreamStart(QStringLiteral("envelope"));
         return;
     }
+#if defined(Q_OS_IOS)
+    // C3 of 24.11: the start's order in the session's identity - the extension keeps it in its provider configuration and
+    // returns it with every status reply, so a relaunched app knows which start runs (adoptUpstreamSession). Not a secret.
+    {
+        QJsonObject meta = xcfg.value(QStringLiteral("tribeSessionMetadata")).toObject();
+        meta.insert(QLatin1String(kUpstreamSessionOrderMetaKey), double(m_upOwner.sessionOrder()));
+        xcfg.insert(QStringLiteral("tribeSessionMetadata"), meta);
+    }
+#endif
     m_lastConfigReport = XrayConfigBuilder::reportSummaryUpstream(m_upStub, e.provisional,
                                                                   meterScopeName(m_upOwner.options().scope));
     m_lastConfigReport.insert(QStringLiteral("stage"), e.provisional ? QStringLiteral("provisional")
@@ -1018,33 +1030,44 @@ void VpnConnectionTunnelControl::retryUpstreamAdoption()
 #endif
 }
 
-// KNOWN LIMIT (round 10 R1, narrowed by the tenure rule, contract 1.19.0 and the server's rule that a release with the tenure's own
-// token is metered even after the lease ended): on iOS the app can be relaunched while the extension keeps a provider tunnel running (the
-// extension holds that session's lease and renew token; the app has no owner for it - only macOS adopts a record). When the same
-// provider is chosen again, this seat-first prepare acquires the profile BEFORE the old tunnel stops. It is a new start with its own
-// nonce and order, so the server takes the seat over: the old lease is ENDED (replaced) and a NEW lease with a new token is made.
-// What follows for the old session: the extension's renewals carry the old token and are refused (expected: HTTP 404 lease_gone, a
-// terminal answer - not verified against a replaced lease), but its final report with the DELETE at the old tunnel's stop carries that
-// tenure's own token (UpstreamLeaseWire.swift releaseBody, from UpstreamLeaseRenewer.swift prepareRelease), so the server still
-// applies it: the report is NOT lost. What remains: (1) only if that DELETE never comes (the extension is killed
-// before its stop) the traffic since the last accepted renewal, at most about 5 minutes (renew_after_s), is lost; (2) the extension stops its provider core at its next renewal's terminal refusal (UpstreamLeaseRenewer.swift:300,
-// UpstreamLeaseMachine.swift:400, PacketTunnelProvider+Upstream.swift:296-316) and keeps the tunnel interface - traffic stops, the
-// tunnel is NOT torn down by the extension. That comes minutes after the new start's acquire, while the app's switch (stop of the old
-// tunnel, up of the new one) takes seconds, so in the normal flow the app's own stop comes first; only a switch that never happens
-// (the new start fails after the seat was taken) leaves the old tunnel without its core until the person acts. No seat is harmed.
-// A proper fix makes the app adopt the running session on iOS as macOS does.
-// SECOND KNOWN LIMIT (round 17 R1, pre-existing, not introduced by the tenure rule): the same relaunch, then ANOTHER provider is chosen.
-// prepareUpstream() below only asks "is an owner of THIS process live" (m_upOwner.active(), the first condition of its guard): after a
-// relaunch it is not (the lease owner is not restored at adoption on iOS), so the seat of the new node is taken first and the server
-// ends the old lease as replaced. If that answer is lost, AvpnEngineQml::onUpstreamPrepared (case Stay, ~12127) treats it as "the working
-// tunnel was never touched": it restores the previous pin and leaves the old tunnel running - although its lease is gone. At its next
-// renewal the extension gets lease_gone and stops its provider core (upstreamLeaseTerminal) while the VPN interface stays up: the person
-// sees "connected" with no traffic. What brings it back: the app reads the extension's status reply (ios_controller.mm:1304 ->
-// emitUpstreamStatus -> upstreamLeaseEvent -> AvpnEngineQml::applyUpstreamTunnelStatus -> onUpstreamLeave -> ServiceEngine::
-// leaveUpstreamNode -> loseLiveSession(restart=true)), so the dead session is left and the engine walks to the next node by itself - but
-// only while the app runs and polls the status; with the app in the background nothing happens until it comes to the foreground (how
-// soon the first poll follows is not verified), or the person reconnects. The proper fix is the one named above: restore the lease
-// owner at adoption on iOS as the desktop does (then m_upOwner.active() is true and the switch takes the live-session path).
+void VpnConnectionTunnelControl::adoptUpstreamSession()
+{
+#if defined(Q_OS_IOS)
+    // C3 of the device round 24.11 (iPhone Air): connect to a provider row, force-quit, relaunch - the live tunnel was adopted,
+    // and the Stop sent no release (no owner of the seat after the relaunch). The facade calls this once the engine adopted the
+    // live tunnel (AvpnEngineQml::tryAdoptObservedTunnel, and identifyAdoptedSession when the identity came late).
+    if (!m_leaseClient || !m_leaseClient->configured() || m_upOwner.active())
+        return;
+    const QByteArray raw = QSettings().value(QLatin1String(kUpstreamLeaseRecordKey)).toByteArray();
+    if (raw.isEmpty())
+        return;
+    const QJsonObject meta = QJsonObject::fromVariantMap(IosController::Instance()->sessionMetadata());
+    const QString liveNode = meta.value(QStringLiteral("node_id")).toString();
+    if (!liveNode.startsWith(QLatin1String("up:")))
+        return; // not a provider session: nothing of the record applies to it
+    const UpstreamLeaseRecord rec = UpstreamLeaseRecord::fromJson(raw);
+    if (!upstreamHandedOverRecordMatches(rec, liveNode, upstreamSessionOrderOf(meta), QDateTime::currentMSecsSinceEpoch())) {
+        // Another start, a session started before this rule, or a broken record: not this app's seat to give back. The record
+        // stays - a later live session can never carry its order, and the next start replaces it.
+        qInfo() << "avpn upstream: the adopted session of" << liveNode << "is not the one the seat record names - its seat stays the extension's";
+        return;
+    }
+    m_upStub = SubscriptionNode{};
+    m_upStub.nodeId = rec.nodeId;
+    applyUpstreamEvents(m_upOwner.adoptHandedOver(rec, upstreamClockMs()));
+    if (m_upOwner.active())
+        qInfo() << "avpn upstream: the seat of the adopted session on" << rec.nodeId
+                << "is this app's again - renewed by the extension, released after the stop";
+#endif
+}
+
+// The two KNOWN LIMITS this guard had (rounds 10 R1 and 17 R1: after an iOS relaunch the app had no owner of the extension's provider
+// session, so picking the same or another provider ran this seat-first prepare beside it - the server ended the old lease as replaced
+// and, with the answer lost, the old tunnel could stay "connected" without its core) are closed by the iOS adoption (C3 of 24.11,
+// adoptUpstreamSession): a relaunched app that adopted THE session its record names owns its seat again, m_upOwner.active() is true,
+// and the pick takes the live-session path (DebugSnapshot.h::upstreamSeatFirst: stop, the old seat released after the confirmed stop,
+// then the new start). What stays as before: a live provider session the record does not name (started by a build without the
+// record, or the record is gone) - not adopted, so these two cases still apply to it.
 quint64 VpnConnectionTunnelControl::prepareUpstream(const Subscription &sub, const SubscriptionNode &node)
 {
     if (!upstreamNodesEnabled() || !m_leaseClient || !m_leaseClient->configured() || m_upOwner.active()
