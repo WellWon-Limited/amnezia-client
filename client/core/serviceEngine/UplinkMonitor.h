@@ -53,6 +53,25 @@ inline PhysicalSourceStart physicalSourceStart(int told)
     return told == 0 ? PhysicalSourceStart::Down : PhysicalSourceStart::Up;
 }
 
+// Device round of 142 (B2, iPhone Air, airplane mode with the tunnel up): the Connect screen kept «Connected» with the
+// amber «трафик не проходит». The tunnel is kept through a network loss by design; the screen says so when the device
+// is KNOWN to have no physical network (unknown = no: the caption never guesses). The fact per platform:
+//  - an authoritative monitor (macOS nw_path_monitor without utun, Android's NOT_VPN set): its own answer;
+//  - iOS: the app's own path monitor with virtual interfaces prohibited (IosScanHost.mm) - a path seen and no physical
+//    interface on it. The QNetworkInformation fallback follows the default path, which is our utun: in airplane mode
+//    it never said Disconnected (round 142, B2: no «uplink down» for the 49 s the phone was offline);
+//  - elsewhere (Windows, Linux, the macOS NE build): the fallback saying Disconnected, which under our own adapter may
+//    never come - there the caption may not show.
+enum class AppPathFact { None, Physical, NoPhysical }; // None = no app path monitor, or no path seen yet
+inline bool physicalUplinkKnownDown(bool authoritative, bool monitorUp, AppPathFact appPath)
+{
+    if (authoritative)
+        return !monitorUp;
+    if (appPath != AppPathFact::None)
+        return appPath == AppPathFact::NoPhysical;
+    return !monitorUp;
+}
+
 // AVPN Scanner (plan §2.11a): the physical uplink's kind when nw_path names no interface - under the Mac's
 // own VPN the virtual interfaces are prohibited and the default route is our utun, so the path's kind is
 // empty. The fallback is the route table's PHYSICAL default routes (UplinkMonitor.mm): each interface with its

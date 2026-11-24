@@ -51,6 +51,10 @@ PageType {
     // Connect audit 2026-11-04: the engine confirmed the live probe fails (red bars, no ms) while the
     // tunnel is up. The caption says so instead of promising a secure connection; orb unchanged.
     readonly property bool liveDeadNow: hasEngine && TribeEngine.liveDead === true
+    // Device round of 142 (B2, airplane mode): the tunnel is kept through a network loss and the checks pause. While the
+    // device is known to have no network the caption says so in the neutral colour - neither «Защита активна» nor the
+    // amber «трафик не проходит» - and the ONLINE badge waits. Undefined on older binaries = as before.
+    readonly property bool noNetHeld: isOn && hasEngine && TribeEngine.tunnelUpNoUplink === true
     // Device test of 142 (second round): while one attempt walks its candidates the engine says how far it got
     // (attemptChecked of attemptTotal; 0 / undefined = no walk - the caption stays «Подключаемся…»).
     // the shown node is not the person's choice (a manual pick replaced by another node); undefined on older binaries
@@ -84,7 +88,7 @@ PageType {
     // «Данные идут» (бейдж ONLINE) — одно свойство движка для главной и списка серверов (5.1.108):
     // туннель поднят, живая проба через туннель прошла или whoami сказал works; no_data/bypass и
     // подтверждённо мёртвая проба запрещают. От серверного флага node_scan не зависит.
-    readonly property bool dataFlowingNow: isOn && hasEngine && TribeEngine.dataFlowing === true
+    readonly property bool dataFlowingNow: isOn && !noNetHeld && hasEngine && TribeEngine.dataFlowing === true
     // Проверка не прошла, движок уже поднимает следующий путь той же попытки.
     readonly property bool nextPathNow: showBusy && !verifyingNow
                                         && (pathCheckNow === "no_data" || pathCheckNow === "bypass")
@@ -884,11 +888,12 @@ PageType {
                                  : root.attemptTotalNow > 1 ? qsTr("Ищем рабочий сервер — пробуем %1 из %2")
                                                                   .arg(root.attemptCheckedNow).arg(root.attemptTotalNow)
                                  : qsTr("Подключаемся…"))
-              : root.isOn ? (root.liveDeadNow ? qsTr("Подключено, трафик не проходит")
-                                              : qsTr("Защита активна — ваше соединение безопасно"))
+              : root.isOn ? (root.noNetHeld ? qsTr("Нет сети — VPN продолжит, когда сеть вернётся")
+                             : root.liveDeadNow ? qsTr("Подключено, трафик не проходит")
+                                                : qsTr("Защита активна — ваше соединение безопасно"))
                           : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
                                                      : qsTr("Подключиться — нажмите кнопку выше"))
-        color: (root.whitelistModeNow || root.nextPathNow || (root.isOn && root.liveDeadNow))
+        color: (root.whitelistModeNow || root.nextPathNow || (root.isOn && root.liveDeadNow && !root.noNetHeld))
                ? Theme.color.warning : root.slate400
         font.family: Theme.font.body; font.pixelSize: Theme.font.monoData; font.weight: Theme.font.wMedium
     }
@@ -1369,13 +1374,15 @@ PageType {
 
         // кнопка «Обновить коннект» → round-robin на следующую живую ноду (TribeEngine.rotateNext,
         // круговой обход от текущей с заворотом). Активна только при подключении; на время свитча — busy. // AVPN
+        // Off / an ended attempt: opens the server choice (round 142, air-C) - see the MouseArea below.
         Rectangle {
             id: refreshBtn
             width: parent.width - (doctorBtn.visible ? doctorBtn.width + parent.spacing : 0)
                                 - (scannerBtn.visible ? scannerBtn.width + parent.spacing : 0)
             height: 49; radius: 16
             // AVPN (2026-07-17): без opacity-приглушения — единый стиль с кнопкой «Доктор»
-            // (реш. владельца: обе кнопки строки выглядят идентично). Действие при !isOn = старт.
+            // (реш. владельца: обе кнопки строки выглядят идентично). Действие при !isOn - the server choice
+            // (round 142, air-C: it was a start).
             color: refreshMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
             border.width: 1
             border.color: refreshMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5) : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8)
@@ -1424,11 +1431,16 @@ PageType {
             }
             MouseArea {
                 id: refreshMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                // Device round of 142 (air-C): with the VPN off this press connected at once to the pinned server
+                // (TribeEngine.start). The button replaces the server of a live connection (rotateNext,
+                // CONNECT-INVARIANTS §11); with nothing to replace - off, or an attempt that ended - it opens the
+                // server choice. It never starts a connection by itself: the orb does. Busy (connecting, switching,
+                // stopping): nothing.
                 onClicked: {
                     if (!root.hasEngine) return
                     if (TribeEngine.busy) return
-                    if (!root.isOn) {     // не подключены — обычный старт вместо ротации
-                        TribeEngine.start()
+                    if (!root.isOn) {
+                        root.requestServerPicker()
                         return
                     }
                     TribeEngine.rotateNext()   // round-robin на следующую живую ноду (заворот) // AVPN
