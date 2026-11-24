@@ -32,6 +32,10 @@
 // clock but keeps the escalation, so a fresh port that does not restore lasting data is followed by
 // the soft restart. The same judgment is what the app's failover reads (`dataQuietSeconds`).
 //
+// tribe.18 (second review): a handshake only by its time moving; RandomTrailers read as the engine reads
+// it, a trailer bounded by the UDP window; a handshake's bytes settled over the whole window since the
+// previous handshake, one initiation held back while unanswered.
+//
 // tribe.17 (review of tribe.16): demand never counts the session's own service traffic (computed from
 // its AmneziaWG configuration, `TribeServiceTraffic`), at every stage; a minute without demand ends an
 // open episode; a sampling gap is not silence; the export for the app is reported only while the
@@ -62,16 +66,19 @@ public enum TribeDataFlow {
     public static let idleSeconds: TimeInterval = 60
 
     /// Inbound data of one sample: the rx growth, minus one handshake when the handshake time moved.
-    /// tribe.17: a sample whose rx growth is exactly one initiation (148 B) with the handshake time
-    /// unchanged is a handshake the server starts: its initiation is counted before the time moves
-    /// (the time is set by its first transport packet, receive.go), so it is not data either.
+    /// tribe.18 (second review, G2): a handshake is recognised by its TIME moving, never by a byte count:
+    /// a padded TCP ACK is 148 B in rx_bytes too (52 + content padding 64 + 32; receive.go counts before
+    /// trimming to the IP length), and tribe.17 took a steady upload's ACKs for handshakes. A server's
+    /// initiation (148 B counted before the time moves on its first transport packet) is therefore data
+    /// in its sample - rare (the server re-keys only when it has data for us), and harmless: the next
+    /// sample deducts a handshake from that first transport packet.
     /// An incoming keepalive IS counted (counters see bytes, not packets): the server sends one only
     /// after it received our data and had nothing to send (passive keepalive), so it proves the path
     /// both ways; a lone keepalive and a lone TCP ACK cannot be told apart by size, and not counting
     /// them would make an ACK-only upload look stalled.
     public static func dataBytes(rxDelta: UInt64, handshakeChanged: Bool) -> UInt64 {
-        if handshakeChanged { return rxDelta > handshakeRxBytes ? rxDelta - handshakeRxBytes : 0 }
-        return rxDelta == handshakeRxBytes ? 0 : rxDelta
+        guard handshakeChanged else { return rxDelta }
+        return rxDelta > handshakeRxBytes ? rxDelta - handshakeRxBytes : 0
     }
 
     /// Inbound data proves the path only when it still arrives `window` seconds after the last repair
@@ -109,8 +116,21 @@ public struct TribeServiceTraffic: Equatable {
     /// Plain WireGuard (no obfuscation): initiation 148 + its confirming keepalive 32; keepalive 32; 25 s.
     public static let plain = TribeServiceTraffic(handshakeTxBytes: 148 + 32, keepaliveTxBytes: 32, keepaliveIntervalSeconds: 25)
 
-    /// A random trailer is bounded by the peer's UDP window (the largest packet seen, about the MTU).
-    static func trailerBound(mtu: Int) -> Int { mtu + 128 }
+    /// tribe.18 (G3): how the engine reads RandomTrailers: the pinned PacketTunnelSettingsGenerator.swift
+    /// `uapiBool` (trimmed, lower-cased: "on", "1", "true", "t", "yes" = on; anything else off). Our app
+    /// writes "1"; tribe.17 accepted "on" only. tests/check_engine_spellings.sh pins this set to the
+    /// generator's (a package gate).
+    public static let engineTrueSpellings: Set<String> = ["on", "1", "true", "t", "yes"]
+    public static func engineBool(_ raw: String?) -> Bool {
+        guard let raw else { return false }
+        return engineTrueSpellings.contains(raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
+    /// tribe.18 (G3): with random trailers a packet grows up to the peer's UDP window (send.go
+    /// randomTrailer: fastrandn(udpWindow - size)), and the window is the largest datagram the peer has
+    /// sent (S4 + 32 + up to the MTU + content padding) or received (the server's, whose MTU this side does
+    /// not know): bounded here by that or a 1500-byte path, whichever is larger.
+    static func udpWindowBound(mtu: Int, s4: Int, contentPadding: Int) -> Int { Swift.max(mtu + s4 + 32 + contentPadding, 1500) }
 
     /// From the session's configuration strings (WGConfig of the provider). Junk = absent/unparseable
     /// values are 0 (the engine refuses a config it cannot parse); a special junk spec this parser does
@@ -123,16 +143,20 @@ public struct TribeServiceTraffic: Equatable {
             return v
         }
         let mtuBytes = int(mtu) > 0 ? int(mtu) : 1280
-        let trailers = randomTrailers?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "on"
+        let trailers = engineBool(randomTrailers)
         let contentPadding = rangeMax(contentPaddingAddition)
-        let keepalivePadding = contentPadding > 0 ? contentPadding : (trailers ? trailerBound(mtu: mtuBytes) : 0)
-        let keepalive = int(s4) + 32 + keepalivePadding
+        let window = udpWindowBound(mtu: mtuBytes, s4: int(s4), contentPadding: contentPadding)
+        // RoutineEncryption: the content padding addition when set, else the random trailer (the whole
+        // datagram then stays below the UDP window), else nothing for an empty payload.
+        let keepalive = contentPadding > 0 ? int(s4) + 32 + contentPadding : (trailers ? window : int(s4) + 32)
         var special = 0
         for spec in specialJunk {
             guard let spec = spec?.trimmingCharacters(in: .whitespacesAndNewlines), !spec.isEmpty else { continue }
             special += specialJunkLength(spec) ?? mtuBytes
         }
-        let initiation = special + int(jc) * int(jmax) + int(s1) + 148 + (trailers ? trailerBound(mtu: mtuBytes) : 0)
+        // SendHandshakeInitiation: special junk, junk, then S1 + 148 (+ a trailer: the datagram stays below
+        // the UDP window).
+        let initiation = special + int(jc) * int(jmax) + (trailers ? window : int(s1) + 148)
         return TribeServiceTraffic(handshakeTxBytes: UInt64(initiation + keepalive), keepaliveTxBytes: UInt64(keepalive),
                                    keepaliveIntervalSeconds: TimeInterval(int(persistentKeepalive)))
     }
@@ -172,19 +196,18 @@ public struct TribeServiceTraffic: Equatable {
         return bounds.max() ?? 0
     }
 
-    /// Demand of one sample: its outbound growth minus this session's own service traffic. A completed
-    /// handshake (`handshakeChanged`) costs `handshakeTxBytes`; keepalives are paid from `credit`, which
-    /// grows by one keepalive per interval (`elapsed`) and holds at most two.
-    public func demand(txDelta: UInt64, handshakeChanged: Bool, elapsed: TimeInterval, credit: inout UInt64) -> UInt64 {
+    /// Demand of one sample: its outbound growth minus the keepalives, paid from `credit`, which grows by
+    /// one keepalive per interval (`elapsed`) and holds at most two. A handshake is NOT settled here
+    /// (tribe.18, G4): its initiation leaves in one sample and its response arrives in a later one, so the
+    /// tracker settles `handshakeTxBytes` against everything sent since the previous handshake.
+    public func demand(txDelta: UInt64, elapsed: TimeInterval, credit: inout UInt64) -> UInt64 {
         if keepaliveIntervalSeconds > 0 && elapsed > 0 {
             let grown = Double(keepaliveTxBytes) * elapsed / keepaliveIntervalSeconds
             credit = Swift.min(2 * keepaliveTxBytes, credit &+ UInt64(grown.rounded(.up)))
         }
-        var rest = txDelta
-        if handshakeChanged { rest = rest > handshakeTxBytes ? rest - handshakeTxBytes : 0 }
-        let paid = Swift.min(rest, credit)
+        let paid = Swift.min(txDelta, credit)
         credit -= paid
-        return rest - paid
+        return txDelta - paid
     }
 }
 
@@ -369,6 +392,10 @@ public struct TribeStallTracker: Equatable {
     private var demandSinceStep: UInt64 = 0
     private var lastDemandAt: TimeInterval
     private var keepaliveCredit: UInt64 = 0
+    /// tribe.18 (G4): demand added since the previous completed handshake - the window in which this
+    /// handshake's initiation was sent - and `lastDemandAt` as it was when that window began.
+    private var demandSinceHandshake: UInt64 = 0
+    private var lastDemandAtBeforeWindow: TimeInterval
     /// Time of the last committed step (watchdog, GUI or roam): the second-stage gap, the stage-3
     /// backoff and its demand evidence count from here.
     private var lastStepAt: TimeInterval?
@@ -401,6 +428,7 @@ public struct TribeStallTracker: Equatable {
         lastHandshake = first.lastHandshakeSec
         lastSampleAt = first.at
         lastDemandAt = first.at
+        lastDemandAtBeforeWindow = first.at
     }
 
     /// tribe.8: the backend was restarted in place (soft restart): the counters start from zero on
@@ -414,6 +442,7 @@ public struct TribeStallTracker: Equatable {
         lastSampleAt = sample.at
         demandSinceProgress = 0
         demandSinceStep = 0
+        demandSinceHandshake = 0
     }
 
     /// tribe.10: an external fresh port at stage 2 moves the second-stage clock only when the previous
@@ -503,7 +532,6 @@ public struct TribeStallTracker: Equatable {
         let data = countersReset ? 0 : TribeDataFlow.dataBytes(rxDelta: sample.rxBytes - lastRx,
                                                                 handshakeChanged: handshakeChanged)
         let demand = countersReset ? 0 : policy.serviceTraffic.demand(txDelta: sample.txBytes - lastTx,
-                                                                      handshakeChanged: handshakeChanged,
                                                                       elapsed: elapsed, credit: &keepaliveCredit)
         lastRx = sample.rxBytes
         lastTx = sample.txBytes
@@ -515,7 +543,9 @@ public struct TribeStallTracker: Equatable {
             lastProgressAt = sample.at
             demandSinceProgress = 0
             demandSinceStep = 0
+            demandSinceHandshake = 0
             lastDemandAt = sample.at
+            lastDemandAtBeforeWindow = sample.at
             return .none
         }
         if countersReset || (data > 0 && TribeDataFlow.provesFlow(dataAt: sample.at, lastRepairAt: lastRepairAt,
@@ -537,8 +567,20 @@ public struct TribeStallTracker: Equatable {
         }
         demandSinceProgress &+= demand
         demandSinceStep &+= demand
+        demandSinceHandshake &+= demand
         if demand > 0 { lastDemandAt = sample.at }
+        let handshakeTx = policy.serviceTraffic.handshakeTxBytes
         if handshakeChanged {
+            // tribe.18 (G4): the handshake's own bytes are settled against everything sent since the previous
+            // handshake (its initiation may have left samples earlier than its response came in); when that
+            // was all there was, it was not demand at all.
+            let window = demandSinceHandshake
+            let settled = Swift.min(handshakeTx, window)
+            demandSinceProgress = demandSinceProgress > settled ? demandSinceProgress - settled : 0
+            demandSinceStep = demandSinceStep > settled ? demandSinceStep - settled : 0
+            if window <= handshakeTx { lastDemandAt = lastDemandAtBeforeWindow }
+            demandSinceHandshake = 0
+            lastDemandAtBeforeWindow = lastDemandAt
             // A completed handshake while less than a stall's demand went out since a count began: the
             // session answers, and at that rate the ladder cannot judge the path - the count starts over
             // (tribe.15's floor, ~270 B/s on a path that re-keys every 15 s; the data watch judges such
@@ -560,7 +602,12 @@ public struct TribeStallTracker: Equatable {
         let stalledFor = sample.at - lastProgressAt
         let probeSeconds = bootstrap ? max(12, policy.stallProbeSeconds) : policy.stallProbeSeconds
         let rebindSeconds = bootstrap ? max(18, policy.stallRebindSeconds) : policy.stallRebindSeconds
-        stalledNow = stalledFor >= probeSeconds && demandSinceProgress >= requiredTx
+        // tribe.18 (G4): what went out since the last handshake may hold one initiation still waiting for its
+        // response (a re-key, a retry): one handshake's worth of it is not demand until that is settled.
+        let held = Swift.min(demandSinceHandshake, handshakeTx)
+        let demandNow = demandSinceProgress > held ? demandSinceProgress - held : 0
+        let demandNowSinceStep = demandSinceStep > held ? demandSinceStep - held : 0
+        stalledNow = stalledFor >= probeSeconds && demandNow >= requiredTx
         switch stage {
         case 0, 1:
             if stalledNow, permit(.rebindPort) {
@@ -573,7 +620,7 @@ public struct TribeStallTracker: Equatable {
             }
         case 2:
             guard persistent, policy.stallRebindSeconds > 0, let last = lastStepAt else { return .none }
-            if stalledFor >= probeSeconds + rebindSeconds && demandSinceProgress >= requiredTx * 2
+            if stalledFor >= probeSeconds + rebindSeconds && demandNow >= requiredTx * 2
                 && sample.at - last >= max(minGapAfterStep, rebindSeconds), permit(.softRestart) {
                 stage = 3
                 persistentSteps = 1
@@ -589,7 +636,7 @@ public struct TribeStallTracker: Equatable {
             let sinceStep = sample.at - last
             // tribe.16: and a stall NOW (the echo of the previous step may have moved the clock).
             // tribe.17: the demand since the step is service-traffic free too (an idle repaired tunnel).
-            guard sinceStep >= TribeStallTracker.persistentBackoff(persistentSteps - 1), demandSinceStep >= requiredTx,
+            guard sinceStep >= TribeStallTracker.persistentBackoff(persistentSteps - 1), demandNowSinceStep >= requiredTx,
                   stalledNow else {
                 return .none
             }

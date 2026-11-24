@@ -34,6 +34,10 @@ public:
     void measure(int timeoutMs = 4000);
     void cancel();
     bool inFlight() const { return m_inFlight; }
+    // AVPN (tribe.18, second review G1): when the current/last measurement started (wall clock, ms) and the longest it
+    // may take by its own timeouts (every endpoint timing out) - lets a caller tell a probe that spanned a suspension.
+    qint64 startedWallMs() const { return m_startedWallMs; }
+    qint64 timeoutBudgetMs() const { return qint64(m_timeoutMs) * qMax(1, int(m_endpoints.size())); }
 
 signals:
     // rttMs ≥ 0 и reachable=true при успехе; rttMs=-1, reachable=false если все эндпоинты не ответили.
@@ -52,6 +56,7 @@ private:
     int                    m_curIdx = 0;
     int                    m_timeoutMs = 4000;
     bool                   m_inFlight = false;
+    qint64                 m_startedWallMs = 0;
     quint64                m_generation = 0;
     qint64                 m_bust = 0; // cache-buster счётчик (вместо запрещённого Math.random — монотонный)
 };

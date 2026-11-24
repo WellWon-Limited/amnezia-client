@@ -1059,6 +1059,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
 #ifdef Q_OS_IOS
         if (!reachable && tunnelWatchFrozen("live_probe"))
             return;
+        // tribe.18 (second review, G1): independent of the data watch - a failed probe that took longer by the wall clock
+        // than its own timeouts allow spanned a suspension of the app and is not fed either.
+        if (!reachable && avpn::HealthLoop::probeSpannedSuspension(m_probe->startedWallMs(), QDateTime::currentMSecsSinceEpoch(),
+                                                                   m_probe->timeoutBudgetMs()))
+            return;
 #endif
         if (m_engine.feedProbeResult(reachable)) { // a dead live session: the failover attempt of the owner
             syncAttempt();

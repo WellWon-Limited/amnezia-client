@@ -519,6 +519,40 @@ int main(int argc, char **argv)
         CHECK(HealthLoop::freshDataStall(50, nowMs - 5000, nowMs) == 50 && HealthLoop::freshDataStall(50, nowMs - 5001, nowMs) == -1);
         CHECK(HealthLoop::freshDataStall(50, nowMs + 1000, nowMs) == -1 && HealthLoop::freshDataStall(50, 0, nowMs) == -1);
         CHECK(HealthLoop::freshDataStall(-1, nowMs, nowMs) == -1);
+        // Second review, G1 (its sequence): failed probes at R+12/24/36 with fresh verdicts 12/24/36; the reply carrying
+        // 46 belongs to a request sent at R+46, the app is suspended at R+46.06 and the reply is applied at R+100, when
+        // the overdue 4th probe fails. 2e641743d dated the reading when it was applied (fresh: failover of a tunnel that
+        // carries data since R+47); tribe.18 dates it by its request (54 s old: no corroboration).
+        const auto g1 = [&](bool datedByRequest) {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(subJson({ EE, US }, 7), err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+            CHECK(eng.connect(err));
+            CHECK(upConnected(eng));
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            const qint64 nowMsG1 = QDateTime::currentMSecsSinceEpoch();
+            eng.noteNetworkChange(now - 160);
+            bool failedOver = false;
+            for (qint64 verdict : {12, 24, 36}) {
+                tun.st = mkStats(now - 5, 1000, 5000 + verdict * 2000);
+                tun.st.dataStallSec = verdict;
+                tun.st.dataStallAtMs = nowMsG1;
+                failedOver = failedOver || eng.feedProbeResult(false);
+            }
+            tun.st.dataStallSec = 46;
+            tun.st.dataStallAtMs = datedByRequest ? nowMsG1 - 54'000 : nowMsG1;
+            failedOver = failedOver || eng.feedProbeResult(false);
+            return failedOver;
+        };
+        CHECK(g1(/*datedByRequest=*/false));  // the rule of 2e641743d: fails over a recovered tunnel
+        CHECK(!g1(/*datedByRequest=*/true));  // tribe.18: a reply to a request sent before the suspension is stale
+        // ... and the 4th probe itself (started at R+40, failed at R+100.002, budget 2 x 4 s) spanned the suspension.
+        CHECK(HealthLoop::probeSpannedSuspension(40'000, 100'002, 8'000));
+        CHECK(!HealthLoop::probeSpannedSuspension(40'000, 50'000, 8'000) && HealthLoop::probeSpannedSuspension(40'000, 50'001, 8'000));
+        CHECK(HealthLoop::probeSpannedSuspension(40'000, 39'000, 8'000) && !HealthLoop::probeSpannedSuspension(0, 100'000, 8'000));
     }
 #endif
 

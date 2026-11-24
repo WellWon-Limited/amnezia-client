@@ -61,7 +61,9 @@ class AwgApple(ConanFile):
     # tribe.17: tribe.16's patches + the reviewed TribeRoaming.swift (service traffic from the session's
     # configuration, idle end of an episode, sampling gaps, the stall verdict for the app). tribe.16 was
     # never released either: rebuilt from this recipe it gets tribe.17's TribeRoaming.swift.
-    version = "3.1.4-tribe.17"
+    # tribe.18: tribe.17's patches + TribeRoaming.swift after the second review (handshake by time only, the
+    # engine's RandomTrailers spellings, service TX settled over the handshake window). tribe.17 never shipped.
+    version = "3.1.4-tribe.18"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
@@ -122,6 +124,8 @@ class AwgApple(ConanFile):
     _xray_pins["3.1.4-tribe.16"] = _xray_pins["3.1.4-tribe.15"]
     # tribe.17 = tribe.16 (same patches) with the reviewed TribeRoaming.swift.
     _xray_pins["3.1.4-tribe.17"] = _xray_pins["3.1.4-tribe.16"]
+    # tribe.18 = tribe.17 (same patches) with the TribeRoaming.swift of the second review.
+    _xray_pins["3.1.4-tribe.18"] = _xray_pins["3.1.4-tribe.17"]
 
     @property
     def _pins(self):
@@ -236,6 +240,11 @@ class AwgApple(ConanFile):
                  f'"{roaming_swift}" "{roaming_test}"')
         copy(self, "TribeRoaming.swift", src=os.path.dirname(roaming_swift),
              dst=os.path.join(self.source_folder, "Sources", "WireGuardKit"), keep_path=False)
+        # tribe.18: the RandomTrailers spellings of the ladder's service traffic = the engine's own (uapiBool).
+        if os.path.exists(os.path.join(self.source_folder, "tests", "check_engine_spellings.sh")) \
+                and "engineTrueSpellings" in open(roaming_swift, encoding="utf-8").read():
+            self.run(f'sh "{os.path.join(self.source_folder, "tests", "check_engine_spellings.sh")}" '
+                     f'"{self.source_folder}" "{roaming_swift}"')
         # tribe.14: patch 0016 makes the adapter reference TribeDataWatch.swift (absent before it;
         # tribeprobe.go of patch 0012 marks the versions that have the data watch).
         # Same rule as the roaming logic: gate the package on its unit test, then ship the file

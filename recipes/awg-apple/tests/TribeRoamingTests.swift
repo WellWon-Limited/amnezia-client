@@ -765,7 +765,7 @@ check(TribeServiceTraffic.specialJunkLength("<b 0xabcd><t><rc 7><rd 3><dz 2><d><
 check(TribeServiceTraffic.specialJunkLength("<x 5>") == nil, "unknown tag")
 check(TribeServiceTraffic.fromConfig(jc: nil, jmax: nil, s1: nil, s4: nil, specialJunk: ["<x 5>"], contentPaddingAddition: nil,
                                      randomTrailers: "on", mtu: "1400", persistentKeepalive: nil).handshakeTxBytes
-      == UInt64(1400 + 148 + 1528 + 32 + 1528), "unknown spec = one MTU, random trailers bounded by the UDP window")
+      == UInt64(1400 + 1500 + 1500), "unknown spec = one MTU; with random trailers the initiation and the keepalive stay below the UDP window (1500 here)")
 func sessionPolicy(_ traffic: TribeServiceTraffic) -> TribeRoamingPolicy {
     var policy = seamless
     policy.serviceTraffic = traffic
@@ -855,9 +855,61 @@ do {
     print("  F4 300 s gap then ticks: first action after the gap \(acted.first.map { "\($0)" } ?? "none") reported at 306/309/310/330: \([306, 309, 310, 330].map { reported[$0] ?? -9 })")
     check(!acted.contains { $0.0 < 310 }, "F4: no step within the first observation window after the gap: \(acted.prefix(2))")
     check(reported[306] == 0, "F4: no verdict on the first tick after the gap: \(String(describing: reported[306]))")
-    check((reported[330] ?? 999) <= 24, "F4: the quiet time counts only what was observed after the gap: \(String(describing: reported[330]))")
+    check((20...24).contains(reported[330] ?? -9), "F4: the stall is detected again and counts only what was observed after the gap: \(String(describing: reported[330]))")
 }
 // END REVIEW REPLAYS
+
+// BEGIN REVIEW 2 REPLAYS (the second review's tables; only the API of tribe.17 / 2e641743d: run against both)
+func sessionTraffic(_ jc: String, _ jmax: String, _ s: String, cpa: String?, rt: String?) -> TribeServiceTraffic {
+    TribeServiceTraffic.fromConfig(jc: jc, jmax: jmax, s1: s, s4: s, specialJunk: [nil, nil, nil, nil, nil],
+                                   contentPaddingAddition: cpa, randomTrailers: rt, mtu: "1280", persistentKeepalive: "25")
+}
+/// Feeds per-second (tx, rx, handshake moved) after 10 s of healthy traffic; returns the ladder's actions.
+func sessionReplay(_ policy: TribeRoamingPolicy, _ seconds: [(tx: UInt64, rx: UInt64, hs: Bool)]) -> [(Int, TribeWatchdogOutcome)] {
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var hs: Int64 = 1_800_000_000
+    var acted: [(Int, TribeWatchdogOutcome)] = []
+    for t in -10...0 { tx += 2000; rx += 2000; _ = arbiter.tick(s(tx, rx, hs, Double(t)), pathSatisfied: true, policy: policy) }
+    for (i, sec) in seconds.enumerated() {
+        tx += sec.tx; rx += sec.rx
+        if sec.hs { hs += 120 }
+        let o = arbiter.tick(s(tx, rx, hs, Double(i + 1)), pathSatisfied: true, policy: policy)
+        if o != .none { acted.append((i + 1, o)) }
+    }
+    return acted
+}
+do {
+    // G2: ContentPaddingAddition 64, S 12: one 1280-byte packet out a second (1324 B), its TCP ACK in
+    // (52 + 64 + 32 = 148 B), the handshake time unchanged: a working upload.
+    let g2 = sessionReplay(sessionPolicy(sessionTraffic("4", "50", "12", cpa: "64", rt: "0")),
+                           Array(repeating: (tx: 1324, rx: 148, hs: false), count: 60))
+    print("  G2 upload acked by 148-byte ACKs, 60 s: \(g2.isEmpty ? "no step" : "\(g2.prefix(2))")")
+    check(g2.isEmpty, "G2: a 148-byte ACK a second is data: no step: \(g2.prefix(2))")
+    // G3: RandomTrailers "1" (what our builder writes), no content padding: a re-key at 1 (4 junk of 20 B,
+    // a 600-byte initiation, a 1100-byte confirmation), then only keepalives of 1100 B every 25 s.
+    var g3seconds: [(tx: UInt64, rx: UInt64, hs: Bool)] = []
+    for t in 1...300 { g3seconds.append(t == 1 ? (tx: 1780, rx: 92, hs: true) : (tx: t % 25 == 0 ? 1100 : 0, rx: 0, hs: false)) }
+    let g3 = sessionReplay(sessionPolicy(sessionTraffic("4", "50", "12", cpa: nil, rt: "1")), g3seconds)
+    print("  G3 trailers \"1\", idle with 1100-byte keepalives, 300 s: \(g3.isEmpty ? "no step" : "\(g3.prefix(2))")")
+    check(g3.isEmpty, "G3: keepalives grown by trailers are service traffic: no step: \(g3.prefix(2))")
+    // G4: heavy junk; a re-key whose initiation (3434 B) leaves in second 1 next to 1000 B of user traffic,
+    // its response arrives in second 2 (with the 288-byte confirmation); 100 B/s of user traffic; the
+    // application answers in second 5.
+    let heavy = sessionTraffic("4", "801", "86", cpa: nil, rt: nil)
+    let g4 = sessionReplay(sessionPolicy(TribeServiceTraffic(handshakeTxBytes: heavy.handshakeTxBytes, keepaliveTxBytes: 288, keepaliveIntervalSeconds: 25)),
+                           [(tx: 1000 + 3434, rx: 0, hs: false), (tx: 100 + 288, rx: 92, hs: true), (tx: 100, rx: 0, hs: false),
+                            (tx: 100, rx: 0, hs: false), (tx: 100, rx: 1000, hs: false)])
+    print("  G4 initiation and response in different samples: \(g4.isEmpty ? "no step" : "\(g4.prefix(2))")")
+    check(g4.isEmpty, "G4: 1300 B of user traffic is no stall: \(g4.prefix(2))")
+    // ... and with the response 5 s late (a retry window): still nothing before it.
+    let g4late = sessionReplay(sessionPolicy(TribeServiceTraffic(handshakeTxBytes: heavy.handshakeTxBytes, keepaliveTxBytes: 288, keepaliveIntervalSeconds: 25)),
+                               [(tx: 1000 + 3434, rx: 0, hs: false), (tx: 100, rx: 0, hs: false), (tx: 100, rx: 0, hs: false), (tx: 100, rx: 0, hs: false),
+                                (tx: 100, rx: 0, hs: false), (tx: 100 + 288, rx: 92, hs: true), (tx: 100, rx: 1000, hs: false)])
+    print("  G4 response 5 s late: \(g4late.isEmpty ? "no step" : "\(g4late.prefix(2))")")
+    check(g4late.isEmpty, "G4: an initiation waiting for its response is not demand: \(g4late.prefix(2))")
+}
+// END REVIEW 2 REPLAYS
 
 // tribe.17: B1 with the fleet's and the heavy-junk sessions (their handshakes and keepalives in the
 // world, their service traffic in the policy): still the engine restart about 15 s after the roam.
@@ -884,9 +936,14 @@ do {
         check(steps.first.map { $0.1 == .softRestart && $0.0 <= 20 } ?? false, "B1 with the \(name) session: engine restart within 20 s: \(steps)")
     }
 }
-// tribe.17: a server's initiation is counted in rx before the handshake time moves: not data.
-check(TribeDataFlow.dataBytes(rxDelta: 148, handshakeChanged: false) == 0 && TribeDataFlow.dataBytes(rxDelta: 149, handshakeChanged: false) == 149,
-      "a lone 148-byte initiation is a handshake, not data")
+// tribe.18 (G2): a handshake only by its time moving - a 148-byte growth with the time unchanged is data
+// (a padded TCP ACK is 148 B too); tribe.17 took it for a server's initiation.
+check(TribeDataFlow.dataBytes(rxDelta: 148, handshakeChanged: false) == 148 && TribeDataFlow.dataBytes(rxDelta: 148, handshakeChanged: true) == 0,
+      "148 B is data unless the handshake time moved")
+// tribe.18 (G3): RandomTrailers as the engine reads it (PacketTunnelSettingsGenerator uapiBool).
+check(["on", "1", "true", "t", "yes", " TRUE ", "Yes"].allSatisfy { TribeServiceTraffic.engineBool($0) }
+      && !["off", "0", "false", "", "2", "enabled"].contains { TribeServiceTraffic.engineBool($0) } && !TribeServiceTraffic.engineBool(nil),
+      "the engine's spellings of on")
 
 // tribe.16: the extension's reading for the app (data_quiet_s): seconds since data last PROVED the
 // path; the echo after a step does not refresh it; unknown without a recent sample.
