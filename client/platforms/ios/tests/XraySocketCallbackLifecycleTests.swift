@@ -218,13 +218,18 @@ private func testIPv6RouteSpec() {
            "malformed CIDR is rejected")
 }
 
-// AVPN (device round air-B 24.11; review R43 F1-F3): the stop of an Xray session that is still starting, through the
-// real decisions (TunnelRuntimeSession's generation + hev phase, XrayHevStop, TunnelStartSlot, StopClosableSlot) and
-// the provider's order (stopTunnel: stopBegan at entry; stopXray: under the native gate the generation move, then the
-// hev decision; then abortForStop right before the stop's own answer; the hev worker: enterHev before it answers or
-// runs). hev itself is a faithful double of hev 2.15.0 + recipe patch 0001: its blocking quit loops until run() has
-// created the event fd (100 ms sleeps); try_quit sets stop_requested, answers -EAGAIN until hev runs, and a hev that
-// reaches run with stop_requested set quits at once.
+// AVPN (device round air-B 24.11; reviews R43 F1-F3, R46 R1-R3): the stop of an Xray session, through the real
+// decisions (TunnelRuntimeSession's generation + hev phase + run epoch, XrayHevRuns, XrayHevStop, TunnelStartSlot,
+// StopClosableSlot) in the provider's order (stopTunnel: stopBegan at entry; stopXray: under the native gate the
+// generation move, then the hev stop; then abortForStop right before the stop's own answer; the hev worker: the
+// process's run slot, then enterHev, then it answers and runs).
+// hev is a model of the native library (recipes/hev-socks5-tunnel) with both protocols of the stop request:
+//  - .scoped (patches 0001 + 0002): a request is kept only while a run is in progress and dies with it; the stopper's
+//    set-and-check and the run's publish-and-take are one critical section each, under one mutex;
+//  - .unsynchronized (patch 0001 alone, the library before R46): the request is a process-global flag that survives
+//    the run, the run publishes `run = 1` and reads the flag without the mutex. Its two stores can sit in store buffers
+//    (arm64): `storeBuffering` makes the next handshake take the order in which both sides read the other's old value.
+// Its blocking quit loops until a run has created its event fd (100 ms sleeps), like hev_socks5_tunnel_stop.
 private final class SystemCompletions: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var startAnswers: [String] = []
@@ -247,81 +252,125 @@ private final class SystemCompletions: @unchecked Sendable {
     }
 }
 
-private enum FakeStartError: Error { case superseded }
+private enum FakeStartError: Error { case superseded, hevBusy }
 
-private final class FakeHev: XrayHevControl, @unchecked Sendable {
-    private let lock = NSLock()
-    private var running = false
-    private var eventFd = false      // hev's event_fds[1] >= 0
-    private var stopRequested = false
-    private var quitEvent = false
-    private(set) var mains = 0
-    private(set) var exited = 0
-    let initMs: Int
-    init(initMs: Int) { self.initMs = initMs }
+private final class ModelHev: XrayHevControl, @unchecked Sendable {
+    enum Native { case scoped, unsynchronized }
+    let native: Native
+    private let mutex = NSLock()           // stop_mutex
+    private var scope = false              // run_scope (scoped)
+    private var running = false            // run
+    private var eventFd = false            // event_fds[1] >= 0
+    private var requested = false          // stop_requested
+    private var event = false              // the quit event written
+    var storeBuffering = false             // unsynchronized: the next handshake loses (both read old values)
+    var initMs = 20
+    private(set) var runs = 0
+    private(set) var stoppedRuns = 0       // runs that ended on a quit event
+    init(native: Native) { self.native = native }
 
-    // Socks5Tunnel.run: init creates the event fd after initMs, then run (= 1; stop_requested -> try_quit), the
-    // event loop until the quit event, then fini.
-    func main() {
-        lock.lock(); mains += 1; lock.unlock()
-        Thread.sleep(forTimeInterval: Double(initMs) / 1000)
-        lock.lock(); eventFd = true; running = true; let requested = stopRequested; lock.unlock()
-        if requested { _ = tryQuit() }
-        while true {
-            lock.lock(); let q = quitEvent; lock.unlock()
-            if q { break }
-            usleep(5_000)
+    // hev_socks5_tunnel_main_*: scope, init (the event fd), run (publish + take), the loop until the event, fini.
+    func main(runMs: Int = 60_000) {
+        mutex.lock(); runs += 1
+        if native == .scoped { scope = true; requested = false }
+        mutex.unlock()
+        usleep(useconds_t(initMs * 1000))
+        mutex.lock(); eventFd = true; mutex.unlock()
+        switch native {
+        case .scoped:
+            mutex.lock(); running = true; if requested { event = true }; mutex.unlock()
+        case .unsynchronized:
+            mutex.lock(); let lose = storeBuffering; mutex.unlock()
+            if lose {
+                // store buffering: the run's `run = 1` is not visible to the stopper yet and the stopper's request is
+                // not visible here - this check reads 0; the stopper reads run == 0 (handled in tryQuit)
+                mutex.lock(); running = true; mutex.unlock()
+            } else {
+                mutex.lock(); running = true; let r = requested; mutex.unlock()
+                if r { _ = tryQuit() }
+            }
         }
-        lock.lock(); running = false; eventFd = false; stopRequested = false; quitEvent = false; exited += 1; lock.unlock()
+        let end = Date().addingTimeInterval(Double(runMs) / 1000)
+        while Date() < end {
+            mutex.lock(); let e = event; mutex.unlock()
+            if e { mutex.lock(); stoppedRuns += 1; mutex.unlock(); break }
+            usleep(1_000)
+        }
+        mutex.lock()
+        running = false; eventFd = false; event = false
+        requested = false // fini (both protocols)
+        if native == .scoped { scope = false }
+        mutex.unlock()
     }
 
-    // hev_socks5_tunnel_stop: `for (;;) { if fd >= 0 break; usleep(100 ms) }` then the event.
+    func tryQuit() -> Int32 {
+        mutex.lock(); defer { mutex.unlock() }
+        switch native {
+        case .scoped:
+            guard scope else { return -ESRCH }
+            requested = true
+            guard running, eventFd else { return -EAGAIN }
+            event = true
+            return 0
+        case .unsynchronized:
+            requested = true
+            if storeBuffering && running {
+                storeBuffering = false // this one handshake reads the old `run`: the request is lost
+                return -EAGAIN
+            }
+            guard running, eventFd else { return -EAGAIN }
+            event = true
+            return 0
+        }
+    }
+
     func quitBlocking() {
         while true {
-            lock.lock()
-            if eventFd { quitEvent = true; lock.unlock(); return }
-            lock.unlock()
+            mutex.lock()
+            if eventFd { event = true; mutex.unlock(); return }
+            mutex.unlock()
             usleep(100_000)
         }
     }
 
-    // hev_socks5_tunnel_try_quit (patch 0001).
-    func tryQuit() -> Int32 {
-        lock.lock(); defer { lock.unlock() }
-        stopRequested = true
-        guard running, eventFd else { return -EAGAIN }
-        quitEvent = true
-        return 0
-    }
-
-    var state: (mains: Int, exited: Int) { lock.lock(); defer { lock.unlock() }; return (mains, exited) }
+    // a stale request left in the process (unsynchronized: it survives the run that set it)
+    var requestLeft: Bool { mutex.lock(); defer { mutex.unlock() }; return requested }
 }
 
 private final class FakeRenewer {}
 
-// One Xray session of the provider, modelled on its real order (PacketTunnelProvider.swift / +Xray.swift / +Upstream).
+// One Xray session of the provider, in the order of the real code (PacketTunnelProvider.swift / +Xray / +Upstream).
 private final class ProviderModel: @unchecked Sendable {
     let system = SystemCompletions()
     let slot = TunnelStartSlot()
     let gate = XrayNativeLifecycleGate()
     let session = TunnelRuntimeSession()
     let renewers = StopClosableSlot<FakeRenewer>()
-    let hev: FakeHev
+    let runs: XrayHevRuns
+    let hev: ModelHev
     let workers = DispatchGroup()
     var startAnswer: (Error?) -> Void = { _ in }
     var generation: UInt64 = 0
     var hevStop: XrayHevStop?
+    var runMs = 60_000
 
-    init(hev: FakeHev) {
+    init(hev: ModelHev, runs: XrayHevRuns = XrayHevRuns()) {
         self.hev = hev
+        self.runs = runs
         startAnswer = slot.begin { [system] in system.start($0) } // startTunnel
         renewers.reopen()                                          // beginUpstreamMeter
         generation = session.beginSession(protocolName: "xray")    // startXray
     }
 
-    // setupAndRunTun2socks: under the gate the worker is queued; the worker enters (or finds the stop), answers the
-    // start, attaches the renewer, runs hev.
-    func queueHevWorker(beforeEnter: (() -> Void)? = nil) {
+    // a core restart inside the same session (network change): stopXray {} then startXray(preservingCounters: true)
+    func restart() {
+        nativeStop()
+        generation = session.beginSession(protocolName: "xray", preservingCounters: true)
+        queueHevWorker()
+    }
+
+    // setupAndRunTun2socks + its worker
+    func queueHevWorker(beforeEnter: (() -> Void)? = nil, afterReturn: (() -> Void)? = nil) {
         let gen = generation
         let queued: Bool = gate.withExclusive {
             guard session.isCurrent(generation: gen), session.transition(to: .running, generation: gen),
@@ -333,29 +382,42 @@ private final class ProviderModel: @unchecked Sendable {
         DispatchQueue.global().async { [self] in
             defer { workers.leave() }
             beforeEnter?()
-            guard session.enterHev(generation: gen) else {
+            guard let run = runs.enter(waitSeconds: XrayHevStop.exitLimitSeconds) else {
+                session.exitHev(generation: gen)
+                startAnswer(FakeStartError.hevBusy)
+                return
+            }
+            guard session.enterHev(generation: gen, run: run) else {
+                runs.exit(run)
                 startAnswer(FakeStartError.superseded)
                 return
             }
-            if renewers.attach(FakeRenewer()) {} // attachUpstreamRenewer (refused after the stop took the slot)
+            _ = renewers.attach(FakeRenewer()) // attachUpstreamRenewer (refused after the stop took the slot)
             startAnswer(nil)
-            hev.main()
+            hev.main(runMs: runMs)
+            afterReturn?()                     // between the native return and the worker's bookkeeping
             session.exitHev(generation: gen)
+            runs.exit(run)
+        }
+    }
+
+    // stopXray's native part (the gate section)
+    func nativeStop() {
+        gate.withExclusive {
+            let stopping = session.beginStopReportingHev()
+            hevStop = XrayHevStop.execute(run: stopping.hevRun, runs: runs, hev: hev)
         }
     }
 
     // stopTunnel -> stopXrayThenReleaseUpstream -> stopXray, then the completion wrapper. Returns how long it took (ms)
     // or nil when it did not return within `bound`.
-    func stop(bound: TimeInterval = 2) -> Double? {
+    func stop(bound: TimeInterval = 3) -> Double? {
         let done = DispatchSemaphore(value: 0)
         let began = DispatchTime.now()
         DispatchQueue.global().async { [self] in
             _ = slot.stopBegan()
             _ = renewers.take()
-            gate.withExclusive {
-                let stopping = session.beginStopReportingHev()
-                hevStop = XrayHevStop.execute(hevRunning: stopping.hevRunning, hev: hev)
-            }
+            nativeStop()
             _ = slot.abortForStop()
             system.stop()
             done.signal()
@@ -363,92 +425,195 @@ private final class ProviderModel: @unchecked Sendable {
         guard done.wait(timeout: .now() + bound) == .success else { return nil }
         return Double(DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1_000_000
     }
+
+    func hevRunning() -> Bool { session.hevPhaseNow == .running }
+}
+
+private func waitUntil(_ seconds: TimeInterval, _ cond: () -> Bool) -> Bool {
+    let end = Date().addingTimeInterval(seconds)
+    while Date() < end { if cond() { return true }; usleep(1_000) }
+    return cond()
 }
 
 private func testStopDuringXrayStart() {
-    // Control: the double is faithful - the blocking quit of a hev that never started does not return (this is what
-    // stopXray did on 24.11, inside the native gate).
+    // Control: the model is faithful - the blocking quit of a hev that never started does not return.
     do {
-        let hev = FakeHev(initMs: 0)
+        let hev = ModelHev(native: .scoped)
         let returned = DispatchSemaphore(value: 0)
         DispatchQueue.global().async { hev.quitBlocking(); returned.signal() }
         expect(returned.wait(timeout: .now() + 0.6) == .timedOut, "control: the blocking quit of a hev never started returned")
     }
-    // 1. The 24.11 case: the stop comes while the start waits for its network settings (no hev worker yet); the
-    //    settings never call back. The stop returns at once, the start gets exactly one answer (an error) before the
-    //    stop's, no hev runs, no renewer attaches.
+    // 1. The 24.11 case: the stop comes while the start waits for its network settings (no hev worker yet).
     do {
-        let m = ProviderModel(hev: FakeHev(initMs: 50))
+        let m = ProviderModel(hev: ModelHev(native: .scoped))
         let ms = m.stop()
-        expect(ms != nil, "the stop of a start still waiting for its settings did not return within 2 s")
-        expect((ms ?? 99_999) < 500, "the stop took \(ms ?? -1) ms")
+        expect(ms != nil && (ms ?? 99_999) < 500, "the stop of a start still waiting for its settings took \(ms ?? -1) ms")
         expect(m.hevStop == .notRunning, "no hev to stop: \(String(describing: m.hevStop))")
         let snap = m.system.snapshot()
         expect(snap.starts == ["stopped_during_start"] && snap.order == ["start:stopped_during_start", "stop"],
                "one start answer, an error, before the stop's: \(snap)")
         m.queueHevWorker() // the settings call back after all: the stopped generation queues nothing
-        expect(m.workers.wait(timeout: .now() + 2) == .success, "no worker left")
-        expect(m.hev.state.mains == 0 && m.renewers.current == nil && m.system.snapshot().starts.count == 1,
-               "a late settings callback started hev, attached a renewer or answered again")
+        expect(m.workers.wait(timeout: .now() + 2) == .success && m.hev.runs == 0 && m.renewers.current == nil,
+               "a late settings callback started hev or attached a renewer")
     }
-    // 2. (F2) The hev worker is queued, the stop comes before it runs: the worker finds the stop - it neither answers
-    //    success nor attaches nor runs hev.
+    // 2. (R43 F2) The worker is queued, the stop comes before it enters: it neither answers success nor runs.
     do {
-        let m = ProviderModel(hev: FakeHev(initMs: 50))
+        let m = ProviderModel(hev: ModelHev(native: .scoped))
         let release = DispatchSemaphore(value: 0)
         m.queueHevWorker(beforeEnter: { _ = release.wait(timeout: .now() + 2) })
         let ms = m.stop()
         release.signal()
-        usleep(100_000) // the worker runs now
-        expect(m.hev.state.mains == 0, "a queued worker ran hev after the stop")
+        usleep(100_000)
+        expect(m.hev.runs == 0, "a queued worker ran hev after the stop")
         expect(m.workers.wait(timeout: .now() + 2) == .success, "the queued worker ended")
         expect(ms != nil && (ms ?? 99_999) < 500 && m.hevStop == .notRunning, "stop with a queued worker: \(ms ?? -1) ms")
-        expect(m.renewers.current == nil, "a queued worker attached a renewer after the stop")
-        expect(m.system.snapshot().starts == ["stopped_during_start"], "start answers: \(m.system.snapshot().starts)")
+        expect(m.renewers.current == nil && m.system.snapshot().starts == ["stopped_during_start"], "no renewer, one error")
     }
-    // 3. hev has entered and is still initialising (400 ms) when the stop comes: the non-blocking quit is deferred,
-    //    the stop returns at once, hev quits as soon as it runs.
+    // 3. hev entered and is still initialising (300 ms): the request is kept for its run, the stop waits for that
+    //    run's return - and returns as soon as it did.
     do {
-        let m = ProviderModel(hev: FakeHev(initMs: 400))
-        let entered = DispatchSemaphore(value: 0)
+        let hev = ModelHev(native: .scoped)
+        hev.initMs = 300
+        let m = ProviderModel(hev: hev)
         m.queueHevWorker()
-        DispatchQueue.global().async { while m.session.hevPhaseNow != .running { usleep(1_000) }; entered.signal() }
-        expect(entered.wait(timeout: .now() + 2) == .success, "the worker entered")
+        expect(waitUntil(2) { m.hevRunning() }, "the worker entered")
         let ms = m.stop()
-        expect(ms != nil && (ms ?? 99_999) < 300, "the stop of an initialising hev waited \(ms ?? -1) ms")
-        expect(m.hevStop == .quitDeferred(-EAGAIN), "the quit is deferred while hev initialises: \(String(describing: m.hevStop))")
-        expect(m.workers.wait(timeout: .now() + 2) == .success && m.hev.state.exited == 1, "hev quit once it ran")
-        expect(m.session.hevPhaseNow == .none, "no hev left after its exit")
-        let snap = m.system.snapshot()
-        expect(snap.starts.count == 1 && snap.order.last == "stop", "one start answer before the stop's: \(snap)")
-        // the renewer this start attached before the stop was taken by the stop - nothing outlives it
-        expect(m.renewers.current == nil, "a renewer outlived the stop")
+        expect(ms != nil && (ms ?? 99_999) < 300 + 200, "the stop of an initialising hev took \(ms ?? -1) ms")
+        if case .returned = m.hevStop {} else { expect(false, "the run must have returned: \(String(describing: m.hevStop))") }
+        expect(!m.hevRunning() && hev.stoppedRuns == 1, "the run returned before the stop completed")
+        expect(m.renewers.current == nil && m.system.snapshot().order.last == "stop", "renewer taken, stop answered last")
     }
-    // 4. hev runs: the quit is queued at once and hev exits.
+    // 4. A running hev: the stop completes after its run returned.
     do {
-        let m = ProviderModel(hev: FakeHev(initMs: 10))
+        let m = ProviderModel(hev: ModelHev(native: .scoped))
         m.queueHevWorker()
-        while m.system.snapshot().starts.isEmpty { usleep(1_000) }
+        expect(waitUntil(2) { !m.system.snapshot().starts.isEmpty }, "the start answered")
         usleep(50_000)
         let ms = m.stop()
-        expect(ms != nil && m.hevStop == .quitQueued, "the stop of a running hev: \(String(describing: m.hevStop))")
-        expect(m.workers.wait(timeout: .now() + 2) == .success && m.hev.state.exited == 1, "a running hev quit")
+        expect(ms != nil && (ms ?? 99_999) < 100, "the stop of a running hev took \(ms ?? -1) ms")
+        expect(m.hevStop == .returned(requests: 1) && !m.hevRunning(), "one request, the run returned: \(String(describing: m.hevStop))")
         expect(m.system.snapshot().starts == ["ok"], "the start that came up answered success once")
     }
-    // 5. hev exited by itself earlier: a later stop does not quit (the blocking quit would wait for ever: fds closed).
+    // 5. hev exited by itself earlier: a later stop requests nothing and waits for nothing.
     do {
-        let m = ProviderModel(hev: FakeHev(initMs: 10))
+        let m = ProviderModel(hev: ModelHev(native: .scoped))
+        m.runMs = 30
         m.queueHevWorker()
-        while m.session.hevPhaseNow != .running { usleep(1_000) }
-        usleep(30_000)
-        _ = m.hev.tryQuit() // hev ends on its own (tun2socks exit)
         expect(m.workers.wait(timeout: .now() + 2) == .success, "hev ended on its own")
         let ms = m.stop()
         expect(ms != nil && m.hevStop == .notRunning, "a stop after hev exited: \(String(describing: m.hevStop))")
     }
 }
 
-// (F3) After the stop began, a start that would report success reports an error.
+// (R46 R1a) the network-change restart inside one provider: the stop of hev-A, at once a new start of hev-B. B must
+// never meet A's stop: the stop completes only after A returned, B enters only then, and the request was A's alone.
+private func testRestartDoesNotInheritTheStop() {
+    for native in [ModelHev.Native.scoped, .unsynchronized] {
+        let m = ProviderModel(hev: ModelHev(native: native))
+        m.queueHevWorker()
+        expect(waitUntil(2) { m.hevRunning() && m.hev.runs == 1 }, "A runs")
+        usleep(30_000)
+        m.restart()
+        expect(waitUntil(2) { m.hev.runs == 2 && m.hevRunning() }, "B entered after the restart (\(native))")
+        usleep(200_000)
+        expect(m.hevRunning() && m.hev.stoppedRuns == 1, "B was stopped by A's request (\(native)): runs \(m.hev.runs) stopped \(m.hev.stoppedRuns)")
+        _ = m.stop()
+        expect(m.workers.wait(timeout: .now() + 3) == .success, "B stopped at the end")
+    }
+}
+
+// (R46 R1b) a stop that comes after A's native run returned but before the worker noted it: nothing may be left for
+// the next run. Needs the scoped native protocol (patch 0002): with the global flag of 0001 the request survives.
+private func testStopAfterReturnLeavesNothing() {
+    let hev = ModelHev(native: .scoped)
+    let m = ProviderModel(hev: hev)
+    m.runMs = 100
+    let returnedNatively = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    m.queueHevWorker(afterReturn: { returnedNatively.signal(); _ = release.wait(timeout: .now() + 2) })
+    expect(returnedNatively.wait(timeout: .now() + 2) == .success, "A returned natively")
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { release.signal() }
+    m.nativeStop() // sees A still entered: requests for A's run and waits for its bookkeeping
+    if case .returned = m.hevStop {} else { expect(false, "the stop after the native return: \(String(describing: m.hevStop))") }
+    expect(!hev.requestLeft, "a request was left behind for the next run")
+    m.generation = m.session.beginSession(protocolName: "xray", preservingCounters: true)
+    m.runMs = 60_000
+    m.queueHevWorker()
+    expect(waitUntil(2) { hev.runs == 2 && m.hevRunning() }, "B entered")
+    usleep(200_000)
+    expect(m.hevRunning() && hev.stoppedRuns == 0, "B was stopped by a request made after A had returned")
+    _ = m.stop()
+    expect(m.workers.wait(timeout: .now() + 3) == .success, "B stopped at the end")
+    // the same sequence on patch 0001 alone (the library before R46) leaves the request behind: why 0002 is needed
+    let old = ModelHev(native: .unsynchronized)
+    let o = ProviderModel(hev: old)
+    o.runMs = 100
+    let back = DispatchSemaphore(value: 0)
+    let go = DispatchSemaphore(value: 0)
+    o.queueHevWorker(afterReturn: { back.signal(); _ = go.wait(timeout: .now() + 2) })
+    expect(back.wait(timeout: .now() + 2) == .success, "0001: A returned natively")
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { go.signal() }
+    o.nativeStop()
+    expect(old.requestLeft, "0001 characterisation: a request made after the run returned is kept for the next run")
+}
+
+// (R46 R2) the handshake of one request with a starting run, in both orders, and the lost one of 0001 (store
+// buffering). One request on the scoped protocol is never lost; on 0001 it can be - and the stop's re-drive still
+// ends the run.
+private func testHandshakeOrders() {
+    // order 1: the request before the run publishes (kept, taken as it runs); order 2: after (the event)
+    for (name, delayMs) in [("request first", 0), ("run first", 60)] {
+        let hev = ModelHev(native: .scoped)
+        hev.initMs = 30
+        let runner = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { hev.main(runMs: 2_000); runner.signal() }
+        usleep(useconds_t((5 + delayMs) * 1000))
+        let rc = hev.tryQuit()
+        expect(rc == 0 || rc == -EAGAIN, "\(name): one request (rc \(rc)) is taken or queued")
+        expect(runner.wait(timeout: .now() + 1) == .success && hev.stoppedRuns == 1, "\(name): one request stops the run")
+    }
+    // 0001, the store-buffering order: one request is lost (characterises the native defect) ...
+    do {
+        let hev = ModelHev(native: .unsynchronized)
+        hev.storeBuffering = true
+        let runner = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { hev.main(runMs: 1_500); runner.signal() }
+        usleep(60_000)
+        let rc = hev.tryQuit()
+        expect(rc == -EAGAIN && runner.wait(timeout: .now() + 0.5) == .timedOut, "0001 store buffering: the one request was not lost (rc \(rc))")
+        _ = runner.wait(timeout: .now() + 2)
+    }
+    // ... and the stop drives the request again until the run returned: the run ends all the same.
+    do {
+        let hev = ModelHev(native: .unsynchronized)
+        hev.storeBuffering = true
+        let m = ProviderModel(hev: hev)
+        m.queueHevWorker()
+        expect(waitUntil(2) { m.hevRunning() }, "the run entered")
+        usleep(60_000)
+        let ms = m.stop()
+        expect(ms != nil && (ms ?? 99_999) < 500 && !m.hevRunning(), "a lost request ended the stop without the run's return (\(ms ?? -1) ms)")
+        if case .returned(let n) = m.hevStop { expect(n >= 2, "the request was driven again (\(n))") } else { expect(false, "\(String(describing: m.hevStop))") }
+    }
+}
+
+// (R46 R1) a run that never returns: the stop ends at its hard limit (loudly), and no new run enters beside it.
+private func testHevThatNeverReturns() {
+    final class StuckHev: XrayHevControl { func tryQuit() -> Int32 { 0 }; func quitBlocking() {} }
+    let runs = XrayHevRuns()
+    guard let a = runs.enter(waitSeconds: 0.1) else { expect(false, "slot"); return }
+    let began = Date()
+    let result = XrayHevStop.execute(run: a, runs: runs, hev: StuckHev(), limitSeconds: 0.3)
+    let ms = Date().timeIntervalSince(began) * 1000
+    if case .exitTimedOut = result {} else { expect(false, "a run that never returns: \(result)") }
+    expect(ms >= 290 && ms < 600, "the stop ends at its limit (\(ms) ms)")
+    expect(runs.enter(waitSeconds: 0.2) == nil, "a new run entered beside a run that never returned")
+    runs.exit(a)
+    expect(runs.enter(waitSeconds: 0.2) != nil, "a new run enters once the old one returned")
+}
+
+// (R43 F3, R46 R3) the decision of what the start delivers is made at its call: a delivery that took its answer,
+// was preempted for longer than the stop's bounds and calls after the stop began delivers the error, never success.
 private func testSuccessAfterStopBegan() {
     let system = SystemCompletions()
     let slot = TunnelStartSlot()
@@ -458,6 +623,23 @@ private func testSuccessAfterStopBegan() {
     _ = slot.abortForStop()
     system.stop()
     expect(system.snapshot().order == ["start:stopped_during_start", "stop"], "\(system.snapshot().order)")
+    // R3: the start thread takes its answer, is preempted 1.5 s (past the 1 s bound); the stop begins meanwhile
+    do {
+        let sys = SystemCompletions()
+        let s = TunnelStartSlot()
+        let taken = DispatchSemaphore(value: 0)
+        s.testHookBeforeDecision = { taken.signal(); Thread.sleep(forTimeInterval: 1.5) }
+        let answer = s.begin { sys.start($0) }
+        let startDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { answer(nil); startDone.signal() }
+        expect(taken.wait(timeout: .now() + 2) == .success, "the start took its answer")
+        _ = s.stopBegan()
+        _ = s.abortForStop()
+        sys.stop()
+        expect(startDone.wait(timeout: .now() + 3) == .success, "the start delivered")
+        let snap = sys.snapshot()
+        expect(snap.starts == ["stopped_during_start"], "a success was delivered after the stop began: \(snap.order)")
+    }
     // many threads race the start's answer and the stop: exactly one answer, always before the stop's
     for round in 0..<200 {
         let sys = SystemCompletions()
@@ -476,7 +658,7 @@ private func testSuccessAfterStopBegan() {
     }
 }
 
-// (F2) The renewer slot: a stop takes and closes, an attach after it is refused, a new session opens it again.
+// (R43 F2) The renewer slot: a stop takes and closes, an attach after it is refused, a new session opens it again.
 private func testStopClosableSlot() {
     let slot = StopClosableSlot<FakeRenewer>()
     let first = FakeRenewer()
@@ -491,6 +673,10 @@ private func testStopClosableSlot() {
 private struct XraySocketCallbackLifecycleTests {
     static func main() throws {
         testStopDuringXrayStart()
+        testRestartDoesNotInheritTheStop()
+        testStopAfterReturnLeavesNothing()
+        testHandshakeOrders()
+        testHevThatNeverReturns()
         testSuccessAfterStopBegan()
         testStopClosableSlot()
         testTrafficAccumulator()

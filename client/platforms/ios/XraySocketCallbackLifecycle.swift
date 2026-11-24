@@ -170,21 +170,24 @@ enum XraySocketCallbackTeardown {
     }
 }
 
-// AVPN (review R43 F1): the hev (tun2socks) part of an Xray stop.
+// AVPN (review R43 F1, R46 R1/R2): the hev (tun2socks) part of an Xray stop.
 //
 // hev 2.15.0's quit (hev_socks5_tunnel_quit -> hev_socks5_tunnel_stop) loops `for (;;)` until hev's event fd exists,
-// sleeping 100 ms - it waits for a hev that was started and has initialised. A stop that came before hev ran (24.11:
-// 0.2 s into an Xray start, the start still waiting for its network settings) waited there for ever, inside the native
-// gate, and after the stop's generation move hev may never start: neither the start nor the stop answered (the
-// session reached Disconnected 25 s later, most likely when the system gave up on the stuck extension). The recipe's
-// patch 0001 (recipes/hev-socks5-tunnel) adds hev_socks5_tunnel_try_quit: "Request tunnel shutdown without waiting for
-// asynchronous initialization. This function never blocks. Callers may retry while initialization is in progress.
-// Returns: zero when the request was queued, -EAGAIN when the tunnel is not ready, otherwise a negative errno value."
-// It first sets stop_requested, which hev_socks5_tunnel_run checks right after `run = 1` (a stop during hev's own
-// initialisation is kept, hev quits as soon as it runs), and hev_socks5_tunnel_fini / a failed init clear it.
-// The decision: hev not started (no worker, or one still queued - enterHev refuses it after the generation move) ->
-// nothing to quit; hev entered (initialising or running) -> the non-blocking quit, once. The blocking quit is never
-// called from a stop. Everything after it (the core stop, the callback teardown) is reached on every path.
+// sleeping 100 ms: a stop that came before hev ran (24.11: 0.2 s into an Xray start) waited there for ever, inside the
+// native gate. The non-blocking request of recipes/hev-socks5-tunnel (patches 0001 + 0002, hev_socks5_tunnel_try_quit)
+// "never blocks" and, since 0002, "belongs to the run in progress and never survives it": 0 = queued to the running
+// tunnel, -EAGAIN = a run is in progress but not running yet (kept for that run, taken as it runs), -ESRCH = no run in
+// progress (nothing kept). Its set-and-check and the run's publish-and-take share one mutex (review R46 R2).
+// The rule (R46 R1):
+//  - hev not entered (no worker, or one still queued - TunnelRuntimeSession.enterHev refuses it after the generation
+//    move): nothing to stop, no wait;
+//  - hev entered (initialising or running): the request is driven for THAT run (its epoch, XrayHevRuns) - again every
+//    retry interval, since one taken before the run reached the library is not kept - until that run has returned;
+//    the stop completes only then, bounded by exitLimitSeconds (a loud log line if hev never returns);
+//  - no worker enters a new run while an earlier run of the process has not returned (XrayHevRuns.enter).
+// The blocking quit is never called from a stop. Everything after it (the core stop, the callback teardown) is reached
+// on every path. Measured on the real library (recipes/hev-socks5-tunnel/test): a running hev returns 0.08 ms after
+// the request (median of 50, max 0.10 ms), so a stop of a running tunnel waits for practically nothing more than before.
 protocol XrayHevControl {
     /// hev_socks5_tunnel_try_quit (never blocks).
     func tryQuit() -> Int32
@@ -192,15 +195,75 @@ protocol XrayHevControl {
     func quitBlocking()
 }
 
-enum XrayHevStop: Equatable {
-    case notRunning       // no hev of this session to stop
-    case quitQueued       // hev was running: its event loop ends now
-    case quitDeferred(Int32) // hev still initialising (-EAGAIN) or another refusal: kept in stop_requested, it quits as it runs
+/// The hev runs of this process (hev is process-global): one at a time, each with its epoch.
+final class XrayHevRuns {
+    static let shared = XrayHevRuns()
+    private let cond = NSCondition()
+    private var running: UInt64 = 0 // the epoch of the run in progress, 0 = none
+    private var last: UInt64 = 0
 
-    /// Inside stopXray's native gate, right after TunnelRuntimeSession.beginStopReportingHev().
-    static func execute(hevRunning: Bool, hev: XrayHevControl) -> XrayHevStop {
-        guard hevRunning else { return .notRunning }
-        let rc = hev.tryQuit()
-        return rc == 0 ? .quitQueued : .quitDeferred(rc)
+    /// The worker, right before Socks5Tunnel.run: this run's epoch once no earlier run is in progress; nil = an
+    /// earlier run did not return within `waitSeconds` - this one must not run (two runs would share hev's state).
+    func enter(waitSeconds: TimeInterval) -> UInt64? {
+        cond.lock()
+        defer { cond.unlock() }
+        let deadline = Date().addingTimeInterval(waitSeconds)
+        while running != 0 && cond.wait(until: deadline) {}
+        guard running == 0 else { return nil }
+        last = last == UInt64.max ? 1 : last + 1
+        running = last
+        return last
+    }
+
+    /// The worker, when Socks5Tunnel.run returned (or when it entered and then did not run).
+    func exit(_ epoch: UInt64) {
+        cond.lock()
+        if running == epoch {
+            running = 0
+            cond.broadcast()
+        }
+        cond.unlock()
+    }
+
+    func inProgress(_ epoch: UInt64) -> Bool {
+        cond.lock()
+        defer { cond.unlock() }
+        return epoch != 0 && running == epoch
+    }
+
+    /// Waits until run `epoch` is no longer in progress, at most until `deadline`. true = it returned.
+    func waitReturn(_ epoch: UInt64, until deadline: Date) -> Bool {
+        cond.lock()
+        defer { cond.unlock() }
+        while epoch != 0 && running == epoch && cond.wait(until: deadline) {}
+        return !(epoch != 0 && running == epoch)
+    }
+}
+
+enum XrayHevStop: Equatable {
+    case notRunning                              // no hev of this session entered: nothing to stop, no wait
+    case returned(requests: Int)                 // the run returned; how many requests it took
+    case exitTimedOut(lastRc: Int32, requests: Int) // the run did not return within the limit (logged loudly)
+
+    static let exitLimitSeconds: TimeInterval = 2
+    static let retrySeconds: TimeInterval = 0.005
+
+    /// Inside stopXray's native gate, right after TunnelRuntimeSession.beginStopReportingHev(): `run` = the epoch of
+    /// the session's hev run (0 = none entered).
+    static func execute(run: UInt64, runs: XrayHevRuns, hev: XrayHevControl,
+                        limitSeconds: TimeInterval = exitLimitSeconds,
+                        retrySeconds: TimeInterval = retrySeconds) -> XrayHevStop {
+        guard run != 0 else { return .notRunning }
+        let deadline = Date().addingTimeInterval(limitSeconds)
+        var requests = 0
+        var lastRc: Int32 = 0
+        while runs.inProgress(run) {
+            lastRc = hev.tryQuit()
+            requests += 1
+            let next = min(deadline, Date().addingTimeInterval(retrySeconds))
+            if runs.waitReturn(run, until: next) { break }
+            if Date() >= deadline { return .exitTimedOut(lastRc: lastRc, requests: requests) }
+        }
+        return .returned(requests: requests)
     }
 }

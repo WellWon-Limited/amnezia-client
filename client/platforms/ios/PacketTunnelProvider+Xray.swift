@@ -415,14 +415,19 @@ extension PacketTunnelProvider {
             let active = xrayRuntimeSession.snapshot()
             let identity = XraySocketCallbackIdentity(generation: active.generation,
                                                       sessionId: active.sessionId)
-            // AVPN (review R43 F1): the generation move and "did a hev worker enter" in one decision; the blocking hev
-            // quit waited for ever for a hev that never started (24.11) - only the non-blocking quit, only for a hev
-            // that runs (XrayHevStop). The core and callback teardown below are reached on every path.
+            // AVPN (review R43 F1, R46 R1): the generation move and "which hev run had entered" in one decision; the
+            // blocking hev quit waited for ever for a hev that never started (24.11). A hev that entered is stopped
+            // for its own run and waited for until that run returned (bounded); none entered: no request, no wait
+            // (XrayHevStop). The core and callback teardown below are reached on every path, after hev.
             let stopping = xrayRuntimeSession.beginStopReportingHev()
             let stopGeneration = stopping.generation
             tribeScanStopAllIfUsed(reason: "core_stop") // AVPN (Scanner §2.3): inside the gate, before the core stops
-            let hevStop = XrayHevStop.execute(hevRunning: stopping.hevRunning, hev: LiveHevControl())
-            xrayLog(.info, message: "Tribe stop (xray): hev \(hevStop)")
+            let hevStop = XrayHevStop.execute(run: stopping.hevRun, runs: XrayHevRuns.shared, hev: LiveHevControl())
+            if case .exitTimedOut = hevStop {
+                xrayLog(.error, message: "Tribe stop (xray): HEV DID NOT RETURN within \(XrayHevStop.exitLimitSeconds) s (\(hevStop)); no new hev runs until it does")
+            } else {
+                xrayLog(.info, message: "Tribe stop (xray): hev \(hevStop)")
+            }
             let done: Bool
             if let identity, xraySocketCallbackRegistry.value(for: identity) != nil {
                 done = retireXrayCallback(identity: identity, stopCore: true)
@@ -773,9 +778,18 @@ extension PacketTunnelProvider {
                 return false
             }
             DispatchQueue.global().async { [weak self] in
+                // AVPN (review R46 R1): hev is process-global - this run waits until an earlier run of the process
+                // has returned (a stop waits for exactly that, bounded), and never runs beside it.
+                guard let run = XrayHevRuns.shared.enter(waitSeconds: XrayHevStop.exitLimitSeconds) else {
+                    xrayLog(.error, message: "Tribe hev: an earlier hev run did not return within \(XrayHevStop.exitLimitSeconds) s; this start does not run hev")
+                    self?.xrayRuntimeSession.exitHev(generation: sessionGeneration)
+                    completionHandler(XrayErrors.tun2socksExited)
+                    return
+                }
                 // AVPN (review R43 F2): a stop may have come after the queueing. Under the session's lock (the one its
                 // generation move takes): a stopped generation neither answers success nor attaches nor runs hev.
-                guard self?.xrayRuntimeSession.enterHev(generation: sessionGeneration) == true else {
+                guard self?.xrayRuntimeSession.enterHev(generation: sessionGeneration, run: run) == true else {
+                    XrayHevRuns.shared.exit(run)
                     completionHandler(XrayErrors.supersededSession)
                     return
                 }
@@ -784,6 +798,7 @@ extension PacketTunnelProvider {
                 completionHandler(nil)
                 let exitCode = Socks5Tunnel.run(withConfig: configurationFilePath)
                 self?.xrayRuntimeSession.exitHev(generation: sessionGeneration) // AVPN (review R43 F1): no hev to stop now
+                XrayHevRuns.shared.exit(run) // AVPN (review R46 R1): the run returned - a stop waiting for it goes on
                 self?.handleTun2socksExit(exitCode, generation: sessionGeneration)
             }
             return true
