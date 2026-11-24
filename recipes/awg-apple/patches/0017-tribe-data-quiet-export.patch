@@ -1,0 +1,13 @@
+diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -425,6 +425,9 @@ public class WireGuardAdapter {
+             self.roamCounters.recoveryUsed = UInt64(self.recovery.budget.episodeUsed)
+             self.roamCounters.recoveryDenied = self.recovery.budget.denied
+             self.roamCounters.recoveryInterventions = self.recovery.budget.interventions
++            // tribe.16: how long inbound data has not proved the path (TribeDataFlow), for the app's
++            // failover; the same judgment the stall ladder acts on. A reading, not a counter.
++            self.roamCounters.dataQuietSeconds = self.recovery.dataQuietSeconds(at: ProcessInfo.processInfo.systemUptime)
+             completionHandler(self.roamCounters)
+         }
+     }

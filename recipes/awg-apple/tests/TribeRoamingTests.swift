@@ -100,13 +100,39 @@ do {
     check(t.stage == 3 && t.persistentSteps == 5, "stage 3 after five steps past the fresh port")
 }
 
-// a fresh handshake counts as inbound progress (idle-but-healthy tunnel)
+// tribe.16: a handshake is not inbound progress (tribe.4-15 counted it, and on the 24.11 path every
+// re-key reset the ladder): the stall clock keeps running from 0 s. Only the demand is counted again
+// from the re-key at 3 s (4.5 KB minus the re-key's 1 KB is below a stall's 4 KB: it may be idle), so
+// the fresh port comes at 6 s, once 4 KB more went out unanswered (tribe.15: at 7 s, 4 s after it).
 do {
     var t = TribeStallTracker(first: s(0, 0, 100, 0))
     var tx: UInt64 = 0
-    var fired = false
-    for i in 1...20 { tx += 1500; let hs: Int64 = i >= 3 ? 200 : 100; if t.observe(s(tx, 0, hs, Double(i)), pathSatisfied: true, policy: seamless) != .none && i <= 6 { fired = true } }
-    check(!fired, "handshake at t=3 postpones the first step past t=6")
+    var rx: UInt64 = 0
+    var first: TimeInterval = -1
+    for i in 1...20 {
+        tx += 1500
+        let hs: Int64 = i >= 3 ? 200 : 100
+        if i == 3 { rx += 92 } // the response of that handshake is all that comes back
+        if t.observe(s(tx, rx, hs, Double(i)), pathSatisfied: true, policy: seamless) != .none && first < 0 { first = Double(i) }
+    }
+    check(first == 6, "handshake at t=3 does not restart the stall clock: \(first)")
+}
+
+// tribe.16: ... but it still proves an IDLE tunnel: keepalives (32 B / 25 s) and a re-key every
+// 120 s (559 B out, 92 B in) for two hours never add up to a stall.
+do {
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0
+    var rx: UInt64 = 0
+    var hs: Int64 = 100
+    var acted: [(Int, TribeWatchdogOutcome)] = []
+    for i in 1...7200 {
+        if i % 25 == 0 { tx += 32 }
+        if i % 120 == 0 { tx += 559; rx += 92; hs += 120 }
+        let o = arbiter.tick(s(tx, rx, hs, Double(i)), pathSatisfied: true, policy: seamless)
+        if o != .none { acted.append((i, o)) }
+    }
+    check(acted.isEmpty, "idle re-keying tunnel: no step and no refusal in 2 h: \(acted.prefix(3))")
 }
 
 // path unsatisfied: watchdog stays quiet no matter how stalled
@@ -275,7 +301,9 @@ for rate in [300.0, 450, 600, 750, 1000, 2000, 5000, 20000, 50000] {
 
 // Rolling cap refusal is retried after the window frees (tribe.6: stage burned, never healed).
 do {
-    let run = runStall(rate: 5000, jitter: 2, from: 31, horizon: 200, stallFrom: 35) { arbiter in
+    // tribe.16: inbound data until 45 s outlasts the echo window of the GUI fresh port at 30 s, so the
+    // episode is over and the stall from 46 s starts at the first step again.
+    let run = runStall(rate: 5000, jitter: 2, from: 31, horizon: 200, stallFrom: 45) { arbiter in
         // Four earlier GUI fresh ports, each after inbound progress: rolling window full until t=120.
         for at in [0.0, 10, 20, 30] {
             _ = arbiter.tick(s(0, UInt64(1000 + at), 100, at), pathSatisfied: true, policy: seamless)
@@ -295,10 +323,11 @@ do {
         _ = arbiter.tick(s(0, UInt64(1000 + at), 100, at), pathSatisfied: true, policy: seamless)
         _ = arbiter.requestFreshPort(s(0, UInt64(1000 + at), 100, at), pathSatisfied: true)
     }
-    _ = arbiter.tick(s(0, 2000, 100, 31), pathSatisfied: true, policy: seamless)
-    check(arbiter.tick(s(50000, 2000, 100, 40), pathSatisfied: true, policy: seamless) == .denied(.rebindPort, .rollingCap), "cap refusal reported")
+    // tribe.16: inbound data 11 s after the last GUI fresh port (past its echo window) ends the episode.
+    _ = arbiter.tick(s(0, 2000, 100, 41), pathSatisfied: true, policy: seamless)
+    check(arbiter.tick(s(50000, 2000, 100, 50), pathSatisfied: true, policy: seamless) == .denied(.rebindPort, .rollingCap), "cap refusal reported")
     check(arbiter.tracker?.stage == 0, "stage not burned by the refusal")
-    check(arbiter.tick(s(51000, 2000, 100, 41), pathSatisfied: true, policy: seamless) == .denied(.rebindPort, .rollingCap), "same step proposed again")
+    check(arbiter.tick(s(51000, 2000, 100, 51), pathSatisfied: true, policy: seamless) == .denied(.rebindPort, .rollingCap), "same step proposed again")
 }
 
 // GUI fresh port before the watchdog's own: recorded as the episode's step, the watchdog goes on to
@@ -499,7 +528,11 @@ do {
     check(after.map { $0.1 } == [.rebindPort, .softRestart, .rebindPort], "after progress: fresh port, soft restart, stage-3 fresh port: \(after)")
     check(after.first.map { $0.0 - 130 <= 6 } ?? false, "fresh episode starts at the probe window: \(after)")
     check(gaps(after).last == 30, "backoff restarted at 30 s: \(after)")
-    var progressed = runPersistent(rate: 1000, horizon: 232, progressAt: [230]).arbiter
+    // tribe.16: inbound bytes 4 s after the stage-3 fresh port at 226 s are its echo: the stage and the
+    // backoff stay; inbound bytes 14 s after it are data and end the episode.
+    let echoed = runPersistent(rate: 1000, horizon: 232, progressAt: [230]).arbiter
+    check(echoed.tracker?.stage == 3 && echoed.tracker?.persistentSteps == 4, "echo of the step: stage 3 and its backoff kept")
+    var progressed = runPersistent(rate: 1000, horizon: 242, progressAt: [240]).arbiter
     check(progressed.tracker?.stage == 0 && progressed.tracker?.persistentSteps == 0, "progress: stage 0, backoff reset")
     _ = progressed.tick(s(1, 1, 1, 251), pathSatisfied: true, policy: seamless) // counters reset tolerated
 }
@@ -519,10 +552,12 @@ do {
 // the refusal does not advance the sequence or the backoff (rule D1).
 do {
     var guiRefusedAt: [Double] = []
-    let run = runPersistent(rate: 5000, horizon: 200, progressAt: Set(1...13)) { tick, arbiter, sample in
-        // Two GUI fresh ports after inbound progress (10 s apart = the same-kind cooldown). The
-        // watchdog's own fresh port falls due at 17 s and waits for the cooldown until 21 s, the
-        // soft restart follows at 27 s: the rolling window then holds 4 interventions until t=121.
+    let run = runPersistent(rate: 5000, horizon: 200, progressAt: Set(1...21)) { tick, arbiter, sample in
+        // Two GUI fresh ports after inbound progress (10 s apart = the same-kind cooldown). tribe.16:
+        // inbound data until 21 s outlasts the echo window of the second one (11 s), the watchdog's
+        // own fresh port follows at 26 s (no cooldown refusal is possible any more: the echo window
+        // is not shorter than the cooldown), the soft restart at 36 s: the rolling window then holds
+        // 4 interventions until t=121.
         if tick == 1 || tick == 11 {
             if arbiter.requestFreshPort(sample, pathSatisfied: true) != .performed { guiRefusedAt.append(sample.at) }
         }
@@ -537,7 +572,7 @@ do {
     check(persistent.count > 1 && persistent[1].0 == 181 && persistent[1].1 == .softRestart, "next step 60 s after the late one: \(run.performed)")
     let capDenials = run.outcomes.filter { if case .denied(_, .rollingCap) = $0.1 { return true } else { return false } }
     check(capDenials.first.map { $0.1 == .denied(.rebindPort, .rollingCap) } ?? false, "cap refusal reported when the step fell due: \(capDenials.first.map { "\($0)" } ?? "none")")
-    check(run.arbiter.budget.denied == 2, "two denial streaks (cooldown, then cap), not one per tick: \(run.arbiter.budget.denied)")
+    check(run.arbiter.budget.denied == 1, "one denial streak (the cap), not one per tick: \(run.arbiter.budget.denied)")
 }
 
 // Tracker level: whatever refuses the step (budget), the step fires later and the backoff counts
@@ -571,8 +606,12 @@ do {
     // until rx exceeded the OLD device's total).
     _ = arbiter.tick(s(600, 0, 0, 22), pathSatisfied: true, policy: seamless)
     check(arbiter.tracker?.stage == 3, "rebased counters: no false progress")
-    _ = arbiter.tick(s(700, 40, 1_700_000_000, 23), pathSatisfied: true, policy: seamless)
-    check(arbiter.tracker?.stage == 0 && arbiter.budget.episodeUsed == 0, "new device's handshake/rx = progress, episode re-armed")
+    // tribe.16: the new device's handshake response (92 B) is not data: stage and episode stay ...
+    _ = arbiter.tick(s(700, 92, 1_700_000_000, 23), pathSatisfied: true, policy: seamless)
+    check(arbiter.tracker?.stage == 3 && arbiter.budget.episodeUsed == 3, "new device's handshake alone is not progress")
+    // ... its first data bytes (past the soft restart's echo window) are.
+    _ = arbiter.tick(s(750, 1092, 1_700_000_000, 24), pathSatisfied: true, policy: seamless)
+    check(arbiter.tracker?.stage == 0 && arbiter.budget.episodeUsed == 0, "new device's data = progress, episode re-armed")
     check(arbiter.requestSoftRestart(s(800, 40, 1_700_000_000, 40), pathSatisfied: true) == .performed, "re-armed after progress (cooldown elapsed)")
 }
 do {
@@ -619,6 +658,130 @@ check(TribeSoftRestartResult.budget(.episode).responsePayload == ["soft_restart"
 check(TribeSoftRestartResult.notStarted.responsePayload == ["soft_restart": "denied", "reason": "not_started"], "soft restart not started payload")
 check(TribeSoftRestartResult.offline.responsePayload == ["soft_restart": "denied", "reason": "offline"], "soft restart offline payload")
 check(TribeSoftRestartResult.failed.responsePayload == ["soft_restart": "denied", "reason": "failed"], "soft restart failure payload")
+
+// BEGIN B1 REPLAY (uses only the API of tribe.15 too: the same section runs against the old file)
+// tribe.16, device round 24.11, case B1 (iPhone Air, 5.1.111 / 141, AmneziaWG node 12, LTE -> Wi-Fi):
+// at the roam the path changes; from then on every new local port (and every new device) gets about
+// one second of data back, then nothing, while the phone keeps sending (1.5 KB/s: the ladder saw 4 KB
+// of demand within 4-5 s of each burst) and handshakes keep completing (every 12 s: 92 B in, 422 B
+// out). Field counters over the 493 s until the app's failover: roam_fresh_ports 1, stall_rebinds 17,
+// soft_restarts 0, stall_persistent 0, recovery_denied 0 -> 15.
+struct PathReplay {
+    var steps: [(at: Double, action: TribeStallAction)] = []
+    var denials = 0
+    var freshPorts: Int { steps.filter { $0.action == .rebindPort }.count }
+    var softRestarts: [Double] { steps.filter { $0.action == .softRestart }.map { $0.at } }
+}
+/// 30 s of healthy LTE, the roam fresh port at 0 s, then `horizon` seconds of the new path:
+/// `rx(t, s)` = data bytes back in second `t` after the roam, `s` seconds after the last new port or device.
+func replayRoam(horizon: Int, demand: UInt64 = 1500, handshakeEvery: Int = 12,
+                rx rxAt: (Int, Int) -> UInt64) -> PathReplay {
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var out = PathReplay()
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var hs: Int64 = 1_800_000_000
+    var newPortAt = 0
+    var deviceHandshakeDue = false
+    for t in -30...horizon {
+        tx += demand
+        if deviceHandshakeDue || (t % handshakeEvery == 0 && hs > 0) {
+            deviceHandshakeDue = false
+            tx += 422; rx += 92; hs = 1_800_000_000 + Int64(t + 30)
+        }
+        rx += t < 0 ? 20_000 : rxAt(t, t - newPortAt)
+        let sample = s(tx, rx, hs, Double(t))
+        if t == 0 { arbiter.noteRoamRebind(sample, freshPort: true); newPortAt = 0; continue }
+        switch arbiter.tick(sample, pathSatisfied: true, policy: seamless) {
+        case .perform(let action):
+            out.steps.append((Double(t), action))
+            newPortAt = t
+            if action == .softRestart {
+                tx = 0; rx = 0; hs = 0; deviceHandshakeDue = true
+                arbiter.rebaseAfterBackendRestart(s(tx, rx, hs, Double(t)))
+            }
+        case .denied:
+            out.denials += 1
+        case .none:
+            break
+        }
+    }
+    return out
+}
+func describe(_ r: PathReplay) -> String {
+    "fresh_ports=\(r.freshPorts) soft_restarts=\(r.softRestarts.count) denied_ticks=\(r.denials) steps=\(r.steps.map { "\($0.action.logName)@+\(Int($0.at))s" }.joined(separator: ","))"
+}
+do {
+    // B1: one second of echo after every new port, then silence, for 493 s (until the field failover).
+    let b1 = replayRoam(horizon: 493) { _, sincePort in sincePort == 1 ? 20_000 : 0 }
+    print("  B1 replay (493 s): \(describe(b1))")
+    check(b1.softRestarts.first.map { $0 <= 20 } ?? false, "B1: the engine restart comes within 20 s of the roam: \(describe(b1))")
+    check(b1.steps.first?.action == .softRestart, "B1: the first ladder step after the roam fresh port is the engine restart, not another port: \(describe(b1))")
+    check(b1.freshPorts <= 3, "B1: no fresh-port loop (field: 17): \(describe(b1))")
+    // Healthy roam: data resumes after the roam fresh port and lasts. Nothing is restarted.
+    let healthy = replayRoam(horizon: 600) { _, _ in 20_000 }
+    print("  healthy roam (600 s): \(describe(healthy))")
+    check(healthy.steps.isEmpty && healthy.denials == 0, "healthy roam: no step at all: \(describe(healthy))")
+    // Slow but working: little data with long gaps under 1.5 KB/s of demand (500 B every 7 s, 2 KB every
+    // 13 s; a gap of 14 s or more under 8 KB of demand is a stall for tribe.15 as well). Fresh ports
+    // within the rolling cap (as tribe.15), never an engine restart.
+    for (gap, bytes) in [(7, UInt64(500)), (13, UInt64(2_000))] {
+        let slow = replayRoam(horizon: 1200) { t, _ in t % gap == 0 && t > 0 ? bytes : 0 }
+        // steps in every rolling 120 s window (each step opens one)
+        var perWindow: [Int] = []
+        for step in slow.steps {
+            let start: Double = step.at
+            perWindow.append(slow.steps.filter { (other: (at: Double, action: TribeStallAction)) -> Bool in other.at >= start && other.at < start + 120 }.count)
+        }
+        print("  slow path every \(gap) s (1200 s): \(describe(slow).prefix(160)) max_steps_per_120s=\(perWindow.max() ?? 0)")
+        check(slow.softRestarts.isEmpty, "slow path (data every \(gap) s): no engine restart: \(describe(slow))")
+        check(perWindow.allSatisfy { $0 <= TribeRecoveryBudget.rollingCap }, "slow path: within the rolling cap: \(perWindow)")
+    }
+}
+// END B1 REPLAY
+
+// tribe.16: the extension's reading for the app (data_quiet_s): seconds since data last PROVED the
+// path; the echo after a step does not refresh it; unknown without a recent sample.
+do {
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    check(arbiter.dataQuietSeconds(at: 0) == -1, "no sample yet: unknown")
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var quiet: [Int: Int64] = [:]
+    for t in 1...60 {
+        tx += 1500
+        if t <= 10 || t == 12 || t >= 40 { rx += 5000 } // data, the roam at 11 s, its echo at 12 s, data again from 40 s
+        let sample = s(tx, rx, 100, Double(t))
+        if t == 11 { arbiter.noteRoamRebind(sample, freshPort: true) }
+        _ = arbiter.tick(sample, pathSatisfied: true, policy: seamless)
+        quiet[t] = arbiter.dataQuietSeconds(at: Double(t))
+    }
+    check(quiet[10] == 0, "data flowing: 0 s: \(String(describing: quiet[10]))")
+    check(quiet[12] == 2 && quiet[20] == 10, "the echo at 12 s does not refresh it: \(String(describing: quiet[12])) \(String(describing: quiet[20]))")
+    check(quiet[39] == 29 && quiet[40] == 0, "data 29 s after the roam proves the path again: \(String(describing: quiet[39])) \(String(describing: quiet[40]))")
+    check(arbiter.dataQuietSeconds(at: 60 + TribeRecoveryArbiter.quietSampleMaxAgeSeconds + 1) == -1, "stale samples: unknown")
+    var counters = TribeRoamingCounters()
+    counters.dataQuietSeconds = 7
+    check(counters.asDictionary["data_quiet_s"] == nil && !counters.summary.contains("quiet"), "a reading, not a journaled counter")
+    // One definition: the data watch deducts the same handshake bytes (its file compiles alone).
+    check(TribeDataFlow.dataBytes(rxDelta: 92, handshakeChanged: true) == 0 && TribeDataFlow.dataBytes(rxDelta: 148, handshakeChanged: true) == 0
+          && TribeDataFlow.dataBytes(rxDelta: 180, handshakeChanged: true) == 32 && TribeDataFlow.dataBytes(rxDelta: 92, handshakeChanged: false) == 92,
+          "handshake bytes are not data")
+    check(TribeDataFlow.provesFlow(dataAt: 19.9, lastRepairAt: 10, window: 10) == false && TribeDataFlow.provesFlow(dataAt: 20, lastRepairAt: 10, window: 10)
+          && TribeDataFlow.provesFlow(dataAt: 11, lastRepairAt: nil, window: 10) && TribeDataFlow.provesFlow(dataAt: 11, lastRepairAt: 10, window: 0),
+          "echo window")
+    // A server-set second stage longer than the stage-3 backoff: an echo still moving the stall clock
+    // never lets a stage-3 step fire while data is arriving.
+    var long = seamless; long.stallRebindSeconds = 60
+    var t3 = TribeStallTracker(first: s(0, 0, 100, 0))
+    var acts: [(Int, TribeStallAction)] = []
+    var rx3: UInt64 = 0
+    for i in 1...200 {
+        if (70...100).contains(i) { rx3 += 100 } // a trickle 6..36 s after the soft restart at 64 s: its echo
+        let a = t3.observe(s(UInt64(i * 2000), rx3, 100, Double(i)), pathSatisfied: true, policy: long, persistent: true) { _ in true }
+        if a != .none { acts.append((i, a)) }
+    }
+    check(acts.prefix(3).map { $0.0 } == [4, 64, 104] && acts.dropFirst(2).first?.1 == .rebindPort,
+          "the stage-3 fresh port due at 94 s waits for a stall (104 s), not during the echo: \(acts)")
+}
 
 // patch 0015: the backend hook runs the callback first, then the operation; nil changes nothing.
 do {
