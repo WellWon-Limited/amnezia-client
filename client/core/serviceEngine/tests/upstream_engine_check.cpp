@@ -2431,6 +2431,144 @@ static void sessionReleaseRetry()
     CHECK(run({409}, kSeatReleaseRetryBudgetMs, &deletes) == 1 && deletes == 1);
 }
 
+// --- device round air-C 24.11 (iPhone Air, 21:53 UTC): the release after a Stop and ONE host rule --------------------------------
+// The primary API host took the connection and never answered (maintenance at the hoster): the seat release went 12 times to it,
+// each try cut at its 1.5 s bound, and gave up ("left to the server's TTL") while the second host answered; a late DELETE freed
+// the seat 68 s after the Stop. With the host rule (UpstreamLeaseWire.h::upstreamDirectBase) the try after a silent one goes to the
+// walk's next edge: the release is answered within its bound, and the lease requests that follow (release, acquire) go there too
+// while the mark lasts. A request through the tunnel (the lease's tunnel_api_base) is never redirected; a client without a next
+// edge behaves as before.
+static void releaseHostFallback()
+{
+    TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {});
+    struct Edge {
+        QTcpServer server;
+        bool silent = false; // accepts and reads, never answers
+        int deletes = 0, posts = 0;
+        explicit Edge(bool quiet) : silent(quiet)
+        {
+            server.listen(QHostAddress::LocalHost);
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [this]() {
+                while (QTcpSocket *s = server.nextPendingConnection()) {
+                    QObject::connect(s, &QTcpSocket::readyRead, s, [this, s]() {
+                        const QByteArray rq = s->readAll();
+                        const bool del = rq.startsWith("DELETE /v1/upstream/lease/");
+                        const bool acq = rq.startsWith("POST /v1/upstream/lease ");
+                        deletes += del ? 1 : 0;
+                        posts += acq ? 1 : 0;
+                        if (silent || (!del && !acq))
+                            return;
+                        const QByteArray body = del ? QByteArray() : QByteArrayLiteral(R"({"code":"no_seat","retry_after_s":30})");
+                        s->write((del ? QByteArrayLiteral("HTTP/1.1 204 X\r\n") : QByteArrayLiteral("HTTP/1.1 409 X\r\nContent-Type: application/json\r\n"))
+                                 + "X-Tribe-Api: 1\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                        s->disconnectFromHost();
+                    });
+                }
+            });
+        }
+        QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()); }
+    };
+    const auto pump = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    };
+    const QString lease7 = QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID0007"), lease8 = QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID0008");
+    {
+        Edge primary(true), fallback(false);
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        const QString p = primary.base(), f = fallback.base();
+        client.configure(&nam, [p] { return p; }, QStringLiteral("00"), [] { return QStringLiteral("token"); });
+        client.setNextDirectBase([p, f](const QString &b) { return b == p ? f : (b == f ? p : QString()); });
+        int result = -1;
+        qint64 doneMs = -1;
+        QElapsedTimer t;
+        t.start();
+        client.onReleaseDone = [&](quint64, bool confirmed) {
+            result = confirmed ? 1 : 0;
+            doneMs = t.elapsed();
+        };
+        client.release(7, lease7, UpstreamMeter{}, LeaseRoute{}); // the release after the confirmed stop (direct route)
+        while (result < 0 && t.elapsed() < 25000)
+            pump(20);
+        std::printf("release host fallback: result=%d primary_deletes=%d fallback_deletes=%d ms=%lld\n", result, primary.deletes,
+                    fallback.deletes, (long long)doneMs);
+        CHECK(result == 1 && primary.deletes == 1 && fallback.deletes == 1);
+        // within the release's own bound: one cut try (1.5 s), the first spacing (300 ms), one answered try
+        CHECK(doneMs > 0 && doneMs < 2 * kUpstreamReleaseTimeoutMs + dataCheckRetryDelayMs(1) + 500);
+        // The next lease requests on the direct route go to the answering host at once - a release and an acquire (ONE rule).
+        result = -1;
+        t.restart();
+        client.release(8, lease8, UpstreamMeter{}, LeaseRoute{});
+        while (result < 0 && t.elapsed() < 5000)
+            pump(20);
+        CHECK(result == 1 && primary.deletes == 1 && fallback.deletes == 2 && t.elapsed() < kUpstreamReleaseTimeoutMs);
+        bool acquired = false;
+        AcquireReply ar;
+        client.onAcquire = [&](quint64, const AcquireReply &r) { acquired = true; ar = r; };
+        client.acquire(9, QStringLiteral("aaaaaaaaaaaaaaa0"), LeaseKind::Session, QString(), LeaseRoute{},
+                       QStringLiteral("nonce-nonce-nonce-0009"), 9, false);
+        t.restart();
+        while (!acquired && t.elapsed() < 5000)
+            pump(20);
+        CHECK(acquired && ar.kind == LeaseReplyKind::Refused && ar.error.code == UpstreamErrorCode::NoSeat);
+        CHECK(fallback.posts == 1 && primary.posts == 0);
+        // A request through the tunnel (the lease's tunnel_api_base) is never redirected, however silent its host.
+        client.releaseRetryBudgetMs = 0; // one try
+        result = -1;
+        t.restart();
+        client.releaseVia(10, lease7, UpstreamMeter{}, LeaseRoute{QString(), p});
+        while (result < 0 && t.elapsed() < 5000)
+            pump(20);
+        CHECK(result == 0 && primary.deletes == 2 && fallback.deletes == 2);
+    }
+    // An acquire whose full wait passed with no answer marks its host too: the following release goes to the other host first.
+    {
+        Edge primary(true), fallback(false);
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        const QString p = primary.base(), f = fallback.base();
+        client.configure(&nam, [p] { return p; }, QStringLiteral("00"), [] { return QStringLiteral("token"); });
+        client.setNextDirectBase([p, f](const QString &b) { return b == p ? f : (b == f ? p : QString()); });
+        bool acquired = false;
+        client.onAcquire = [&](quint64, const AcquireReply &) { acquired = true; };
+        client.acquire(11, QStringLiteral("aaaaaaaaaaaaaaa0"), LeaseKind::Session, QString(), LeaseRoute{},
+                       QStringLiteral("nonce-nonce-nonce-0011"), 11, /*hedged=*/false);
+        QElapsedTimer t;
+        t.start();
+        while (!acquired && t.elapsed() < 6000)
+            pump(20);
+        CHECK(acquired && primary.posts == 1);
+        int result = -1;
+        client.onReleaseDone = [&](quint64, bool confirmed) { result = confirmed ? 1 : 0; };
+        t.restart();
+        client.release(12, lease8, UpstreamMeter{}, LeaseRoute{});
+        while (result < 0 && t.elapsed() < 5000)
+            pump(20);
+        CHECK(result == 1 && primary.deletes == 0 && fallback.deletes == 1);
+    }
+    // A bare client (no next edge): every try goes to the walk's edge, as before.
+    {
+        Edge primary(true);
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        const QString p = primary.base();
+        client.configure(&nam, [p] { return p; }, QStringLiteral("00"), [] { return QStringLiteral("token"); });
+        client.releaseRetryBudgetMs = 2500; // two resends (sessionReleaseRetry: the same budget, three tries)
+        int result = -1;
+        client.onReleaseDone = [&](quint64, bool confirmed) { result = confirmed ? 1 : 0; };
+        client.release(13, lease7, UpstreamMeter{}, LeaseRoute{});
+        QElapsedTimer t;
+        t.start();
+        while (result < 0 && t.elapsed() < 8000)
+            pump(20);
+        CHECK(result == 0 && primary.deletes == 3);
+    }
+    TuningStore::set({}, {}, {}, {});
+}
+
 // S3 (device round 10): a provider leg that never put a lease request or a tunnel start on the network (held by our own
 // bookkeeping, refused locally) must not be written as the path's no_handshake - the server proven a minute ago was
 // pushed behind every untried one by exactly that. A leg that really sent and got nothing is still recorded.
@@ -5277,6 +5415,7 @@ int main(int argc, char **argv)
     dataCheck();
     standbyAndStatus();
     envelopeAndParsing();
+    releaseHostFallback();
     if (g_fail) {
         std::printf("upstream_engine_check: %d of %d FAILED\n", g_fail, g_total);
         return 1;

@@ -319,6 +319,57 @@ inline SeatReleaseNext seatReleaseNext(int httpStatus, int retriesSoFar, qint64 
     return n;
 }
 
+// ONE host rule of the lease requests (device round air-C 24.11, 21:53 UTC, iPhone Air): after a Stop the seat release went 12
+// times to the primary API host, each try cut at its 1.5 s bound (maintenance at the hoster), and gave up - "left to the server's
+// TTL" - while the second host answered; a late DELETE freed the seat 68 s after the Stop. Every lease request (acquire, renew,
+// release and each resend) took the edge walk's direct edge at send time (ConfigService::activeBaseUrl), and no lease request
+// ever told anybody that the edge was silent: the walk moves on the facade's own requests, and after a Stop nothing else asked
+// the API, so the edge stayed for the release's whole budget. The acquires of that round reached the second host only once the
+// walk had moved for other reasons (or through a tunnel's session edge) - the acquire had no fallback of its own either.
+// The rule, for every lease request on the DIRECT route (an empty route.apiBase; a request through the tunnel - the lease's
+// tunnel_api_base - is never redirected): the walk's edge, unless the last lease request to THAT edge ended silent less than
+// kUpstreamEdgeMarkMs ago - then the walk's next edge (upstreamDirectBase). Silent = no answer of the API: no HTTP answer, the
+// request's own bound, a foreign answer (upstreamHostOutcome); the app's own abort (a tunnel transition's API reset, a stop)
+// says nothing. An answer of the API on the marked edge clears the mark; a silent end on the other edge moves the mark there,
+// so consecutive silent tries alternate between the hosts (upstreamEdgeMarkAfter). Each try keeps its own bound and a release
+// its retry budget: a Stop never waits longer, the second host is only tried within that bound. Tests: upstream_lease_check
+// hostRule, upstream_engine_check releaseHostFallback.
+enum class UpstreamHostOutcome { Answered, Silent, NoVerdict };
+inline UpstreamHostOutcome upstreamHostOutcome(int httpStatus, bool fromTribeApi, bool canceled, bool timedOut)
+{
+    if (httpStatus > 0 && fromTribeApi)
+        return UpstreamHostOutcome::Answered; // any status: the host and the API answered (a 5xx is the API's, resent as before)
+    if (httpStatus <= 0 && canceled && !timedOut)
+        return UpstreamHostOutcome::NoVerdict; // cut by the app itself, not by the request's bound
+    return UpstreamHostOutcome::Silent;
+}
+struct UpstreamEdgeMark {
+    QString base;     // the edge whose last lease request ended silent ("" = none)
+    qint64 atMs = -1; // when (the wall clock of the client)
+};
+inline constexpr qint64 kUpstreamEdgeMarkMs = 60000;
+inline QString upstreamDirectBase(const QString &walkEdge, const QString &nextEdge, const UpstreamEdgeMark &mark, qint64 nowMs)
+{
+    const bool walkSilent = !walkEdge.isEmpty() && mark.base == walkEdge && mark.atMs >= 0 && nowMs >= mark.atMs
+                            && nowMs - mark.atMs < kUpstreamEdgeMarkMs;
+    return walkSilent && !nextEdge.isEmpty() && nextEdge != walkEdge ? nextEdge : walkEdge;
+}
+inline UpstreamEdgeMark upstreamEdgeMarkAfter(const UpstreamEdgeMark &mark, const QString &base, UpstreamHostOutcome outcome,
+                                              qint64 nowMs)
+{
+    if (base.isEmpty())
+        return mark;
+    switch (outcome) {
+    case UpstreamHostOutcome::Answered:
+        return mark.base == base ? UpstreamEdgeMark{} : mark;
+    case UpstreamHostOutcome::Silent:
+        return UpstreamEdgeMark{base, nowMs};
+    case UpstreamHostOutcome::NoVerdict:
+        break;
+    }
+    return mark;
+}
+
 // The session nonce of an acquire (contract 1.19.0): client-random, 16..64 characters of [A-Za-z0-9_-], ONE per START of a
 // provider session and never reused by a later start. A nonce names ONE tenure of a seat: every acquire of that start (the direct
 // request, the seat confirmation through the tunnel, retries) carries the same one and gets the same lease id and renew token

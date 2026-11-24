@@ -42,6 +42,10 @@ public:
     // R1a: the edge a DIRECT request goes to now (no tunnel carries it): the walk's edge of this run, never the
     // session edge - a new leg's seat request and a release after a stop use this.
     QString directBaseUrl() const { return m_activeBase; }
+    // The edge after `base` in the walk's own order (the stored edges, then the baked ones; EdgeWalk.h::nextEdge) - where a lease
+    // request on the direct route goes when the last one to `base` got no answer (UpstreamLeaseWire.h::upstreamDirectBase). Moves
+    // nothing. "" = nowhere else to go (a pinned dev backend, a single edge).
+    QString nextEdgeAfter(const QString &base) const;
     // AVPN upstream nodes: the config signing key (dev or prod, as chosen by the facade) - the lease
     // answer is signed by the same key under its own context (SignedContext.h).
     const QString &publicKeyHex() const { return m_pubKeyHex; }
