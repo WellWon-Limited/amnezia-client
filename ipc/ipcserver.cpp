@@ -182,6 +182,13 @@ bool IpcServer::updateResolvers(const QString &ifname, const QList<QHostAddress>
     qDebug() << "IpcServer::updateResolvers";
 #endif
 
+#ifdef Q_OS_MACOS
+    // AVPN (diag): the resolvers a tunnel session hands the system (the queries the Xray core sees).
+    QStringList resolverList;
+    for (const QHostAddress &resolver : resolvers)
+        resolverList.append(resolver.toString());
+    qDebug().noquote() << "[dns] resolvers for" << ifname << ":" << resolverList.join(QStringLiteral(", "));
+#endif
     return Router::updateResolvers(ifname, resolvers);
 }
 
@@ -223,6 +230,7 @@ void IpcServer::setLogsEnabled(bool enabled)
     } else {
         Logger::deInit();
     }
+    Xray::getInstance().setDiagnosticsEnabled(enabled); // AVPN: core failures in the service log (xraysession.h)
 }
 
 bool IpcServer::startNetworkCheck(const QString& serverIpv4Gateway, const QString& deviceIpv4Address)

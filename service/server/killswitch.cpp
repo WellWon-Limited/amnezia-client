@@ -432,6 +432,9 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
     MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), true);
     MacOSFirewall::setAnchorTable(QStringLiteral("310.blockDNS"), true, QStringLiteral("dnsaddr"), dnsServers);
     MacOSFirewall::setAnchorEnabled(QStringLiteral("400.allowPIA"), true);
+    // AVPN (diag): what the kill switch lets out - the server and the resolvers of this session.
+    qDebug().noquote() << "[killswitch] split" << splitTunnelType << "allownets:" << allownets.join(QStringLiteral(", "))
+                       << "| dnsaddr:" << dnsServers.join(QStringLiteral(", "));
 #endif
     return true;
 }

@@ -5,6 +5,9 @@
 #include <QJsonObject>   // AVPN
 #include <QString>
 
+#include <atomic>        // AVPN
+#include "xraysession.h" // AVPN: core session rule + diagnostics
+
 // AVPN: reset-safe аккумулятор кумулятивных счётчиков интерфейса tun2socks (utun).
 // Контракт CONNECT-INVARIANTS §17.1: наружу отдаём КУМУЛЯТИВ с подъёма xray-сессии, не дельты.
 //  - первый замер после старта — база (utun мог существовать до нас с чужими байтами);
@@ -75,6 +78,11 @@ public:
     // counter source exists, i.e. Linux - counters are honest zeros), source.
     QJsonObject runtimeStatus(const QString& ifaceHint);
 
+    // AVPN: the service log switch (IpcServer::setLogsEnabled). On macOS it also raises the core's
+    // log level to "info" for the next start, keeping only the lines that report a failure
+    // (xraysession.h xrayDiagConfig / xrayKeepCoreLine).
+    void setDiagnosticsEnabled(bool enabled) { m_diagnostics = enabled; }
+
 private:
     static void ctxSockCallback(uintptr_t fd, void* ctx) {
         reinterpret_cast<Xray*>(ctx)->sockCallback(fd);
@@ -103,6 +111,16 @@ private:
     qint64 m_startedAtMs = 0;
     QElapsedTimer m_since;
     XrayTrafficAccumulator m_traffic;
+
+    // AVPN (macOS): one close per core instance, a start only on a closed core (xraysession.h).
+    avpn::XrayCoreSession m_core;
+    bool m_diagnostics = false;
+    // Read by logHandler / sockCallback on the core's Go threads.
+    std::atomic<bool> m_levelRaised{false};
+    std::atomic<quint32> m_droppedInfoLines{0};
+    std::atomic<quint32> m_bindOk{0};
+    std::atomic<quint32> m_bindFailed{0};
+    std::atomic<int> m_bindFirstErrno{0};
 };
 
 #endif // XRAY_H
