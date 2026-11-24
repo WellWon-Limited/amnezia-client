@@ -326,6 +326,23 @@ foreach(avpn_label_src main.cpp ui/controllers/settingsUiController.cpp core/con
                  OBJECT_DEPENDS ${AVPN_GIT_COMMIT_HEADER})
 endforeach()
 
+# Desktop test rig (24.11.2026): the test command channel - a local socket in the app's data directory through which
+# an agent presses the app's buttons and reads its state (core/serviceEngine/DevControl.h, DevControlApp.h). Desktop
+# development builds only: AVPN_DEV_TOOLS=ON on macOS desktop, Windows or Linux; never iOS, Android, the macOS
+# Network Extension build or any build without AVPN_DEV_TOOLS (the default). Without it neither these sources nor a
+# string of them are in the binary (core/serviceEngine/tests/check_dev_control_release.sh).
+if(AVPN_DEV_TOOLS AND NOT IOS AND NOT ANDROID AND NOT MACOS_NE)
+    add_compile_definitions(AVPN_DESKTOP_TEST_CHANNEL=1) # Qt Network (QLocalServer) and Quick are linked already
+    list(APPEND HEADERS ${AVPN_SE}/DevControl.h ${AVPN_SE}/DevControlApp.h)
+    list(APPEND SOURCES ${AVPN_SE}/DevControl.cpp ${AVPN_SE}/DevControlApp.cpp ${AVPN_SE}/DevControlInstall.cpp)
+    list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/DevControl.cpp ${AVPN_SE}/DevControlApp.cpp ${AVPN_SE}/DevControlInstall.cpp)
+    # the live commit label in `state` (as the three label files above)
+    set_property(SOURCE ${AVPN_SE}/DevControlInstall.cpp APPEND_STRING PROPERTY
+                 COMPILE_FLAGS "${AVPN_GIT_COMMIT_FORCE_INCLUDE}")
+    set_property(SOURCE ${AVPN_SE}/DevControlInstall.cpp APPEND PROPERTY OBJECT_DEPENDS ${AVPN_GIT_COMMIT_HEADER})
+    message(STATUS "AVPN overlay: AVPN_DESKTOP_TEST_CHANNEL=ON (test command channel, development build)")
+endif()
+
 # AVPN (аудит N3, 2026-07-02): «нет return в non-void функции» = UB — в НАШИХ исходниках это
 # ошибка компиляции, не warning. Апстрим-TU не трогаем. MSVC не покрываем (наши платформы — clang).
 if(NOT MSVC)
