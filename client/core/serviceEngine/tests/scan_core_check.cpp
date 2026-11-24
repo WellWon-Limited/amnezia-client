@@ -4525,6 +4525,58 @@ static void choiceSlotsAndStopStays()
     }
 }
 
+// «Остановить» (owner 24.11, one screen: the rings stop with the number found so far). A scan that already found a
+// working server keeps it: Done, its rows and count, the scope's fresh result (cache + slot), the summary's
+// stop_reason "cancel", one freeze and one cancel of the host, no «Найдено N» shade. A scan stopped before it found
+// anything is cancelled as before: idle, nothing kept (the page goes back to its choice).
+static void stopKeepsWhatItFound()
+{
+    const auto world = [](qint64 stopAt) {
+        World w = baseWorld("stop_keeps", hostMac(), ScanNetKind::Wifi);
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        if (stopAt >= 0)
+            w.script << qMakePair(stopAt, at("stop"));
+        w.runMs = 12000;
+        return w;
+    };
+    // the same scan without a stop: the first moment it shows a verified row while it still runs
+    Driver plain(world(-1));
+    plain.run();
+    qint64 foundAt = -1;
+    int verifiedThen = 0;
+    for (const Recorded &r : plain.steps)
+        if (scanPhaseNameScanning(phaseOf(r.view)) && r.view.value(QLatin1String("verified")).toInt() > 0) {
+            foundAt = qint64(r.event.value(QLatin1String("now_ms")).toDouble()) - kT0;
+            verifiedThen = r.view.value(QLatin1String("verified")).toInt();
+            break;
+        }
+    const int allFound = lastView(plain).value(QLatin1String("verified")).toInt();
+    CHECK(foundAt > 0 && phaseOf(lastView(plain)) == QLatin1String("done") && verifiedThen < allFound);
+
+    // stopped right then: what was found stays on the screen
+    Driver d(world(foundAt + 1));
+    d.run();
+    const QJsonObject v = lastView(d);
+    const int kept = v.value(QLatin1String("verified")).toInt();
+    CHECK(phaseOf(v) == QLatin1String("done"));
+    CHECK(kept >= verifiedThen && kept < allFound);
+    CHECK(countActions(d, ScanActionKind::PersistResults) >= 1); // + one per later proof by exclusion
+    const QJsonArray fresh = v.value(QLatin1String("slots")).toArray();
+    CHECK(fresh.size() == 1 && fresh.at(0).toObject().value(QLatin1String("works")).toInt() == kept);
+    CHECK(countActions(d, ScanActionKind::FreezeHostScan) == 1 && countActions(d, ScanActionKind::StopHostScan) == 1);
+    CHECK(countActions(d, ScanActionKind::CloseScreen) == 0 && d.m.screenOpen());
+    CHECK(d.m.lastSummary().value(QLatin1String("stop_reason")).toString() == QLatin1String("cancel"));
+    CHECK(shadeCount(d, "scan_found") == 0 && shadeCount(plain, "scan_found") == 0); // the rings say the count
+    CHECK(!d.m.draining());
+
+    // stopped before anything was found: cancelled, nothing kept
+    Driver e(world(foundAt / 2));
+    e.run();
+    const QJsonObject ev = lastView(e);
+    CHECK(phaseOf(ev) == QLatin1String("idle") && ev.value(QLatin1String("rows")).toArray().isEmpty());
+    CHECK(countActions(e, ScanActionKind::PersistResults) == 0 && e.m.screenOpen());
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -5057,6 +5109,7 @@ int main(int argc, char **argv)
     rowsAfter17Nov();
     countrylessRows();
     choiceSlotsAndStopStays();
+    stopKeepsWhatItFound();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();
