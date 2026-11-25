@@ -197,6 +197,10 @@ TribeScanner::TribeScanner(const Deps &d, QObject *parent)
             self->timerFired();
     };
     m_m.restoreBudget(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetStoreKey))).array());
+    // the pool's last answer: the counts of the scope choice before (or without) a fresh fetch
+    ScanPoolView storedPool;
+    if (scanPoolFromJson(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanPoolStoreKey))).object(), storedPool))
+        m_m.poolReady(storedPool, now());
     m_enabled = scannerSwitchOn(TuningStore::flag(QLatin1String(kScannerFlag), false), kScanHostOnThisBuild);
     m_doctorLegacy = TuningStore::flag(QLatin1String(kDoctorLegacyFlag), false);
     m_connectOnOpen = scanConnectOnOpenFlag();
@@ -2005,6 +2009,7 @@ void TribeScanner::fetchPoolIfStale()
             self->emitLog(QStringLiteral("pool fetched countries=%1 total=%2 own=%3 provider=%4 whitelist=%5 by_country=%6")
                               .arg(p.view.countries.size()).arg(own + provider).arg(own).arg(provider).arg(p.view.whitelist)
                               .arg(per.join(QLatin1Char(','))));
+            self->m_store->write(QLatin1String(kScanPoolStoreKey), QJsonDocument(scanPoolToJson(p.view)).toJson(QJsonDocument::Compact));
             self->dispatch(self->m_m.poolReady(p.view, self->now()));
         }
         else if (p.status == 404)
@@ -2363,6 +2368,11 @@ void TribeScanner::connectRefused(const QString &nodeId)
         emitLog(QStringLiteral("connect_refused node=%1").arg(nodeId));
         dispatch(m_m.connectRefused(nodeId, now()));
     }, Qt::QueuedConnection);
+}
+void TribeScanner::rowRequestDropped(const QString &nodeId)
+{
+    emitLog(QStringLiteral("row_request_dropped node=%1").arg(nodeId));
+    dispatch(m_m.rowRequestDropped(nodeId, now()));
 }
 void TribeScanner::reportQueueChanged() { dispatch(m_m.reportQueueState(m_engine->reportQueueFull(), now())); }
 

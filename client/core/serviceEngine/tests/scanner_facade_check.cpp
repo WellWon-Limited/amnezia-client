@@ -4365,6 +4365,19 @@ static void caseServerScope()
             logged = logged || l.startsWith(QLatin1String("pool fetched countries="));
         CHECK(logged);
         w.s->close();
+        // Device round air-D, E1: a later launch whose pool fetch does not come (through the tunnel our API did not
+        // answer) still counts the pool - the last answer is kept - never the manifest's first screen («8 серверов»)
+        const QJsonObject before = bar;
+        w.s.reset();
+        w.poolOnOpen = false;
+        w.start();
+        w.s->show();
+        w.run(5000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), 1); // no second fetch
+        const QJsonObject again = w.s->viewJson().value(QStringLiteral("bar")).toObject();
+        CHECK(again.value("scope_whitelist").toInt() == before.value("scope_whitelist").toInt() && again.value("scope_whitelist").toInt() >= 0);
+        CHECK(again.value("scope_countries").toArray().size() == before.value("scope_countries").toArray().size());
+        w.s->close();
     }
     {
         World w;

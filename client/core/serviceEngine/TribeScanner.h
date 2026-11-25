@@ -270,6 +270,7 @@ inline constexpr char kScanCapsAwgWithheldField[] = "awg_unavailable";
 inline constexpr char kScanBudgetStoreKey[] = "avpn/scanBudget";
 inline constexpr char kScanCacheStorePrefix[] = "avpn/scanCache/";
 inline constexpr char kScanCacheIndexKey[] = "avpn/scanCacheIndex";
+inline constexpr char kScanPoolStoreKey[] = "avpn/scanPool"; // the last GET /v1/scan/pool answer (scanPoolToJson)
 inline constexpr int kScanCacheMaxNetworks = 8;
 
 // Store key of a network's cached result: its weak fingerprint alone, hashed (nothing readable on disk). Not the
@@ -370,6 +371,9 @@ public:
     // The engine refused a ConnectRow before touching the tunnel (the pin failed, the row's node is gone): the row
     // returns to its normal state and the list takes taps again. Safe to call from inside connectRow (queued).
     void connectRefused(const QString &nodeId);
+    // The engine dropped a row's request before the row's own attempt began (DebugSnapshot.h scanRowAttemptObserve,
+    // dropped): no verdict for the row, the person is told the connect did not start.
+    void rowRequestDropped(const QString &nodeId);
     void reportQueueChanged();
     void refreshSwitches();
     void noteUpstreamRevision(qint64 revision);

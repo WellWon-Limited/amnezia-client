@@ -637,13 +637,19 @@ inline QString scanScopeOf(const QString &raw)
 // live tunnel is probed in every scope and saved in that scope's result: it never counts for another country (review
 // round 36, F2).
 // A row the list shows as available (view.available): a proven working row - fresh or cached, a tapped row while it
-// connects, the proven live connection; never «Не удалось» (a failed probe or tap) nor «Не проверено».
+// connects - and the live connection, which reads «Подключено» as soon as data flows through it (ScanCurrent::working,
+// the engine's own data check) whether or not the scan's sized check through it answered (device round air-D, E1: that
+// check could not reach our API - "live_probe warm status=0" - the row read «Подключено», the rings left it out).
+// Never «Не удалось» (a failed probe or tap) nor «Не проверено».
 inline bool scanRowShownAvailable(const ScanRowView &r)
 {
-    if (r.unavailable || !r.verified)
+    if (r.unavailable)
         return false;
-    return r.state == ScanRowState::Works || r.state == ScanRowState::Slow || r.state == ScanRowState::Connecting
-           || r.state == ScanRowState::Connected;
+    if (r.current)
+        return r.state == ScanRowState::Connected;
+    if (!r.verified)
+        return false;
+    return r.state == ScanRowState::Works || r.state == ScanRowState::Slow || r.state == ScanRowState::Connecting;
 }
 
 inline bool scanRowInScope(const QString &countryCode, const QString &scope)
@@ -916,10 +922,15 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!n.sameNetwork(m_net))
+        if (ownTunnelNotice(n)) {
+            // the person's own row connect is raising a tunnel: nothing of the network the list belongs to changed
+            if (n.kind != ScanNetKind::Unknown)
+                adoptOwnTunnelGeneration(n);
+        } else if (!n.sameNetwork(m_net)) {
             applyNetworkChange(n, cached, now, s);
-        else
+        } else {
             refineKey(n.key);
+        }
         m_net.radio = n.radio;
         finishStep(s, now);
         return s;
@@ -961,6 +972,35 @@ private:
     // device round 11, iPhone Air 20.11 13:05, a row connect turned "unknown" into "cell:asn:<N>:4g" and the list of 20
     // rows shrank to the connected one). Not a network change: the list, its result and its slots stay; what is
     // reported from now on carries the new key. A scan already running reports under the key it started with.
+    // Device round air-D, E3 (and air-C N8 pair 2): a row tapped, its tunnel comes up, and the platform's path monitor
+    // reports our own utun - a new generation of the SAME network ("network kind=wifi key=wifi:asn:12389 gen=f48c..."
+    // while the path engine said "scan_network_key_refined net_gen=19"), or a moment of "kind=unknown" while the tunnel
+    // switches. That rebuilt the list from the cached result in another order and the second tap hit another row. While
+    // a row's connect runs (m_connectingId), such a notice is our own tunnel: a moment without a network says nothing,
+    // and the same kind and fingerprint (the physical network) keep the list, its rows and their order; only a notice
+    // of another network (kind or fingerprint) rebuilds it - the one exception to "rows never move under the finger".
+    bool ownTunnelNotice(const ScanNetwork &n) const
+    {
+        if (m_connectingId.isEmpty() || scanPhaseScanning(m_phase))
+            return false;
+        return n.kind == ScanNetKind::Unknown || (n.kind == m_net.kind && n.fingerprint == m_net.fingerprint);
+    }
+    // The new generation taken in place: the rows measured on this network a moment ago stay current evidence.
+    void adoptOwnTunnelGeneration(const ScanNetwork &n)
+    {
+        const QString was = m_net.generation();
+        const QString gen = n.generation();
+        for (Row &r : m_rows)
+            if (!r.cached && r.generation == was)
+                r.generation = gen;
+        if (m_scanNet.generation() == was) {
+            m_scanNet.sources = n.sources;
+            m_scanNet.key = n.key;
+        }
+        refineKey(n.key);
+        m_net.sources = n.sources;
+    }
+
     void refineKey(const QString &key)
     {
         if (m_rowsKey == m_net.key)
@@ -1733,6 +1773,26 @@ public:
     bool ofRunningChain(const QString &nodeId) const
     {
         return !m_connectingId.isEmpty() && (nodeId.isEmpty() || nodeId == m_connectingId || m_chainOrder.contains(nodeId));
+    }
+
+    // The engine dropped the tapped row's request before the row's own attempt began (device round air-D, E2: two taps,
+    // the older row's seat request hung, its attempt was torn down for the new tap and the engine turned the intent off -
+    // "intent_off why=external_loss" - before the new row's attempt ever started; the new row was marked «Не удалось»
+    // and the VPN ended off). No verdict and no outcome for the row: it reads as before. A warning shade says the
+    // connect did not start, so two taps never end silently "off" - the row can be tapped again.
+    ScanStep rowRequestDropped(const QString &nodeId, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        if (!m_connectingId.isEmpty() && (nodeId.isEmpty() || nodeId == m_connectingId)) {
+            m_connectingId.clear();
+            m_chainOrder.clear();
+            m_chainLaterShown = false;
+            m_chain.begin(m_net.key);
+            s.actions << shade(ShadeTone::Warning, QStringLiteral("connect_not_started"));
+        }
+        finishStep(s, now);
+        return s;
     }
 
     // The engine's attempt ended in an error (engine Error) while a tap's chain ran.

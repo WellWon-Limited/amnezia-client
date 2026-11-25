@@ -4615,7 +4615,8 @@ static qint64 firstFoundAt(const World &w, qint64 from)
 // scope, counted in one place: cached rows too, a row that failed after a tap no more.
 static void availableIsWhatTheListShows()
 {
-    // a cached result of 3 working rows shown while the VPN is connected (its proof not taken yet): 3, not 0 / 1
+    // a cached result of 3 working rows shown while the VPN is connected: the 3 rows and the «Подключено» one (E1, air-D:
+    // the live connection is counted as the list shows it), never 0 / 1
     {
         World w = baseWorld("available", hostMac(), ScanNetKind::Wifi);
         ScanOpen o = openOf(w, QStringLiteral("1"), true);
@@ -4631,7 +4632,7 @@ static void availableIsWhatTheListShows()
         m.shown(o, kT0);
         const QJsonObject v = viewJson(m, kT0);
         CHECK(rowsInState(v, "works") + rowsInState(v, "slow") == 3 && rowsInState(v, "connected") == 1);
-        CHECK(v.value(QLatin1String("available")).toInt() == 3);
+        CHECK(v.value(QLatin1String("available")).toInt() == 4);
     }
     // a finished scan: every working row of the list; a row tapped and failed is «Не удалось» and no more counted
     {
@@ -4966,6 +4967,102 @@ static void progressCountsWhatIsChecked()
     for (const Recorded &r : d.steps)
         if (phaseOf(r.view) == QLatin1String("reach"))
             CHECK(r.view.value(QLatin1String("stage_count")).toInt() <= r.view.value(QLatin1String("stage_total")).toInt());
+}
+
+// E1 (device round air-D, iPhone Air, 25.11): a scan WHILE CONNECTED (Германия 1 Xray). The round's lines: "action
+// probe_live_tunnel bytes=65536", "api live_probe warm status=0" (our API did not answer through the tunnel), "api
+// probe_batch status=0 asked=10 granted=0 fail=transport", "persist_results rows=1"; the list: Германия 1 «Подключено»,
+// Финляндия 1 Xray «Доступно», Белые списки 1, 2 «Не проверено" - the rings said 1. The live connection carries data (the
+// engine's check), it reads «Подключено» and is counted like the list shows it, proven by the scan's own check or not.
+static void connectedRowIsCounted()
+{
+    World w = baseWorld("connected_count", hostMac(), ScanNetKind::Wifi);
+    w.current = QStringLiteral("2:xray");
+    w.liveProbeWorks = false;   // "api live_probe warm status=0"
+    w.cutApp = QStringLiteral("batch"); // "api probe_batch status=0 ... fail=transport": the providers stay unchecked
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
+    w.runMs = 12000;
+    Driver d(w);
+    d.run();
+    const QJsonObject v = lastView(d);
+    const QJsonObject live = rowOf(v, QStringLiteral("2:xray"));
+    CHECK(phaseOf(v) == QLatin1String("done") && live.value(QLatin1String("state")).toString() == QLatin1String("connected"));
+    const int shown = rowsInState(v, "works") + rowsInState(v, "slow") + rowsInState(v, "connected");
+    CHECK(rowsInState(v, "connected") == 1 && v.value(QLatin1String("available")).toInt() == shown);
+}
+
+// E2 (device round air-D): the engine dropped the tapped row's request before its own attempt began ("intent_off
+// why=external_loss" after the older row's seat request hung): the row is not «Не удалось», no outcome is sent, the chain
+// is over and the person is told the connect did not start ("connect_not_started") - the row can be tapped again.
+static void droppedRequestIsNoVerdict()
+{
+    World w = baseWorld("dropped", hostMac(), ScanNetKind::Wifi);
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+    w.runMs = 9000;
+    Driver d(w);
+    d.run();
+    QStringList ids;
+    for (const QJsonValue &x : lastView(d).value(QLatin1String("rows")).toArray())
+        if (x.toObject().value(QLatin1String("state")).toString() == QLatin1String("works"))
+            ids << x.toObject().value(QLatin1String("id")).toString();
+    CHECK(ids.size() >= 2);
+    if (ids.size() < 2)
+        return;
+    const QString a = ids.at(0), b = ids.at(1);
+    const qint64 t = d.now + 1000;
+    d.m.rowTapped(a, t);
+    d.m.rowTapped(b, t + 700);
+    const ScanStep s = d.m.rowRequestDropped(b, t + 6500);
+    const QJsonObject v = viewJson(d.m, t + 6500);
+    CHECK(rowOf(v, b).value(QLatin1String("state")).toString() == QLatin1String("works"));
+    CHECK(rowOf(v, a).value(QLatin1String("state")).toString() == QLatin1String("works"));
+    CHECK(d.m.connectingId().isEmpty() && !s.has(ScanActionKind::SendOutcomes));
+    bool told = false;
+    for (const ScanAction &x : s.actions)
+        told = told || (x.kind == ScanActionKind::ShowShade && x.shade.textKey == QLatin1String("connect_not_started"));
+    CHECK(told);
+    CHECK(d.m.rowTapped(b, t + 7000).has(ScanActionKind::ConnectRow)); // tappable again
+}
+
+// E3 (device round air-D, pair 1): a row tapped (Германия 2), its tunnel coming up, and the path monitor's notice of our
+// own utun 0.5 s later - "network kind=wifi key=wifi:asn:12389 gen=f48c..." with the path engine's
+// "scan_network_key_refined net_gen=19" (the same physical network) - rebuilt the list from the cached result in another
+// order; the second tap, aimed at the row under the finger, hit another row. While a row's connect runs the list keeps
+// its rows and order on such a notice (and on a moment of "kind=unknown"); another network still rebuilds it.
+static void ownTunnelNoticeKeepsTheList()
+{
+    World w = baseWorld("own_tunnel", hostMac(), ScanNetKind::Wifi);
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+    w.runMs = 9000;
+    Driver d(w);
+    d.run();
+    const QJsonObject v0 = lastView(d);
+    const QStringList ids0 = rowIds(v0);
+    QString a;
+    for (const QJsonValue &x : v0.value(QLatin1String("rows")).toArray())
+        if (a.isEmpty() && x.toObject().value(QLatin1String("state")).toString() == QLatin1String("works"))
+            a = x.toObject().value(QLatin1String("id")).toString();
+    CHECK(ids0.size() >= 3 && !a.isEmpty());
+    const qint64 t = d.now + 1000;
+    d.m.rowTapped(a, t);
+    const double build = viewJson(d.m, t).value(QLatin1String("list_build")).toDouble();
+    // a moment without a network while the tunnel switches, then the same Wi-Fi with a new generation and a refined key
+    ScanNetwork none = scanNet(ScanNetKind::Unknown, QStringLiteral("unknown"), 7);
+    d.m.networkChanged(none, ScanCachedResult(), t + 450);
+    ScanNetwork same = w.net;
+    same.key = w.net.key + QStringLiteral(":asn:12389");
+    same.sources = {ScanNetSource{QStringLiteral("app"), kAppEpoch, 9}};
+    d.m.networkChanged(same, ScanCachedResult(), t + 500);
+    const QJsonObject v1 = viewJson(d.m, t + 500);
+    CHECK(v1.value(QLatin1String("list_build")).toDouble() == build);
+    CHECK(rowIds(v1) == ids0); // every row in its place
+    bool cached = false;
+    for (const QJsonValue &x : v1.value(QLatin1String("rows")).toArray())
+        cached = cached || x.toObject().value(QLatin1String("flags")).toArray().contains(QStringLiteral("cache"));
+    CHECK(!cached && rowOf(v1, a).value(QLatin1String("state")).toString() == QLatin1String("connecting"));
+    // another network (another fingerprint) still rebuilds the list
+    d.m.networkChanged(scanNet(ScanNetKind::Wifi, QStringLiteral("wifi:asn:64999"), 1, QStringLiteral("gw2")), ScanCachedResult(), t + 900);
+    CHECK(viewJson(d.m, t + 900).value(QLatin1String("list_build")).toDouble() != build);
 }
 
 static void refusedEndsScope()
@@ -5508,6 +5605,9 @@ int main(int argc, char **argv)
     oneVerdictPerRow();
     failedCandidatesAreNoResult();
     progressCountsWhatIsChecked();
+    connectedRowIsCounted();
+    droppedRequestIsNoVerdict();
+    ownTunnelNoticeKeepsTheList();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();
