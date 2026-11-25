@@ -12,6 +12,7 @@
 #include "ServiceProbe.h"    // AVPN backend-first (Task 4): ServiceProbeConfig — m_svcCfgsAll (kill-switch чипов)
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "SystemAwake.h"     // AVPN (24.11.2026, cause F): the fact "the system is fully awake" and its gate
+#include "DaemonAdoptHint.h" // AVPN (round mac-C): what the GUI knows about the macOS daemon's adopted tunnel
 #include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
 #include "LaunchGuard.h"     // AVPN (self-update v2): безопасный запуск после обновления + откат
 #include "TunnelWatchResume.h" // AVPN (iOS data watch, 141): the hand-over at a return of the app (tested)
@@ -1327,6 +1328,9 @@ private:
     void probeDaemonTunnelOnStartup();
     void daemonDirectDeactivate();
     bool m_adoptedNoProto = false;
+    // AVPN (round mac-C, DaemonAdoptHint.h): the daemon's own words about the tunnel the startup probe adopts (its
+    // transport, its peer's endpoint) - the engine names the node by them, as for a session this GUI started.
+    avpn::DaemonAdoptHint m_daemonAdoptHint;
 #endif
     // AVPN (sub-grace): из onTick при connected — «подписка истекла и грейс прошёл» → управляемый
     // stop() (тот же путь, что пользовательский: намерение OFF + reconcile) + subscriptionEnforcedStop().

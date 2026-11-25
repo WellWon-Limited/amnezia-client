@@ -799,6 +799,14 @@ QJsonObject Daemon::getStatus() {
     json.insert("date", connection.m_date.toString());
     json.insert("txBytes", QJsonValue(status.m_txBytes));
     json.insert("rxBytes", QJsonValue(status.m_rxBytes));
+#ifdef Q_OS_MACOS
+    // AVPN (round mac-C, DaemonAdoptHint.h): the peer this tunnel goes to, so a GUI that adopts it after a
+    // restart names its node as it would name a session it started. Readers that do not know the field ignore it.
+    QString endpoint;
+    if (liveTunnelPeer(nullptr, &endpoint) && !endpoint.isEmpty()) {
+      json.insert("endpoint", endpoint);
+    }
+#endif
     return json;
   }
 

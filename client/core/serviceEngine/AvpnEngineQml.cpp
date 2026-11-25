@@ -4364,6 +4364,22 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
     const bool adopted = m_engine.adoptTunnelConnected(m_serviceSessionMeta.value(QStringLiteral("node_id")).toString(),
                                                        m_serviceSessionMeta.value(QStringLiteral("proto")).toString(),
                                                        m_serviceSessionMeta.value(QStringLiteral("endpoint")).toString());
+#elif defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // Round mac-C (DaemonAdoptHint.h): the daemon's tunnel is adopted with what the daemon says about it - AmneziaWG
+    // to its peer's endpoint - and its node is named by that endpoint, so a mode change, a server choice or a
+    // failover acts on it as on a session this GUI started. An older daemon says no endpoint: no hint, as before
+    // (the transport is still known: liveSessionTransport).
+    bool adopted = false;
+    if (m_adoptedNoProto && !m_daemonAdoptHint.endpoint.isEmpty()) {
+        adopted = m_engine.adoptTunnelConnected(QString(), m_daemonAdoptHint.proto, m_daemonAdoptHint.endpoint);
+        if (!m_engine.currentIdentityKnown())
+            m_engine.tryIdentifyCurrentNode();
+        reliabilityEvent(QStringLiteral("adopt_daemon_session identified=%1 node=%2")
+                             .arg(int(m_engine.currentIdentityKnown())).arg(m_engine.currentNodeId()));
+    } else {
+        adopted = m_engine.adoptTunnelConnected();
+    }
+    m_daemonAdoptHint = avpn::DaemonAdoptHint(); // one adoption: never a later session's
 #else
     const bool adopted = m_engine.adoptTunnelConnected();
 #endif
@@ -7459,6 +7475,8 @@ void AvpnEngineQml::probeDaemonTunnelOnStartup()
                 && m_op == Op::None && m_lastTunnelState != Vpn::Connected) {
                 qInfo() << "[adopt] daemon holds a live tunnel — adopting (GUI restart)";
                 m_adoptedNoProto = true;
+                // Round mac-C: the daemon says which peer it holds - the adoption below names the node by it.
+                m_daemonAdoptHint = avpn::daemonAdoptHintFromStatus(o);
                 // AVPN (независимое ревью волны, MINOR-4): если демон держит xray, статистику
                 // адоптированной сессии никто не поллит (m_lastUpProto пуст) — HealthLoop слеп.
                 m_tunnel.adoptXrayIfRunning();
@@ -8663,9 +8681,14 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
     // The rule - DebugSnapshot.h::decidePinOnTransportMode (facade_policy_check).
     const avpn::TransportMode effective = m_engine.transportMode();
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
+    QString liveProto = m_engine.currentNodeProto();
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // Round mac-C: a session adopted from the daemon is AmneziaWG even while its node is not named (DaemonAdoptHint.h).
+    liveProto = avpn::liveSessionTransport(liveProto, m_adoptedNoProto);
+#endif
     const avpn::PinModeDecision d = avpn::decidePinOnTransportMode(
         avpn::transportModeToString(effective), m_engine.pinnedNodeId(), m_engine.pinLacksTransport(effective),
-        avpn::isTunnelUpStateName(st), m_engine.currentNodeProto());
+        avpn::isTunnelUpStateName(st), liveProto);
     if (d.clearPin) {
         m_engine.clearPin();
         persistPin();
