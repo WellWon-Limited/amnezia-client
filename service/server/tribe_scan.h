@@ -35,6 +35,19 @@
 //    group). Removed when the scan ends (final reply, stop-all, deadline + grace, shutdown) and at service
 //    start (crash recovery). Fail-closed: when the kill switch is ours but the exemption cannot be
 //    loaded, scan_start is refused ({"error":"internal","detail":"kill_switch_exemption"}).
+//  - macOS routes of the pinned sockets (round mac-C, 25.11.2026): a socket pinned to the uplink (IP_BOUND_IF) is
+//    routed only by routes scoped to that interface, or by the primary default when no more specific route of
+//    another interface covers the destination. An AmneziaWG session's 0/1 + 128/1 via its utun cover all of IPv4,
+//    so every pinned probe failed at once with ENETUNREACH, before pf ever saw a packet (`route get -ifscope en0`
+//    "not in table"; the scan ended in 0.3 s with nothing found). An Xray session never had this: it installs the
+//    same pair scoped to the uplink for its own pinned core sockets (RouterMac::routeAddXray, upstream #2479), and
+//    with the VPN off nothing hides the primary default. So the host adds that pair - 0/1 and 128/1 via the
+//    uplink's IPv4 router, scoped to the uplink, tagged RTF_PROTO3 (RTPRF_OURS) - for the scan's lifetime, only
+//    when a socket pinned to the uplink has no route, and deletes exactly what it added: with the pf exemption
+//    (every end of a scan), when the uplink changes under it, and at service start (crash recovery: tagged ones
+//    only). A route it found (an Xray session's) is never touched. Scoped routes serve pinned lookups only: the
+//    tunnel's own traffic keeps its 0/1 + 128/1. Needed but not in force = the no-uplink refusal
+//    (host_options.bind_interface): a pinned probe there could only fail, which would read as "nothing works".
 //
 // What it never does: start, stop or reconfigure a tunnel; register a socket callback; log a request, a
 // reply, a config, a token, a host, an address or an interface name (only ids, codes and sizes); retry.
@@ -217,12 +230,51 @@ struct TribeScanReplyInfo {
 TribeScanReplyInfo tribeScanInspectReply(const QByteArray &reply);
 
 // One PF_ROUTE message (macOS): `resample` = worth a fresh uplink sample; `loss` = the current uplink
-// (index) lost its default route, an address or its link. Cloned and host routes are ignored.
+// (index) lost its default route, an address or its link. Cloned and host routes are ignored, and so are this
+// host's own half routes (ownPid sent them, scoped and tagged RTF_PROTO3): its own plumbing is no path fact - the
+// delete at a scan's end would otherwise read as a loss and move the generation after every scan under AmneziaWG.
 struct TribeScanRouteEvent {
     bool resample = false;
     bool loss = false;
 };
-TribeScanRouteEvent tribeScanRouteEvent(const char *msg, qsizetype len, int uplinkIndex);
+TribeScanRouteEvent tribeScanRouteEvent(const char *msg, qsizetype len, int uplinkIndex, qint64 ownPid = -1);
+
+// --- the uplink's half routes for pinned probe sockets (macOS; see the header comment) ---------------------------
+
+// One of the pair: dst 0.0.0.0/1 or 128.0.0.0/1 via `gateway`, scoped to `ifindex`. Addresses in host order.
+struct TribeScanHalfRoute {
+    quint32 dst = 0;
+    quint32 gateway = 0;
+    int ifindex = 0;
+    bool operator==(const TribeScanHalfRoute &o) const { return dst == o.dst && gateway == o.gateway && ifindex == o.ifindex; }
+};
+inline constexpr quint32 kTribeScanHalfLow = 0x00000000u;  // 0.0.0.0/1
+inline constexpr quint32 kTribeScanHalfHigh = 0x80000000u; // 128.0.0.0/1
+// A destination in each half the pinned-route test asks the kernel about (a UDP connect: no packet is sent).
+inline constexpr quint32 kTribeScanTestLow = 0x01010101u;  // 1.1.1.1
+inline constexpr quint32 kTribeScanTestHigh = 0xC0000201u; // 192.0.2.1 (TEST-NET-1)
+
+struct TribeScanRouteArm {
+    int result = 0;                  // 1 = added, 0 = not needed (pinned sockets route, or no IPv4 router), -1 = needed, not in force
+    QList<TribeScanHalfRoute> added; // what this arm added, never a route it found
+};
+// The kernel as the arm sees it: pinned(ifindex, dst) = a socket pinned to ifindex has a route to dst;
+// write(add, route) = 0 on success, else errno (EEXIST: a route of someone else is there).
+struct TribeScanRouteOps {
+    std::function<bool(int ifindex, quint32 dst)> pinned;
+    std::function<int(bool add, const TribeScanHalfRoute &r)> write;
+};
+// Adds the pair for `u` via `router` (host order, 0 = none known) where pinned sockets have no route, then checks
+// they route; on any failure deletes what it added and answers -1.
+TribeScanRouteArm tribeScanArmHalfRoutes(const TribeScanUplink &u, quint32 router, const TribeScanRouteOps &ops);
+void tribeScanDisarmHalfRoutes(const QList<TribeScanHalfRoute> &added, const TribeScanRouteOps &ops);
+// The routing-socket message of an RTM_ADD (add) or RTM_DELETE of one half route: RTA_DST, RTA_GATEWAY, RTA_NETMASK,
+// RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE | RTF_PROTO3, rtm_index = the scope. "" outside macOS.
+QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int seq);
+// From an AF_INET NET_RT_DUMP: the half routes a scan host added (scoped, static, gateway, RTF_PROTO3), and the
+// IPv4 router of the default route on `ifindex` (0 = none).
+QList<TribeScanHalfRoute> tribeScanTaggedHalfRoutes(const QByteArray &dump);
+quint32 tribeScanDefaultRouter(const QByteArray &dump, int ifindex);
 
 // The probe children of this process (macOS; the engine spawns `<binary> probe` per AmneziaWG session):
 //  - tribeScanParseProcArgs: argv from a KERN_PROCARGS2 buffer (argc, exec path, padding, argv...);
@@ -270,6 +322,12 @@ struct TribeScanDeps {
     // "the access network cannot reach the probe host" (false exclusion evidence, plan §2.2c, §2.8).
     std::function<int(const QString &ifname)> armFirewall;
     std::function<void()> disarmFirewall;
+    // The uplink's half routes for the pinned probe sockets (macOS; nothing elsewhere): armRoutes adds them where a
+    // socket pinned to the uplink has no route and tells what it added; disarmRoutes deletes exactly those;
+    // clearLeftoverRoutes deletes the tagged ones a previous service instance left (it died mid-scan). Any thread.
+    std::function<TribeScanRouteArm(const TribeScanUplink &u)> armRoutes;
+    std::function<void(const QList<TribeScanHalfRoute> &added)> disarmRoutes;
+    std::function<void()> clearLeftoverRoutes;
     // awg_mini: the checked probe binary ("" = none; worker thread) and the live AmneziaWG tunnel (main
     // thread, at the arrival of each message).
     std::function<QString()> awgProbeBinary;
@@ -337,14 +395,18 @@ private:
         QString scanId;
         quint64 serial = 0;
         bool armed = false;
+        QList<TribeScanHalfRoute> routes; // the half routes this scan added
     };
 
     // worker thread; `live` / `tunnelChanges` as they were when the message arrived (main thread)
     QByteArray process(const QByteArray &message, const TribeScanAwgLive &live, quint64 tunnelChanges);
     void sample(const TribeScanUplink &up, bool loss);             // any thread
     void publishGeneration(const ScanNetSource &g);                // any thread -> main
-    // The active scan ends ("" = whichever is active); its exemption is removed. Any thread.
+    // The active scan ends ("" = whichever is active); its exemption and its half routes are removed. Any thread.
     bool endActive(const QString &scanId, const char *why); // true = an exemption was removed
+    // The uplink moved: the active scan's half routes lead to a router it may no longer have - they go now (the
+    // scan itself is ended by the app, its generation moved too). Any thread.
+    void dropRoutes(const char *why);
     void scheduleDisarm(quint64 serial, qint64 afterMs);           // any thread -> main
     void readRouteSocket();                                        // main thread (macOS)
     // The engine stops (waitMs), probe children die, the exemption goes; a stop the engine does not confirm

@@ -22,6 +22,7 @@
 #include <QThread>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <memory>
 #include <cstring>
@@ -30,10 +31,12 @@
 #include <utility>
 
 #ifdef Q_OS_MACOS
+    #include <arpa/inet.h>
     #include <csignal>
     #include <libproc.h>
     #include <net/if.h>
     #include <net/route.h>
+    #include <netinet/in.h>
     #include <spawn.h>
     #include <sys/wait.h>
 extern char **environ;
@@ -123,6 +126,10 @@ struct Harness {
     }();
     std::unique_ptr<TribeScanHost> host;
     quint64 nextId = 1;
+    // The uplink's half routes: what armRoutes answers (guarded by uplinkMutex; result 0 = not needed, noted only
+    // when it is not 0, so the order lists of the other checks stay as they are), the leftover clears counted.
+    TribeScanRouteArm routeArm;
+    std::atomic<int> routeClears{0};
 
     Harness()
     {
@@ -136,6 +143,16 @@ struct Harness {
             return armResult.load();
         };
         d.disarmFirewall = []() { fake::engine().note(QStringLiteral("disarm")); };
+        d.armRoutes = [this](const TribeScanUplink &u) {
+            QMutexLocker l(&uplinkMutex);
+            if (routeArm.result != 0)
+                fake::engine().note(QStringLiteral("routes:arm:%1").arg(u.index));
+            return routeArm;
+        };
+        d.disarmRoutes = [](const QList<TribeScanHalfRoute> &added) {
+            fake::engine().note(QStringLiteral("routes:disarm:%1").arg(added.size()));
+        };
+        d.clearLeftoverRoutes = [this]() { ++routeClears; };
         d.killProbeChildren = [this]() {
             fake::engine().note(QStringLiteral("kill"));
             TribeScanKillResult k;
@@ -158,6 +175,11 @@ struct Harness {
     {
         QMutexLocker l(&uplinkMutex);
         uplink = u;
+    }
+    void setRouteArm(const TribeScanRouteArm &a)
+    {
+        QMutexLocker l(&uplinkMutex);
+        routeArm = a;
     }
     // Submits and waits for the reply; returns the slot's code, the reply in *out.
     int send(const QByteArray &message, QByteArray *out = nullptr, int waitMs = 3000)
@@ -1306,6 +1328,347 @@ static void logPrivacy(const QString &vectorsPath)
     std::printf("log: %d service lines checked against %lld markers\n", lines, qlonglong(secrets.size()));
 }
 
+// --- the uplink's half routes for pinned probe sockets (round mac-C: under AmneziaWG every pinned probe had no route) ---
+
+#ifdef Q_OS_MACOS
+// One AF_INET route-table entry as NET_RT_DUMP writes it: rt_msghdr, then DST, GATEWAY, NETMASK (each rounded to 4).
+// maskLen = the trimmed netmask sockaddr's length (0 = a /0 mask, 5 = a /1 mask as the kernel keeps it), -1 = none.
+static QByteArray dumpEntry(int flags, int index, quint32 dst, bool gwInet, quint32 gw, int maskLen, quint8 maskByte = 0x80)
+{
+    const auto inet = [](quint32 a) {
+        sockaddr_in s{};
+        s.sin_len = sizeof(s);
+        s.sin_family = AF_INET;
+        s.sin_addr.s_addr = htonl(a);
+        return QByteArray(reinterpret_cast<const char *>(&s), sizeof(s));
+    };
+    QByteArray body = inet(dst);
+    int addrs = RTA_DST | RTA_GATEWAY;
+    if (gwInet) {
+        body += inet(gw);
+    } else {
+        QByteArray link(20, '\0'); // a sockaddr_dl (the tunnel's link): AF_LINK
+        link[0] = char(20);
+        link[1] = char(AF_LINK);
+        body += link;
+    }
+    if (maskLen >= 0) {
+        addrs |= RTA_NETMASK;
+        QByteArray mask(maskLen > 0 ? 8 : 4, '\0');
+        mask[0] = char(maskLen);
+        if (maskLen >= 5)
+            mask[4] = char(maskByte);
+        body += mask;
+    }
+    rt_msghdr h{};
+    h.rtm_version = RTM_VERSION;
+    h.rtm_type = RTM_GET;
+    h.rtm_flags = flags;
+    h.rtm_index = u_short(index);
+    h.rtm_addrs = addrs;
+    h.rtm_msglen = u_short(sizeof(h) + size_t(body.size()));
+    return QByteArray(reinterpret_cast<const char *>(&h), sizeof(h)) + body;
+}
+
+static quint32 saAt(const QByteArray &m, qsizetype off)
+{
+    sockaddr_in s{};
+    std::memcpy(&s, m.constData() + off, sizeof(s));
+    return ntohl(s.sin_addr.s_addr);
+}
+#endif
+
+// The kernel as the half-route arm sees it: pinned sockets route when the system's routes serve them (base) or a half
+// route of that interface covers the destination.
+struct FakeKernel {
+    bool base = false;
+    bool brokenRoutes = false;  // routes are added but a pinned socket still has none (a dead gateway)
+    QList<TribeScanHalfRoute> present;
+    QHash<quint32, int> addError; // dst -> errno of its add (EEXIST also makes it present: someone else's)
+    QStringList writes;
+    int pinnedCalls = 0;
+    TribeScanRouteOps ops()
+    {
+        TribeScanRouteOps o;
+        o.pinned = [this](int ifindex, quint32 dst) {
+            ++pinnedCalls;
+            if (base)
+                return true;
+            if (brokenRoutes)
+                return false;
+            const quint32 half = dst & kTribeScanHalfHigh;
+            for (const TribeScanHalfRoute &r : present)
+                if (r.ifindex == ifindex && r.dst == half)
+                    return true;
+            return false;
+        };
+        o.write = [this](bool add, const TribeScanHalfRoute &r) {
+            writes << QStringLiteral("%1:%2:%3").arg(add ? QStringLiteral("add") : QStringLiteral("del")).arg(r.dst == 0 ? 0 : 128).arg(r.ifindex);
+            if (add) {
+                const int e = addError.value(r.dst, 0);
+                if (e == EEXIST)
+                    present << r;
+                if (e != 0)
+                    return e;
+                present << r;
+                return 0;
+            }
+            const int before = int(present.size());
+            present.removeAll(r);
+            return int(present.size()) < before ? 0 : ESRCH;
+        };
+        return o;
+    }
+};
+
+static void uplinkRoutes()
+{
+#ifdef Q_OS_MACOS
+    // The message the service writes: RTM_ADD / RTM_DELETE of one half, scoped to the uplink, tagged.
+    TribeScanHalfRoute hi;
+    hi.dst = kTribeScanHalfHigh;
+    hi.gateway = 0xC0000201u; // 192.0.2.1
+    hi.ifindex = 7;
+    for (const bool add : {true, false}) {
+        const QByteArray m = tribeScanHalfRouteMessage(add, hi, 42);
+        rt_msghdr h{};
+        CHECK(m.size() == qsizetype(sizeof(h) + 3 * sizeof(sockaddr_in)));
+        if (m.size() < qsizetype(sizeof(h) + 3 * sizeof(sockaddr_in)))
+            continue;
+        std::memcpy(&h, m.constData(), sizeof(h));
+        CHECK_EQ(int(h.rtm_msglen), int(m.size()));
+        CHECK_EQ(int(h.rtm_version), RTM_VERSION);
+        CHECK_EQ(int(h.rtm_type), add ? RTM_ADD : RTM_DELETE);
+        CHECK_EQ(int(h.rtm_index), 7);
+        CHECK_EQ(h.rtm_seq, 42);
+        CHECK_EQ(h.rtm_addrs, RTA_DST | RTA_GATEWAY | RTA_NETMASK);
+        CHECK_EQ(h.rtm_flags, RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE | RTF_PROTO3);
+        CHECK_EQ(saAt(m, sizeof(h)), kTribeScanHalfHigh);
+        CHECK_EQ(saAt(m, sizeof(h) + sizeof(sockaddr_in)), 0xC0000201u);
+        CHECK_EQ(saAt(m, sizeof(h) + 2 * sizeof(sockaddr_in)), 0x80000000u); // a /1 mask
+    }
+
+    // The route table: only the tagged half routes are ours; the default's IPv4 router per interface.
+    const int tagged = RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE | RTF_PROTO3;
+    const QByteArray dump = dumpEntry(RTF_UP | RTF_GATEWAY | RTF_STATIC, 7, 0, true, 0xC0000201u, 0)        // primary default en7
+                            + dumpEntry(RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE, 9, 0, true, 0xC6336401u, 0) // scoped default en9
+                            + dumpEntry(RTF_UP | RTF_STATIC, 20, 0, false, 0, 5)                         // the tunnel's 0/1
+                            + dumpEntry(tagged, 7, kTribeScanHalfLow, true, 0xC0000201u, 5)               // ours
+                            + dumpEntry(tagged, 7, kTribeScanHalfHigh, true, 0xC0000201u, 5)              // ours
+                            + dumpEntry(RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE, 7, kTribeScanHalfLow, true, 0xC0000201u, 5) // Xray's
+                            + dumpEntry(tagged | RTF_HOST, 7, kTribeScanHalfLow, true, 0xC0000201u, -1)  // a host route
+                            + dumpEntry(tagged, 7, 0x0A000000u, true, 0xC0000201u, 5, 0xFF);             // 10/8: not a half
+    const QList<TribeScanHalfRoute> ours = tribeScanTaggedHalfRoutes(dump);
+    CHECK_EQ(int(ours.size()), 2);
+    if (ours.size() == 2) {
+        CHECK(ours.at(0).dst == kTribeScanHalfLow && ours.at(0).gateway == 0xC0000201u && ours.at(0).ifindex == 7);
+        CHECK(ours.at(1).dst == kTribeScanHalfHigh && ours.at(1).gateway == 0xC0000201u && ours.at(1).ifindex == 7);
+    }
+    CHECK_EQ(tribeScanDefaultRouter(dump, 7), 0xC0000201u);
+    CHECK_EQ(tribeScanDefaultRouter(dump, 9), 0xC6336401u); // a scoped default when there is no primary one
+    CHECK_EQ(tribeScanDefaultRouter(dump, 20), 0u);         // the tunnel has no IPv4 router
+    CHECK(tribeScanTaggedHalfRoutes(dump.left(dump.size() - 3)).size() <= 2); // a cut dump: no read past its end
+    CHECK(tribeScanTaggedHalfRoutes(QByteArray()).isEmpty());
+
+    // Its own half routes are no path fact (their delete at a scan's end would read as a loss); anyone else's are.
+    rt_msghdr rt{};
+    rt.rtm_msglen = sizeof(rt);
+    rt.rtm_version = RTM_VERSION;
+    rt.rtm_type = RTM_DELETE;
+    rt.rtm_flags = tagged;
+    rt.rtm_index = 7;
+    rt.rtm_pid = 4242;
+    TribeScanRouteEvent e = tribeScanRouteEvent(reinterpret_cast<const char *>(&rt), sizeof(rt), 7, 4242);
+    CHECK(!e.resample && !e.loss);
+    e = tribeScanRouteEvent(reinterpret_cast<const char *>(&rt), sizeof(rt), 7, 4243);
+    CHECK(e.resample && e.loss);
+    rt.rtm_flags = RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE; // own but untagged (Xray's routeDeleteXray)
+    e = tribeScanRouteEvent(reinterpret_cast<const char *>(&rt), sizeof(rt), 7, 4242);
+    CHECK(e.resample && e.loss);
+#endif
+
+    // The arm (portable): nothing when pinned sockets route; the pair where they do not; never a route it found.
+    TribeScanUplink u = phys();
+    {
+        FakeKernel k;
+        k.base = true; // the VPN off (the primary default) or an Xray session (its own scoped pair)
+        const TribeScanRouteArm a = tribeScanArmHalfRoutes(u, 0xC0000201u, k.ops());
+        CHECK(a.result == 0 && a.added.isEmpty() && k.writes.isEmpty());
+    }
+    {
+        FakeKernel k; // AmneziaWG up: 0/1 + 128/1 via its utun hide the primary default from pinned sockets
+        const TribeScanRouteArm a = tribeScanArmHalfRoutes(u, 0xC0000201u, k.ops());
+        CHECK_EQ(a.result, 1);
+        CHECK_EQ(k.writes, (QStringList{QStringLiteral("add:0:7"), QStringLiteral("add:128:7")}));
+        CHECK(a.added.size() == 2 && a.added.at(0).dst == kTribeScanHalfLow && a.added.at(1).dst == kTribeScanHalfHigh
+              && a.added.at(0).gateway == 0xC0000201u && a.added.at(1).ifindex == 7);
+        tribeScanDisarmHalfRoutes(a.added, k.ops());
+        CHECK_EQ(k.writes.mid(2), (QStringList{QStringLiteral("del:0:7"), QStringLiteral("del:128:7")}));
+        CHECK(k.present.isEmpty());
+    }
+    {
+        FakeKernel k;
+        k.addError.insert(kTribeScanHalfLow, EEXIST); // someone's low half is there: never recorded as ours
+        const TribeScanRouteArm a = tribeScanArmHalfRoutes(u, 0xC0000201u, k.ops());
+        CHECK(a.result == 1 && a.added.size() == 1 && a.added.first().dst == kTribeScanHalfHigh);
+    }
+    {
+        FakeKernel k;
+        k.addError.insert(kTribeScanHalfHigh, EPERM); // the second add fails: the first goes again, fail closed
+        const TribeScanRouteArm a = tribeScanArmHalfRoutes(u, 0xC0000201u, k.ops());
+        CHECK(a.result == -1 && a.added.isEmpty() && k.present.isEmpty());
+        CHECK_EQ(k.writes, (QStringList{QStringLiteral("add:0:7"), QStringLiteral("add:128:7"), QStringLiteral("del:0:7")}));
+    }
+    {
+        FakeKernel k;
+        k.brokenRoutes = true; // added, and pinned sockets still have no route: both go, fail closed
+        const TribeScanRouteArm a = tribeScanArmHalfRoutes(u, 0xC0000201u, k.ops());
+        CHECK(a.result == -1 && a.added.isEmpty() && k.present.isEmpty());
+    }
+    {
+        FakeKernel k; // needed, no IPv4 router known: nothing written, fail closed
+        const TribeScanRouteArm a = tribeScanArmHalfRoutes(u, 0, k.ops());
+        CHECK(a.result == -1 && k.writes.isEmpty());
+    }
+    {
+        FakeKernel k;
+        TribeScanUplink bad = u;
+        bad.name = QStringLiteral("utun4");
+        const TribeScanRouteArm a = tribeScanArmHalfRoutes(bad, 0xC0000201u, k.ops());
+        CHECK(a.result == 0 && k.pinnedCalls == 0 && k.writes.isEmpty());
+    }
+
+    // The host: the routes live exactly as long as the scan's pf exemption, and go first when the uplink moves.
+    fake::engine().reset();
+    Harness h;
+    CHECK_EQ(h.routeClears.load(), 1); // crash recovery at start: a previous instance's tagged routes
+    const auto progress = [](const QByteArray &msg, const QByteArray &) -> QByteArray {
+        const QJsonObject o = obj(msg);
+        const QString id = o.value(QLatin1String("scan_id")).toString();
+        if (o.value(QLatin1String("action")).toString() == QLatin1String("scan_start"))
+            return QStringLiteral("{\"type\":\"scan_ack\",\"scan_id\":\"%1\",\"accepted\":1,\"mem_mb\":9}").arg(id).toUtf8();
+        return QStringLiteral("{\"type\":\"scan_progress\",\"scan_id\":\"%1\",\"seq\":3,\"phase\":\"done\",\"items\":[],"
+                              "\"bytes_spent\":1,\"done\":true,\"final\":true}")
+            .arg(id)
+            .toUtf8();
+    };
+    fake::engine().reply = progress;
+    QByteArray r;
+    // Not needed (the VPN off, an Xray session): no route is written or deleted.
+    h.clock += 2000;
+    CHECK_EQ(h.send(startRequest(QStringLiteral("rt0")), &r), 0);
+    CHECK_EQ(h.send(R"({"action":"scan_poll","scan_id":"rt0","since":0})", &r), 0);
+    CHECK_EQ(countOf(fake::engine().orderSnapshot(), QStringLiteral("routes:")), 0);
+
+    TribeScanRouteArm need;
+    need.result = 1;
+    TribeScanHalfRoute lo;
+    lo.dst = kTribeScanHalfLow;
+    lo.gateway = 0xC0000201u;
+    lo.ifindex = 7;
+    TribeScanHalfRoute hiR = lo;
+    hiR.dst = kTribeScanHalfHigh;
+    need.added = {lo, hiR};
+    h.setRouteArm(need);
+    // Needed (AmneziaWG up): pf first, then the routes, then the engine; the final reply removes both.
+    fake::engine().reset();
+    fake::engine().reply = progress;
+    h.clock += 2000;
+    CHECK_EQ(h.send(startRequest(QStringLiteral("rt1")), &r), 0);
+    CHECK(scanDecodeReply(r).kind == ScanHostReplyKind::Ack);
+    CHECK_EQ(h.send(R"({"action":"scan_poll","scan_id":"rt1","since":0})", &r), 0);
+    QList<QString> order = fake::engine().orderSnapshot();
+    const QList<QString> want1 = {QStringLiteral("arm:en7"), QStringLiteral("routes:arm:7"), QStringLiteral("scan_message:scan_start"),
+                                  QStringLiteral("scan_message:scan_poll"), QStringLiteral("routes:disarm:2"), QStringLiteral("disarm")};
+    if (order != want1)
+        std::fprintf(stderr, "  routes order: %s\n", qPrintable(order.join(QLatin1Char(' '))));
+    CHECK_EQ(order, want1);
+
+    // A tunnel change ends the scan: the engine stops, then its routes and its exemption go.
+    fake::engine().reset();
+    fake::engine().reply = progress;
+    h.clock += 2000;
+    CHECK_EQ(h.send(startRequest(QStringLiteral("rt2")), &r), 0);
+    tribeScanBeforeTunnelChange("awg_deactivate");
+    order = fake::engine().orderSnapshot();
+    const QList<QString> want2 = {QStringLiteral("arm:en7"), QStringLiteral("routes:arm:7"), QStringLiteral("scan_message:scan_start"),
+                                  QStringLiteral("stop_all:2000"), QStringLiteral("routes:disarm:2"), QStringLiteral("disarm")};
+    if (order != want2)
+        std::fprintf(stderr, "  routes order: %s\n", qPrintable(order.join(QLatin1Char(' '))));
+    CHECK_EQ(order, want2);
+
+    // The uplink moves under a scan: its routes lead to a router it may no longer have - they go at once, once.
+    fake::engine().reset();
+    fake::engine().reply = progress;
+    h.clock += 2000;
+    CHECK_EQ(h.send(startRequest(QStringLiteral("rt3")), &r), 0);
+    TribeScanUplink moved = phys();
+    moved.gateway = QStringLiteral("192.0.2.254");
+    h.setUplink(moved);
+    h.host->notePathEvent(false);
+    CHECK_EQ(countOf(fake::engine().orderSnapshot(), QStringLiteral("routes:disarm:2")), 1);
+    h.host->notePathEvent(false); // nothing moved since
+    CHECK_EQ(h.send(R"({"action":"scan_poll","scan_id":"rt3","since":0})", &r), 0);
+    CHECK_EQ(countOf(fake::engine().orderSnapshot(), QStringLiteral("routes:disarm:")), 1);
+    CHECK_EQ(countOf(fake::engine().orderSnapshot(), QStringLiteral("disarm")), 1); // the exemption at the final
+    h.setUplink(phys());
+
+    // A scan replaced by the next start: the old routes go before the new arm.
+    fake::engine().reset();
+    fake::engine().reply = [](const QByteArray &msg, const QByteArray &) {
+        return QStringLiteral("{\"type\":\"scan_ack\",\"scan_id\":\"%1\",\"accepted\":1,\"mem_mb\":9}")
+            .arg(obj(msg).value(QLatin1String("scan_id")).toString())
+            .toUtf8();
+    };
+    h.clock += 2000;
+    CHECK_EQ(h.send(startRequest(QStringLiteral("rt4a")), &r), 0);
+    h.clock += 2000;
+    CHECK_EQ(h.send(startRequest(QStringLiteral("rt4b")), &r), 0);
+    order = fake::engine().orderSnapshot();
+    const QList<QString> want4 = {QStringLiteral("arm:en7"), QStringLiteral("routes:arm:7"), QStringLiteral("scan_message:scan_start"),
+                                  QStringLiteral("arm:en7"), QStringLiteral("routes:disarm:2"), QStringLiteral("routes:arm:7"),
+                                  QStringLiteral("scan_message:scan_start")};
+    if (order != want4)
+        std::fprintf(stderr, "  routes order: %s\n", qPrintable(order.join(QLatin1Char(' '))));
+    CHECK_EQ(order, want4);
+    tribeScanBeforeTunnelChange("xray_stop"); // rt4b ends
+    // ... and a scan the app never closes loses them at its deadline with its exemption.
+    QList<std::function<void()>> fires;
+    h.host->setDisarmTimerForTest([&](qint64, std::function<void()> fire) { fires << std::move(fire); });
+    fake::engine().reset();
+    fake::engine().reply = [](const QByteArray &, const QByteArray &) { return QByteArray(R"({"type":"scan_ack","scan_id":"rt5","accepted":1,"mem_mb":9})"); };
+    h.clock += 2000;
+    CHECK_EQ(h.send(startRequest(QStringLiteral("rt5"), 1000), &r), 0);
+    CHECK(waitFor([&]() { return fires.size() == 1; }));
+    if (!fires.isEmpty())
+        fires.last()();
+    CHECK_EQ(countOf(fake::engine().orderSnapshot(), QStringLiteral("routes:disarm:2")), 1);
+    h.host->setDisarmTimerForTest(nullptr);
+
+    // Needed but not in force: the no-uplink refusal, the engine never asked, the exemption armed for it removed.
+    TribeScanRouteArm fail;
+    fail.result = -1;
+    h.setRouteArm(fail);
+    fake::engine().reset();
+    fake::engine().reply = progress;
+    h.clock += 2000;
+    CHECK_EQ(h.send(startRequest(QStringLiteral("rt6")), &r), 0);
+    CHECK_EQ(r, QByteArray(R"({"error":"bad_request","detail":"host_options.bind_interface"})"));
+    order = fake::engine().orderSnapshot();
+    CHECK_EQ(countOf(order, QStringLiteral("scan_message:")), 0);
+    CHECK(order.size() >= 3 && order.at(0) == QStringLiteral("arm:en7") && order.at(1) == QStringLiteral("routes:arm:7")
+          && order.at(2) == QStringLiteral("disarm"));
+
+    // Shutdown with a scan's routes in place: they go.
+    h.setRouteArm(need);
+    fake::engine().reset();
+    fake::engine().reply = progress;
+    h.clock += 20000;
+    CHECK_EQ(h.send(startRequest(QStringLiteral("rt7")), &r), 0);
+    h.host->shutdown();
+    CHECK_EQ(countOf(fake::engine().orderSnapshot(), QStringLiteral("routes:disarm:2")), 1);
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -1321,6 +1684,7 @@ int main(int argc, char **argv)
     generation();
     awgHost();
     teardownTests();
+    uplinkRoutes();
     childKill();
     logInjection();
     logPrivacy(vectors);
