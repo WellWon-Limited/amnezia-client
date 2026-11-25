@@ -13,6 +13,7 @@
 //   report_check_refused {report_id, reason}   host_progress {reply (the host's scan_progress JSON, decoded by
 //   ScanHostContract.h)}   lease_granted {node_id, access}   lease_refused {node_id, code}
 //   row_tapped {node_id}   connect_failed {node_id}   attempt_ended {}   support_check_tapped {}   report_link_tapped {}
+//   tunnel_no_data {ids: [..]} (the engine's path ledger: rows whose real tunnel carried no data here)
 //   report_check_started {}   report_check_progress {step, total}   report_check_done {delivery, report_id}
 //   connect_and_scan_tapped {}   live_probe_result {node_id, facts (a data ITEM of ScanHostContract.h)}
 //   host_cancel_ack {scan_id, bytes_spent}   host_freeze_ack {scan_id, spent, reserved}
@@ -261,6 +262,12 @@ inline ScanStep applyScanEvent(ScanMachine &m, const QJsonObject &ev, bool *know
     if (e == QLatin1String("closed")) return m.closed(now);
     if (e == QLatin1String("stop")) return m.stopTapped(now);
     if (e == QLatin1String("retry")) return m.retryTapped(now);
+    if (e == QLatin1String("tunnel_no_data")) {
+        QStringList ids;
+        for (const QJsonValue &x : a.value(QLatin1String("ids")).toArray())
+            ids << x.toString();
+        return m.tunnelNoDataHere(ids, now);
+    }
     if (e == QLatin1String("got_it")) return m.gotItTapped(now);
     if (e == QLatin1String("filter")) return m.filterChosen(a.value(QLatin1String("cc")).toString(), now);
     if (e == QLatin1String("network_changed"))

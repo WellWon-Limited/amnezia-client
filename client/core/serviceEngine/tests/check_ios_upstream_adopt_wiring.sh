@@ -54,9 +54,9 @@ has "$clear" '#if AVPN_UPSTREAM_GUI_OWNER || defined(Q_OS_IOS)' \
 # R2
 bu="$(body_of "$ADP" 'void VpnConnectionTunnelControl::bringUpUpstream(')"
 ord="$(under "$bu" '#if defined(Q_OS_IOS)')"
-has "$ord" 'meta.insert(QLatin1String(kUpstreamSessionOrderMetaKey), double(m_upOwner.sessionOrder()));' \
+has "$ord" 'meta.insert(QLatin1String(kUpstreamSessionOrderMetaKey), double(m_upOwner.tunnelOrder()));' \
     && has "$ord" 'xcfg.insert(QStringLiteral("tribeSessionMetadata"), meta);' \
-    || bad "R2: an iOS provider start must carry its start order in tribeSessionMetadata (under Q_OS_IOS)"
+    || bad "R2: an iOS provider start must carry the order its tunnel is brought up with (tunnelOrder, round 44 F3) in tribeSessionMetadata"
 o1="$(first_line "$bu" 'meta.insert(QLatin1String(kUpstreamSessionOrderMetaKey)')"
 o2="$(first_line "$bu" 'invokeConnect(xcfg, m_upStub.nodeId, DockerContainer::Xray)')"
 { [ -n "$o1" ] && [ -n "$o2" ] && [ "$o1" -lt "$o2" ]; } \

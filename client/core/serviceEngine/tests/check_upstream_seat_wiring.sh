@@ -294,25 +294,45 @@ ask="$(body_of "$SE/ConfigService.cpp" 'void ConfigService::askDirectOnce()')"
 has "$ask" 'const bool proofOwed = m_proofOwedFn && m_proofOwedFn();' && has "$ask" 'm_askLater.start(int(kAskSpacingMs));' \
     || bad "answer lost: askDirectOnce must consult the owed proof and come back after the spacing while it is owed"
 
-# H1 (device round air-C 24.11: 12 release tries to one silent API host, the seat freed 68 s after the Stop): ONE host rule for the
-# lease requests on the direct route (UpstreamLeaseWire.h::upstreamDirectBase, tested by upstream_lease_check hostRule and
-# upstream_engine_check releaseHostFallback). Checked here: the facade gives the client the walk's next edge; every direct request
-# takes its base by the rule; the end of every acquire, renewal and release (and the acquire's full wait) feeds the mark, and a
-# release notes it BEFORE it schedules its resend.
+# H1 (device round air-C 24.11: 12 release tries to one silent API host, the seat freed 68 s after the Stop) + review round 44 F1/F2:
+# ONE host rule for the lease requests whose ACTUAL path is direct (UpstreamLeaseWire.h::upstreamDirectBase / upstreamRequestPath /
+# upstreamCompleteStatus, tested by upstream_lease_check hostRule and upstream_engine_check releaseHostFallback, reviewRound44).
+# Checked here: the facade gives the client the walk's next edge AND the app's tunnel state; every request builder takes its base and
+# path from targetFor (the one place), which decides the path before any redirect; the end of every acquire, renewal and release (and
+# an acquire's wait) feeds the mark with the request's own target; "answered" is the one complete-answer status, and a release
+# notes it BEFORE it decides its resend.
 has "$fac_nc" 'lease->setNextDirectBase([this](const QString &base) { return m_configSvc ? m_configSvc->nextEdgeAfter(base) : QString(); });' \
     || bad "H1: the facade must give the lease client the walk's next edge (setNextDirectBase -> ConfigService::nextEdgeAfter)"
-bf="$(body_of "$CLI" 'QString UpstreamLeaseClient::baseFor(')"
-has "$bf" 'return upstreamDirectBase(trimmedBase(walk), trimmedBase(next), m_edgeMark, QDateTime::currentMSecsSinceEpoch());' \
-    || bad "H1: a lease request on the direct route must take its base by upstreamDirectBase"
-has "$acq" 'noteHostOutcome(base, route, r);' && has "$acq" 'noteHostSilent(base, route);' \
-    || bad "H1: an acquire's end and its full wait must feed the host mark"
-has "$(body_of "$CLI" 'void UpstreamLeaseClient::renew(')" 'noteHostOutcome(base, route, r);' \
+has "$fac_nc" 'lease->setTunnelUpSource([this]() {' \
+    || bad "F1: the facade must give the lease client the app's tunnel state (setTunnelUpSource)"
+tf="$(body_of "$CLI" 'UpstreamLeaseClient::LeaseTarget UpstreamLeaseClient::targetFor(')"
+has "$tf" 't.path = upstreamRequestPath(!route.apiBase.isEmpty(), !m_tunnelDown, m_stopConfirmed, m_tunnelUpFn && m_tunnelUpFn());' \
+    && has "$tf" 't.base = upstreamDirectBase(walk, next, m_edgeMark, QDateTime::currentMSecsSinceEpoch());' \
+    || bad "H1/F1: targetFor must decide the actual path (upstreamRequestPath) and redirect only by upstreamDirectBase"
+p1="$(first_line "$tf" 'if (t.path != UpstreamRequestPath::Direct) {')"
+p2="$(first_line "$tf" 't.base = upstreamDirectBase(')"
+{ [ -n "$p1" ] && [ -n "$p2" ] && [ "$p1" -lt "$p2" ]; } || bad "F1: a request through a tunnel must leave targetFor before any redirect"
+cli_nc="$(grep -v '^[[:space:]]*//' "$CLI")"
+[ "$(printf '%s\n' "$cli_nc" | grep -c 'const LeaseTarget target = targetFor(')" = "4" ] \
+    || bad "H1: acquire, renew, sendRelease and fetchStandby must each take their target from targetFor (and nothing else)"
+printf '%s\n' "$cli_nc" | grep -qF 'baseFor(' && bad "H1: a second base decision (baseFor) next to targetFor"
+has "$acq" 'noteHostOutcome(target, r);' && has "$acq" 'noteHostSilent(target);' && has "$acq" 'if (!hedged || target.redirected)' \
+    || bad "H1/Q5b: an acquire's end and its wait (a redirected hedge too) must feed the host mark with its own target"
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::renew(')" 'noteHostOutcome(target, r);' \
     || bad "H1: a renewal's end must feed the host mark"
+nho="$(body_of "$CLI" 'void UpstreamLeaseClient::noteHostOutcome(')"
+has "$nho" 'if (t.path != UpstreamRequestPath::Direct || !reply)' && has "$nho" 'upstreamHostOutcome(answerStatus(reply),' \
+    || bad "F1/F2: only a direct request marks, and only by the complete-answer status"
+printf '%s\n' "$cli_nc" | grep -qF 'return upstreamCompleteStatus(code.isValid() ? code.toInt() : 0, int(r->error()));' \
+    || bad "F2: answerStatus must be the one complete-answer definition (upstreamCompleteStatus)"
 srl="$(body_of "$CLI" 'void UpstreamLeaseClient::sendRelease(')"
-h1="$(first_line "$srl" 'noteHostOutcome(base, route, r);')"
+h1="$(first_line "$srl" 'noteHostOutcome(target, r);')"
 h2="$(first_line "$srl" 'const SeatReleaseNext next = seatReleaseNext(')"
 { [ -n "$h1" ] && [ -n "$h2" ] && [ "$h1" -lt "$h2" ]; } \
     || bad "H1: a release must note its host's outcome before it decides the resend (the resend then goes to the other host)"
+has "$srl" 'const int status = answerStatus(r);' || bad "F2: a release is final only on a complete answer (answerStatus)"
+has "$(body_of "$CLI" 'void UpstreamLeaseClient::tunnelStopped()')" 'm_stopConfirmed = true;' \
+    || bad "F1: the confirmed stop must make the held releases direct before the app's own state moves"
 
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"

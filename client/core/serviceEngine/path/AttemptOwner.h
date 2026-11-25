@@ -25,7 +25,8 @@
 // stamp (Android: the VPN service from the start command until VpnService.Builder.establish() returned and the
 // backend runs - with «Доступ к сайтам РФ» Android installs ~10 800 routes there, 7-10 s on the emulator 20.11).
 // Between them the start deadline does not run; from "built" the leg has its full start deadline for the server's
-// part. A build that does not finish within localBuildMs ends the leg with a LOCAL outcome (LocalBuildOverrun,
+// part. A leg may enter its local phase again after "built" (begun/ended pairs, review R43 F5); localBuildMs bounds
+// all its local phases together. A build that does not finish within it ends the leg with a LOCAL outcome (LocalBuildOverrun,
 // Inconclusive: nothing recorded against the path), and the next candidate is tried. The local time is not part of
 // the leg's connect time either. A platform that does not report builds (desktop) behaves exactly as before; iOS
 // reports only a parked start (below).
@@ -495,8 +496,10 @@ private:
             return;
         if (ev.building) {
             if (m_leg.buildSince < 0) {
+                // a leg may enter its local phase again (review R43 F5: iOS parks the same start a second time when the
+                // profile is torn down again during its save); the local bound counts all of them together
                 m_leg.buildSince = m_awake;
-                m_leg.deadline = m_awake + m_t.localBuildMs;
+                m_leg.deadline = m_awake + std::max<qint64>(0, m_t.localBuildMs - m_leg.localMs);
             }
         } else if (m_leg.buildSince >= 0) {
             endLocalBuild();

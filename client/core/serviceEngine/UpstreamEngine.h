@@ -402,8 +402,13 @@ struct UpstreamLeaseRecord {
     qint64 revision = 0;
     MeterScope scope = MeterScope::Tunnel;
     QStringList meterTags;    // the lease's meter_tags (proxy scope sums exactly these)
-    // The order of the start that holds the lease (UpstreamLeaseWire.h::UpstreamSessionOrder; -1 = not known, an older
-    // record). iOS matches the record to THE session the extension runs by it (upstreamHandedOverRecordMatches); not a secret.
+    // TWO identities (review round 44 F3), neither a secret:
+    //  - tunnelOrder: the order the TUNNEL carries - the one its bring-up put into tribeSessionMetadata (iOS); iOS matches the record to
+    //    THE session the extension runs by it (upstreamHandedOverRecordMatches). A provisional start whose seat confirmation was retried
+    //    after an order-floor denial runs on with the bring-up's order while the lease belongs to the retry's order.
+    //  - sessionOrder: the order of the start the server holds the lease for now (UpstreamLeaseWire.h::UpstreamSessionOrder).
+    // The seat itself is released by leaseId. -1 = not known (an older record).
+    qint64 tunnelOrder = -1;
     qint64 sessionOrder = -1;
 
     bool valid() const
@@ -427,7 +432,8 @@ struct UpstreamLeaseRecord {
                                          {QStringLiteral("revision"), double(revision)},
                                          {QStringLiteral("meter_scope"), meterScopeName(scope)},
                                          {QStringLiteral("meter_tags"), QJsonArray::fromStringList(meterTags)},
-                                         {QStringLiteral("session_order"), double(sessionOrder)}})
+                                         {QStringLiteral("session_order"), double(sessionOrder)},
+                                         {QStringLiteral("tunnel_order"), double(tunnelOrder)}})
             .toJson(QJsonDocument::Compact);
     }
     static UpstreamLeaseRecord fromJson(const QByteArray &json)
@@ -449,6 +455,8 @@ struct UpstreamLeaseRecord {
         if (r.meterTags.isEmpty())
             r.scope = MeterScope::Tunnel;
         r.sessionOrder = qint64(o.value(QLatin1String("session_order")).toDouble(-1));
+        // A record without tunnel_order (written by 1ac577c96): its one order was the tunnel's, except after the rare retry above.
+        r.tunnelOrder = qint64(o.value(QLatin1String("tunnel_order")).toDouble(double(r.sessionOrder)));
         return r;
     }
 };
@@ -488,6 +496,8 @@ inline qint64 upstreamAdoptConfirmBudgetMs(const UpstreamLeaseRecord &r, qint64 
 // (UpstreamLeaseOwner::adoptHandedOver). The record names the start by its order; the order rides in the session's
 // tribeSessionMetadata (iOS only, VpnConnectionTunnelControl::bringUpUpstream), which the extension keeps in its provider
 // configuration and returns with every status reply - so the relaunched app reads back which start is running.
+// The value is the order of the start that BROUGHT THE TUNNEL UP (UpstreamLeaseOwner::tunnelOrder) - the tunnel's identity, matched
+// against UpstreamLeaseRecord::tunnelOrder; the key name stays as the builds on the test phones write it.
 inline constexpr const char *kUpstreamSessionOrderMetaKey = "session_order";
 
 // The start order in a session's metadata; -1 = absent or not a valid order (a session started before this rule).
@@ -502,17 +512,18 @@ inline qint64 upstreamSessionOrderOf(const QJsonObject &metadata)
     return qint64(d);
 }
 
-// The record names THE session the extension runs: the same node and the same start order as the live session's metadata, a
-// lease id a release can name, not older than kUpstreamRecordMaxAgeMs. Anything else - another start, another node, a record
+// The record names THE session the extension runs: the same node and the same TUNNEL order (the one the live session's metadata
+// carries: UpstreamLeaseRecord::tunnelOrder) - never the lease's current server order, which a confirmation retry may have moved -
+// a lease id a release can name, not older than kUpstreamRecordMaxAgeMs. Anything else - another start, another node, a record
 // without an order, a broken one - is not adopted: that seat stays the extension's to release, as before. A lease id belongs to
 // one start (contract 1.19.0: another start gets a NEW lease id), so the release this enables can only ever end that start's
 // lease - never a seat a newer start holds.
-inline bool upstreamHandedOverRecordMatches(const UpstreamLeaseRecord &r, const QString &liveNodeId, qint64 liveSessionOrder,
+inline bool upstreamHandedOverRecordMatches(const UpstreamLeaseRecord &r, const QString &liveNodeId, qint64 liveTunnelOrder,
                                             qint64 nowWallMs)
 {
     static const QRegularExpression idRe(QStringLiteral("^[A-Za-z0-9_-]{1,64}$"));
     return idRe.match(r.profileId).hasMatch() && r.nodeId == upstreamNodeIdFor(r.profileId) && r.nodeId == liveNodeId
-           && upstreamLeaseIdValid(r.leaseId) && r.sessionOrder > 0 && r.sessionOrder == liveSessionOrder && r.savedWallMs > 0
+           && upstreamLeaseIdValid(r.leaseId) && r.tunnelOrder > 0 && r.tunnelOrder == liveTunnelOrder && r.savedWallMs > 0
            && nowWallMs >= r.savedWallMs - 60000 && nowWallMs - r.savedWallMs < kUpstreamRecordMaxAgeMs;
 }
 

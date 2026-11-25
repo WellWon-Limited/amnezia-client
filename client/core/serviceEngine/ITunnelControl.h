@@ -13,10 +13,13 @@ struct TunnelStats {
     qint64 rxBytes = 0;
     qint64 txBytes = 0;
     bool   valid = false;
-    // AVPN (iOS, awg-apple tribe.16, device round 24.11 B1): seconds since inbound DATA last proved the path, as the
-    // extension's stall ladder judges it (no handshake bytes, no echo of its own repair step; status `data_quiet_s`).
-    // -1 = unknown: every other platform, an extension before tribe.16, Xray. Read only by the AmneziaWG probe rule.
-    qint64 dataQuietSec = -1;
+    // AVPN (iOS, awg-apple tribe.17, device round 24.11 B1): the extension's stall verdict (status `data_stall_s`):
+    // while its stall ladder sees a stall right now, how long the path has gone without data that proved it; 0 = not
+    // stalled now. -1 = unknown: every other platform, an extension before tribe.17, Xray. `dataStallAtMs` = when the
+    // status request was sent (wall clock, ms; tribe.18: never the apply time; a reading is used only while fresh).
+    // Read only by the AmneziaWG probe rule.
+    qint64 dataStallSec = -1;
+    qint64 dataStallAtMs = 0;
 };
 
 // Хелперы наполнения TunnelStats (ИНЦИДЕНТ 2026-07-11 «сам отключился и переподключился»):

@@ -176,10 +176,15 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
             [this](qint64 hsEpochSec) { updateHandshakeEpoch(m_stats, hsEpochSec); },
             Qt::QueuedConnection);
 #if defined(Q_OS_IOS)
-    // AVPN (awg-apple tribe.16, device round 24.11 B1): the extension's own "no data for N s" (-1 = unknown). iOS only:
-    // the macOS NE build keeps the behaviour of build 141 (its probe rule never sees the field).
-    connect(IosController::Instance(), &IosController::dataQuietChanged, this,
-            [this](qint64 seconds) { m_stats.dataQuietSec = seconds; },
+    // AVPN (awg-apple tribe.17, device round 24.11 B1): the extension's stall verdict (-1 = unknown) with the time it
+    // came in. iOS only: the macOS NE build keeps the behaviour of build 141 (its probe rule never sees the field).
+    // tribe.18 (second review, G1): dated by its request's send time, never by when the reply was applied (a reply
+    // queued before a suspension is applied after it, and must not look fresh then).
+    connect(IosController::Instance(), &IosController::dataStallChanged, this,
+            [this](qint64 seconds, qint64 measuredAtMs) {
+                m_stats.dataStallSec = seconds;
+                m_stats.dataStallAtMs = measuredAtMs;
+            },
             Qt::QueuedConnection);
 #endif
     // AVPN (девайс-разбор 2026-09-02): ядро Xray не поднялось в NE — текст причины наружу
@@ -908,7 +913,7 @@ void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)
     // returns it with every status reply, so a relaunched app knows which start runs (adoptUpstreamSession). Not a secret.
     {
         QJsonObject meta = xcfg.value(QStringLiteral("tribeSessionMetadata")).toObject();
-        meta.insert(QLatin1String(kUpstreamSessionOrderMetaKey), double(m_upOwner.sessionOrder()));
+        meta.insert(QLatin1String(kUpstreamSessionOrderMetaKey), double(m_upOwner.tunnelOrder())); // the tunnel's identity (round 44 F3)
         xcfg.insert(QStringLiteral("tribeSessionMetadata"), meta);
     }
 #endif

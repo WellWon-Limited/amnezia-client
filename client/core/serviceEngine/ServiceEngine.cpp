@@ -1522,13 +1522,15 @@ bool ServiceEngine::feedProbeResult(bool ok)
             return false;
     } else {
         const qint64 nowEpoch = QDateTime::currentSecsSinceEpoch();
-        // tribe.16 (device round 24.11 B1): the extension's "no inbound data for N s" corroborates too; -1 on every
-        // platform but iOS with a tribe.16 extension (TunnelStats::dataQuietSec), where this is the rule of 141.
-        const qint64 dataQuietSec = m_tunnel ? m_tunnel->readStats().dataQuietSec : -1;
+        // tribe.17 (device round 24.11 B1): the extension's stall verdict corroborates too, while fresh; -1 on every
+        // platform but iOS with a tribe.17 extension (TunnelStats::dataStallSec), where this is the rule of 141.
+        const TunnelStats live = m_tunnel ? m_tunnel->readStats() : TunnelStats{};
+        const qint64 dataStallSec = HealthLoop::freshDataStall(live.dataStallSec, live.dataStallAtMs,
+                                                               QDateTime::currentMSecsSinceEpoch());
         if (!HealthLoop::probeDeadCorroborated(m_probeFailStreak, awgProbeFailCyclesTuned(),
                                                m_health.inNetworkGrace(nowEpoch), m_health.latestHandshakeEpoch(),
-                                               nowEpoch, awgProbeDeadHandshakeAgeSTuned(), dataQuietSec,
-                                               awgProbeDeadQuietSTuned()))
+                                               nowEpoch, awgProbeDeadHandshakeAgeSTuned(), dataStallSec,
+                                               awgProbeDeadStallSTuned()))
             return false;
     }
     m_probeFailStreak = 0;
@@ -1797,15 +1799,22 @@ bool ServiceEngine::onLocalBuild(LocalBuildReport report, quint64 leg)
     }
     const EngineState before = m_state;
     switch (report) {
-    case LocalBuildReport::Building:
-        if (m_legBuildBegun == leg)
+    case LocalBuildReport::Building: {
+        // Begun/ended pairs (review R43 F5): a repeat while the phase runs changes nothing; a "building" of the same leg
+        // after its "built" is a second local phase (iOS parks the same start again when the profile is torn down
+        // again during its save) - the clock stands again, the local bound counts both phases together.
+        const bool again = m_legBuildBegun == leg;
+        if (again && m_owner.legBuilding())
             return false; // a repeated report changes nothing
         m_legBuildBegun = leg;
-        attemptJournal(QStringLiteral("leg_build begin leg=%1 node=%2 (the device builds its tunnel: the start clock stands)")
-                           .arg(leg).arg(m_owner.currentPath().id.id));
+        attemptJournal(again ? QStringLiteral("leg_build again leg=%1 node=%2 local_ms=%3 (a second local phase of the same start: the clock stands again)")
+                                   .arg(leg).arg(m_owner.currentPath().id.id).arg(m_owner.legLocalBuildMs())
+                             : QStringLiteral("leg_build begin leg=%1 node=%2 (the device builds its tunnel: the start clock stands)")
+                                   .arg(leg).arg(m_owner.currentPath().id.id));
         if (!m_owner.legBuilding())
             feedOwner(path::AttemptEvent::localBuild(nowMs(), m_owner.currentLeg(), true));
         break;
+    }
     case LocalBuildReport::Built:
         if (!m_owner.legBuilding())
             return false; // nothing local runs for this leg (a repeated report)

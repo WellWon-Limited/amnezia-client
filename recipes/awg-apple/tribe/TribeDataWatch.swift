@@ -281,7 +281,7 @@ public struct TribeDataWatchPolicy: Equatable {
     /// above that next to a handshake is data.
     public var handshakeRxAllowanceBytes: UInt64 = 148 // = TribeDataFlow.handshakeRxBytes (tribe.16, pinned by the ladder test)
     /// Subtracted from the tx growth of a sample in which the handshake time changed.
-    public var handshakeTxAllowanceBytes: UInt64 = 1024 // = TribeDataFlow.handshakeTxBytes (tribe.16, pinned by the ladder test)
+    public var handshakeTxAllowanceBytes: UInt64 = 1024 // tribe.17: raised to the session's own handshake (TribeServiceTraffic) by the provider
     /// Quiet time after a path change.
     public var pathStableSeconds: TimeInterval = 20
     /// Quiet time after a device start or a peer switch.

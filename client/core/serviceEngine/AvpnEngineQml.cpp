@@ -1057,6 +1057,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // handshake): N провалов подряд (xray_probe_fail_cycles) → движок уводит на другой транспорт
         // той же локации (двухфазный свитч, как health-DEAD). awg — no-op внутри. Сигнал приходит с
         // верха цикла событий (async-ответ QNetworkReply), не из-под Selector::pick.
+        // tribe.17 (review of the 24.11 fix, Q6): a failed probe while the health verdict is held after a return /
+        // thaw (the iOS data watch's resume guard, the one the health tick uses; false elsewhere and with the watch
+        // off) is not fed: a request that was in flight across a suspension says nothing about the tunnel.
+#ifdef Q_OS_IOS
+        if (!reachable && tunnelWatchFrozen("live_probe"))
+            return;
+        // tribe.18 (second review, G1): independent of the data watch - a failed probe that took longer by the wall clock
+        // than its own timeouts allow spanned a suspension of the app and is not fed either.
+        if (!reachable && avpn::HealthLoop::probeSpannedSuspension(m_probe->startedWallMs(), QDateTime::currentMSecsSinceEpoch(),
+                                                                   m_probe->timeoutBudgetMs()))
+            return;
+#endif
         if (m_engine.feedProbeResult(reachable)) { // a dead live session: the failover attempt of the owner
             syncAttempt();
             emit changed();
@@ -1178,8 +1190,15 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                                [this]() { return authToken(); });
     // Device round air-C 24.11: a lease request whose last try on the walk's edge got no answer goes to the walk's next edge -
     // ONE host rule for acquire, renew and release (UpstreamLeaseWire.h::upstreamDirectBase); the walk itself is not moved.
-    if (avpn::UpstreamLeaseClient *lease = m_tunnel.upstreamClient())
+    if (avpn::UpstreamLeaseClient *lease = m_tunnel.upstreamClient()) {
         lease->setNextDirectBase([this](const QString &base) { return m_configSvc ? m_configSvc->nextEdgeAfter(base) : QString(); });
+        // Review round 44 F1: the rule applies only to a request that really goes direct - a tunnel of ours carries the app's
+        // requests in these states (the same fact ConfigService reads: setTunnelUpSource below).
+        lease->setTunnelUpSource([this]() {
+            return m_lastTunnelState == Vpn::Connecting || m_lastTunnelState == Vpn::Connected
+                || m_lastTunnelState == Vpn::Reconnecting || m_lastTunnelState == Vpn::Disconnecting;
+        });
+    }
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
     // уже вырезает каждый вход, поэтому смена edge не требует перезапуска туннеля.
     resolveApiCarveHosts(avpn::edgeHosts(avpn::edgeCandidates(avpn::ConfigStore::loadEdges(), kBakedEdges)));

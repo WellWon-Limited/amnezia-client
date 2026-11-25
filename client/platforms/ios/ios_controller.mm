@@ -1234,11 +1234,14 @@ void IosController::checkStatus()
     NSString *tunnelIdValue = !m_tunnelId.isEmpty() ? m_tunnelId.toNSString() : @"";
 
     NSDictionary* message = @{actionKey: actionValue, tunnelIdKey: tunnelIdValue};
+    // AVPN (awg-apple tribe.18, second review G1): what the reply measures is at most as old as this request; a reply
+    // that is applied only after a suspension keeps this time (never the time it was applied).
+    const qint64 requestSentMs = QDateTime::currentMSecsSinceEpoch();
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
     // tunnel: наш retain (retainedCurrentTunnel) отпускается в КОНЦЕ блока — синхронно после
     // sendProviderMessage (ответ-хендлер менеджер не трогает; release в колбэке был бы двойным
     // при callback(nil)-ветках). Сам блок дополнительно держит tunnel как object-capture.
-    sendVpnExtensionMessage(tunnel, message, [this, gen, request](NSDictionary* response){
+    sendVpnExtensionMessage(tunnel, message, [this, gen, request, requestSentMs](NSDictionary* response){
         if (!response) {
             QMetaObject::invokeMethod(this, [this, gen, request]() {
                 m_statusRequests.complete(gen, request);
@@ -1254,8 +1257,8 @@ void IosController::checkStatus()
         const uint64_t txBytes = uint64FromResponse(response, @"tx_bytes");
         const uint64_t rxBytes = uint64FromResponse(response, @"rx_bytes");
         const long long last_handshake_time_sec = int64FromResponse(response, @"last_handshake_time_sec");
-        // AVPN (awg-apple tribe.16): absent in an older extension's reply -> -1 (unknown)
-        const long long dataQuietSec = int64FromResponse(response, @"data_quiet_s", -1);
+        // AVPN (awg-apple tribe.17): absent in an older extension's reply -> -1 (unknown)
+        const long long dataStallSec = int64FromResponse(response, @"data_stall_s", -1);
         // AVPN (этап D3): runtime_state xray-пути (starting/running/stopping/stopped/failed) —
         // только для лога; у WG-ответа ключа нет (пусто).
         const QString runtimeState = stringFromResponse(response, @"runtime_state");
@@ -1299,7 +1302,7 @@ void IosController::checkStatus()
             roamSummary = parts.join(QLatin1Char(' '));
         }
 
-        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, dataQuietSec, runtimeState, engineDown, // AVPN: capture list - status generation/request (C5/H7), session metadata, data quiet (tribe.16), xray runtime (D3), roam counters
+        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, dataStallSec, requestSentMs, runtimeState, engineDown, // AVPN: capture list - status generation/request (C5/H7), session metadata, data stall (tribe.17), xray runtime (D3), roam counters
                                          startFailure, ifaceName, coreLogTail, roamSummary, roamSoftRestarts, roamResumes,
                                          xrayProtectBound, xrayProtectUnbound, xrayProtectRejected, upstreamStatus]() { // AVPN (upstream nodes): + upstreamStatus
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
@@ -1463,7 +1466,7 @@ void IosController::checkStatus()
                 }
             } else {
                 emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);
-                emit dataQuietChanged(dataQuietSec >= 0 ? (qint64) dataQuietSec : -1); // AVPN (tribe.16)
+                emit dataStallChanged(dataStallSec >= 0 ? (qint64) dataStallSec : -1, requestSentMs); // AVPN (tribe.18)
             }
             m_rxBytes = rxBytes;
             m_txBytes = txBytes;

@@ -46,6 +46,10 @@ public:
     // route goes when the last lease request to the walk's edge ended silent - ONE rule for acquire, renew and release
     // (UpstreamLeaseWire.h::upstreamDirectBase, device round air-C 24.11). Unset = the walk's edge only (a bare client).
     void setNextDirectBase(std::function<QString(const QString &)> next) { m_nextDirectBase = std::move(next); }
+    // The app's own native state: a tunnel of ours is up now, in any state in which it may carry the app's requests (the facade's
+    // fact, the one ConfigService reads too). With the client's own start / stop facts it decides the ACTUAL path of every request
+    // (UpstreamLeaseWire.h::upstreamRequestPath, review round 44 F1). Unset = the client's own facts only.
+    void setTunnelUpSource(std::function<bool()> up) { m_tunnelUpFn = std::move(up); }
     bool configured() const;
     QString publicKeyHex() const { return m_pubKeyHex; }
 
@@ -91,7 +95,11 @@ public:
     // The release after a confirmed stop (ReleaseAfterStop): holds for the stop only while a tunnel is believed
     // running - a Disconnected that already happened is not waited for again (review F4 of 19.11).
     void holdReleasesForStopIfRunning();
-    void tunnelStarted() { m_tunnelDown = false; } // the adapter saw the native tunnel come up / connecting
+    void tunnelStarted() // the adapter saw the native tunnel come up / connecting
+    {
+        m_tunnelDown = false;
+        m_stopConfirmed = false;
+    }
     int heldReleases() const { return int(m_held.size()); }
 
     // GET /v1/upstream/standby?network_key= with the device token on the direct base. done(httpStatus,
@@ -135,10 +143,16 @@ public:
     // id or gives a cancelled acquire's seat back at once.
 
 private:
-    QString baseFor(const LeaseRoute &route) const;
-    // A lease request to `base` ended (route as it was sent): the host rule's mark follows its outcome (direct route only).
-    void noteHostOutcome(const QString &base, const LeaseRoute &route, QNetworkReply *reply);
-    void noteHostSilent(const QString &base, const LeaseRoute &route); // the attempt's full wait passed with no answer
+    // Where a request goes and by which path, decided when it is built (targetFor) and kept with it until it ends.
+    struct LeaseTarget {
+        QString base;
+        UpstreamRequestPath path = UpstreamRequestPath::Direct;
+        bool redirected = false; // sent to the walk's next edge by the host rule
+    };
+    LeaseTarget targetFor(const LeaseRoute &route) const;
+    // A lease request ended: the host rule's mark follows its outcome (the direct path only).
+    void noteHostOutcome(const LeaseTarget &target, QNetworkReply *reply);
+    void noteHostSilent(const LeaseTarget &target); // the attempt's wait passed with no answer
     void sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route,
                      int attempt, qint64 spacedMs = 0, quint64 bgKey = 0);
     void reportLateGrant(const QString &profileId, const QString &leaseId, const LeaseRoute &route, quint64 acquireId);
@@ -148,6 +162,7 @@ private:
     QPointer<QNetworkAccessManager> m_nam;
     std::function<QString()> m_directBase;
     std::function<QString(const QString &)> m_nextDirectBase;
+    std::function<bool()> m_tunnelUpFn;
     UpstreamEdgeMark m_edgeMark; // the direct edge whose last lease request ended silent (UpstreamLeaseWire.h host rule)
     std::function<QString()> m_token;
     QString m_pubKeyHex;
@@ -162,6 +177,7 @@ private:
     QList<HeldRelease> m_held;
     QHash<quint64, QString> m_acquiresOut; // acquire request id -> profile, until its HTTP request ends
     bool m_tunnelDown = true; // the last tunnel event was a confirmed stop (or none yet)
+    bool m_stopConfirmed = false; // the last tunnel event was a confirmed stop (not "none yet")
     bool m_stopPending = false;
     qint64 m_heldSinceMs = 0;
     void flushHeld(bool tunnelDown);

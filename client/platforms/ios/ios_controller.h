@@ -182,10 +182,12 @@ signals:
     // (HealthLoop). Значение уже парсится в checkStatus из UAPI last_handshake_time_sec; здесь лишь
     // отдаём его наружу (раньше использовалось только для подтверждения коннекта). См. VpnConnectionTunnelControl.
     void handshakeChanged(qint64 lastHandshakeEpochSec);
-    // AVPN (awg-apple tribe.16, device round 24.11 B1): the extension's `data_quiet_s` - seconds since inbound DATA
-    // last proved the path (no handshake bytes, no echo of a repair step); -1 = the reply has none (an extension
-    // before tribe.16, an Xray session, a stale watchdog). Feeds the AmneziaWG probe failover (HealthLoop).
-    void dataQuietChanged(qint64 seconds);
+    // AVPN (awg-apple tribe.17, device round 24.11 B1): the extension's `data_stall_s` - while its stall ladder sees
+    // a stall right now (nothing in for 4 s while the user sends), how long the path has gone without data that
+    // proved it; 0 = not stalled now (data comes in, or nobody sends); -1 = the reply has none (an extension before
+    // tribe.17, an Xray session, a stale watchdog). Feeds the AmneziaWG probe failover (HealthLoop).
+    // `measuredAtMs` (tribe.18, G1) = when the status request was sent (wall clock): the reading is at most that old.
+    void dataStallChanged(qint64 seconds, qint64 measuredAtMs);
     // AVPN (floor 19.11): the awaited AmneziaWG handshake was seen - awaitedMs from the NE's Connected to this
     // status reply (the stage between "extension Connected" and the app's Connected; journal ios_handshake_seen).
     void handshakeConfirmed(qint64 awaitedMs);

@@ -383,8 +383,16 @@ order "$cfg_start" '#ifdef Q_OS_IOS' 'freezeCachedFeatures(c.features, /\*ios=\*
 # ---- E7: the package and the targets ----------------------------------------------------------------------
 # tribe.15 (the probe engine's host limits, an engine patch) = tribe.14's package patches byte for byte.
 # tribe.16 (one definition of "data is flowing", device round 24.11 B1) = tribe.15's + 0017 last.
-grep -q 'self.requires("awg-apple/3.1.4-tribe.16")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.16"
-grep -q '^    version = "3.1.4-tribe.16"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.16"
+# tribe.17 (its review: TribeRoaming.swift only) = tribe.16's patches unchanged.
+# tribe.18 (the second review: TribeRoaming.swift only) = tribe.17's patches unchanged.
+grep -q 'self.requires("awg-apple/3.1.4-tribe.18")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.18"
+grep -q '^    version = "3.1.4-tribe.18"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.18"
+list18="$(awk '/^  "3.1.4-tribe.18":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+[ -n "$list18" ] && [ "$list18" = "$(awk '/^  "3.1.4-tribe.17":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')" ] \
+    || bad "E7: tribe.18 must carry the package patches of tribe.17 unchanged, in the same order"
+list17="$(awk '/^  "3.1.4-tribe.17":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+[ -n "$list17" ] && [ "$list17" = "$(awk '/^  "3.1.4-tribe.16":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')" ] \
+    || bad "E7: tribe.17 must carry the package patches of tribe.16 unchanged, in the same order"
 list16="$(awk '/^  "3.1.4-tribe.16":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
 [ -n "$list16" ] && [ "$list16" = "$(awk '/^  "3.1.4-tribe.15":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')
 patches/0017-tribe-data-quiet-export.patch" ] \

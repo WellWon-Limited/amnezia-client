@@ -240,8 +240,8 @@ PageType {
     }
     property bool allCache: false         // every shown row is a cached one (set by syncRows)
     readonly property bool lastResult: !scanning && otherCount > 0 && (blocked || allCache)
-    // the live connection's row (view.rows[0] with the «current» flag) is drawn first, above everything else of the list;
-    // otherCount = the rows besides it (set by syncRows)
+    // the live connection's row is view.rows[0] (the «current» flag) when the machine built the list with it; otherCount =
+    // the rows besides it - the result's own rows (set by syncRows)
     property bool liveFirst: false
     // the live connection's row wherever the result has it (review round 36, F4: a row connected from the list keeps
     // its place - rows never jump - and the choice still shows it under «ВАШЕ ПОДКЛЮЧЕНИЕ»); -1 = none (set by syncRows)
@@ -418,6 +418,23 @@ PageType {
         duration: Theme.motion.reduceMotion ? 0 : Theme.motion.slow
         // in-out: the list under the block starts moving gently (OutCubic moved it 35 px in the first frame)
         easing.type: Easing.InOutCubic
+        // back on the choice, the rings small again: the selected row in view (device round air-C, D7)
+        onStopped: if (root.choosing) root.revealSelected()
+    }
+    // the choice's selected row brought into the list's view (Back from a result of a country far down the list left it
+    // off screen); nothing moves when it is already in view
+    function revealSelected() {
+        let row = null
+        for (let i = 0; i < chooseCol.children.length && !row; ++i)
+            if (chooseCol.children[i].objectName === "scannerScope_" + (selected === "" ? "all" : selected))
+                row = chooseCol.children[i]
+        if (!row || !row.visible) return
+        const top = row.mapToItem(list.contentItem, 0, 0).y
+        const bottom = top + row.height
+        if (top < list.contentY)
+            list.contentY = Math.max(0, top - list.padTop)
+        else if (bottom > list.contentY + list.height)
+            list.contentY = Math.max(0, Math.min(list.contentHeight - list.height, bottom - list.height + list.padBottom))
     }
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
@@ -733,28 +750,54 @@ PageType {
                         }
                     }
 
-                    // the live connection's row: always the first thing of the result, drawn like every other row
+                    Text {
+                        id: sectionLabel
+                        visible: root.otherCount > 0
+                        text: root.lastResult ? ScanTexts.sectionLast : ScanTexts.sectionNow
+                        textFormat: Text.PlainText
+                        color: Theme.color.text3
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.caption
+                        font.weight: Theme.font.wSemibold
+                        font.letterSpacing: Theme.font.trackCaption * Theme.font.caption
+                        lineHeight: 15
+                        lineHeightMode: Text.FixedHeight
+                    }
+                    // The rows place THEMSELVES: y = index x pitch. Rows only join the end (the machine's list), so an index
+                    // never changes while the list lives. A new row fades in at its own place, rising from one gap below
+                    // (never over a row).
+                    // The live connection (device round air-C, D4) is one of these rows, drawn the one way every list draws
+                    // it (TribeScanRow «Подключено», highlighted) - never a separate card above the caption. Where it stands
+                    // is the machine's list rule: first in a list that is built (page open, a scan, a scope, a network), and
+                    // in its own place when it was connected from the list the person is looking at - it never jumps under
+                    // the finger; it moves to the top when the result is next built.
                     Item {
-                        id: liveBox
-                        visible: root.liveFirst
+                        id: rowsBox
+                        readonly property real pitch: Theme.scan.rowHeight + resultCol.spacing
+                        visible: rowsModel.count > 0
                         width: parent.width
-                        height: root.liveFirst ? Theme.scan.rowHeight : 0
+                        height: Math.max(0, rowsModel.count * pitch - resultCol.spacing)
+                        // the lines under the rows (wait line, legend, «Найти ещё») slide with the list's growth
+                        Behavior on height {
+                            enabled: !Theme.motion.reduceMotion
+                            NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutCubic }
+                        }
                         Repeater {
                             model: rowsModel
                             delegate: ScanRowSlot {
-                                liveSlot: true
-                                liveFirst: root.liveFirst
+                                liveSlot: false
+                                liveFirst: false
                                 scanning: root.scanning
-                                rowWidth: liveBox.width
-                                pitch: Theme.scan.rowHeight + resultCol.spacing
+                                rowWidth: rowsBox.width
+                                pitch: rowsBox.pitch
                                 gap: resultCol.spacing
                                 onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
                             }
                         }
                     }
 
-                    // «Все страны · 46 серверов» / «Германия · 12 серверов» + what the Scan button does: the result shows
-                    // nothing of its scope (the kit's empty-state pattern: title, text; the action is the bar's Scan
+                    // «Все страны · 46 серверов» / «Германия · 12 серверов» + what the Scan button does, under the live
+                    // connection's row when there is one: the result shows nothing of its scope (the kit's empty-state pattern: title, text; the action is the bar's Scan
                     // button - one button, one meaning; the radar is the rings')
                     Column {
                         visible: root.scopeStart
@@ -788,50 +831,6 @@ PageType {
                             font.pixelSize: Theme.font.bodyS
                             lineHeight: 20
                             lineHeightMode: Text.FixedHeight
-                        }
-                    }
-
-                    Text {
-                        id: sectionLabel
-                        visible: root.otherCount > 0
-                        // under the connected row (when there is one) .sec-label.in-list margin-top 4; else the list's first child
-                        topPadding: root.liveFirst ? Theme.space.xs : 0
-                        text: root.lastResult ? ScanTexts.sectionLast : ScanTexts.sectionNow
-                        textFormat: Text.PlainText
-                        color: Theme.color.text3
-                        font.family: Theme.font.body
-                        font.pixelSize: Theme.font.caption
-                        font.weight: Theme.font.wSemibold
-                        font.letterSpacing: Theme.font.trackCaption * Theme.font.caption
-                        lineHeight: 15
-                        lineHeightMode: Text.FixedHeight
-                    }
-                    // The other rows place THEMSELVES: y = place x pitch (place = index, less the live row above). Rows only
-                    // join the end (the machine's list), so an index never changes while the list lives. A new row fades in
-                    // at its own place, rising from one gap below (never over a row). One delegate (ScanRowSlot) serves the
-                    // live row's repeater above and this one: a slot shows itself or hides by index 0 + liveFirst.
-                    Item {
-                        id: rowsBox
-                        readonly property real pitch: Theme.scan.rowHeight + resultCol.spacing
-                        visible: root.otherCount > 0
-                        width: parent.width
-                        height: Math.max(0, root.otherCount * pitch - resultCol.spacing)
-                        // the lines under the rows (wait line, legend, «Найти ещё») slide with the list's growth
-                        Behavior on height {
-                            enabled: !Theme.motion.reduceMotion
-                            NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutCubic }
-                        }
-                        Repeater {
-                            model: rowsModel
-                            delegate: ScanRowSlot {
-                                liveSlot: false
-                                liveFirst: root.liveFirst
-                                scanning: root.scanning
-                                rowWidth: rowsBox.width
-                                pitch: rowsBox.pitch
-                                gap: resultCol.spacing
-                                onRowTapped: (rid) => { if (root.hasScanner) TribeScanner.tapRow(rid) }
-                            }
                         }
                     }
 
@@ -1037,6 +1036,23 @@ PageType {
                 }
             }
         }
+        // The list's top edge (device round air-C, D3): content scrolled under the badges fades out over Theme.space.xl -
+        // a line cut at the edge (the half «ДОСТУПНЫ СЕЙЧАС» under the count badge) never shows as a fragment. Only while
+        // the list is scrolled; the badges row above keeps its own background.
+        Rectangle {
+            objectName: "scannerListEdge"
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: Theme.space.xl
+            visible: list.contentY > 0
+            // solid over the first third (a cut line is never taller), then the fade
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: Theme.color.bg800 }
+                GradientStop { position: 0.35; color: Theme.color.bg800 }
+                GradientStop { position: 1.0; color: Qt.alpha(Theme.color.bg800, 0) }
+            }
+        }
     }
 
     // ── the one pinned button ──
@@ -1098,28 +1114,31 @@ PageType {
                     NumberAnimation { target: rowWrap; property: "opacity"; from: 0; to: 1; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                     NumberAnimation { target: lift; property: "y"; from: slot.gap; to: 0; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                 }
+                // Every role read with its default (device round air-C, D8): a new list build clears the model, and
+                // a row being removed reads its roles as undefined once more before it goes ("Unable to assign
+                // [undefined] to bool" at the start of a scope's scan).
                 TribeScanRow {
                     anchors.fill: parent
                     transform: Translate { id: lift }
-                    label: slot.model.label
-                    countryCode: slot.model.cc
-                    transport: slot.model.transport
-                    version: slot.model.version
-                    rowState: slot.model.rstate
-                    speed: slot.model.speed
-                    bars: slot.model.bars
-                    ms: slot.model.ms
+                    label: slot.model.label ?? ""
+                    countryCode: slot.model.cc ?? ""
+                    transport: slot.model.transport ?? "xray"
+                    version: slot.model.version ?? ""
+                    rowState: slot.model.rstate ?? "works"
+                    speed: slot.model.speed ?? "none"
+                    bars: slot.model.bars ?? 0
+                    ms: slot.model.ms ?? -1
                     // a cached row is drawn as cache whenever no scan runs: the whole last result, or a row of it the
                     // finished scan did not judge again (it stays in its place)
-                    cached: slot.model.fromCache && !slot.scanning
-                    dimmed: slot.model.dimmed
-                    tappable: slot.model.tappable
-                    verifying: slot.model.verifying
-                    liveUnverified: slot.model.liveUnverified
-                    unverified: slot.model.unverified
-                    crowd: slot.model.crowd
+                    cached: (slot.model.fromCache ?? false) && !slot.scanning
+                    dimmed: slot.model.dimmed ?? false
+                    tappable: slot.model.tappable ?? false
+                    verifying: slot.model.verifying ?? false
+                    liveUnverified: slot.model.liveUnverified ?? false
+                    unverified: slot.model.unverified ?? false
+                    crowd: slot.model.crowd ?? false
                     whitelist: slot.model.cc === ""
-                    onTapped: slot.rowTapped(slot.model.rid)
+                    onTapped: slot.rowTapped(slot.model.rid ?? "")
                 }
             }
         }

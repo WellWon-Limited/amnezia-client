@@ -35,6 +35,14 @@ xcrun --sdk macosx swiftc -Onone -parse-as-library \
     "$SCRIPT_DIR/XraySocketCallbackLifecycleTests.swift"
 "$WORK_DIR/xray_lifecycle_tests"
 
+# AVPN (review R43 F3): the order of startTunnel's and stopTunnel's answers (TunnelStartSlot).
+echo "== 1-slot хостовый Swift-тест порядка ответов старта и стопа =="
+xcrun --sdk macosx swiftc -Onone -parse-as-library \
+    -o "$WORK_DIR/tunnel_start_slot_order_tests" \
+    "$IOS_DIR/TunnelRuntimeStatus.swift" \
+    "$SCRIPT_DIR/TunnelStartSlotOrderTests.swift"
+"$WORK_DIR/tunnel_start_slot_order_tests"
+
 # AVPN (floor 19.11): the RU split of an own Xray session as one routing rule of the core (XrayDirectSplit.swift).
 echo "== 1a хостовый Swift-тест разделения РФ внутри ядра Xray =="
 xcrun --sdk macosx swiftc -Onone -parse-as-library \
@@ -81,7 +89,7 @@ fi
 
 # AVPN (upstream nodes): --ne-typecheck = every Swift source of the NE target (list as in
 # client/ios/networkextension/CMakeLists.txt) typechecked for iphoneos against the conan packages
-# awg-apple 3.1.4-tribe.14 (wireguard.h with LibXrayTribeHTTP), hev-socks5-tunnel 2.15.0 and
+# awg-apple 3.1.4-tribe.14 (wireguard.h with LibXrayTribeHTTP), hev-socks5-tunnel 2.15.0-tribe.1 and
 # openvpnadapter 1.0.0 from the local cache. No Xcode project, no build, no signing.
 if [[ "${1:-}" == "--ne-typecheck" ]]; then
     echo "== 1c typecheck цели NE (iphoneos, пакеты conan) =="
@@ -106,7 +114,7 @@ for rr in d.values():
     # newest revision (re-exporting an older recipe makes it the newest again).
     AWG="${AWG_APPLE_PACKAGE_DIR:-$(python3 -I "$SCRIPT_DIR/find_awg_apple_package.py" "$REPO_ROOT" iOS || true)}"
     [[ -n "$AWG" ]] || AWG="$(pkg awg-apple/3.1.4-tribe.14 "s.get('os') == 'iOS'")"
-    HEVP="${HEV_PACKAGE_DIR:-$(pkg hev-socks5-tunnel/2.15.0 "s.get('os') == 'iOS' and o.get('as_framework') == 'True'")}"
+    HEVP="${HEV_PACKAGE_DIR:-$(pkg hev-socks5-tunnel/2.15.0-tribe.1 "s.get('os') == 'iOS' and o.get('as_framework') == 'True'")}"
     OVPN="${OPENVPNADAPTER_PACKAGE_DIR:-$(pkg openvpnadapter/1.0.0 "s.get('os') == 'iOS'")}"
     WGS="$AWG/src/Sources"
     grep -q LibXrayTribeHTTP "$AWG/include/wireguard.h" || { echo "СТОП: $AWG без LibXrayTribeHTTP" >&2; exit 1; }

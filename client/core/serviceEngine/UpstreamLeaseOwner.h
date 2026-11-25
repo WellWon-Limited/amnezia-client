@@ -217,7 +217,8 @@ public:
             return ev;
         resetSession();
         m_lastNowMs = nowMs;
-        m_sessionOrder = r.sessionOrder; // the running start's (no new start is made)
+        m_sessionOrder = r.sessionOrder; // the lease's start (no new start is made)
+        m_tunnelOrder = r.tunnelOrder;   // the tunnel's identity (review round 44 F3)
         m_nodeId = r.nodeId;
         m_profileId = r.profileId;
         m_stubSha = r.configSha256;
@@ -445,6 +446,10 @@ public:
     // The nonce of the current start (tests; a secret-ish value: never logged).
     const QString &sessionNonce() const { return m_nonce; }
     qint64 sessionOrder() const { return m_sessionOrder; }
+    // The order of the start that brought the running tunnel up (review round 44 F3): what its tribeSessionMetadata carries
+    // (VpnConnectionTunnelControl::bringUpUpstream) and the record names it by. Equal to sessionOrder() unless a provisional
+    // session's confirmation was retried after an order-floor denial (a new order for the lease, the same tunnel).
+    qint64 tunnelOrder() const { return m_tunnelOrder >= 0 ? m_tunnelOrder : m_sessionOrder; }
     QString tunnelApiBase() const { return m_machine.route().apiBase; }
 
     // Contract §1 upstream_lease for the envelope / the hand-over. expires_in_ms is relative to now.
@@ -539,6 +544,7 @@ private:
         // Never reused by a later start, never made per request.
         m_nonce = upstreamNewSessionNonce();
         m_floorRetried = false; // this leg has not been retried after an order-floor denial yet (onAcquireReply)
+        m_tunnelOrder = -1;     // no tunnel of this start yet (set at its bring-up)
     }
 
     QVector<UpstreamOwnerEvent> endSession(qint64 nowMs)
@@ -600,6 +606,7 @@ private:
         r.scope = m_machine.meterScope();
         r.meterTags = currentMeterTags();
         r.sessionOrder = m_sessionOrder;
+        r.tunnelOrder = tunnelOrder();
         return p;
     }
     // The session's record is kept by this process: the GUI owner (macOS / Windows) or, with the extension renewing, iOS.
@@ -657,6 +664,7 @@ private:
                 if (silentReady)
                     break;
                 if (a.provisional) {
+                    m_tunnelOrder = m_sessionOrder; // the tunnel's identity from now (a confirmation retry moves only the lease's order)
                     UpstreamOwnerEvent b;
                     b.kind = UpstreamOwnerEventKind::BringUp;
                     b.provisional = true;
@@ -790,6 +798,7 @@ private:
     // The BringUp of a granted (not provisional) session: the lease travels in the envelope.
     void readyEvents(qint64 nowMs, QVector<UpstreamOwnerEvent> &ev)
     {
+        m_tunnelOrder = m_sessionOrder; // the tunnel's identity: the start that brings it up
         // iOS: the record goes BEFORE the bring-up - a bring-up the adapter refuses ends the session inside BringUp, and its
         // ClearRecord must come after the record, never before it.
         if (m_opt.keepRecord && !m_opt.keepOwnership)
@@ -1373,6 +1382,7 @@ private:
     bool m_floorRetried = false;               // this leg already began again after an order-floor denial: a second one is a refusal
     QString m_nonce;                           // the session nonce of the current start (resetSession)
     qint64 m_sessionOrder = -1;                // its order: strictly increasing across starts, persisted (m_order)
+    qint64 m_tunnelOrder = -1;                 // the order the running tunnel was brought up with (tunnelOrder())
     UpstreamSessionOrder m_order;
     static constexpr int kUnsentMaxSends = 3;
     qint64 m_lastNowMs = 0;       // the owner's last clock reading (a deadline for a release made without one)

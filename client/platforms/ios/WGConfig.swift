@@ -76,10 +76,23 @@ struct WGConfig: Decodable {
   }
 
   var roamingPolicy: TribeRoamingPolicy {
-    TribeRoamingPolicy.fromConfig(keepBackend: roamKeepBackend,
-                                  pauseAfterS: roamPauseAfterS,
-                                  stallProbeS: roamStallProbeS,
-                                  stallRebindS: roamStallRebindS)
+    var policy = TribeRoamingPolicy.fromConfig(keepBackend: roamKeepBackend,
+                                               pauseAfterS: roamPauseAfterS,
+                                               stallProbeS: roamStallProbeS,
+                                               stallRebindS: roamStallRebindS)
+    // AVPN (awg-apple tribe.17): what this session sends by itself (junk, special junk, paddings,
+    // keepalives) is never demand for the stall ladder (review of tribe.16, F2).
+    policy.serviceTraffic = serviceTraffic
+    return policy
+  }
+
+  /// AVPN (awg-apple tribe.17): this session's own service traffic, from its AmneziaWG parameters.
+  var serviceTraffic: TribeServiceTraffic {
+    TribeServiceTraffic.fromConfig(jc: junkPacketCount, jmax: junkPacketMaxSize, s1: initPacketJunkSize,
+                                   s4: transportPacketJunkSize,
+                                   specialJunk: [specialJunk1, specialJunk2, specialJunk3, specialJunk4, specialJunk5],
+                                   contentPaddingAddition: contentPaddingAddition, randomTrailers: randomTrailers,
+                                   mtu: mtu, persistentKeepalive: persistentKeepAlive)
   }
 
   // AVPN split-DNS: форвардер включён → система получает виртуальный резолвер (100.100.100.53),

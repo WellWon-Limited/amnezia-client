@@ -12,7 +12,9 @@ import NetworkExtension
 // All upstream state of one provider (one stored property in PacketTunnelProvider).
 final class TribeUpstreamState {
     private let lock = NSLock()
-    private var renewerStorage: UpstreamLeaseRenewer?
+    // AVPN (review R43 F2): the stop takes the renewer and closes the slot in one step - a start still under way can
+    // never attach one after it (StopClosableSlot, TunnelRuntimeStatus.swift).
+    private let renewerSlot = StopClosableSlot<UpstreamLeaseRenewer>()
     private var socksStorage: (port: Int, user: String, pass: String)?
     private var coreStoppedStorage = false
     private var wantsStatsStorage = false
@@ -21,9 +23,16 @@ final class TribeUpstreamState {
     private var terminalStorage = UpstreamTerminalMemo()
 
     var renewer: UpstreamLeaseRenewer? {
-        get { lock.lock(); defer { lock.unlock() }; return renewerStorage }
-        set { lock.lock(); renewerStorage = newValue; lock.unlock() }
+        get { renewerSlot.current }
+        set { renewerSlot.set(newValue) }
     }
+
+    // The start attaches its renewer: false = the session's stop came first (the renewer must not start).
+    func attachRenewer(_ renewer: UpstreamLeaseRenewer) -> Bool { renewerSlot.attach(renewer) }
+    // The stop of the session: its renewer (nil = none), and no renewer attaches until the next tunnel start.
+    func takeRenewerForStop() -> UpstreamLeaseRenewer? { renewerSlot.take() }
+    // A fresh tunnel start (not a core restart inside the session).
+    func openRenewerSlot() { renewerSlot.reopen() }
 
     // The core's SOCKS inbound of the CURRENT core start (port changes on every restart).
     var socks: (port: Int, user: String, pass: String)? {
@@ -214,7 +223,12 @@ extension PacketTunnelProvider {
             },
             onTerminal: { [weak self] code in self?.upstreamLeaseTerminal(code: code) },
             log: { xrayLog(.info, message: $0) })
-        tribeUpstream.renewer = renewer
+        // AVPN (review R43 F2): a stop that came while this start was still under way took the slot - nothing of the
+        // stopped session may outlive it (the renewer would keep a seat renewed for a tunnel that is gone).
+        guard tribeUpstream.attachRenewer(renewer) else {
+            xrayLog(.info, message: "Tribe upstream: the session stopped before its renewer attached; not started")
+            return
+        }
         if case .active(_, let lease) = plan {
             renewer.startActive(lease: lease)
         } else {
@@ -278,6 +292,7 @@ extension PacketTunnelProvider {
 
     // A fresh tunnel start (not a core restart): this session's metering state.
     func beginUpstreamMeter(_ plan: UpstreamStartPlan) {
+        tribeUpstream.openRenewerSlot() // AVPN (review R43 F2): a new session may attach its renewer again
         tribeUpstream.resetProxyMeter()
         tribeUpstream.wantsStats = UpstreamMeterPlan.wantsStats(plan)
     }
@@ -322,11 +337,11 @@ extension PacketTunnelProvider {
     // the core stops, and only then the DELETE goes over the extension's direct path (its own sockets never enter
     // its tunnel) - a provider that failed its data check can no longer swallow the release.
     func stopXrayThenReleaseUpstream(completionHandler: @escaping () -> Void) {
-        guard let renewer = tribeUpstream.renewer else {
+        // AVPN (review R43 F2): take and close in one step - a start still queued cannot attach a renewer after this.
+        guard let renewer = tribeUpstream.takeRenewerForStop() else {
             stopXray(completionHandler: completionHandler)
             return
         }
-        tribeUpstream.renewer = nil
         let prepared = renewer.prepareRelease()
         stopXray {
             guard let prepared else {

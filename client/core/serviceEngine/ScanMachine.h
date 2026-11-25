@@ -925,6 +925,28 @@ public:
         return s;
     }
 
+    // The engine's path ledger on the Scanner's rows (S6, device round 5; ServiceEngine::failedInTunnelHere): the ids
+    // whose real tunnel came up on this network and carried no data, with no data ok since. Such a row reads «Не удалось»
+    // and is not counted (rowViewOf, slotWorks) - unless the result proved it through its own full path: the ledger's
+    // rule that a light probe never clears a tunnel no-data (PathLedger.h stage 2) stays; a handshake + data download of
+    // the same path is no light probe. The coordinator hands the set over whenever it changes.
+    ScanStep tunnelNoDataHere(const QStringList &ids, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        m_tunnelNoData = QSet<QString>(ids.begin(), ids.end());
+        finishStep(s, now);
+        return s;
+    }
+    // Every row the machine holds (fresh, cached, the live one): what the coordinator asks the ledger about.
+    QStringList rowIds() const
+    {
+        QStringList out;
+        for (const Row &r : m_rows)
+            out << r.id;
+        return out;
+    }
+
     ScanStep vpnState(const ScanCurrent &c, qint64 now)
     {
         now = clock(now);
@@ -1085,8 +1107,12 @@ public:
         s.actions << appRequestDone(requestId, apiBytes, now).actions;
         if (reason == QLatin1String("scanner_off") || reason == QLatin1String("invalid") || reason == QLatin1String("unsupported"))
             m_serverBatch = ServerBatch::No;
-        if (current)
+        if (current) {
+            // the scope's servers did not come: the scan goes on with the device's own rows of the scope - and with none,
+            // nothing is checked: startHost ends it as a scan that could not start (review air-C, D2)
+            m_candFailed = reason == QLatin1String("scanner_off") ? QStringLiteral("scanner_off") : QStringLiteral("candidates_unavailable");
             startHost(now, s);
+        }
         finishStep(s, now);
         return s;
     }
@@ -1821,7 +1847,7 @@ public:
             break;
         case ScanPhase::Reach:
             v.stage = ScanStageKey::Reach;
-            v.stageTotal = m_cands.size();
+            v.stageTotal = checkedTotal();
             v.stageCount = reachedCount();
             v.progress = v.stageTotal > 0 ? double(v.stageCount) / v.stageTotal : 0;
             break;
@@ -2028,6 +2054,7 @@ private:
         bool probeDone = false;   // the scheduled probe has its result
         bool finalDone = false;   // the candidate has its verdict (or was given up)
         bool inHost = false;      // the current probe was handed to the host
+        bool probed = false;      // it was handed to the host at least once (a candidate given up before is no check)
         bool dropped = false;
         Lease lease = Lease::None;
         FollowUp followUp = FollowUp::None;
@@ -2077,11 +2104,15 @@ private:
         QString generation;        // strict local generation of a FRESH row (current evidence, F10)
         QString fingerprint;       // weak local fingerprint of a CACHED row's network
         QString evidence;          // "exclusion" when proven by exclusion (plan v2.2)
+        bool fullProof = false;    // proven through its own full path: AWG mini / Xray full profile (a handshake and a
+                                   // data download of the server's own path), not a light probe (Xray leg, reach)
         quint64 arrival = 0;
         int batch = 0;             // the batch of this series («Найти ещё») that made the row fresh; 0 = none yet
     };
 
     bool rowVerified(const Row &r) const { return !r.fromLive || r.liveVerified; }
+    // The row's path itself carried this result's data: a full-path probe, or the live tunnel's sized download.
+    static bool fullProofOf(const Row &r) { return r.fullProof || (r.fromLive && r.liveVerified); }
 
     // A row becomes fresh evidence of this scan: its arrival and the batch of the series it joins.
     void stampArrival(Row &r)
@@ -2322,6 +2353,7 @@ private:
             r.batch = cr.batch;
             r.cachedAt = cached.savedAtMs;
             r.crowdWorks = cr.crowdWorks;
+            r.fullProof = cr.fullProof;
             r.fingerprint = cached.fingerprint;
             m_rows << r;
         }
@@ -2346,13 +2378,15 @@ private:
         const qint64 age = now - c.savedAtMs;
         return age >= -60000 && age <= slotFreshMs();
     }
-    // The result's working rows of its own scope (view.slots works, «M доступно»).
-    static int slotWorks(const ScanCachedResult &c)
+    // The result's working rows of its own scope (view.slots works, «M доступно»): the rows it shows as available -
+    // a row whose real tunnel carried nothing here is not one unless the result proved it through its full path.
+    int slotWorks(const ScanCachedResult &c) const
     {
         const QString scope = scanScopeOf(c.scope);
         int n = 0;
         for (const ScanCachedRow &r : c.rows)
-            n += (scanClassWorking(r.cls) && scanRowInScope(r.countryCode, scope)) ? 1 : 0;
+            n += (scanClassWorking(r.cls) && scanRowInScope(r.countryCode, scope)
+                  && !(m_tunnelNoData.contains(r.id) && !r.fullProof)) ? 1 : 0;
         return n;
     }
     qint64 slotFreshMs() const { return qMin(kScanCacheShowMaxMs, qint64(m_t.cacheWorksTtlS) * 1000); }
@@ -2641,6 +2675,7 @@ private:
         m_exclusionDone = false;
         m_exclusionWhy.clear();
         m_stopReason.clear(); // this scan's own reason (a Stop's "cancel" never leaks into the next summary)
+        m_candFailed.clear();
         m_userStopped = false;
         m_seatsRequested = 0;
         m_exclusionRows = 0;
@@ -2929,6 +2964,15 @@ private:
         bool anyHost = false;
         for (const Cand &c : m_cands)
             anyHost = anyHost || (!c.finalDone && (!c.c.needsLease || c.lease == Lease::Requested));
+        // Device round air-C, D2 (Latvia, Wi-Fi): POST /v1/scan/candidates timed out, the scope has no row of the device's
+        // own - nothing was checked, yet the scan ended Empty («Латвия: доступных серверов сейчас нет») and was stored as
+        // the country's fresh result. One rule with a failed manifest (manifestUnavailable, the LTE case): the scan could
+        // not start - NoScan, never a result, nothing stored; no host was started, so no cooldown is armed by it.
+        if (!anyHost && !m_candFailed.isEmpty() && !m_appSideOnly && !m_continuation) {
+            m_hostDone = true;
+            toNoScan(m_candFailed, now, s);
+            return;
+        }
         if (!anyHost) {
             m_hostDone = true;
             stopStage2(now, m_appSideOnly ? QStringLiteral("budget") : QStringLiteral("nothing_to_probe"), s);
@@ -2939,6 +2983,7 @@ private:
         for (Cand &c : m_cands)
             if (!c.c.needsLease && !c.finalDone) {
                 c.inHost = true;
+                c.probed = true;
                 a.candidates << c.c;
             }
         a.limits = scanHostLimitsFrom(m_t, m_fullConc, m_legConc, m_awgConc);
@@ -3206,6 +3251,8 @@ private:
             r.fromLive = false;
             r.liveVerified = false;
             r.crowdWorks = c.c.crowdWorks;
+            r.fullProof = isFollowUp ? c.fu.kind == ScanProbeKind::XrayFull
+                                     : (c.c.kind == ScanProbeKind::AwgMini || c.c.kind == ScanProbeKind::XrayFull);
             r.generation = m_scanNet.generation();
             r.fingerprint = m_scanNet.fingerprint;
             if (r.cached || ri < 0)
@@ -3271,11 +3318,23 @@ private:
         return n;
     }
 
+    // «Проверяем доступность · N из M» (device round air-C, D6: «2 из 21» while the host got 18): one set for both - the
+    // candidates this scan checks, i.e. every one not given up before its probe (the plan's «Не проверено»: budget,
+    // the batch cap, a config on cellular, a refused lease). M shrinks when a lease is refused; it never counts a
+    // candidate that was never going to be probed, and N never counts one as reached before its probe.
+    static bool givenUp(const Cand &c) { return c.finalDone && !c.probed; }
+    int checkedTotal() const
+    {
+        int n = 0;
+        for (const Cand &c : m_cands)
+            n += givenUp(c) ? 0 : 1;
+        return n;
+    }
     int reachedCount() const
     {
         int n = 0;
         for (const Cand &c : m_cands)
-            n += (c.reachDone || c.probeDone || c.finalDone) ? 1 : 0;
+            n += (!givenUp(c) && (c.reachDone || c.probeDone || c.finalDone)) ? 1 : 0;
         return n;
     }
 
@@ -3445,6 +3504,7 @@ private:
                 continue;
             }
             c.inHost = true;
+            c.probed = true;
             if (initial) {
                 add.candidates << c.c;
             } else {
@@ -3894,6 +3954,7 @@ private:
             r.fromLive = false;
             r.cached = false;
             r.crowdWorks = c.c.crowdWorks;
+            r.fullProof = false; // proven by exclusion: no probe of its own path carried the data
             r.generation = m_scanNet.generation();
             r.fingerprint = m_scanNet.fingerprint;
             r.evidence = QStringLiteral("exclusion");
@@ -3995,6 +4056,7 @@ private:
             cr.speed = x.speed;
             cr.ms = x.sortMs;
             cr.crowdWorks = x.crowdWorks;
+            cr.fullProof = fullProofOf(x);
             cr.batch = rowBatch(x);
             if (cache.rows.size() < kScanCacheRowsMax)
                 cache.rows << cr;
@@ -4126,6 +4188,11 @@ private:
         v.crowdWorks = r.crowdWorks;
         v.state = r.base == ScanClass::Slow ? ScanRowState::Slow : ScanRowState::Works;
         const bool isCurrent = isCurrentId(r.id);
+        // S6 (device round 5) in the one verdict of the row: its real tunnel carried no data on this network and nothing
+        // proved it through its own full path since - «Не удалось», never «Доступно» on a light probe (PathLedger stage
+        // 2). This network's handshake + data download of the same path outranks the older mark (device round air-C, D1).
+        if (!isCurrent && m_tunnelNoData.contains(r.id) && !fullProofOf(r))
+            v.state = ScanRowState::Failed;
         if (isCurrent) {
             v.state = ScanRowState::Connected;
             v.current = true;
@@ -4636,7 +4703,9 @@ private:
     bool m_startedVpn = false;
     bool m_checkAfterScan = false;
     QString m_stopReason;
+    QSet<QString> m_tunnelNoData; // rows whose real tunnel carried no data on this network (tunnelNoDataHere)
     bool m_userStopped = false;   // «Остановить» ended this scan keeping what it found (stopTapped)
+    QString m_candFailed;         // this scan's /v1/scan/candidates request failed: the NoScan reason if nothing is left
     bool m_scopeRefused = false;  // the last scope choice was refused: no scan until a choice is taken (review F2)
     bool m_resultPartial = false; // the finished result on the screen is a stopped scan's (view.partial)
     bool m_resultStored = true;   // ... and it is the stored result of its scope (persistResult)

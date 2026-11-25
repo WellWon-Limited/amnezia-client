@@ -4842,6 +4842,132 @@ static void refusedScopeNeverScansAnother()
     CHECK(m.retryTapped(kT0 + 60).has(ScanActionKind::RequestManifest));
 }
 
+// D1 (device round air-C, iPhone Air, 24.11): one verdict per row - the number in the rings is the rows the list shows
+// as available. The journal: «21:43:06.255 app_probe id=12 kind=awg_mini hs_ok=true http=200 bytes_rx=65536 sha_ok=true
+// rtt_ms=89», then «21:43:08.376 path_outcome node=12 outcome=probe_ok source=scanner state=suspect» (an older failed
+// connect on this network); rings «10 доступно», rows 9 «Доступно» + node 12 «Не удалось». Here: own AWG "1" proven by
+// awg_mini (handshake + 64 KiB, sha ok, 89 ms) and own Xray "4:xray" proven by a light leg probe, both with the ledger's
+// «real tunnel carried no data here» mark. The full-path proof wins on the row; the light one never outranks the mark
+// (PathLedger stage 2): «Не удалось», not counted - the rings, the rows and the choice row («M доступно») agree.
+static void oneVerdictPerRow()
+{
+    World w = baseWorld("one_verdict", hostMac(), ScanNetKind::Wifi);
+    w.awgMini = true;
+    w.numbers.insert(QStringLiteral("scan_awg_concurrency"), 2);
+    w.out[QStringLiteral("1")].rtt = 89;
+    w.script << qMakePair(qint64(0), at("tunnel_no_data", {{QStringLiteral("ids"), QJsonArray{QStringLiteral("1"), QStringLiteral("4:xray")}}}));
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+    w.runMs = 12000;
+    Driver d(w);
+    d.run();
+    const QJsonObject v = lastView(d);
+    const QString st1 = rowOf(v, QStringLiteral("1")).value(QLatin1String("state")).toString();
+    const QString st4 = rowOf(v, QStringLiteral("4:xray")).value(QLatin1String("state")).toString();
+    CHECK(phaseOf(v) == QLatin1String("done"));
+    CHECK(st1 == QLatin1String("works") || st1 == QLatin1String("slow")); // the scan's handshake + data proof wins
+    CHECK(st4 == QLatin1String("failed"));                                // a light probe never outranks the mark
+    const int shown = rowsInState(v, "works") + rowsInState(v, "slow");
+    CHECK(v.value(QLatin1String("available")).toInt() == shown);
+    const QJsonArray sl = v.value(QLatin1String("slots")).toArray();
+    CHECK(sl.size() == 1 && sl.at(0).toObject().value(QLatin1String("works")).toInt() == shown);
+    // the stored result keeps the proof's strength: restored later, the same verdicts and the same count
+    const ScanAction *p = lastAction(d, ScanActionKind::PersistResults);
+    CHECK(p != nullptr);
+    if (!p)
+        return;
+    const ScanCachedResult stored = scanCachedResultFromJson(scanCachedResultToJson(p->cached));
+    bool full1 = false, full4 = true;
+    for (const ScanCachedRow &r : stored.rows) {
+        if (r.id == QLatin1String("1"))
+            full1 = r.fullProof;
+        if (r.id == QLatin1String("4:xray"))
+            full4 = r.fullProof;
+    }
+    CHECK(full1 && !full4);
+    ScanOpen o = openOf(w, QString(), false);
+    o.cached = stored;
+    ScanMachine m(w.caps);
+    const qint64 t = stored.savedAtMs + 60000;
+    m.tunnelNoDataHere({QStringLiteral("1"), QStringLiteral("4:xray")}, t);
+    m.shown(o, t);
+    const QJsonObject r = viewJson(m, t);
+    CHECK(rowOf(r, QStringLiteral("4:xray")).value(QLatin1String("state")).toString() == QLatin1String("failed"));
+    CHECK(r.value(QLatin1String("available")).toInt() == rowsInState(r, "works") + rowsInState(r, "slow")
+          && r.value(QLatin1String("available")).toInt() == shown);
+    const QJsonArray rs = r.value(QLatin1String("slots")).toArray();
+    CHECK(!rs.isEmpty() && rs.at(0).toObject().value(QLatin1String("works")).toInt() == shown);
+    // a data ok through the real tunnel since (the mark gone): the row is available again
+    m.tunnelNoDataHere({}, t + 10);
+    CHECK(rowOf(viewJson(m, t + 10), QStringLiteral("4:xray")).value(QLatin1String("state")).toString() == QLatin1String("works"));
+}
+
+// D2 (device round air-C, Latvia on Wi-Fi): POST /v1/scan/candidates timed out after 15.2 s ("api candidates status=0
+// nodes=0"), the scope has no row of the device's own - the old machine ended the scan Empty and stored it
+// ("persist_results rows=0", «Латвия: доступных серверов сейчас нет»). One rule with a failed manifest (the LTE case):
+// a scan that checked nothing could not start - NoScan, nothing stored, no cooldown, the scope's old result untouched.
+static void failedCandidatesAreNoResult()
+{
+    World w = baseWorld("cand_failed", hostMac(), ScanNetKind::Wifi);
+    const auto actionOf = [](const ScanStep &s, ScanActionKind k) {
+        for (const ScanAction &a : s.actions)
+            if (a.kind == k)
+                return a;
+        return ScanAction();
+    };
+    for (const char *reason : {"timeout", "unsupported"}) {
+        ScanMachine m(w.caps);
+        m.opened(openOf(w, QString(), false), kT0);
+        m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+        m.tick(kT0 + 50 + 8100);
+        m.poolReady(ScanPoolView{{}, 3, 1}, kT0 + 8300);
+        m.filterChosen(QStringLiteral("whitelist"), kT0 + 8300); // a scope with none of the device's own rows
+        m.retryTapped(kT0 + 40000);
+        const ScanAction rc = actionOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 40050), ScanActionKind::RequestCandidates);
+        CHECK(!rc.requestId.isEmpty());
+        const ScanStep f = m.candidatesUnavailable(rc.requestId, QLatin1String(reason), 300, kT0 + 55250);
+        const ScanView v = m.view(kT0 + 55250);
+        CHECK(!f.has(ScanActionKind::PersistResults) && !f.has(ScanActionKind::StartHostScan));
+        CHECK(v.phase == ScanPhase::NoScan && v.empty.reason == QLatin1String("candidates_unavailable"));
+        bool slot = false;
+        for (const ScanSlotView &sv : v.scopeSlots)
+            slot = slot || sv.scope == QLatin1String(kScanScopeWhitelist);
+        CHECK(!slot); // never stored as that scope's result
+        // no host started: no cooldown armed by it - «Сканировать» is offered again
+        CHECK(v.bar.button == ScanBarButton::Retry && v.bar.buttonEnabled);
+        CHECK(m.retryTapped(kT0 + 56500).has(ScanActionKind::RequestManifest));
+    }
+}
+
+// D6 (device round air-C): «Проверяем доступность · 2 из 21» while the log said "start_host_scan candidates=18" - the
+// denominator counted the candidates the plan gave up before any probe (and counted them as reached). One set for
+// both numbers: what this scan checks (handed to the host, or still waiting for a seat).
+static void progressCountsWhatIsChecked()
+{
+    World w = baseWorld("progress", hostMac(), ScanNetKind::Cellular); // full-kind providers: no config on cellular
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+    w.runMs = 12000;
+    Driver d(w);
+    d.run();
+    int startAt = -1;
+    for (int i = 0; i < d.steps.size() && startAt < 0; ++i)
+        if (d.steps.at(i).step.has(ScanActionKind::StartHostScan))
+            startAt = i;
+    CHECK(startAt >= 0);
+    if (startAt < 0)
+        return;
+    const ScanStep &st = d.steps.at(startAt).step;
+    int checks = st.find(ScanActionKind::StartHostScan)->candidates.size();
+    if (const ScanAction *b = st.find(ScanActionKind::RequestProbeBatch))
+        checks += b->ids.size();
+    const QJsonObject v = d.steps.at(startAt).view;
+    CHECK(phaseOf(v) == QLatin1String("reach"));
+    CHECK(v.value(QLatin1String("stage_total")).toInt() == checks && v.value(QLatin1String("stage_count")).toInt() == 0);
+    // the count never passes the total, and it ends with every checked candidate reached
+    for (const Recorded &r : d.steps)
+        if (phaseOf(r.view) == QLatin1String("reach"))
+            CHECK(r.view.value(QLatin1String("stage_count")).toInt() <= r.view.value(QLatin1String("stage_total")).toInt());
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -5379,6 +5505,9 @@ int main(int argc, char **argv)
     secondRowTapTakesOver();
     stoppedResultStaysHonest();
     refusedScopeNeverScansAnother();
+    oneVerdictPerRow();
+    failedCandidatesAreNoResult();
+    progressCountsWhatIsChecked();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();

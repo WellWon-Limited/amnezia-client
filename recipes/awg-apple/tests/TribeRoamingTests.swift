@@ -101,9 +101,9 @@ do {
 }
 
 // tribe.16: a handshake is not inbound progress (tribe.4-15 counted it, and on the 24.11 path every
-// re-key reset the ladder): the stall clock keeps running from 0 s. Only the demand is counted again
-// from the re-key at 3 s (4.5 KB minus the re-key's 1 KB is below a stall's 4 KB: it may be idle), so
-// the fresh port comes at 6 s, once 4 KB more went out unanswered (tribe.15: at 7 s, 4 s after it).
+// re-key reset the ladder): the stall clock keeps running from 0 s. tribe.17: the re-key's own bytes
+// (the session's service traffic) are not demand, the user's 1.5 KB/s is, so the fresh port comes at
+// 4 s (tribe.16 counted the demand again from the re-key: 6 s; tribe.15: 7 s, 4 s after it).
 do {
     var t = TribeStallTracker(first: s(0, 0, 100, 0))
     var tx: UInt64 = 0
@@ -115,7 +115,7 @@ do {
         if i == 3 { rx += 92 } // the response of that handshake is all that comes back
         if t.observe(s(tx, rx, hs, Double(i)), pathSatisfied: true, policy: seamless) != .none && first < 0 { first = Double(i) }
     }
-    check(first == 6, "handshake at t=3 does not restart the stall clock: \(first)")
+    check(first == 4, "handshake at t=3 does not restart the stall clock: \(first)")
 }
 
 // tribe.16: ... but it still proves an IDLE tunnel: keepalives (32 B / 25 s) and a re-key every
@@ -211,6 +211,8 @@ do {
     check(tracker.observe(s(1024, 0, 0, 4), pathSatisfied: true, policy: seamless) == .none, "bootstrap respects built-in retries")
     check(tracker.observe(s(1024, 0, 0, 12), pathSatisfied: false, policy: seamless) == .none, "offline never heals")
     check(tracker.observe(s(1024, 0, 0, 12), pathSatisfied: true, policy: seamless) == .rebindPort, "bootstrap fresh port after retry grace")
+    // tribe.17: samples every second (more than `samplingGapSeconds` between two is not an observation)
+    for second in 13...28 { _ = tracker.observe(s(1024 + UInt64(second - 12) * 64, 0, 0, Double(second)), pathSatisfied: true, policy: seamless, persistent: true) { _ in true } }
     check(tracker.observe(s(2048, 0, 0, 29), pathSatisfied: true, policy: seamless, persistent: true) { _ in true } == .none, "second stage not before 30 s")
     check(tracker.observe(s(2048, 0, 0, 30), pathSatisfied: true, policy: seamless, persistent: true) { _ in true } == .softRestart, "bootstrap soft restart after grace")
     var later: [(Int, TribeStallAction)] = []
@@ -323,8 +325,11 @@ do {
         _ = arbiter.tick(s(0, UInt64(1000 + at), 100, at), pathSatisfied: true, policy: seamless)
         _ = arbiter.requestFreshPort(s(0, UInt64(1000 + at), 100, at), pathSatisfied: true)
     }
-    // tribe.16: inbound data 11 s after the last GUI fresh port (past its echo window) ends the episode.
+    // tribe.16: inbound data 11 s after the last GUI fresh port (past its echo window) ends the episode
+    // (tribe.17: one sample a second, as the watchdog ticks).
+    for at in 31...40 { _ = arbiter.tick(s(0, 1030, 100, Double(at)), pathSatisfied: true, policy: seamless) }
     _ = arbiter.tick(s(0, 2000, 100, 41), pathSatisfied: true, policy: seamless)
+    for at in 42...49 { _ = arbiter.tick(s(0, 2000, 100, Double(at)), pathSatisfied: true, policy: seamless) }
     check(arbiter.tick(s(50000, 2000, 100, 50), pathSatisfied: true, policy: seamless) == .denied(.rebindPort, .rollingCap), "cap refusal reported")
     check(arbiter.tracker?.stage == 0, "stage not burned by the refusal")
     check(arbiter.tick(s(51000, 2000, 100, 51), pathSatisfied: true, policy: seamless) == .denied(.rebindPort, .rollingCap), "same step proposed again")
@@ -537,12 +542,14 @@ do {
     _ = progressed.tick(s(1, 1, 1, 251), pathSatisfied: true, policy: seamless) // counters reset tolerated
 }
 
-// Stage 3 needs demand and a path: idle outbound or an unsatisfied path never triggers it; the step
-// fires as soon as demand returns (the backoff has already elapsed).
+// Stage 3 needs demand and a path: idle outbound or an unsatisfied path never triggers it.
+// tribe.17: a minute without any demand ends the episode (nothing can prove or disprove a repair
+// without user traffic), so when demand returns the ladder starts again at the fresh port, at once
+// (tribe.16: it went on with the stage-3 step), and the soft restart follows a second stage later.
 do {
     let idleRun = runPersistent(rate: 1000, horizon: 200, idle: 15...150)
-    check(idleRun.performed.map { $0.1 } == [.rebindPort, .softRestart, .rebindPort], "idle: no stage-3 step: \(idleRun.performed)")
-    check(idleRun.performed.last.map { $0.0 >= 151 && $0.0 <= 156 } ?? false, "step as soon as outbound grows again: \(idleRun.performed)")
+    check(idleRun.performed.prefix(4).map { $0.1 } == [.rebindPort, .softRestart, .rebindPort, .softRestart], "idle: no stage-3 step, a new episode after it: \(idleRun.performed)")
+    check(idleRun.performed.count > 2 && idleRun.performed[2].0 >= 151 && idleRun.performed[2].0 <= 156, "the first step as soon as outbound grows again: \(idleRun.performed)")
     let offlineRun = runPersistent(rate: 1000, horizon: 200, offline: 17...150)
     check(offlineRun.performed.map { $0.1 } == [.rebindPort, .softRestart, .rebindPort], "offline: no stage-3 step: \(offlineRun.performed)")
     check(offlineRun.performed.last?.0 == 151, "step on the first satisfied tick: \(offlineRun.performed)")
@@ -739,6 +746,205 @@ do {
 }
 // END B1 REPLAY
 
+// tribe.17 (review of tribe.16): the session's own service traffic, computed from its configuration by
+// the function the provider uses (WGConfig.serviceTraffic). The fleet's AmneziaWG 3.1 bundle at its
+// maxima (tribe-backend generate_awg_params defaults: Jc 4..6, Jmin 10, Jmax 50, S1=S2=S3=S4 12..64,
+// I1 = the fake DNS packet, ContentPaddingAddition 10-100, RandomTrailers off, PersistentKeepalive 25)
+// and the review's heavy-junk example (Jc 4, Jmin 800, Jmax 801, S1 86, S2 57, S4 256).
+let fleetI1 = "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>"
+let fleetTraffic = TribeServiceTraffic.fromConfig(jc: "6", jmax: "50", s1: "64", s4: "64", specialJunk: [fleetI1, nil, nil, nil, nil],
+                                                  contentPaddingAddition: "10-100", randomTrailers: "off", mtu: "1280", persistentKeepalive: "25")
+let heavyTraffic = TribeServiceTraffic.fromConfig(jc: "4", jmax: "801", s1: "86", s4: "256", specialJunk: [nil, nil, nil, nil, nil],
+                                                  contentPaddingAddition: nil, randomTrailers: nil, mtu: "1280", persistentKeepalive: "25")
+check(TribeServiceTraffic.specialJunkLength(fleetI1) == 44, "fleet I1 = 2 random + 42 fixed bytes: \(String(describing: TribeServiceTraffic.specialJunkLength(fleetI1)))")
+check(fleetTraffic == TribeServiceTraffic(handshakeTxBytes: 44 + 6 * 50 + 64 + 148 + 196, keepaliveTxBytes: 64 + 32 + 100, keepaliveIntervalSeconds: 25),
+      "fleet maxima: keepalive 196 B, handshake 752 B: \(fleetTraffic)")
+check(heavyTraffic == TribeServiceTraffic(handshakeTxBytes: 4 * 801 + 86 + 148 + 288, keepaliveTxBytes: 256 + 32, keepaliveIntervalSeconds: 25),
+      "heavy junk: keepalive 288 B, handshake 3726 B: \(heavyTraffic)")
+check(TribeServiceTraffic.specialJunkLength("<b 0xabcd><t><rc 7><rd 3><dz 2><d><ds>") == 2 + 4 + 7 + 3 + 2, "every tag of the engine")
+check(TribeServiceTraffic.specialJunkLength("<x 5>") == nil, "unknown tag")
+check(TribeServiceTraffic.fromConfig(jc: nil, jmax: nil, s1: nil, s4: nil, specialJunk: ["<x 5>"], contentPaddingAddition: nil,
+                                     randomTrailers: "on", mtu: "1400", persistentKeepalive: nil).handshakeTxBytes
+      == UInt64(1400 + 1500 + 1500), "unknown spec = one MTU; with random trailers the initiation and the keepalive stay below the UDP window (1500 here)")
+func sessionPolicy(_ traffic: TribeServiceTraffic) -> TribeRoamingPolicy {
+    var policy = seamless
+    policy.serviceTraffic = traffic
+    return policy
+}
+
+// BEGIN REVIEW REPLAYS (only the API of tribe.16 / 40f74845a besides sessionPolicy: run against both files)
+struct IdleSession { let name: String; let keepalive: UInt64; let initiation: UInt64; let policy: TribeRoamingPolicy }
+/// A healthy idle tunnel as amneziawg-go counts it: a keepalive every 25 s, a re-key every 125 s (its
+/// initiation with junk + the confirming keepalive out, the 92-byte response in), nothing else. `repaired`:
+/// it starts right after a soft restart (stage 3, counters rebased), the review's table.
+func idleReplay(_ session: IdleSession, seconds: Int, repaired: Bool) -> [(Int, TribeWatchdogOutcome)] {
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 50_000
+    var hs: Int64 = 1_800_000_000
+    var acted: [(Int, TribeWatchdogOutcome)] = []
+    _ = arbiter.tick(s(tx, rx, hs, 0), pathSatisfied: true, policy: session.policy)
+    if repaired {
+        check(arbiter.requestSoftRestart(s(tx, rx, hs, 0), pathSatisfied: true) == .performed, "\(session.name): the repair")
+        tx = 0; rx = 0; hs = 0
+        arbiter.rebaseAfterBackendRestart(s(tx, rx, hs, 0))
+    }
+    for t in 1...seconds {
+        if t == 1 || t % 125 == 1 { tx += session.initiation + session.keepalive; rx += 92; hs = 1_800_000_000 + Int64(t) }
+        if t % 25 == 0 { tx += session.keepalive }
+        let o = arbiter.tick(s(tx, rx, hs, Double(t)), pathSatisfied: true, policy: session.policy)
+        if o != .none { acted.append((t, o)) }
+    }
+    if repaired { check(arbiter.tracker?.stage == 0, "\(session.name): a repaired tunnel that sits idle is back at stage 0: \(String(describing: arbiter.tracker?.stage))") }
+    return acted
+}
+do {
+    let sessions = [
+        IdleSession(name: "plain (review table)", keepalive: 32, initiation: 148, policy: seamless),
+        IdleSession(name: "fleet maxima", keepalive: 196, initiation: 556, policy: sessionPolicy(fleetTraffic)),
+        IdleSession(name: "heavy junk (review)", keepalive: 288, initiation: 3434, policy: sessionPolicy(heavyTraffic)),
+    ]
+    for session in sessions {
+        let repaired = idleReplay(session, seconds: 3600, repaired: true)
+        print("  F1 idle after a repair, \(session.name), 1 h: \(repaired.isEmpty ? "no step" : "\(repaired.prefix(3))")")
+        check(repaired.isEmpty, "F1: \(session.name): an idle tunnel after a repair takes no step in 1 h: \(repaired.prefix(3))")
+        let fresh = idleReplay(session, seconds: 7200, repaired: false)
+        print("  F2 idle from stage 0, \(session.name), 2 h: \(fresh.isEmpty ? "no step" : "\(fresh.prefix(3))")")
+        check(fresh.isEmpty, "F2: \(session.name): an idle healthy tunnel takes no step in 2 h: \(fresh.prefix(3))")
+    }
+}
+do {
+    // F3, the review's sequence: last data at 0, 1536 B/s out, the ladder repairs (fresh port 4, soft
+    // restart 14, handshakes 15 and 30, stage-3 fresh port 44); the repair works: 5120 B/s from 45 s. At the
+    // app's probes (12, 24, 36, 48) the extension must not report a quiet path once data is coming in.
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 50_000
+    var hs: Int64 = 1_800_000_000
+    var steps: [(Int, TribeStallAction)] = []
+    var reported: [Int: Int64] = [:]
+    for t in 0...70 {
+        tx += 1536
+        if t == 15 || t == 30 { tx += 180; rx += 92; hs = 1_800_000_000 + Int64(t) }
+        if t >= 45 { rx += 5120 }
+        if case .perform(let a) = arbiter.tick(s(tx, rx, hs, Double(t)), pathSatisfied: true, policy: seamless) {
+            steps.append((t, a))
+            if a == .softRestart { tx = 0; rx = 0; hs = 0; arbiter.rebaseAfterBackendRestart(s(tx, rx, hs, Double(t))) }
+        }
+        reported[t] = arbiter.dataQuietSeconds(at: Double(t))
+    }
+    print("  F3 recovered inside the echo window: steps=\(steps.map { "\($0.1.logName)@\($0.0)" }) reported at 12/24/36/44/48/56: \([12, 24, 36, 44, 48, 56].map { reported[$0] ?? -9 })")
+    check(steps.map { $0.0 } == [4, 14, 44], "F3: the review's repair sequence: \(steps)")
+    check((reported[44] ?? 0) >= 40, "F3: stalled before the data returns: \(String(describing: reported[44]))")
+    check(reported[48] == 0 && reported[56] == 0, "F3: data coming in (echo window or proven) = not reported: \(String(describing: reported[48])) \(String(describing: reported[56]))")
+}
+do {
+    // F4: a stalled path, then 300 s with no sample (the extension suspended while the system is awake),
+    // then one tick: no step, no verdict; the next verdict counts only what was observed after the gap.
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0
+    let rx: UInt64 = 50_000
+    var acted: [(Int, TribeWatchdogOutcome)] = []
+    var times = Array(0...6)
+    times.append(contentsOf: 306...330)
+    var reported: [Int: Int64] = [:]
+    for t in times {
+        tx += t <= 6 ? 1500 : 300 * 1500 / 25 // the gap's bytes arrive with its first sample
+        let o = arbiter.tick(s(tx, rx, 100, Double(t)), pathSatisfied: true, policy: seamless)
+        if o != .none && t >= 306 { acted.append((t, o)) }
+        reported[t] = arbiter.dataQuietSeconds(at: Double(t))
+    }
+    print("  F4 300 s gap then ticks: first action after the gap \(acted.first.map { "\($0)" } ?? "none") reported at 306/309/310/330: \([306, 309, 310, 330].map { reported[$0] ?? -9 })")
+    check(!acted.contains { $0.0 < 310 }, "F4: no step within the first observation window after the gap: \(acted.prefix(2))")
+    check(reported[306] == 0, "F4: no verdict on the first tick after the gap: \(String(describing: reported[306]))")
+    check((20...24).contains(reported[330] ?? -9), "F4: the stall is detected again and counts only what was observed after the gap: \(String(describing: reported[330]))")
+}
+// END REVIEW REPLAYS
+
+// BEGIN REVIEW 2 REPLAYS (the second review's tables; only the API of tribe.17 / 2e641743d: run against both)
+func sessionTraffic(_ jc: String, _ jmax: String, _ s: String, cpa: String?, rt: String?) -> TribeServiceTraffic {
+    TribeServiceTraffic.fromConfig(jc: jc, jmax: jmax, s1: s, s4: s, specialJunk: [nil, nil, nil, nil, nil],
+                                   contentPaddingAddition: cpa, randomTrailers: rt, mtu: "1280", persistentKeepalive: "25")
+}
+/// Feeds per-second (tx, rx, handshake moved) after 10 s of healthy traffic; returns the ladder's actions.
+func sessionReplay(_ policy: TribeRoamingPolicy, _ seconds: [(tx: UInt64, rx: UInt64, hs: Bool)]) -> [(Int, TribeWatchdogOutcome)] {
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var hs: Int64 = 1_800_000_000
+    var acted: [(Int, TribeWatchdogOutcome)] = []
+    for t in -10...0 { tx += 2000; rx += 2000; _ = arbiter.tick(s(tx, rx, hs, Double(t)), pathSatisfied: true, policy: policy) }
+    for (i, sec) in seconds.enumerated() {
+        tx += sec.tx; rx += sec.rx
+        if sec.hs { hs += 120 }
+        let o = arbiter.tick(s(tx, rx, hs, Double(i + 1)), pathSatisfied: true, policy: policy)
+        if o != .none { acted.append((i + 1, o)) }
+    }
+    return acted
+}
+do {
+    // G2: ContentPaddingAddition 64, S 12: one 1280-byte packet out a second (1324 B), its TCP ACK in
+    // (52 + 64 + 32 = 148 B), the handshake time unchanged: a working upload.
+    let g2 = sessionReplay(sessionPolicy(sessionTraffic("4", "50", "12", cpa: "64", rt: "0")),
+                           Array(repeating: (tx: 1324, rx: 148, hs: false), count: 60))
+    print("  G2 upload acked by 148-byte ACKs, 60 s: \(g2.isEmpty ? "no step" : "\(g2.prefix(2))")")
+    check(g2.isEmpty, "G2: a 148-byte ACK a second is data: no step: \(g2.prefix(2))")
+    // G3: RandomTrailers "1" (what our builder writes), no content padding: a re-key at 1 (4 junk of 20 B,
+    // a 600-byte initiation, a 1100-byte confirmation), then only keepalives of 1100 B every 25 s.
+    var g3seconds: [(tx: UInt64, rx: UInt64, hs: Bool)] = []
+    for t in 1...300 { g3seconds.append(t == 1 ? (tx: 1780, rx: 92, hs: true) : (tx: t % 25 == 0 ? 1100 : 0, rx: 0, hs: false)) }
+    let g3 = sessionReplay(sessionPolicy(sessionTraffic("4", "50", "12", cpa: nil, rt: "1")), g3seconds)
+    print("  G3 trailers \"1\", idle with 1100-byte keepalives, 300 s: \(g3.isEmpty ? "no step" : "\(g3.prefix(2))")")
+    check(g3.isEmpty, "G3: keepalives grown by trailers are service traffic: no step: \(g3.prefix(2))")
+    // G4: heavy junk; a re-key whose initiation (3434 B) leaves in second 1 next to 1000 B of user traffic,
+    // its response arrives in second 2 (with the 288-byte confirmation); 100 B/s of user traffic; the
+    // application answers in second 5.
+    let heavy = sessionTraffic("4", "801", "86", cpa: nil, rt: nil)
+    let g4 = sessionReplay(sessionPolicy(TribeServiceTraffic(handshakeTxBytes: heavy.handshakeTxBytes, keepaliveTxBytes: 288, keepaliveIntervalSeconds: 25)),
+                           [(tx: 1000 + 3434, rx: 0, hs: false), (tx: 100 + 288, rx: 92, hs: true), (tx: 100, rx: 0, hs: false),
+                            (tx: 100, rx: 0, hs: false), (tx: 100, rx: 1000, hs: false)])
+    print("  G4 initiation and response in different samples: \(g4.isEmpty ? "no step" : "\(g4.prefix(2))")")
+    check(g4.isEmpty, "G4: 1300 B of user traffic is no stall: \(g4.prefix(2))")
+    // ... and with the response 5 s late (a retry window): still nothing before it.
+    let g4late = sessionReplay(sessionPolicy(TribeServiceTraffic(handshakeTxBytes: heavy.handshakeTxBytes, keepaliveTxBytes: 288, keepaliveIntervalSeconds: 25)),
+                               [(tx: 1000 + 3434, rx: 0, hs: false), (tx: 100, rx: 0, hs: false), (tx: 100, rx: 0, hs: false), (tx: 100, rx: 0, hs: false),
+                                (tx: 100, rx: 0, hs: false), (tx: 100 + 288, rx: 92, hs: true), (tx: 100, rx: 1000, hs: false)])
+    print("  G4 response 5 s late: \(g4late.isEmpty ? "no step" : "\(g4late.prefix(2))")")
+    check(g4late.isEmpty, "G4: an initiation waiting for its response is not demand: \(g4late.prefix(2))")
+}
+// END REVIEW 2 REPLAYS
+
+// tribe.17: B1 with the fleet's and the heavy-junk sessions (their handshakes and keepalives in the
+// world, their service traffic in the policy): still the engine restart about 15 s after the roam.
+do {
+    for (name, traffic) in [("fleet", fleetTraffic), ("heavy junk", heavyTraffic)] {
+        var arbiter = TribeRecoveryArbiter(jitter: 2)
+        var tx: UInt64 = 0, rx: UInt64 = 0
+        var hs: Int64 = 1_800_000_000
+        var newPortAt = 0
+        var steps: [(Int, TribeStallAction)] = []
+        for t in -30...120 {
+            tx += 1500
+            if t % 25 == 0 { tx += traffic.keepaliveTxBytes }
+            if t % 12 == 0 { tx += traffic.handshakeTxBytes; rx += 92; hs = 1_800_000_000 + Int64(t + 30) }
+            rx += t < 0 ? 20_000 : (t - newPortAt == 1 ? 20_000 : 0)
+            let sample = s(tx, rx, hs, Double(t))
+            if t == 0 { arbiter.noteRoamRebind(sample, freshPort: true); continue }
+            if case .perform(let a) = arbiter.tick(sample, pathSatisfied: true, policy: sessionPolicy(traffic)) {
+                steps.append((t, a)); newPortAt = t
+                if a == .softRestart { tx = 0; rx = 0; hs = 0; arbiter.rebaseAfterBackendRestart(s(0, 0, 0, Double(t))) }
+            }
+        }
+        print("  B1 replay, \(name) session: \(steps.map { "\($0.1.logName)@+\($0.0)s" })")
+        check(steps.first.map { $0.1 == .softRestart && $0.0 <= 20 } ?? false, "B1 with the \(name) session: engine restart within 20 s: \(steps)")
+    }
+}
+// tribe.18 (G2): a handshake only by its time moving - a 148-byte growth with the time unchanged is data
+// (a padded TCP ACK is 148 B too); tribe.17 took it for a server's initiation.
+check(TribeDataFlow.dataBytes(rxDelta: 148, handshakeChanged: false) == 148 && TribeDataFlow.dataBytes(rxDelta: 148, handshakeChanged: true) == 0,
+      "148 B is data unless the handshake time moved")
+// tribe.18 (G3): RandomTrailers as the engine reads it (PacketTunnelSettingsGenerator uapiBool).
+check(["on", "1", "true", "t", "yes", " TRUE ", "Yes"].allSatisfy { TribeServiceTraffic.engineBool($0) }
+      && !["off", "0", "false", "", "2", "enabled"].contains { TribeServiceTraffic.engineBool($0) } && !TribeServiceTraffic.engineBool(nil),
+      "the engine's spellings of on")
+
 // tribe.16: the extension's reading for the app (data_quiet_s): seconds since data last PROVED the
 // path; the echo after a step does not refresh it; unknown without a recent sample.
 do {
@@ -755,7 +961,9 @@ do {
         quiet[t] = arbiter.dataQuietSeconds(at: Double(t))
     }
     check(quiet[10] == 0, "data flowing: 0 s: \(String(describing: quiet[10]))")
-    check(quiet[12] == 2 && quiet[20] == 10, "the echo at 12 s does not refresh it: \(String(describing: quiet[12])) \(String(describing: quiet[20]))")
+    // tribe.17: reported only while stalled now - 0 while the echo arrives (12 s), and once stalled again
+    // counted from the last PROOF (10 s), not from the echo.
+    check(quiet[12] == 0 && quiet[20] == 10, "the echo at 12 s does not refresh it: \(String(describing: quiet[12])) \(String(describing: quiet[20]))")
     check(quiet[39] == 29 && quiet[40] == 0, "data 29 s after the roam proves the path again: \(String(describing: quiet[39])) \(String(describing: quiet[40]))")
     check(arbiter.dataQuietSeconds(at: 60 + TribeRecoveryArbiter.quietSampleMaxAgeSeconds + 1) == -1, "stale samples: unknown")
     var counters = TribeRoamingCounters()

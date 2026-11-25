@@ -807,8 +807,10 @@ static void ownerHandedOverAdoption()
         CHECK(!upstreamHandedOverRecordMatches(rec, a.nodeId, order, rec.savedWallMs + kUpstreamRecordMaxAgeMs)); // too old
         CHECK(upstreamHandedOverRecordMatches(rec, a.nodeId, order, rec.savedWallMs + kUpstreamRecordMaxAgeMs - 1));
         CHECK(!upstreamHandedOverRecordMatches(rec, a.nodeId, order, rec.savedWallMs - 120000));       // saved "in the future"
-        UpstreamLeaseRecord old = rec;
-        old.sessionOrder = -1; // a record of a build without the order
+        QJsonObject oldJson = QJsonDocument::fromJson(rec.toJson()).object(); // a record of a build without the order
+        oldJson.remove(QStringLiteral("session_order"));
+        oldJson.remove(QStringLiteral("tunnel_order"));
+        const UpstreamLeaseRecord old = UpstreamLeaseRecord::fromJson(QJsonDocument(oldJson).toJson(QJsonDocument::Compact));
         CHECK(!upstreamHandedOverRecordMatches(old, a.nodeId, -1, wall) && !upstreamHandedOverRecordMatches(old, a.nodeId, order, wall));
         UpstreamLeaseRecord bad = rec;
         bad.leaseId = QStringLiteral("short");
@@ -5377,6 +5379,202 @@ static void floorDenialRetry()
     }
 }
 
+// --- review round 44 of 25.11 (seat-adopt branch, findings F1-F3 and Q5(b)) --------------------------------------------------------
+// F1: a lease request that goes THROUGH a tunnel of ours (a seat taken before a switch: the route names no base, the request rides the
+//     live tunnel to the walk's edge) never marks a host and is never redirected - from the tunnel's exit only the walk's edge may be
+//     reachable (EdgeWalk.h R1a); a mark set by an earlier direct request does not move it either.
+// F2: a 200 whose body was cut (a reset, or a stall cut by the request's own bound) is no answer: the host is silent, a release is sent
+//     again - to the other host - and the next request goes there.
+// Q5(b): a redirected request that gets no answer within its wait - a hedge too - marks its host, so the next one goes back.
+// F3: a provisional start whose seat confirmation was retried after an order-floor denial runs with the bring-up's order in the
+//     tunnel's metadata while the lease belongs to the retry's order: the record names the tunnel by the first, the adoption after a
+//     relaunch matches it, and the Stop releases the confirmed lease once.
+static void reviewRound44()
+{
+    TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), 1500}}, {{QStringLiteral("upstream_nodes"), true}}, {}, {});
+    struct Edge {
+        enum Mode { Answer, Silent, CutReset, CutStall };
+        QTcpServer server;
+        Mode mode;
+        int deletes = 0, posts = 0;
+        explicit Edge(Mode m) : mode(m)
+        {
+            server.listen(QHostAddress::LocalHost);
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [this]() {
+                while (QTcpSocket *s = server.nextPendingConnection()) {
+                    QObject::connect(s, &QTcpSocket::readyRead, s, [this, s]() {
+                        const QByteArray rq = s->readAll();
+                        const bool del = rq.startsWith("DELETE /v1/upstream/lease/");
+                        const bool acq = rq.startsWith("POST /v1/upstream/lease ");
+                        if (!del && !acq)
+                            return;
+                        deletes += del ? 1 : 0;
+                        posts += acq ? 1 : 0;
+                        switch (mode) {
+                        case Silent:
+                            return;
+                        case CutReset:
+                        case CutStall: // the API's 200 head and part of the body - then a reset, or nothing more
+                            s->write("HTTP/1.1 200 OK\r\nX-Tribe-Api: 1\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n"
+                                     "{\"type\":\"upstream_lease\",\"lease_id\":\"Lea");
+                            s->flush();
+                            if (mode == CutReset)
+                                s->disconnectFromHost();
+                            return;
+                        case Answer: {
+                            const QByteArray body = del ? QByteArray() : QByteArrayLiteral(R"({"code":"no_seat","retry_after_s":30})");
+                            s->write((del ? QByteArrayLiteral("HTTP/1.1 204 X\r\n")
+                                          : QByteArrayLiteral("HTTP/1.1 409 X\r\nContent-Type: application/json\r\n"))
+                                     + "X-Tribe-Api: 1\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n"
+                                     + body);
+                            s->disconnectFromHost();
+                            return;
+                        }
+                        }
+                    });
+                }
+            });
+        }
+        QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()); }
+    };
+    struct Rig {
+        QNetworkAccessManager nam;
+        UpstreamLeaseClient client;
+        int result = -1;
+        bool acquired = false;
+        AcquireReply reply;
+        Rig(const QString &walk, const QString &other)
+        {
+            client.configure(&nam, [walk] { return walk; }, QStringLiteral("00"), [] { return QStringLiteral("token"); });
+            client.setNextDirectBase([walk, other](const QString &b) { return b == walk ? other : (b == other ? walk : QString()); });
+            client.onReleaseDone = [this](quint64, bool confirmed) { result = confirmed ? 1 : 0; };
+            client.onAcquire = [this](quint64, const AcquireReply &r) { acquired = true; reply = r; };
+        }
+        static void pump(int ms)
+        {
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < ms)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        }
+        int release(quint64 id, qint64 budgetMs = kSeatReleaseRetryBudgetMs)
+        {
+            client.releaseRetryBudgetMs = budgetMs;
+            result = -1;
+            client.release(id, QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID%1").arg(id, 4, 10, QLatin1Char('0')), UpstreamMeter{}, LeaseRoute{});
+            QElapsedTimer t;
+            t.start();
+            while (result < 0 && t.elapsed() < 25000)
+                pump(20);
+            return result;
+        }
+        bool acquire(quint64 id, bool hedged = false)
+        {
+            acquired = false;
+            client.acquire(id, QStringLiteral("aaaaaaaaaaaaaaa0"), LeaseKind::Session, QString(), LeaseRoute{},
+                           QStringLiteral("nonce-nonce-nonce-%1").arg(id, 4, 10, QLatin1Char('0')), qint64(id), hedged);
+            QElapsedTimer t;
+            t.start();
+            while (!acquired && t.elapsed() < 8000)
+                pump(20);
+            return acquired;
+        }
+    };
+
+    // F2: a cut 200 (reset after part of the body) and a stalled 200 (cut by the release's own 1.5 s bound) are no answers.
+    for (const Edge::Mode cut : {Edge::CutReset, Edge::CutStall}) {
+        Edge primary(cut), second(Edge::Answer);
+        Rig r(primary.base(), second.base());
+        const int res = r.release(1);
+        std::printf("round44 F2 release after a cut 200 (%s): result=%d primary_deletes=%d second_deletes=%d\n",
+                    cut == Edge::CutReset ? "reset" : "stall", res, primary.deletes, second.deletes);
+        CHECK(res == 1 && primary.deletes == 1 && second.deletes == 1);
+    }
+    {   // ... and an acquire's cut 200 marks its host too: the next request goes to the other one
+        Edge primary(Edge::CutReset), second(Edge::Answer);
+        Rig r(primary.base(), second.base());
+        CHECK(r.acquire(2) && r.reply.kind == LeaseReplyKind::Failed && primary.posts == 1);
+        CHECK(r.release(3) == 1 && primary.deletes == 0 && second.deletes == 1);
+    }
+
+    // F1: a request through a tunnel of ours stays on the walk's edge, marked or not, and its failure marks nothing.
+    {
+        Edge walk(Edge::Silent), other(Edge::Answer);
+        Rig r(walk.base(), other.base());
+        CHECK(r.release(4) == 1 && walk.deletes == 1 && other.deletes == 1); // direct: the walk's edge is marked, the resend went over
+        walk.mode = Edge::Answer;
+        r.client.tunnelStarted(); // a tunnel of ours comes up and carries the app's requests (a seat taken before a switch)
+        CHECK(r.acquire(5) && r.reply.kind == LeaseReplyKind::Refused);
+        std::printf("round44 F1 in-tunnel acquire with the walk's edge marked: walk_posts=%d other_posts=%d\n", walk.posts, other.posts);
+        CHECK(walk.posts == 1 && other.posts == 0);
+    }
+    {
+        Edge walk(Edge::Silent), other(Edge::Answer);
+        Rig r(walk.base(), other.base());
+        r.client.tunnelStarted();
+        CHECK(r.acquire(6) && walk.posts == 1); // through the tunnel, no answer within the full wait
+        CHECK(r.release(60, 0) == 0 && walk.deletes == 1 && other.deletes == 0); // through the tunnel, ended silent at its bound
+        r.client.tunnelStopped();               // the confirmed stop: requests are direct again
+        walk.mode = Edge::Answer;
+        const int res = r.release(7);
+        std::printf("round44 F1 direct release after an in-tunnel silence: result=%d walk_deletes=%d other_deletes=%d\n", res,
+                    walk.deletes, other.deletes);
+        CHECK(res == 1 && walk.deletes == 2 && other.deletes == 0); // the in-tunnel silences marked nothing
+    }
+
+    // Q5(b): the walk's edge is silent, the redirected one too - a HEDGED acquire's short wait marks the redirected edge, the next
+    // request goes back at once (at most one bounded attempt on the second host per silence of the first).
+    {
+        Edge walk(Edge::Silent), other(Edge::Silent);
+        Rig r(walk.base(), other.base());
+        CHECK(r.release(8, 0) == 0 && walk.deletes == 1 && other.deletes == 0); // one try (no resend budget): marks the walk's edge
+        CHECK(r.acquire(9, /*hedged=*/true) && other.posts == 1 && walk.posts == 0);
+        const int res = r.release(10, 0);
+        std::printf("round44 Q5b request after a silent redirected hedge: result=%d walk_deletes=%d other_deletes=%d\n", res,
+                    walk.deletes, other.deletes);
+        CHECK(res == 0 && walk.deletes == 2 && other.deletes == 0);
+    }
+
+    // F3: the provisional start's confirmation retried after an order-floor denial; relaunch; Stop.
+    {
+        const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+        const qint64 T = 9100000, wall = 1764000000000LL;
+        UpstreamLeaseOwner::Options ios;
+        ios.keepRecord = true;
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(ios);
+        o.begin(a, 1, packFor(a), T, wall);
+        QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(io.last("acquire")->id, failed("transport"), T + 1200); // the pack tunnel
+        CHECK(findEv(ev, UpstreamOwnerEventKind::BringUp) && o.provisionalPending());
+        const qint64 tunnelOrder = o.sessionOrder(); // what bringUpUpstream put into the tunnel's tribeSessionMetadata
+        o.tunnelUp(T + 1500);
+        const FakeIo::Call conf = *io.last("acquire");
+        o.onAcquireReply(conf.id, floorDenial(tunnelOrder + 5000), T + 1600);
+        const FakeIo::Call again = *io.last("acquire");
+        CHECK(again.id != conf.id && again.order > tunnelOrder + 5000);
+        ev = o.onAcquireReply(again.id, grantedAs(a, "LeaseRetryXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"), T + 1700);
+        const UpstreamOwnerEvent *p = findEv(ev, UpstreamOwnerEventKind::Persist);
+        CHECK(findEv(ev, UpstreamOwnerEventKind::LeaseConfirmed) && p);
+        const UpstreamLeaseRecord rec = p ? UpstreamLeaseRecord::fromJson(p->record.toJson()) : UpstreamLeaseRecord();
+        CHECK(rec.leaseId == QLatin1String("LeaseRetryXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX") && rec.sessionOrder == again.order);
+        // force-quit, relaunch: the extension still runs the tunnel brought up with `tunnelOrder`
+        const bool matches = upstreamHandedOverRecordMatches(rec, a.nodeId, tunnelOrder, wall + 60000);
+        std::printf("round44 F3 record after the confirmation retry: matches_live_tunnel=%d\n", int(matches));
+        CHECK(matches);
+        FakeIo io2;
+        UpstreamLeaseOwner relaunched(&io2);
+        relaunched.setOptions(ios);
+        if (matches)
+            relaunched.adoptHandedOver(rec, T + 90000);
+        CHECK(relaunched.active() && relaunched.holdsLease(rec.leaseId));
+        const QVector<UpstreamOwnerEvent> stop = relaunched.disconnect(T + 120000); // the person's Stop
+        const UpstreamOwnerEvent *r = findEv(stop, UpstreamOwnerEventKind::ReleaseAfterStop);
+        CHECK(countEv(stop, UpstreamOwnerEventKind::ReleaseAfterStop) == 1 && r && r->leaseId == rec.leaseId && io2.calls.isEmpty());
+    }
+    TuningStore::set({}, {}, {}, {});
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -5416,6 +5614,7 @@ int main(int argc, char **argv)
     standbyAndStatus();
     envelopeAndParsing();
     releaseHostFallback();
+    reviewRound44();
     if (g_fail) {
         std::printf("upstream_engine_check: %d of %d FAILED\n", g_fail, g_total);
         return 1;

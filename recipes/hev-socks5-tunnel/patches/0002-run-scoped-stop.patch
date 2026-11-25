@@ -1,0 +1,231 @@
+--- a/src/hev-main.c
++++ b/src/hev-main.c
+@@ -89,15 +89,17 @@
+ int
+ hev_socks5_tunnel_main_from_file (const char *config_path, int tun_fd)
+ {
+-    int res = hev_config_init_from_file (config_path);
+-    if (res < 0) {
+-        hev_socks5_tunnel_reset_stop ();
+-        return -1;
+-    }
++    int res;
+ 
+-    res = hev_socks5_tunnel_main_inner (tun_fd);
++    /* One run: a stop request made from here on belongs to it alone. */
++    hev_socks5_tunnel_scope_begin ();
++    res = hev_config_init_from_file (config_path);
+     if (res < 0)
+-        hev_socks5_tunnel_reset_stop ();
++        res = -1;
++    else
++        res = hev_socks5_tunnel_main_inner (tun_fd);
++    hev_socks5_tunnel_scope_end ();
++
+     return res;
+ }
+ 
+@@ -105,15 +107,16 @@
+ hev_socks5_tunnel_main_from_str (const unsigned char *config_str,
+                                  unsigned int config_len, int tun_fd)
+ {
+-    int res = hev_config_init_from_str (config_str, config_len);
+-    if (res < 0) {
+-        hev_socks5_tunnel_reset_stop ();
+-        return -1;
+-    }
++    int res;
+ 
+-    res = hev_socks5_tunnel_main_inner (tun_fd);
++    hev_socks5_tunnel_scope_begin ();
++    res = hev_config_init_from_str (config_str, config_len);
+     if (res < 0)
+-        hev_socks5_tunnel_reset_stop ();
++        res = -1;
++    else
++        res = hev_socks5_tunnel_main_inner (tun_fd);
++    hev_socks5_tunnel_scope_end ();
++
+     return res;
+ }
+ 
+--- a/src/hev-main.h
++++ b/src/hev-main.h
+@@ -84,10 +84,14 @@
+  *
+  * Request tunnel shutdown without waiting for asynchronous initialization.
+  * This function never blocks. Callers may retry while initialization is in
+- * progress.
++ * progress. The request belongs to the run in progress
++ * (hev_socks5_tunnel_main_*) and never survives it: a later run starts
++ * without it.
+  *
+- * Returns: zero when the request was queued, -EAGAIN when the tunnel is not
+- * ready, otherwise a negative errno value.
++ * Returns: zero when the request was queued to the running tunnel, -EAGAIN
++ * when a run is in progress but not running yet (the request is kept for that
++ * run and taken as soon as it runs), -ESRCH when no run is in progress
++ * (nothing is kept), otherwise a negative errno value.
+  */
+ int hev_socks5_tunnel_try_quit (void);
+ 
+--- a/src/hev-socks5-tunnel.c
++++ b/src/hev-socks5-tunnel.c
+@@ -42,6 +42,9 @@
+ 
+ static int run;
+ static int stop_requested;
++/* A library run (hev_socks5_tunnel_main_*) is in progress: a stop request is
++ * kept only for it and is gone when it returns. Guarded by stop_mutex. */
++static int run_scope;
+ static pthread_mutex_t stop_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static int tun_fd = -1;
+ static int tun_fd_local;
+@@ -684,10 +687,14 @@
+     stat_rx_packets = 0;
+     stat_tx_bytes = 0;
+     stat_rx_bytes = 0;
+-    WRITE_ONCE (run, 0);
+-    WRITE_ONCE (stop_requested, 0);
++    pthread_mutex_lock (&stop_mutex);
++    run = 0;
++    stop_requested = 0;
++    pthread_mutex_unlock (&stop_mutex);
+ }
+ 
++static int stop_event_write_locked (void);
++
+ int
+ hev_socks5_tunnel_run (void)
+ {
+@@ -702,9 +709,14 @@
+     task_lwip_timer = hev_task_ref (task_lwip_timer);
+     hev_task_run (task_lwip_timer, lwip_timer_task_entry, NULL);
+ 
+-    WRITE_ONCE (run, 1);
+-    if (READ_ONCE (stop_requested))
+-        hev_socks5_tunnel_try_quit ();
++    /* Publish "running" and take a request made during initialization in one
++     * critical section with the stopper's set-and-check (try_quit): either the
++     * request is seen here, or the stopper sees run and writes the event. */
++    pthread_mutex_lock (&stop_mutex);
++    run = 1;
++    if (stop_requested)
++        stop_event_write_locked ();
++    pthread_mutex_unlock (&stop_mutex);
+ 
+     hev_task_system_run ();
+ 
+@@ -744,48 +756,80 @@
+     return ready;
+ }
+ 
+-int
+-hev_socks5_tunnel_try_quit (void)
++static int
++stop_event_write_locked (void)
+ {
+     unsigned char val = 0;
+     ssize_t res;
+-    int fd;
++    int fd = event_fds[1];
+ 
+-    /* Preserve a stop requested while async initialization is still in
+-     * progress. hev_socks5_tunnel_run observes this flag before entering the
+-     * task system, so the caller never needs the blocking stop API. */
+-    WRITE_ONCE (stop_requested, 1);
+-
+-    pthread_mutex_lock (&stop_mutex);
+-    if (!READ_ONCE (run)) {
+-        pthread_mutex_unlock (&stop_mutex);
++    if (fd < 0)
+         return -EAGAIN;
+-    }
+ 
+-    fd = event_fds[1];
+-    if (fd < 0) {
+-        pthread_mutex_unlock (&stop_mutex);
+-        return -EAGAIN;
+-    }
+-
+     res = write (fd, &val, sizeof (val));
+-    pthread_mutex_unlock (&stop_mutex);
+-
+     if (res == sizeof (val))
+         return 0;
+     if (res < 0)
+         return -errno;
+ 
+     return -EIO;
++}
++
++int
++hev_socks5_tunnel_try_quit (void)
++{
++    int res;
++
++    /* The set-and-check of the stop request and hev_socks5_tunnel_run's
++     * publish-and-take are one critical section each, under stop_mutex. A
++     * request is kept only while a run is in progress (run_scope): it is taken
++     * when that run starts running, and it never survives that run. */
++    pthread_mutex_lock (&stop_mutex);
++    if (!run_scope) {
++        pthread_mutex_unlock (&stop_mutex);
++        return -ESRCH;
++    }
++
++    stop_requested = 1;
++    if (!run || event_fds[1] < 0) {
++        pthread_mutex_unlock (&stop_mutex);
++        return -EAGAIN;
++    }
++
++    res = stop_event_write_locked ();
++    pthread_mutex_unlock (&stop_mutex);
++
++    return res;
+ }
+ 
+ void
+ hev_socks5_tunnel_reset_stop (void)
+ {
+-    WRITE_ONCE (stop_requested, 0);
++    pthread_mutex_lock (&stop_mutex);
++    stop_requested = 0;
++    pthread_mutex_unlock (&stop_mutex);
+ }
+ 
+ void
++hev_socks5_tunnel_scope_begin (void)
++{
++    pthread_mutex_lock (&stop_mutex);
++    run_scope = 1;
++    stop_requested = 0;
++    pthread_mutex_unlock (&stop_mutex);
++}
++
++void
++hev_socks5_tunnel_scope_end (void)
++{
++    pthread_mutex_lock (&stop_mutex);
++    run_scope = 0;
++    run = 0;
++    stop_requested = 0;
++    pthread_mutex_unlock (&stop_mutex);
++}
++
++void
+ hev_socks5_tunnel_stats (size_t *tx_packets, size_t *tx_bytes,
+                          size_t *rx_packets, size_t *rx_bytes)
+ {
+--- a/src/hev-socks5-tunnel.h
++++ b/src/hev-socks5-tunnel.h
+@@ -20,6 +20,8 @@
+ int hev_socks5_tunnel_is_ready (void);
+ int hev_socks5_tunnel_try_quit (void);
+ void hev_socks5_tunnel_reset_stop (void);
++void hev_socks5_tunnel_scope_begin (void);
++void hev_socks5_tunnel_scope_end (void);
+ 
+ void hev_socks5_tunnel_stats (size_t *tx_packets, size_t *tx_bytes,
+                               size_t *rx_packets, size_t *rx_bytes);

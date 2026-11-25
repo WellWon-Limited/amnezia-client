@@ -101,5 +101,12 @@ tap="$(body_of 'ScanStep rowTapped(const QString &id, qint64 now)' "$MACHINE")"
 printf '%s\n' "$tap" | grep -qF '!m_connectingId.isEmpty() ||' && bad "F6: a second row tap while one connects must not be dropped"
 printf '%s\n' "$tap" | grep -qF 'endChain(s, false);' || bad "F6: the superseded row's request must end without a verdict"
 
+# device round air-C, D1: one verdict per row - the coordinator never rewrites a row's state after the machine counted
+refresh="$(body_of 'void TribeScanner::refreshView()' "$FACADE")"
+printf '%s\n' "$refresh" | grep -qE 'insert\(QStringLiteral\("state"\)' && bad "D1: refreshView must not rewrite a row's state (the machine's verdict)"
+grep -qF 'dispatch(m_m.tunnelNoDataHere(ids, now()));' "$FACADE" || bad "D1: the ledger's S6 fact must reach the machine (tunnelNoDataHere)"
+grep -qF 'readonly property bool available: rowState === "works" || rowState === "slow"' "$CLIENT/ui/qml/Tribe/components/TribeScanRow.qml" \
+    || bad "D1: a slow row must read «Доступно» (it is counted)"
+
 [ "$fail" = 0 ] && echo "scanner page wiring: ok"
 exit "$fail"
