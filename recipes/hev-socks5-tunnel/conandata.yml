@@ -1,8 +1,11 @@
 patches:
-  "2.15.0-tribe.1":
+  "2.15.0-tribe.2":
     - patch_file: "patches/0001-library-nonblocking-lifecycle.patch"
       patch_description: "Expose readiness and non-blocking stop for async Apple lifecycle"
       patch_type: "portability"
     - patch_file: "patches/0002-run-scoped-stop.patch"
       patch_description: "A stop request belongs to one run: set-and-check under one mutex, never kept outside a run"
+      patch_type: "bugfix"
+    - patch_file: "patches/0003-sticky-session-cancel.patch"
+      patch_description: "A cancelled session's timeout stays 0: a handshake step completing after the stop cannot re-arm it"
       patch_type: "bugfix"

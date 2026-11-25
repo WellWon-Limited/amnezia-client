@@ -1,0 +1,63 @@
+--- a/src/core/src/hev-socks5.c
++++ b/src/core/src/hev-socks5.c
+@@ -31,9 +31,16 @@
+ void
+ hev_socks5_set_timeout (HevSocks5 *self, int timeout)
+ {
+-    self->timeout = timeout;
++    self->timeout = self->cancelled ? 0 : timeout;
+ }
+ 
++void
++hev_socks5_cancel (HevSocks5 *self)
++{
++    self->cancelled = 1;
++    self->timeout = 0;
++}
++
+ HevSocks5AddrFamily
+ hev_socks5_get_addr_family (HevSocks5 *self)
+ {
+@@ -67,6 +74,7 @@
+ 
+     self->fd = -1;
+     self->timeout = -1;
++    self->cancelled = 0;
+     self->type = type;
+     self->addr_family = HEV_SOCKS5_ADDR_FAMILY_UNSPEC;
+ 
+--- a/src/core/src/hev-socks5.h
++++ b/src/core/src/hev-socks5.h
+@@ -49,6 +49,10 @@
+ 
+     int fd;
+     int timeout;
++    /* Cancelled (hev_socks5_cancel): the timeout stays 0 - a step that
++     * completes after the cancel (a handshake answer already on its way)
++     * cannot re-arm it, so the object ends at its next wait. */
++    int cancelled;
+     int udp_associated;
+     HevSocks5Type type;
+     HevSocks5AddrFamily addr_family;
+@@ -67,6 +71,7 @@
+ 
+ int hev_socks5_get_timeout (HevSocks5 *self);
+ void hev_socks5_set_timeout (HevSocks5 *self, int timeout);
++void hev_socks5_cancel (HevSocks5 *self);
+ 
+ HevSocks5AddrFamily hev_socks5_get_addr_family (HevSocks5 *self);
+ void hev_socks5_set_addr_family (HevSocks5 *self, HevSocks5AddrFamily family);
+--- a/src/hev-socks5-session.c
++++ b/src/hev-socks5-session.c
+@@ -58,7 +58,10 @@
+     LOG_D ("%p socks5 session terminate", self);
+ 
+     iface = HEV_OBJECT_GET_IFACE (self, HEV_SOCKS5_SESSION_TYPE);
+-    hev_socks5_set_timeout (HEV_SOCKS5 (self), 0);
++    /* the end of a stop: no later step of this session may re-arm its
++     * timeout (a handshake answer that arrives with the stop used to set the
++     * UDP timeout again and keep the run alive for its whole length) */
++    hev_socks5_cancel (HEV_SOCKS5 (self));
+     hev_task_wakeup (iface->get_task (self));
+ }
+ 

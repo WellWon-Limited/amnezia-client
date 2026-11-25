@@ -45,7 +45,7 @@ class AmneziaVPN(ConanFile):
             self.requires("awg-apple/3.1.4-tribe.15")
             # Cut geo pair, shipped as appex resources and passed as datDir.
             self.requires("tribe-xray-geo/1.0.0")
-            self.requires("hev-socks5-tunnel/2.15.0-tribe.1", options={"as_framework": True})
+            self.requires("hev-socks5-tunnel/2.15.0-tribe.2", options={"as_framework": True})
             self.requires("openvpnadapter/1.0.0")
 
         if os == "Android":

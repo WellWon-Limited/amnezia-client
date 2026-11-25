@@ -1,14 +1,16 @@
 #!/bin/bash
-# Host check of the hev stop contract on the REAL library (review R46): fetches the pinned 2.15.0 sources and
+# Host check of the hev stop contract on the REAL library (reviews R46, R47): fetches the pinned 2.15.0 sources and
 # submodules (the archives and SHA-256 of ../conanfile.py), applies the recipe's patches, builds the static libraries
-# for this Mac and runs hev_stop_check.c against them (a socketpair stands in for the tun fd).
-#   bash recipes/hev-socks5-tunnel/test/run_hev_stop_check.sh            # patches 0001 + 0002 (the package)
-#   PATCHES="0001" bash recipes/hev-socks5-tunnel/test/run_hev_stop_check.sh   # 0001 alone: checks 1 and 2 fail
+# for this Mac and runs hev_stop_check.c and hev_stop_session_check.c against them (a socketpair stands in for the tun
+# fd; a SOCKS server double answers hev's UDP_ASSOCIATE at the stop).
+#   bash recipes/hev-socks5-tunnel/test/run_hev_stop_check.sh                   # 0001 + 0002 + 0003 (the package)
+#   PATCHES="0001 0002" bash recipes/hev-socks5-tunnel/test/run_hev_stop_check.sh # session check fails (R47 H1a)
+#   PATCHES="0001" bash recipes/hev-socks5-tunnel/test/run_hev_stop_check.sh      # stop checks 1 and 2 fail (R46)
 # Needs network (github.com). Work dir: HEV_CHECK_DIR (default: a new mktemp dir under TMPDIR). Exit 0 = passed.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RECIPE="$(cd "$HERE/.." && pwd)"
-PATCHES="${PATCHES:-0001 0002}"
+PATCHES="${PATCHES:-0001 0002 0003}"
 WORK="${HEV_CHECK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/hev-stop-check.XXXXXX")}"
 mkdir -p "$WORK/dl"
 fetch() { # <url> <sha256> <file>
@@ -42,8 +44,12 @@ for n in $PATCHES; do
     patch -p1 -s -d "$TREE" < "$(ls "$RECIPE/patches/$n"-*.patch)"
 done
 make -C "$TREE" -j8 static > "$WORK/build.log" 2>&1
-clang -O1 -o "$WORK/hev_stop_check" "$HERE/hev_stop_check.c" "$TREE/bin/libhev-socks5-tunnel.a" \
-    "$TREE/third-part/lwip/bin/liblwip.a" "$TREE/third-part/yaml/bin/libyaml.a" \
-    "$TREE/third-part/hev-task-system/bin/libhev-task-system.a" -lpthread
-echo "== hev stop check, patches: $PATCHES"
-"$WORK/hev_stop_check"
+rc=0
+for check in hev_stop_check hev_stop_session_check; do
+    clang -O1 -o "$WORK/$check" "$HERE/$check.c" "$TREE/bin/libhev-socks5-tunnel.a" \
+        "$TREE/third-part/lwip/bin/liblwip.a" "$TREE/third-part/yaml/bin/libyaml.a" \
+        "$TREE/third-part/hev-task-system/bin/libhev-task-system.a" -lpthread
+    echo "== $check, patches: $PATCHES"
+    "$WORK/$check" || rc=1
+done
+exit $rc
