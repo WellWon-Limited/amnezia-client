@@ -389,8 +389,19 @@ order "$cfg_start" '#ifdef Q_OS_IOS' 'freezeCachedFeatures(c.features, /\*ios=\*
 # tribe.20 (review of tribe.19: TribeRoaming.swift only) = tribe.19's patches unchanged.
 # tribe.21 (upstream bump: amneziawg-apple v3.1.5, amneziawg-go v3.1.20261116) = tribe.20's patches unchanged + 0018
 # last (test only: the awg_mini prime-echo test for a core that no longer loses the first packet).
-grep -q 'self.requires("awg-apple/3.1.5-tribe.21")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.21"
-grep -q '^    version = "3.1.5-tribe.21"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.21"
+# tribe.22 (device round air-G: a new 5-tuple begins with the handshake) = tribe.21's patches unchanged + 0019 last
+# (the adapter half; TribeRoaming.swift is the other).
+grep -q 'self.requires("awg-apple/3.1.5-tribe.22")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.22"
+grep -q '^    version = "3.1.5-tribe.22"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.22"
+list22="$(awk '/^  "3.1.5-tribe.22":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+[ -n "$list22" ] && [ "$list22" = "$(awk '/^  "3.1.5-tribe.21":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')
+patches/0019-tribe-new-flow-handshake-first.patch" ] \
+    || bad "E7: tribe.22 must carry the package patches of tribe.21 unchanged, in the same order, and 0019 last"
+[ "$(grep -c '^diff --git ' "$RECIPE/patches/0019-tribe-new-flow-handshake-first.patch")" = "1" ] \
+    && grep -q '^diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift ' "$RECIPE/patches/0019-tribe-new-flow-handshake-first.patch" \
+    || bad "E7: patch 0019 must change the adapter and nothing else"
+grep -q 'case .rebindPort, .softRestart: return \[.restartBackend\]' "$RECIPE/tribe/TribeRoaming.swift" \
+    || bad "E7: a step that changes the 5-tuple must be a new device (TribeRoaming.socketOps)"
 list21="$(awk '/^  "3.1.5-tribe.21":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
 [ -n "$list21" ] && [ "$list21" = "$(awk '/^  "3.1.4-tribe.20":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')
 patches/0018-tribe-awg-first-packet-kept.patch" ] \

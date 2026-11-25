@@ -73,7 +73,14 @@ class AwgApple(ConanFile):
     # test-only patch: the new core no longer loses the first packet after a UAPI set of S4, which the awg_mini
     # runner's prime-echo test asserted. The same Swift sources, Xray core and Go toolchain; the awg_mini gate
     # also runs under -race (the core's timer race is fixed). The version prefix is the upstream wrapper's; N goes on.
-    version = "3.1.5-tribe.21"
+    # tribe.22: tribe.21's patches + 0019 + TribeRoaming.swift after device round air-G (25.11): a new 5-tuple
+    # begins with the handshake. A roam after a real loss or to another interface, the ladder's fresh port and the
+    # app's rebind are a new device on the same TUN (restartBackendInPlace) instead of listen_port=0 + a keepalive
+    # under the old keys on the live one - the node saw 25 packets of such a flow on the Wi-Fi, 12 on the LTE, then
+    # none, while flows that began with a handshake were not limited. With it: no separate roam proof restart, bytes
+    # on a device without a handshake are not data, the verdict for the app counts from lasting data. The same Go
+    # archive as tribe.21 (no Go change). tribe.21 was built into dev builds only (dea025cda), never shipped.
+    version = "3.1.5-tribe.22"
     settings = "os", "arch", "compiler"
 
     # Upstream wrapper version (the version's prefix) -> its archive, its tag commit and the AWG core the
@@ -111,6 +118,9 @@ class AwgApple(ConanFile):
         "3.1.4-tribe.7": "3.1.4-tribe.7",
         "3.1.4-tribe.8": "3.1.4-tribe.8",
         "3.1.4-tribe.9": "3.1.4-tribe.9",
+        # tribe.20 is the released file of 5.1.112 / 142; tribe.21 was built from the same file (dea025cda).
+        "3.1.4-tribe.20": "3.1.4-tribe.20",
+        "3.1.5-tribe.21": "3.1.4-tribe.20",
     }
 
     # Xray core + Go toolchain per released version. Absent = the tribe.3-tribe.11 pins (the
@@ -165,6 +175,8 @@ class AwgApple(ConanFile):
     _xray_pins["3.1.4-tribe.20"] = _xray_pins["3.1.4-tribe.19"]
     # tribe.21 = tribe.20 on the new upstream pair (_upstream_pins); core, toolchain and shared patches identical.
     _xray_pins["3.1.5-tribe.21"] = _xray_pins["3.1.4-tribe.20"]
+    # tribe.22 = tribe.21 + adapter patch 0019 and TribeRoaming.swift (no Go change).
+    _xray_pins["3.1.5-tribe.22"] = _xray_pins["3.1.5-tribe.21"]
 
     @property
     def _pins(self):

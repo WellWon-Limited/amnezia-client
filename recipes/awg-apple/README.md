@@ -8,7 +8,8 @@ and macOS Network Extension targets compile.
 
 | Version | Patches | Notes |
 |---|---|---|
-| `3.1.5-tribe.21` | the patches of tribe.20 + 0018 | current (iOS 143); upstream bug-fix bump: amneziawg-apple v3.1.5 (HTTP/2 request body buffer capped at 32 KiB) + amneziawg-go v3.1.20261116 (section "tribe.21 behaviour"); 0018 = test only (the awg_mini prime-echo test for a core that no longer loses the first packet). Swift sources, Xray core and Go toolchain those of tribe.20 |
+| `3.1.5-tribe.22` | the patches of tribe.21 + 0019 | current (iOS 143); tribe.21 after device round air-G (section "tribe.22 behaviour"): a new 5-tuple begins with the handshake - a roam after a real loss or to another interface, the ladder's fresh port and the app's rebind are a new device on the same TUN; no separate roam proof restart; no data without a handshake; the verdict for the app counts from lasting data. 0019 = the adapter half, `TribeRoaming.swift` the other; the Go archive is tribe.21's |
+| `3.1.5-tribe.21` | the patches of tribe.20 + 0018 | built into the 143 dev build `dea025cda`, not released, superseded by tribe.22; upstream bug-fix bump: amneziawg-apple v3.1.5 (HTTP/2 request body buffer capped at 32 KiB) + amneziawg-go v3.1.20261116 (section "tribe.21 behaviour"); 0018 = test only (the awg_mini prime-echo test for a core that no longer loses the first packet). Swift sources, Xray core and Go toolchain those of tribe.20 |
 | `3.1.4-tribe.20` | the patches of tribe.19 | built into 5.1.112 / 142 (release commit `f24ffe819`); tribe.19 after its review (section "tribe.20 behaviour"). TribeRoaming.swift only |
 | `3.1.4-tribe.19` | the patches of tribe.18 | superseded by tribe.20, not released; tribe.18 after device round air-D (section "tribe.19 behaviour"): a fresh-port roam is another network, a stale session is proved at once on the new path. TribeRoaming.swift only |
 | `3.1.4-tribe.18` | the patches of tribe.17 | superseded by tribe.19, not released; tribe.17 after the second review (section "tribe.18 behaviour"): a handshake only by its time moving, RandomTrailers as the engine reads it, service TX settled over the handshake window. TribeRoaming.swift + the gate `tests/check_engine_spellings.sh` |
@@ -1152,6 +1153,55 @@ Neither tag has a GitHub release entry; the ranges below are the tags' commits.
   backend, patch 0016).
 - `TribeRoaming.swift` and `TribeDataWatch.swift` are tribe.20's files. A later version that changes either must first
   freeze the released versions' copies (rule above).
+
+## tribe.22 behaviour: a new 5-tuple begins with the handshake (device round air-G, patch 0019 + TribeRoaming.swift)
+
+Round air-F (build `dea025cda`, iPhone Air, AmneziaWG on node 12): after Wi-Fi -> LTE -> Wi-Fi, and after airplane
+mode back to the same Wi-Fi, the session passed one page and then nothing for minutes, with no failover. Round air-G
+watched the phone's peer on the node while it happened (`awg show` twice a second and the headers of the UDP packets
+of its addresses, read-only; `~/avpn-build/phone-diag/air-G/RESULTS.txt`):
+
+- **Cause.** Every flow whose FIRST packet was a transport packet - the keepalive tribe.9 sent under the old keys
+  from its fresh local port (roam after a real loss / interface change, the ladder's first step, the app's rebind) -
+  got exactly 25 packets to the node on the Wi-Fi and 12 on the LTE, and then none; the node kept sending down that
+  flow. A handshake started 0.3 s after the first packet did not help. Flows that began with the handshake's prelude
+  (I1, junk, initiation: a fresh Connect, the soft restart) were not limited, from the same address at the same
+  time. Where on the path the limit sits is not known (two networks, one node; the other node was not limited on the
+  Wi-Fi); the node's module and firewall are the same as the other node's. This is the "about 1 s of data after every
+  new port" of tribe.16 and the reason only the soft restart healed it.
+- **Rule.** A new 5-tuple begins with the handshake. `TribeRoaming.socketOps(for: .rebindPort)` is
+  `[.restartBackend]`: a new device on the same TUN (`restartBackendInPlace`: wgTurnOff + wgTurnOn, no
+  setTunnelNetworkSettings), whose first packet is its initiation. `TribeSocketOp.freshListenPort` and `.sendKeepalive`
+  are removed, so the old sequence cannot be written again; `wgSendKeepalives` stays in the Go archive, unused. This
+  is what upstream does on a returning path (it restarts the device), without re-applying the network settings.
+  A path event without a loss on the same interface keeps the same-port bump (same 5-tuple).
+- **Adapter (0019).** `scheduleRoamRebind`: a roam that needs a new 5-tuple restarts the backend in place, then
+  tells the arbiter with the NEW device's sample (`noteRoamStep`); the endpoint re-set before it is dropped (the
+  restart resolves endpoints itself). `performSocketOps` handles `bumpWithKeepalive` and `restartBackend` only.
+  Counters: such a roam is `roam_fresh_ports` +1 and `soft_restarts` +1; the ladder's first step `stall_rebinds` +1
+  and `soft_restarts` +1. Log labels unchanged for the app's journal (`path returned`, `inbound stalled ... fresh
+  local port`).
+- **No separate roam proof restart.** tribe.19 K2 / tribe.20 L2 restarted the device once after a roam of an
+  unproven session, from its own allowance. The roam is that new handshake now: `roamRestartSince`,
+  `requestRoamProof`, `noteRoamProof`, `roamRestartWindowSeconds`, `roamProvenSeconds`, `lastHandshakeSeenAt` and
+  `demandNowBytes` are removed. K1 (the roam is another network) and L1 (the 120 s series bound) stay.
+- **Data rules.** (1) Bytes on a device that has not completed a handshake are never data
+  (`TribeDataFlow.dataBytes(...hasSession:)`): the server's own initiations are 148 B each in rx. (2) The verdict for
+  the app's failover (`data_stall_s`) and the roam series count from the last LASTING data: data that comes in after
+  `TribeRecoveryArbiter.lastingSeconds` (60 s = `idleSeconds`) without a repair step of any origin and without a
+  stall. Field: on the dead uplink the node's handshakes and retransmissions arrived every 1-4 s for 10-20 s after
+  each step, then thinned out; tribe.16-21 took the first of them 10 s after a step for proof, the verdict started
+  over after every step and never reached the app's 45 s (runs 2 and 4 of air-F: no failover until the tester's
+  Stop). The ladder's own proof (`provesFlow`, a second stage after a step) is unchanged: it only decides which
+  step is next.
+- **Not covered.** A session that completes its handshake and later loses its uplink while stray data keeps arriving
+  densely (no 4 s gap under demand) is not seen as stalled by counters alone until the stray data thins out; the
+  app's handshake-age rule (135 s) and the data watch's in-tunnel probe are the owners of that case. On a slow path
+  (gaps of 4 s and more under demand) the ladder's first step is a new device now, at most 4 per 120 s (the rolling
+  cap), where it was a cheap port change.
+- **Tests.** `tests/TribeRoamingTests.swift`, section AIR-G REPLAYS (run against tribe.20's frozen file they fail:
+  fresh-port loop every ~41 s, no lasting data, the verdict never reaches 45 s). `tribe/snapshots/3.1.4-tribe.20/`
+  and `tests/snapshots/3.1.4-tribe.20/` freeze the released file (tribe.21 was built from the same one).
 
 ## Rebuilding the package (isolated Conan home, nothing in the global cache changes)
 

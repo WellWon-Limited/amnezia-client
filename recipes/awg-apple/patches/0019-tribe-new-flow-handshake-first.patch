@@ -1,0 +1,120 @@
+diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -356,11 +356,11 @@
+         }
+     }
+ 
+-    /// Tribe (BUG-4 auto-heal): rebind the tunnel UDP socket to a NEW ephemeral local port on
+-    /// the LIVE tunnel. UAPI `listen_port=0` -> IpcSet -> BindUpdate closes and reopens the
+-    /// socket, so the next handshake goes out from a fresh 5-tuple flow (heals session-scoped
+-    /// DPI blocks; equivalent of toggling airplane mode). Peers, keys and handshake state are
+-    /// untouched -- this is NOT a reconfiguration.
++    /// Tribe (BUG-4 auto-heal): a NEW 5-tuple for the live tunnel (heals session-scoped DPI blocks;
++    /// equivalent of toggling airplane mode).
++    /// tribe.22 (device round air-G): a new 5-tuple begins with the handshake, so this is a new device on
++    /// the same TUN (TribeRoaming.socketOps), not `listen_port=0` on the live one: a flow that began with a
++    /// transport packet under the old keys got 25 packets through and then none.
+     /// - Parameter completionHandler: completion handler; nil error on success.
+     public func rebindListenPort(completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
+         rebindListenPortResult { result in
+@@ -385,7 +385,7 @@
+                 return
+             }
+             self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator)
+-            self.logHandler(.verbose, "rebindListenPort: socket rebound to a new ephemeral port, keepalive sent")
++            self.logHandler(.verbose, "rebindListenPort: new socket on a new ephemeral port, handshake first")
+             completionHandler(.performed)
+         }
+     }
+@@ -634,11 +634,11 @@
+                     self.pathLostAt = nil
+                     self.roamCounters.pathRestored += 1
+                     let outage = Int((Date().timeIntervalSince(lostAt) * 1000).rounded())
+-                    self.logHandler(.verbose, "Tribe roaming: path restored after \(outage) ms, fresh local port on the live device (\(self.roamCounters.summary))")
++                    self.logHandler(.verbose, "Tribe roaming: path restored after \(outage) ms (\(self.roamCounters.summary))")
+                 }
+                 // tribe.9: after a real loss or a move to another interface the old 5-tuple is dead
+                 // or foreign to the new NAT (field data 24-28.09: a fresh port healed 31 of 82 stalls,
+-                // the same-port bump 4 of 27): fresh local port + keepalive instead of the bump.
++                // the same-port bump 4 of 27): a new 5-tuple instead of the bump (tribe.22: a new device).
+                 if TribeRoaming.roamRebindAction(realLoss: realLoss, interfaceChanged: interfaceChanged) == .rebindPort {
+                     self.roamWantsFreshPort = true
+                 }
+@@ -743,22 +743,28 @@
+             let freshPort = self.roamWantsFreshPort
+             self.roamWantsFreshPort = false // tribe.10: cleared even when not .started (no stale flag)
+             guard case .started(let handle, let settingsGenerator) = self.state else { return }
++            if freshPort {
++                // tribe.22 (device round air-G): the path returned after a real loss or moved to another
++                // interface = a new 5-tuple, and a new 5-tuple begins with the handshake: a new device on
++                // the same TUN (new socket, no keypair, its first packet is the initiation with its
++                // prelude), no network settings change. tribe.9-21 kept the device and sent a keepalive
++                // under the old keys from a fresh port: the path let 25 packets of that flow through.
++                self.roamCounters.roamFreshPorts += 1
++                self.logHandler(.verbose, "Tribe roaming: path returned, new socket and handshake on the same TUN (\(self.roamCounters.summary))")
++                self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator)
++                // The arbiter was rebased on the new device by the restart; the roam opens its episode there.
++                guard case .started(let newHandle, _) = self.state else { return }
++                self.noteRoamStep(handle: newHandle, freshPort: true)
++                return
++            }
+             let (wgConfig, resolutionResults) = settingsGenerator.endpointUapiConfiguration()
+             self.logEndpointResolutionResults(resolutionResults)
+ 
+             TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { _ = wgSetConfig(handle, wgConfig) }
+             wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+-            if freshPort {
+-                // tribe.9: new local port (new 5-tuple through the carrier NAT) + keepalive, so the
+-                // server learns the new outer address at once. Device, keys and TUN untouched.
+-                self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator)
+-                self.roamCounters.roamFreshPorts += 1
+-                self.logHandler(.verbose, "Tribe roaming: path returned, fresh local port + keepalive on the live device (\(self.roamCounters.summary))")
+-            } else {
+-                TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { wgBumpSockets(handle) }
+-                self.roamCounters.roamBumps += 1
+-            }
+-            self.noteRoamStep(handle: handle, freshPort: freshPort)
++            TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { wgBumpSockets(handle) }
++            self.roamCounters.roamBumps += 1
++            self.noteRoamStep(handle: handle, freshPort: false)
+         }
+     }
+ 
+@@ -832,23 +838,15 @@
+         self.recovery.noteRoamRebind(sample, freshPort: freshPort)
+     }
+ 
+-    /// Socket operations for a stall step (TribeRoaming.socketOps). Every step ends with a
+-    /// keepalive so the server learns the new outer address/port at once; otherwise inbound
+-    /// traffic (a VoIP call) keeps going to the old address until our next data packet.
+-    /// tribe.8: after `listen_port=0` only a keepalive goes out (`wgSendKeepalives`, no second
+-    /// BindUpdate of the new socket); `restartBackend` ends the old handle.
++    /// Socket operations for a stall or roam step (TribeRoaming.socketOps).
++    /// tribe.22: a step that changes the 5-tuple is `restartBackend` (a new device: its first packet is
++    /// the handshake); `listen_port=0` + a keepalive on the live device (tribe.8-21) are gone.
++    /// `restartBackend` ends the old handle.
+     private func performSocketOps(_ ops: [TribeSocketOp], handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) {
+         for op in ops {
+             switch op {
+-            case .freshListenPort:
+-                TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { _ = wgSetConfig(handle, "listen_port=0\n") }
+-                #if os(iOS)
+-                wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+-                #endif
+             case .bumpWithKeepalive:
+                 TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { wgBumpSockets(handle) }
+-            case .sendKeepalive:
+-                wgSendKeepalives(handle)
+             case .restartBackend:
+                 _ = self.restartBackendInPlace(handle: handle, settingsGenerator: settingsGenerator)
+                 return
+@@ -950,7 +948,7 @@
+                 break
+             case .rebindPort where steps == 0:
+                 self.roamCounters.stallRebinds += 1
+-                self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), fresh local port + keepalive (\(self.roamCounters.summary))")
++                self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), fresh local port with a new handshake (\(self.roamCounters.summary))")
+             case .softRestart where steps <= 1:
+                 self.logHandler(.verbose, "Tribe roaming: still stalled after the fresh port, soft restart of the backend (\(self.roamCounters.summary))")
+             default:

@@ -42,6 +42,9 @@ class AmneziaVPN(ConanFile):
         if has_ne:
             # Official parser-fixed 3.1.4 plus the existing Tribe
             # dnsfwd/warmup/rebind patch set.
+            # tribe.22: tribe.21 after device round air-G (a new 5-tuple begins with the handshake: a roam after a
+            # real loss or to another interface is a new device on the same TUN; the verdict for the app's
+            # failover counts from lasting data; adapter patch 0019 + TribeRoaming.swift, the same Go archive).
             # tribe.21: tribe.20 on upstream amneziawg-apple v3.1.5 (HTTP/2 request body buffer capped at 32 KiB)
             # and amneziawg-go v3.1.20261116 (bug fixes, no wire change); same patches and Swift sources + one
             # test-only patch (the core no longer loses the first packet after a UAPI set of S4).
@@ -57,7 +60,7 @@ class AmneziaVPN(ConanFile):
             # tribe.15: tribe.14 + the probe engine's host limits (in-app probe host). tribe.14: tribe.12 (Xray core amnezia-xray-core v1.261101.0 on Go 1.27.4, LibXrayTribeHTTP,
             # FreeOSMemory loop once per process, the Scanner's probe engine) + the tunnel-side data
             # watch (patches 0012 and 0016).
-            self.requires("awg-apple/3.1.5-tribe.21")
+            self.requires("awg-apple/3.1.5-tribe.22")
             # Cut geo pair, shipped as appex resources and passed as datDir.
             self.requires("tribe-xray-geo/1.0.0")
             self.requires("hev-socks5-tunnel/2.15.0-tribe.2", options={"as_framework": True})
