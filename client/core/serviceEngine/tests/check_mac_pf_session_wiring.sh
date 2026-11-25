@@ -173,7 +173,7 @@ for forbidden in 'uninstall(' 'install(' 'applyStrictBlock(' 'flushAnchors('; do
   if has "$kb" "$forbidden"; then bad "K7: the kept block runs $forbidden (a moment without the block)"; fi
 done
 has "$(body "$KS" 'bool KillSwitch::init()')" 'MacOSFirewall::isInstalled()' || bad "K7: the service start does not look for a lease a previous process held"
-has "$(body "$KS" 'bool KillSwitch::refresh(bool enabled)')" 'm_holdUntilMs = 0;' || bad "K7: the kill switch turned off does not clear the lease"
+has "$(body "$KS" 'bool KillSwitch::refresh(bool enabled)')" 'm_holdDeadlineMs = 0;' || bad "K7: the kill switch turned off does not clear the lease"
 grep -q 'SLOT( bool setKillSwitchHold( int ttlMs, const QStringList &controlPlaneAddrs ) );' "$ROOT/ipc/ipc_interface.rep" || bad "K7: no IPC slot for the lease"
 has "$(body "$IPC" 'bool IpcServer::setKillSwitchHold(int ttlMs, const QStringList &controlPlaneAddrs)')" 'KillSwitch::instance()->setHold(ttlMs, controlPlaneAddrs)' \
   || bad "K7: the IPC slot does not reach KillSwitch::setHold"
