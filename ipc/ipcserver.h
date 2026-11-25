@@ -44,6 +44,7 @@ public:
     virtual bool enableKillSwitch(const QJsonObject &excludeAddr, int vpnAdapterIndex) override;
     virtual bool disableKillSwitch() override;
     virtual bool refreshKillSwitch( bool enabled ) override;
+    virtual bool setKillSwitchHold(int ttlMs, const QStringList &controlPlaneAddrs) override; // AVPN (round mac-D3)
     virtual bool updateResolvers(const QString& ifname, const QList<QHostAddress>& resolvers) override;
     virtual bool restoreResolvers() override;
     virtual bool xrayStart(const QString& cfg) override;

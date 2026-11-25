@@ -36,6 +36,17 @@ public:
     void tunnelCreated(const QString &ifname) { m_createdTun = ifname; }
     void openTunnelSession(const FirewallParams &params, const QString &tunnelIfname);
 #endif
+    // AVPN (round mac-D3, the kill switch across the app's own transitions): the app's lease on the person's intent
+    // "VPN on" (IpcServer::setKillSwitchHold). ttlMs > 0 arms or renews it (bounded by kHoldMaxMs) with the API edge
+    // addresses a provider leg's seat request needs; ttlMs <= 0 releases it. While it runs, a session stop keeps the
+    // block (pf and every anchor) and only adds those addresses to the session's pass table; the next session's open
+    // replaces the session anchors under the block. With no session open, its release or its end lifts the block.
+    // The deadline is persisted: a service that starts inside it keeps the block a previous process left.
+    // macOS only (the platform whose service owns a kill-switch session); elsewhere a no-op.
+    bool setHold(int ttlMs, const QStringList &controlPlaneAddrs);
+    void holdTick(); // the lease's end (its timer; the host check calls it with its clock)
+    static void setClockForTest(qint64 (*clock)());
+    static constexpr int kHoldMaxMs = 15000;
 
 private:
     KillSwitch(QObject* parent) {};
@@ -44,6 +55,17 @@ private:
 #ifdef Q_OS_MACOS
     bool m_sessionOpen = false; // AVPN
     QString m_createdTun;       // AVPN: brought up for the session being built, not taken yet
+    // AVPN (round mac-D3): the lease on the intent and the block it keeps between two sessions.
+    bool holdActive() const;
+    void keepBlockForNextSession();
+    void liftHeldBlock(const char *why);
+    void persistHold();
+    void armHoldTimer();
+    qint64 m_holdUntilMs = 0;        // wall clock; 0 = no lease
+    QStringList m_holdAddrs;         // the API edges a seat request needs while no session is open
+    QStringList m_sessionAllowAddrs; // the pass table of the session that is (or was last) open
+    bool m_blockHeld = false;        // the block of an ended session stays, owned by the lease
+    class QTimer *m_holdTimer = nullptr;
 #endif
 
 };

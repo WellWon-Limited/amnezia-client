@@ -54,9 +54,15 @@ public slots:
     void disconnectFromVpn();
 
     void onKillSwitchModeChanged(bool enabled);
+    // AVPN (round mac-D3, macOS): the lease on the person's intent in the service (KillSwitch::setHold): while the
+    // intent is on and the kill switch setting is on, a stop of a session keeps the block for the next one.
+    void syncKillSwitchHold(bool intentOn, const QStringList &controlPlaneAddrs);
     void disconnectSlots();
 
     void setConnectionState(Vpn::ConnectionState state);
+
+private:
+    int m_killSwitchHoldSent = -1; // AVPN (round mac-D3): the last lease sent (-1 = none yet), for the log only
 
 signals:
     void bytesChanged(quint64 receivedBytes, quint64 sentBytes);

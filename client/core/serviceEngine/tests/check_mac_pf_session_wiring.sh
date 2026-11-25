@@ -163,5 +163,30 @@ if grep -v '^[[:space:]]*#' "$dnsFile" | grep -E '^[[:space:]]*pass' | grep -vqE
 fi
 grep -q 'pass out on %1 proto { tcp, udp } to <dnsaddr> port 53' "$OWN" || bad "K6: dnsSessionRules does not name the session's tun"
 
+# ---- K7 (round mac-D3): the block lives as long as the person's intent, not one session -----------------------
+dks="$(body "$KS" 'bool KillSwitch::disableKillSwitch() {')"
+hb=$(at "$dks" 'if (hadBlock && holdActive() && !isStrictKillSwitchEnabled()) {')
+un=$(at "$dks" 'MacOSFirewall::uninstall();')
+[ "${hb:-0}" -gt 0 ] && [ "${un:-0}" -gt "${hb:-0}" ] || bad "K7: a stop under the lease on the intent does not keep the block before the uninstall"
+kb="$(body "$KS" 'void KillSwitch::keepBlockForNextSession()')"
+for forbidden in 'uninstall(' 'install(' 'applyStrictBlock(' 'flushAnchors('; do
+  if has "$kb" "$forbidden"; then bad "K7: the kept block runs $forbidden (a moment without the block)"; fi
+done
+has "$(body "$KS" 'bool KillSwitch::init()')" 'MacOSFirewall::isInstalled()' || bad "K7: the service start does not look for a lease a previous process held"
+has "$(body "$KS" 'bool KillSwitch::refresh(bool enabled)')" 'm_holdUntilMs = 0;' || bad "K7: the kill switch turned off does not clear the lease"
+grep -q 'SLOT( bool setKillSwitchHold( int ttlMs, const QStringList &controlPlaneAddrs ) );' "$ROOT/ipc/ipc_interface.rep" || bad "K7: no IPC slot for the lease"
+has "$(body "$IPC" 'bool IpcServer::setKillSwitchHold(int ttlMs, const QStringList &controlPlaneAddrs)')" 'KillSwitch::instance()->setHold(ttlMs, controlPlaneAddrs)' \
+  || bad "K7: the IPC slot does not reach KillSwitch::setHold"
+VC="$ROOT/client/vpnConnection.cpp"
+has "$(body "$VC" 'void VpnConnection::syncKillSwitchHold(bool intentOn, const QStringList &controlPlaneAddrs)')" 'iface->setKillSwitchHold(ttl,' \
+  || bad "K7: VpnConnection does not send the lease"
+ENG="$ROOT/client/core/serviceEngine/AvpnEngineQml.cpp"
+has "$(body "$ENG" 'void AvpnEngineQml::syncKillSwitchHold()')" 'Q_ARG(bool, m_wantConnected)' || bad "K7: the lease does not follow the person's intent"
+has "$(body "$ENG" 'void AvpnEngineQml::syncIntent()')" 'syncKillSwitchHold();' || bad "K7: an intent change (Stop / Connect) does not reach the lease at once"
+grep -q 'connect(&m_killSwitchHoldTimer, &QTimer::timeout, this, \[this\]() { syncKillSwitchHold(); });' "$ENG" || bad "K7: the lease is not renewed"
+qr=$(grep -n '"syncKillSwitchHold", Qt::QueuedConnection, Q_ARG(bool, false)' "$ENG" | head -1 | cut -d: -f1)
+qe=$(grep -n 'aboutToQuit, this, \[this\] { endUpstreamSessionOnQuit(); });' "$ENG" | head -1 | cut -d: -f1)
+[ -n "$qr" ] && [ -n "$qe" ] && [ "$qr" -lt "$qe" ] || bad "K7: a quit does not give the lease back ahead of the stop it sends"
+
 [ "$fail" = "0" ] && echo "check_mac_pf_session_wiring: ok"
 exit "$fail"

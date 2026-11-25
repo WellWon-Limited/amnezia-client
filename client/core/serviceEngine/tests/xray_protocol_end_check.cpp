@@ -139,6 +139,7 @@ public:
     bool disableKillSwitch() override { return note("disableKillSwitch"); }
     bool disableAllTraffic() override { return note("disableAllTraffic"); }
     bool refreshKillSwitch(bool) override { return note("refreshKillSwitch"); }
+    bool setKillSwitchHold(int, const QStringList &) override { return note("setKillSwitchHold"); }
     bool addKillSwitchAllowedRange(const QStringList) override { return note("addKillSwitchAllowedRange"); }
     bool resetKillSwitchAllowedRange(const QStringList) override { return note("resetKillSwitchAllowedRange"); }
     bool enablePeerTraffic(const QJsonObject &) override { return note("enablePeerTraffic"); }

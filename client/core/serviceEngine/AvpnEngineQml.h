@@ -1124,6 +1124,8 @@ private:
     // tapped now or saved earlier: its transports first, then fallback with a notice) or an exact node (a Scanner
     // row: that one path, an honest error if it fails).
     void syncIntent();
+    // AVPN (round mac-D3, macOS desktop): the service's lease on the intent (VpnConnection::syncKillSwitchHold).
+    void syncKillSwitchHold();
     QString choiceJournal() const;
     // Pin a server the person tapped. A server the transport mode cannot serve switches the mode to Auto and is
     // selected (coordinator decision 9 of 18.11: the latest explicit action wins; the UI gets a notice).
@@ -1475,6 +1477,7 @@ private:
     SessionGeneration           m_stopGeneration;        // поколение гасимой сессии (A4: runtime/конфигурации)
     int                         m_statusRequestAttempts = 0; // запросы статуса в текущем ожидании
     QTimer                      m_statusRetryTimer;      // backoff запросов статуса (1/2/4 с)
+    QTimer                      m_killSwitchHoldTimer;   // AVPN (round mac-D3): renews the lease on the intent
     int                         m_stopRetries = 0;       // повторы стопа после дедлайна (≤2)
     QTimer                      m_stopRetryTimer;        // backoff повторов стопа (2/4 с)
     // Ревью CL-A r2 (K3/C4): системный диалог «Разрешить VPN» в пути — сторож старта не рвёт коннект.

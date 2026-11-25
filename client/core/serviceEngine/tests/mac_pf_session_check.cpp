@@ -250,7 +250,24 @@ struct Kernel {
 
 static Kernel g_k;
 
+// Round mac-D3: while a transition runs under the app's lease on the intent, every single pf command must leave the
+// block in force (our pf enabled, the main ruleset evaluating "tribe", 100.blockAll loaded); a command after which it
+// is not is a moment the Mac could send the person's traffic outside any tunnel.
+static bool g_watchBlock = false;
+static QStringList g_blockGaps;
+static bool blockInForce()
+{
+    return g_k.tokenHeld && g_k.mainRefsTribe && !g_k.anchors.value(QStringLiteral("tribe/100.blockAll")).rules.isEmpty();
+}
+static int modelImpl(const QString &command);
 static int model(const QString &command)
+{
+    const int rc = modelImpl(command);
+    if (g_watchBlock && !blockInForce())
+        g_blockGaps << command.left(90);
+    return rc;
+}
+static int modelImpl(const QString &command)
 {
     ++g_commands;
     static const QString A = QStringLiteral("'tribe/([^']+)'");
@@ -900,6 +917,186 @@ int main(int argc, char **argv)
         awgStart(tA);
         CHECK(!hasTable(QStringLiteral("120.blockNets"), QStringLiteral("blocknets")));
         awgStop();
+    }
+
+    // ---- round mac-D3: the block across the app's own transitions (KillSwitch::setHold) -------------------------
+    {
+        static qint64 clockMs = 1'000'000;
+        KillSwitch::setClockForTest([]() { return clockMs; });
+        const QStringList api = { QStringLiteral("192.0.2.80"), QStringLiteral("198.51.100.80") }; // the API edges
+        auto held = [&](const char *name) {
+            g_case = name;
+            g_blockGaps.clear();
+            g_watchBlock = true;
+        };
+        auto endHeld = [&]() {
+            g_watchBlock = false;
+            CHECK_EQ(g_blockGaps, QStringList());
+        };
+        auto heldPass = [&](const QStringList &session) {
+            QStringList p = session;
+            p << api;
+            CHECK_EQ(tableOf(QStringLiteral("110.allowNets"), QStringLiteral("allownets")), p);
+            CHECK(blockInForce());
+        };
+        const QString tC = QStringLiteral("utun6"), xray2 = QStringLiteral("utun23");
+
+        reboot();
+        awgStart(tA);
+        CHECK(ks()->setHold(8000, api));
+        held("H1 AWG -> AWG (server switch: deactivate, activate)");
+        awgStop();
+        heldPass({ kAwgPeer });
+        awgStart(tC);
+        checkAwg(tC);
+        endHeld();
+
+        held("H2 AWG -> Xray (mode switch)");
+        awgStop();
+        xrayStart(xray);
+        checkXray(xray);
+        CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), pass(xray)); // the AWG utun's pass is replaced, not kept
+        endHeld();
+
+        held("H3 Xray -> Xray (server switch)");
+        xrayStop(xray);
+        heldPass({ kXrayServer });
+        xrayStart(xray2);
+        checkXray(xray2);
+        endHeld();
+
+        held("H4 Xray -> AWG (mode switch)");
+        xrayStop(xray2);
+        awgStart(tA);
+        checkAwg(tA);
+        CHECK_EQ(rulesOf(QStringLiteral("400.allowPIA")), QStringList()); // the Xray session's service pass goes
+        endHeld();
+
+        held("H5 failover: AWG leg -> dead AWG leg -> Xray leg -> AWG");
+        awgStop();
+        awgStart(tB);
+        awgStop();
+        xrayStart(xray);
+        xrayStop(xray);
+        awgStart(tA);
+        checkAwg(tA);
+        endHeld();
+
+        held("H6 a lost client mid-session (IpcServer::onProcessControllerLost) -> the app's next session");
+        awgStop();
+        xrayStart(xray);
+        ks()->disableKillSwitch(); // the lost client's teardown
+        heldPass({ kXrayServer });
+        xrayStart(xray2);
+        checkXray(xray2);
+        endHeld();
+
+        g_case = "H7 renewals keep it; the person's Stop (release) lifts it at once";
+        clockMs += 5000;
+        CHECK(ks()->setHold(8000, api));
+        clockMs += 5000;
+        ks()->holdTick();
+        xrayStop(xray2);
+        CHECK(blockInForce()); // 10 s after arming, renewed at 5 s: still held
+        CHECK(ks()->setHold(0, {}));
+        checkAllGone();
+
+        g_case = "H8 release first, then the stop (the AWG stop travels on another channel)";
+        reboot();
+        CHECK(ks()->setHold(8000, api));
+        awgStart(tA);
+        CHECK(ks()->setHold(0, {}));
+        checkAwg(tA); // a release never touches an open session
+        awgStop();
+        checkAllGone();
+
+        g_case = "H9 the app dies mid-switch: no renewal -> the block ends with the lease";
+        reboot();
+        CHECK(ks()->setHold(8000, api));
+        awgStart(tA);
+        awgStop();
+        CHECK(blockInForce());
+        clockMs += 7000;
+        ks()->holdTick();
+        CHECK(blockInForce());
+        clockMs += 1001;
+        ks()->holdTick();
+        checkAllGone();
+
+        reboot();
+        CHECK(ks()->setHold(8000, api));
+        xrayStart(xray);
+        held("H10 the service restarts mid-session inside the lease -> the block stays -> the next session");
+        serviceStart(); // kill -9 + launchd: a new process, the kernel keeps the dead process's pf
+        CHECK_EQ(tableOf(QStringLiteral("110.allowNets"), QStringLiteral("allownets")), api); // the dead session's pass goes
+        CHECK(ks()->setHold(8000, api)); // the app's next renewal reaches the new process
+        awgStart(tB);
+        checkAwg(tB);
+        endHeld();
+
+        g_case = "H11 the service restarts inside the lease and no app comes back -> lifted at the lease's end";
+        awgStop();
+        serviceStart();
+        CHECK(blockInForce());
+        clockMs += 8001;
+        ks()->holdTick();
+        checkAllGone();
+
+        g_case = "H12 a service start after the lease ended: the self-heal as before";
+        reboot();
+        CHECK(ks()->setHold(8000, api));
+        awgStart(tA);
+        clockMs += 9000;
+        serviceStart();
+        checkAllGone();
+
+        g_case = "H13 kill switch turned off (refresh(false)) clears the lease: the stop lifts the block";
+        reboot();
+        CHECK(ks()->setHold(8000, api));
+        awgStart(tA);
+        setStrict(false);
+        checkAllGone(); // refresh(false) = disableKillSwitch, as before
+        awgStart(tA);
+        awgStop();
+        checkAllGone();
+
+        g_case = "H14 no lease (intent off / kill switch setting off): every stop lifts the block, as before";
+        reboot();
+        awgStart(tA);
+        awgStop();
+        checkAllGone();
+        xrayStart(xray);
+        xrayStop(xray);
+        checkAllGone();
+
+        g_case = "H15 a lease with no session ever opened arms nothing; its release changes nothing";
+        reboot();
+        CHECK(ks()->setHold(8000, api));
+        checkAllGone();
+        CHECK(ks()->setHold(0, {}));
+        checkAllGone();
+
+        g_case = "H16 strict on under a held block: the strict block; the release keeps the strict block";
+        reboot();
+        CHECK(ks()->setHold(8000, api));
+        awgStart(tA);
+        awgStop();
+        setStrict(true);
+        checkStrictBlockOnly(false);
+        CHECK(ks()->setHold(0, {}));
+        checkStrictBlockOnly(false);
+        setStrict(false);
+        checkAllGone();
+
+        g_case = "H17 invalid control-plane addresses are refused";
+        reboot();
+        CHECK(ks()->setHold(8000, { QStringLiteral("1.2.3.4; pfctl -d"), QStringLiteral("example.com"), api.first() }));
+        awgStart(tA);
+        awgStop();
+        CHECK_EQ(tableOf(QStringLiteral("110.allowNets"), QStringLiteral("allownets")), (QStringList { kAwgPeer, api.first() }));
+        CHECK(ks()->setHold(0, {}));
+        checkAllGone();
+        KillSwitch::setClockForTest(nullptr);
     }
 
     g_case = "every command modelled";

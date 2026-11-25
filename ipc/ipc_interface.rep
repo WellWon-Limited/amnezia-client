@@ -31,6 +31,9 @@ class IpcInterface
     SLOT( bool disableKillSwitch() );
     SLOT( bool disableAllTraffic() );
     SLOT( bool refreshKillSwitch( bool enabled ) );
+    // AVPN (round mac-D3): the app's lease on the person's intent "VPN on" - a stop keeps the kill switch block while it
+    // runs (KillSwitch::setHold). ttlMs <= 0 releases it.
+    SLOT( bool setKillSwitchHold( int ttlMs, const QStringList &controlPlaneAddrs ) );
     SLOT( bool addKillSwitchAllowedRange( const QStringList ranges ) );
     SLOT( bool resetKillSwitchAllowedRange( const QStringList ranges ) );
     SLOT( bool enablePeerTraffic( const QJsonObject &configStr) );

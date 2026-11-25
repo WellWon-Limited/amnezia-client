@@ -368,6 +368,12 @@ bool IpcServer::disableKillSwitch()
     return KillSwitch::instance()->disableKillSwitch();
 }
 
+// AVPN (round mac-D3): the app's lease on the intent (killswitch.h setHold). Touches pf only to lift a held block.
+bool IpcServer::setKillSwitchHold(int ttlMs, const QStringList &controlPlaneAddrs)
+{
+    return KillSwitch::instance()->setHold(ttlMs, controlPlaneAddrs);
+}
+
 bool IpcServer::enablePeerTraffic(const QJsonObject &configStr)
 {
 #ifdef MZ_DEBUG

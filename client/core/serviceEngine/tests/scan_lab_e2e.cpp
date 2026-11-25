@@ -216,6 +216,7 @@ public:
     bool disableKillSwitch() override { return false; }
     bool disableAllTraffic() override { return false; }
     bool refreshKillSwitch(bool) override { return false; }
+    bool setKillSwitchHold(int, const QStringList &) override { return false; }
     bool addKillSwitchAllowedRange(const QStringList) override { return false; }
     bool resetKillSwitchAllowedRange(const QStringList) override { return false; }
     bool enablePeerTraffic(const QJsonObject &) override { return false; }

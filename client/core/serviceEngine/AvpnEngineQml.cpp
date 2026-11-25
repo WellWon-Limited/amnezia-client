@@ -650,6 +650,16 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // (UpstreamEngine.h, AppExitKind). Every deliberate quit ends in
     // quit()/exit() and so here - closing/hiding the window never does. Overlay: hooked from our file, the
     // upstream amneziaApplication.cpp is untouched (as the iOS guard below).
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN (round mac-D3): a quit gives the lease on the intent back first (queued ahead of the stop the quit sends):
+    // a session the quit ends lifts its block; an AmneziaWG session the quit leaves running keeps its own.
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this] {
+        m_killSwitchHoldTimer.stop();
+        if (m_conn)
+            QMetaObject::invokeMethod(m_conn, "syncKillSwitchHold", Qt::QueuedConnection, Q_ARG(bool, false),
+                                      Q_ARG(QStringList, QStringList()));
+    });
+#endif
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this] { endUpstreamSessionOnQuit(); });
 #endif
 #ifdef Q_OS_IOS
@@ -1393,6 +1403,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     });
     m_transitionTimer.start();
     // AVPN (фикс-волна 2026-09-22, A1): ограниченные повторы запроса статуса и стопа (backoff).
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN (round mac-D3): the lease is 8 s (VpnConnection::syncKillSwitchHold), renewed every 2 s while the app runs;
+    // the first tick also gives back a lease a crashed previous run left (intent off at start).
+    m_killSwitchHoldTimer.setInterval(2000);
+    connect(&m_killSwitchHoldTimer, &QTimer::timeout, this, [this]() { syncKillSwitchHold(); });
+    m_killSwitchHoldTimer.start();
+    QTimer::singleShot(0, this, [this]() { syncKillSwitchHold(); });
+#endif
     m_statusRetryTimer.setSingleShot(true);
     connect(&m_statusRetryTimer, &QTimer::timeout, this, [this]() {
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
@@ -3428,6 +3446,25 @@ void AvpnEngineQml::cancelStartPreparation()
 
 // ---- Path engine, stage 1 (design 2026-11-17): the facade's side of the attempt owner -----------------------
 
+// AVPN (round mac-D3, kill switch across the app's own transitions; RESULTS of round mac-D3 "design"): the person's intent
+// "VPN on" is the lifetime of the kill switch block. The service keeps the block across a stop while this lease runs
+// (KillSwitch::setHold); the API edges (m_apiHostIps, every edge candidate) pass while no session is open, so a provider
+// leg's seat request reaches the API. Sent on every intent sync and renewed by m_killSwitchHoldTimer.
+void AvpnEngineQml::syncKillSwitchHold()
+{
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (!m_conn)
+        return;
+    QStringList controlPlane;
+    for (const QHostAddress &ip : std::as_const(m_apiHostIps)) {
+        if (ip.protocol() == QAbstractSocket::IPv4Protocol && controlPlane.size() < 16)
+            controlPlane << ip.toString();
+    }
+    QMetaObject::invokeMethod(m_conn, "syncKillSwitchHold", Qt::QueuedConnection, Q_ARG(bool, m_wantConnected),
+                              Q_ARG(QStringList, controlPlane));
+#endif
+}
+
 void AvpnEngineQml::syncIntent()
 {
     // Review E8 of 18.11: the person's choice is independent of what the pool or the mode can serve right now -
@@ -3468,9 +3505,11 @@ void AvpnEngineQml::syncIntent()
     const bool moved = m_intentEpoch.set(v);
     m_engine.setUserChoice(c);
     m_engine.setIntentEpoch(m_intentEpoch.epoch);
-    if (moved)
+    if (moved) {
         reliabilityEvent(QStringLiteral("intent_epoch moved=%1 wanted=%2 choice=%3 mode=%4")
                              .arg(m_intentEpoch.epoch).arg(int(v.wanted)).arg(choiceJournal(), v.mode));
+        syncKillSwitchHold(); // round mac-D3: the person's Stop releases the block at once, a Connect arms it
+    }
 }
 
 QString AvpnEngineQml::choiceJournal() const

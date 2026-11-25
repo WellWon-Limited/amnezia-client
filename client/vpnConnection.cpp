@@ -121,6 +121,27 @@ void VpnConnection::onBytesChanged(quint64 receivedBytes, quint64 sentBytes)
     emit bytesChanged(receivedBytes, sentBytes);
 }
 
+// AVPN (round mac-D3): queued from the facade on this thread, so it reaches the service in order with the stops this thread
+// sends (disconnectFromVpn). The reply is not awaited: a lost renewal only shortens the lease (8 s), never blocks a stop.
+void VpnConnection::syncKillSwitchHold(bool intentOn, const QStringList &controlPlaneAddrs)
+{
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    static constexpr int kHoldTtlMs = 8000;
+    const bool killSwitchOn = m_appSettingsRepository && m_appSettingsRepository->isKillSwitchEnabled();
+    const int ttl = (intentOn && killSwitchOn) ? kHoldTtlMs : 0;
+    if (ttl != m_killSwitchHoldSent)
+        qInfo().noquote() << "[killswitch] hold" << (ttl > 0 ? "on" : "off") << "intent=" << intentOn
+                          << "kill_switch=" << killSwitchOn << "control_plane=" << controlPlaneAddrs.size();
+    m_killSwitchHoldSent = ttl;
+    IpcClient::withInterface([ttl, controlPlaneAddrs](QSharedPointer<IpcInterfaceReplica> iface) {
+        iface->setKillSwitchHold(ttl, ttl > 0 ? controlPlaneAddrs : QStringList());
+    });
+#else
+    Q_UNUSED(intentOn);
+    Q_UNUSED(controlPlaneAddrs);
+#endif
+}
+
 void VpnConnection::onKillSwitchModeChanged(bool enabled)
 {
 #ifdef AMNEZIA_DESKTOP

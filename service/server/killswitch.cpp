@@ -2,7 +2,9 @@
 
 
 #include <QApplication>
+#include <QDateTime>
 #include <QHostAddress>
+#include <QTimer>
 #include <QRegularExpression>
 #include <algorithm>
 
@@ -46,6 +48,13 @@ static bool isValidIpOrCidr(const QString &value) {
 
 KillSwitch* s_instance = nullptr;
 
+// AVPN (round mac-D3): the lease's clock (wall clock: the deadline outlives the process).
+static qint64 systemClockMs() { return QDateTime::currentMSecsSinceEpoch(); }
+static qint64 (*s_clockMs)() = &systemClockMs;
+void KillSwitch::setClockForTest(qint64 (*clock)()) { s_clockMs = clock ? clock : &systemClockMs; }
+static const QString kHoldUntilKey = QStringLiteral("Conf/killSwitchHoldUntilMs");
+static const QString kHoldAddrsKey = QStringLiteral("Conf/killSwitchHoldAddrs");
+
 KillSwitch* KillSwitch::instance()
 {
     if (s_instance == nullptr) {
@@ -63,6 +72,28 @@ bool KillSwitch::init()
     if (isStrictKillSwitchEnabled()) {
         return disableAllTraffic();
     }
+
+#ifdef Q_OS_MACOS
+    // AVPN (round mac-D3): a service that starts inside the app's lease on the intent (the previous process died with
+    // the VPN wanted on - mid-switch or mid-session) keeps the block that process left until the app's next session
+    // opens or the lease ends; the dead session's passes go, the API edges stay. Never beyond kHoldMaxMs.
+    {
+        const qint64 until = m_appSettigns->value(kHoldUntilKey, 0).toLongLong();
+        const qint64 now = s_clockMs();
+        if (until > now && until - now <= kHoldMaxMs && MacOSFirewall::isInstalled()) {
+            m_holdUntilMs = until;
+            m_holdAddrs = m_appSettigns->value(kHoldAddrsKey).toStringList();
+            m_sessionAllowAddrs.clear();
+            keepBlockForNextSession();
+            armHoldTimer();
+            qInfo().noquote() << "[killswitch] kill switch hold: the service starts inside the intent - the block stays for"
+                              << (until - now) << "ms or until the next session";
+            return true;
+        }
+        m_appSettigns->remove(kHoldUntilKey);
+        m_appSettigns->remove(kHoldAddrsKey);
+    }
+#endif
 
     // AVPN: self-heal на старте демона. Если прошлый инстанс упал с загруженным
     // firewall-анкором ("tribe") / висящим pf.token — здесь он снимается (на macOS
@@ -84,6 +115,14 @@ bool KillSwitch::refresh(bool enabled)
     m_appSettigns->setValue("Conf/strictKillSwitchEnabled", enabled);
 #endif
 
+#ifdef Q_OS_MACOS
+    // AVPN (round mac-D3): the client sends refresh(false) for the kill switch turned off too - nothing is held then.
+    if (!enabled && m_holdUntilMs > 0) {
+        m_holdUntilMs = 0;
+        m_holdAddrs.clear();
+        persistHold();
+    }
+#endif
     if (isStrictKillSwitchEnabled()) {
         return disableAllTraffic();
     }  else {
@@ -138,8 +177,17 @@ bool KillSwitch::disableKillSwitch() {
     // AVPN (pf state ownership, macospfanchors.h): a stop ends the kill-switch session and leaves no session
     // pf state. Strict: the block stays and every anchor of the session is flushed; otherwise every tribe/*
     // anchor is flushed. The session's tun goes with it (killswitch.h).
+    // Round mac-D3: under the app's lease on the intent (setHold) a stop ends the session, not the block - the next
+    // session replaces the session anchors under it; the lease's release or end lifts it.
+    const bool hadBlock = m_sessionOpen || m_blockHeld;
     m_sessionOpen = false;
     m_createdTun.clear();
+    if (hadBlock && holdActive() && !isStrictKillSwitchEnabled()) {
+        keepBlockForNextSession();
+        m_allowedRanges.clear();
+        return true;
+    }
+    m_blockHeld = false;
     if (isStrictKillSwitchEnabled()) {
         MacOSFirewall::applyStrictBlock();
     } else {
@@ -423,6 +471,8 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
     m_createdTun.clear();
     MacOSFirewall::applySessionRules(params, tunnel);
     m_sessionOpen = true;
+    m_blockHeld = false; // round mac-D3: a held block is this session's from here on
+    m_sessionAllowAddrs = params.allowAddrs;
     // AVPN (diag): what the kill switch lets out - the server and the resolvers of this session.
     qDebug().noquote() << "[killswitch] split" << splitTunnelType << "allownets:" << allownets.join(QStringLiteral(", "))
                        << "| dnsaddr:" << dnsServers.join(QStringLiteral(", "));
@@ -438,5 +488,122 @@ void KillSwitch::openTunnelSession(const FirewallParams &params, const QString &
     m_createdTun.clear();
     MacOSFirewall::applySessionRules(params, tunnelIfname);
     m_sessionOpen = true;
+    m_blockHeld = false; // round mac-D3: a held block is this session's from here on
+    m_sessionAllowAddrs = params.allowAddrs;
+}
+#endif
+
+bool KillSwitch::setHold(int ttlMs, const QStringList &controlPlaneAddrs)
+{
+#ifdef Q_OS_MACOS
+    QStringList addrs;
+    for (const QString &a : controlPlaneAddrs) {
+        if (isValidIpOrCidr(a) && !addrs.contains(a))
+            addrs << a;
+        else if (!a.isEmpty())
+            qWarning() << "IPC: rejected an invalid control-plane address of the kill switch hold";
+    }
+    if (ttlMs > 0) {
+        const bool fresh = m_holdUntilMs == 0;
+        m_holdUntilMs = s_clockMs() + qMin(ttlMs, kHoldMaxMs);
+        const bool addrsChanged = addrs != m_holdAddrs;
+        m_holdAddrs = addrs;
+        persistHold();
+        armHoldTimer();
+        if (fresh)
+            qInfo().noquote() << "[killswitch] kill switch hold: armed, ttl" << ttlMs << "ms, control plane passes:" << addrs.size();
+        if (addrsChanged && m_blockHeld && !m_sessionOpen)
+            keepBlockForNextSession(); // the seat request of the next leg goes to the current edges
+        return true;
+    }
+    const bool had = m_holdUntilMs > 0;
+    m_holdUntilMs = 0;
+    m_holdAddrs.clear();
+    persistHold();
+    if (m_holdTimer)
+        m_holdTimer->stop();
+    if (had)
+        qInfo() << "[killswitch] kill switch hold: released";
+    if (m_blockHeld && !m_sessionOpen)
+        liftHeldBlock("released");
+    return true;
+#else
+    (void)ttlMs;
+    (void)controlPlaneAddrs;
+    return true;
+#endif
+}
+
+void KillSwitch::holdTick()
+{
+#ifdef Q_OS_MACOS
+    if (m_holdUntilMs == 0)
+        return;
+    if (s_clockMs() < m_holdUntilMs) {
+        armHoldTimer();
+        return;
+    }
+    m_holdUntilMs = 0;
+    m_holdAddrs.clear();
+    persistHold();
+    qInfo() << "[killswitch] kill switch hold: expired (no renewal from the app)";
+    if (m_blockHeld && !m_sessionOpen)
+        liftHeldBlock("expired");
+#endif
+}
+
+#ifdef Q_OS_MACOS
+bool KillSwitch::holdActive() const
+{
+    return m_holdUntilMs > 0 && s_clockMs() < m_holdUntilMs;
+}
+
+// The block stays: pf and every anchor of the ended session; its pass table also lets the API edges through (the next
+// provider leg's seat request; the person's traffic has no tunnel to pass and stays blocked).
+void KillSwitch::keepBlockForNextSession()
+{
+    m_blockHeld = true;
+    QStringList pass = m_sessionAllowAddrs;
+    for (const QString &a : m_holdAddrs)
+        if (!pass.contains(a))
+            pass << a;
+    MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), true);
+    MacOSFirewall::setAnchorTable(QStringLiteral("110.allowNets"), true, QStringLiteral("allownets"), pass);
+    qInfo().noquote() << "[killswitch] kill switch hold: the session ended, its block stays until the next session;"
+                      << "control plane passes:" << m_holdAddrs.size();
+}
+
+void KillSwitch::liftHeldBlock(const char *why)
+{
+    m_blockHeld = false;
+    qInfo().noquote() << "[killswitch] kill switch hold: the block is lifted -" << why;
+    if (isStrictKillSwitchEnabled())
+        MacOSFirewall::applyStrictBlock();
+    else
+        MacOSFirewall::uninstall();
+}
+
+void KillSwitch::persistHold()
+{
+    if (!m_appSettigns)
+        return;
+    if (m_holdUntilMs > 0) {
+        m_appSettigns->setValue(kHoldUntilKey, m_holdUntilMs);
+        m_appSettigns->setValue(kHoldAddrsKey, m_holdAddrs);
+    } else {
+        m_appSettigns->remove(kHoldUntilKey);
+        m_appSettigns->remove(kHoldAddrsKey);
+    }
+}
+
+void KillSwitch::armHoldTimer()
+{
+    if (!m_holdTimer) {
+        m_holdTimer = new QTimer(this);
+        m_holdTimer->setSingleShot(true);
+        connect(m_holdTimer, &QTimer::timeout, this, &KillSwitch::holdTick);
+    }
+    const qint64 left = m_holdUntilMs - s_clockMs();
+    m_holdTimer->start(int(qBound(qint64(0), left + 10, qint64(kHoldMaxMs) + 10)));
 }
 #endif
