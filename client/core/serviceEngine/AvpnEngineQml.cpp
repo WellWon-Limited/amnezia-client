@@ -12542,6 +12542,10 @@ void AvpnEngineQml::endUpstreamSessionOnQuit()
     avpn::UpstreamQuitHooks h;
     h.userStop = [this]() { stop(); };
     h.stopped = [this]() { return m_lastTunnelState == Vpn::Disconnected; };
+    h.releaseSettled = [this]() { // round mac-D2: the seat's release answered (or given up), not only sent
+        const avpn::UpstreamLeaseClient *c = m_tunnel.upstreamClient();
+        return !c || c->releasesSettled();
+    };
     h.pump = [](int ms) {
         QEventLoop loop;
         QTimer::singleShot(ms, &loop, &QEventLoop::quit);
@@ -12550,8 +12554,10 @@ void AvpnEngineQml::endUpstreamSessionOnQuit()
     h.nowMs = [&clock]() { return clock.elapsed(); };
     h.journal = [this](const QString &line) { reliabilityEvent(line); };
     if (avpn::runUpstreamQuit(m_appExitKind, avpn::upstreamNodesEnabled(), upstreamSession, h))
-        reliabilityEvent(QStringLiteral("upstream_quit_stop stopped=%1 ms=%2")
-                             .arg(int(m_lastTunnelState == Vpn::Disconnected)).arg(clock.elapsed()));
+        reliabilityEvent(QStringLiteral("upstream_quit_stop stopped=%1 release_settled=%2 ms=%3")
+                             .arg(int(m_lastTunnelState == Vpn::Disconnected))
+                             .arg(int(!m_tunnel.upstreamClient() || m_tunnel.upstreamClient()->releasesSettled()))
+                             .arg(clock.elapsed()));
 #endif
 }
 

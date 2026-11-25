@@ -101,6 +101,10 @@ public:
         m_stopConfirmed = false;
     }
     int heldReleases() const { return int(m_held.size()); }
+    // Round mac-D2: no seat release of this client is held for a stop or still waiting for its answer (resends
+    // included). The quit of the GUI waits for this, not only for the tunnel to stop (UpstreamEngine.h::runUpstreamQuit):
+    // the release goes out when the stop is confirmed, and a quit that ended right then cut it off (device round D2).
+    bool releasesSettled() const { return m_held.isEmpty() && m_releasesOpen.isEmpty(); }
 
     // GET /v1/upstream/standby?network_key= with the device token on the direct base. done(httpStatus,
     // body, X-Tribe-Sig) - status 0 = no answer. One fetch at a time (false = one is in flight / not
@@ -175,6 +179,7 @@ private:
         LeaseRoute route;
     };
     QList<HeldRelease> m_held;
+    QSet<quint64> m_releasesOpen; // round mac-D2: releases sent and not finished yet (answered, given up, withdrawn)
     QHash<quint64, QString> m_acquiresOut; // acquire request id -> profile, until its HTTP request ends
     bool m_tunnelDown = true; // the last tunnel event was a confirmed stop (or none yet)
     bool m_stopConfirmed = false; // the last tunnel event was a confirmed stop (not "none yet")

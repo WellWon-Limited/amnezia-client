@@ -792,8 +792,11 @@ static void ownerHandedOverAdoption()
             }
         pump(300);
         CHECK(edge.paths.isEmpty() && client.heldReleases() == 1); // the stop is not confirmed yet
+        CHECK(!client.releasesSettled()); // round mac-D2: held = not settled (the quit waits)
         client.tunnelStopped(); // the Disconnected of that stop (upstreamTunnelDown)
+        CHECK(!client.releasesSettled()); // sent, its answer not here yet
         pump(600);
+        CHECK(client.releasesSettled()); // answered 204
         CHECK(edge.paths == QStringList{QStringLiteral("/v1/upstream/lease/") + L1});
         CHECK(edge.auths == QStringList{QStringLiteral("Bearer devtok")} && edge.bodies == QStringList{QString()});
         CHECK(done && o.pendingReleases() == 0);
@@ -1520,9 +1523,12 @@ static void quitEndsUpstreamSession()
         int pumps = 0;
         bool disconnected = false;
         QStringList journal;
+        qint64 releaseAnsweredAt = -1; // round mac-D2: the clock at which the release's answer arrives (-1 = no hook)
         UpstreamQuitHooks hooks(bool stopReachesService)
         {
             UpstreamQuitHooks h;
+            if (releaseAnsweredAt >= 0)
+                h.releaseSettled = [this]() { return clock >= releaseAnsweredAt; };
             h.userStop = [this]() {
                 e.requestStop();
                 owner.disconnect(clock);
@@ -1566,6 +1572,24 @@ static void quitEndsUpstreamSession()
         CHECK(rel && r.owner.releaseSent() && rel->meter.rxDelta == 4096 && rel->meter.epoch == 3); // final report
         CHECK(r.t.downs == 1 && r.disconnected && r.clock <= kUpstreamQuitStopBoundMs);
         CHECK(r.journal == QStringList{QStringLiteral("upstream session ended on app quit")});
+    }
+    {
+        // Round mac-D2 (device: the quit ended when the tunnel stopped, as the release went out - the exit cut it off and
+        // the seat stayed paid until its TTL): the quit waits for the release's answer too, within the same bound.
+        Rig r;
+        upstreamRig(r);
+        r.releaseAnsweredAt = 700; // the stop at 300, the answer to the release 400 ms later
+        CHECK(runUpstreamQuit(AppExitKind::Quit, true, true, r.hooks(true)));
+        CHECK(r.disconnected && r.io.last("release"));
+        CHECK(r.clock >= 700 && r.clock < 700 + 50);
+    }
+    {
+        // ... and a release that never gets its answer: the quit goes on at the bound.
+        Rig r;
+        upstreamRig(r);
+        r.releaseAnsweredAt = kUpstreamQuitStopBoundMs * 10;
+        CHECK(runUpstreamQuit(AppExitKind::Quit, true, true, r.hooks(true)));
+        CHECK(r.disconnected && r.clock == kUpstreamQuitStopBoundMs);
     }
     {
         // The stop never reaches the service: the quit still goes on at the bound (never hangs).

@@ -281,14 +281,17 @@ inline bool upstreamQuitEndsSession(AppExitKind kind, bool upstreamNodesOn, bool
 struct UpstreamQuitHooks {
     std::function<void()> userStop;               // the engine's normal user stop (release, then stop)
     std::function<bool()> stopped;                // the stop reached the service (tunnel Disconnected)
+    std::function<bool()> releaseSettled;         // round mac-D2: no seat release held or unanswered (none = settled)
     std::function<void(int)> pump;                // run the event loop for up to N ms
     std::function<qint64()> nowMs;                // a monotonic clock
     std::function<void(const QString &)> journal; // the reliability journal
 };
 
-// Runs the quit path when it applies (returns true) and waits at most boundMs for the stop - then the exit
-// goes on regardless (a quit never hangs, a logout is never held beyond the bound). Not applicable: nothing
-// is called at all (the quit is byte-for-byte the one before).
+// Runs the quit path when it applies (returns true) and waits at most boundMs for the stop AND the seat's release -
+// then the exit goes on regardless (a quit never hangs, a logout is never held beyond the bound). The release is sent
+// when the stop is confirmed, so a wait for the stop alone ended as the release went out and the exit cut it off: the
+// seat stayed paid until its lease TTL (device round D2, macOS). Not applicable: nothing is called at all (the quit
+// is byte-for-byte the one before).
 inline bool runUpstreamQuit(AppExitKind kind, bool upstreamNodesOn, bool upstreamSession, const UpstreamQuitHooks &h,
                             int boundMs = kUpstreamQuitStopBoundMs)
 {
@@ -297,7 +300,7 @@ inline bool runUpstreamQuit(AppExitKind kind, bool upstreamNodesOn, bool upstrea
     h.journal(QStringLiteral("upstream session ended on app quit"));
     h.userStop();
     const qint64 until = h.nowMs() + qMax(0, boundMs);
-    while (!h.stopped()) {
+    while (!(h.stopped() && (!h.releaseSettled || h.releaseSettled()))) {
         const qint64 left = until - h.nowMs();
         if (left <= 0)
             break;

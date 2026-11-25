@@ -343,6 +343,8 @@ void UpstreamLeaseClient::flushHeld(bool tunnelDown)
 void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,
                                       const LeaseRoute &route, int attempt, qint64 spacedMs, quint64 bgKey)
 {
+    if (requestId)
+        m_releasesOpen.insert(requestId); // round mac-D2: open until it is answered, given up or withdrawn
     const LeaseTarget target = targetFor(route);
     const QString &base = target.base;
     const QString bearer = !route.renewToken.isEmpty() ? route.renewToken : (m_token ? m_token() : QString());
@@ -361,6 +363,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         armTimeout(r, kUpstreamReleaseTimeoutMs);
     }
     if (!r) {
+        m_releasesOpen.remove(requestId);
         QTimer::singleShot(0, this, [this, requestId]() {
             if (onReleaseDone)
                 onReleaseDone(requestId, false); // not sendable: never reached the server
@@ -384,6 +387,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         switch (next.kind) {
         case UpstreamReleaseTry::Resend:
             if (releaseWanted && !releaseWanted(requestId)) { // taken back by a newer start of the profile
+                m_releasesOpen.remove(requestId);
                 qInfo() << "avpn upstream: seat release withdrawn by a newer start - not resent";
                 if (bgKey)
                     avpn::bgtask::end(avpn::bgtask::Reason::Release, bgKey, avpn::bgtask::EndWhy::Settled);
@@ -398,6 +402,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
                 avpn::bgtask::begin(avpn::bgtask::Reason::Release, key);
                 QTimer::singleShot(next.delayMs, this, [this, requestId, leaseId, meter, route, attempt, spacedMs, next, key]() {
                     if (releaseWanted && !releaseWanted(requestId)) {
+                        m_releasesOpen.remove(requestId);
                         avpn::bgtask::end(avpn::bgtask::Reason::Release, key, avpn::bgtask::EndWhy::Settled);
                         return;
                     }
@@ -409,6 +414,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
             // Round mac-D2: a release the server answered, in the log (status and tries only): a freed seat was
             // silent before - only resends and give-ups were logged.
             qInfo().noquote() << QStringLiteral("avpn upstream: seat release answered status=%1 tries=%2").arg(status).arg(attempt + 1);
+            m_releasesOpen.remove(requestId);
             if (bgKey)
                 avpn::bgtask::end(avpn::bgtask::Reason::Release, bgKey, avpn::bgtask::EndWhy::Settled);
             if (onReleaseDone)
@@ -417,6 +423,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         case UpstreamReleaseTry::NotConfirmed:
             qWarning().noquote() << QStringLiteral("avpn upstream: seat release gave up status=%1 net_error=%2 tries=%3 - left to the server's TTL")
                                         .arg(status).arg(int(r->error())).arg(attempt + 1);
+            m_releasesOpen.remove(requestId);
             if (bgKey)
                 avpn::bgtask::end(avpn::bgtask::Reason::Release, bgKey, avpn::bgtask::EndWhy::Settled);
             if (onReleaseDone)
