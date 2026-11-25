@@ -16,8 +16,10 @@
 #       which hev run entered, only that run gets the non-blocking request, driven again until that run returned; the
 #       worker takes the process's run slot before it enters (no run beside an earlier one) and gives it back when its
 #       run returned; it re-checks the generation before it answers, attaches or runs; the renewer is taken and closed
-#       in one step at the stop and attached only through that slot; the hev package is the one whose patch scopes a
-#       request to one run.
+#       in one step at the stop and attached only through that slot; the hev package is the one whose patches scope a
+#       request to one run and make a session's cancel sticky;
+#   P6  (review R47 H1b) the network-change restart runs off the main queue through XrayRoamDriver: `reasserting` is
+#       cleared only by a restart that carries traffic, a failed one is retried once and then ends the tunnel.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -138,10 +140,24 @@ has "$(sbody "$UP" 'func beginUpstreamMeter(')" 'tribeUpstream.openRenewerSlot()
 
 REC="$CLIENT/../recipes/hev-socks5-tunnel"
 grep -F '"patches/0002-run-scoped-stop.patch"' "$REC/conandata.yml" > /dev/null || bad "P5: the hev recipe applies the run-scoped stop (patch 0002)"
-grep -F 'self.requires("hev-socks5-tunnel/2.15.0-tribe.1"' "$CLIENT/../conanfile.py" > /dev/null || bad "P5: the app pins the hev package with patch 0002"
+grep -F 'self.requires("hev-socks5-tunnel/2.15.0-tribe.2"' "$CLIENT/../conanfile.py" > /dev/null || bad "P5: the app pins the hev package with patches 0002 + 0003"
+grep -F '"patches/0003-sticky-session-cancel.patch"' "$REC/conandata.yml" > /dev/null || bad "P5: the hev recipe applies the sticky session cancel (patch 0003)"
+grep -F 'self->timeout = self->cancelled ? 0 : timeout;' "$REC/patches/0003-sticky-session-cancel.patch" > /dev/null || bad "P5: a cancelled session's timeout cannot be re-armed"
 grep -F 'if (!run_scope) {' "$REC/patches/0002-run-scoped-stop.patch" > /dev/null || bad "P5: a request is kept only inside a run"
+
+# ---- P6 ----
+roam="$(sbody "$PTP" 'private func handle(networkChange changePath: Network.NWPath, completion: @escaping (Error?) -> Void) {')"
+has "$roam" 'driver.run(completion: completion)' || bad "P6: the network-change restart goes through XrayRoamDriver"
+has "$roam" 'endTunnel: { [weak self] error in self?.cancelTunnelWithError(error) },' || bad "P6: a restart that failed twice ends the tunnel"
+if printf '%s\n' "$roam" | grep -F 'self?.reasserting = false' > /dev/null; then bad "P6: reasserting may not be cleared outside the driver's success"; fi
+sched="$(sbody "$PTP" 'private func scheduleNetworkChangeHandling(')"
+has "$sched" 'self.networkChangeApplyQueue.async {' || bad "P6: the restart runs on its own serial queue"
+if printf '%s\n' "$sched" | grep -F 'DispatchQueue.main.async' > /dev/null; then bad "P6: the restart must not run on the main queue"; fi
+drv="$(code "$IOS/XraySocketCallbackLifecycle.swift")"
+has "$drv" 'guard failed else { return .connected }' && has "$drv" 'return attempt < 2 ? .retry : .endTunnel' \
+    || bad "P6: only a restart that did not fail is connected; one retry, then the end"
 
 if [ "$fail" -ne 0 ]; then
     exit 1
 fi
-echo "ios start park wiring: OK (P1 controller, P2 facade, P3 extension + app log, P4 owner + engine, P5 hev stop + renewer)"
+echo "ios start park wiring: OK (P1 controller, P2 facade, P3 extension + app log, P4 owner + engine, P5 hev stop + renewer, P6 roam restart)"
