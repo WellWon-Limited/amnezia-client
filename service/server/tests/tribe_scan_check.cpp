@@ -743,17 +743,35 @@ static void generation()
     h.host->notePathEvent(false); // nothing moved
     CHECK_EQ(changed, 1);
     // Round mac-D2 (device round D 10:24:24): a route-table read that failed is unknown, never a path fact - the
-    // generation stays, with a loss mark too; the uplink read right after it is the same path.
+    // generation stays; the uplink read right after it is the same path.
     {
         TribeScanUplink unreadable;
         unreadable.unreadable = true;
         h.setUplink(unreadable);
         h.host->notePathEvent(false);
-        h.host->notePathEvent(true);
         CHECK_EQ(changed, 1);
         h.setUplink(phys());
         h.host->notePathEvent(false);
         CHECK_EQ(changed, 1);
+    }
+    // Review of 25fc28096 (finding 4, round mac-D3): a loss the routing socket confirmed (the uplink went down, its
+    // address or default went) while the table cannot be read is deferred, never erased: the next readable sample
+    // moves the generation even when the uplink came back with the same address and router (equal fingerprint).
+    {
+        Harness hl;
+        int moves = 0;
+        QObject::connect(hl.host.get(), &IpcScanInterfaceSource::scanGenerationChanged, hl.host.get(), [&](const QString &) { ++moves; });
+        hl.host->notePathEvent(false); // the baseline
+        TribeScanUplink unreadable;
+        unreadable.unreadable = true;
+        hl.setUplink(unreadable);
+        hl.host->notePathEvent(true); // the loss, read at the same moment the dump failed
+        CHECK_EQ(moves, 0);           // no verdict without a table
+        hl.setUplink(phys());         // back, same address and router
+        hl.host->notePathEvent(false);
+        CHECK_EQ(moves, 1);           // the deferred loss is applied
+        hl.host->notePathEvent(false);
+        CHECK_EQ(moves, 1);           // once
     }
 
     fake::engine().reply = [](const QByteArray &, const QByteArray &) { return QByteArray(R"({"type":"scan_ack","scan_id":"g","accepted":0,"mem_mb":null})"); };

@@ -1436,7 +1436,13 @@ QByteArray TribeScanHost::process(const QByteArray &message, const TribeScanAwgL
 void TribeScanHost::sample(const TribeScanUplink &up, bool loss)
 {
     if (up.unreadable) { // a failed table read says nothing about the path: the generation and the routes stay
-        qInfo() << "[tribescan] uplink not readable (route table read failed) - no path fact";
+        // Review of 25fc28096 (round mac-D3): ... but a loss the routing socket confirmed is a fact - deferred to the
+        // next readable sample, never erased (the uplink may come back with the same fingerprint).
+        if (loss) {
+            QMutexLocker l(&m_mutex);
+            m_lossPending = true;
+        }
+        qInfo() << "[tribescan] uplink not readable (route table read failed) - no path fact" << (loss ? "(a loss is kept)" : "");
         return;
     }
     const QByteArray fp = tribeScanUplinkFingerprint(up);
@@ -1445,6 +1451,7 @@ void TribeScanHost::sample(const TribeScanUplink &up, bool loss)
     bool moved = false;
     {
         QMutexLocker l(&m_mutex);
+        loss = loss || std::exchange(m_lossPending, false);
         moved = m_gen.observe(fp, loss);
         m_lastUplinkIndex = tribeScanUplinkUsable(up) ? up.index : 0;
         g = m_gen.now();

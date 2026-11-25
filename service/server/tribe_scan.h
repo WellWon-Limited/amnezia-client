@@ -504,6 +504,7 @@ private:
     QMutex m_fwMutex;
     mutable QMutex m_mutex;
     TribeScanGeneration m_gen;
+    bool m_lossPending = false;              // guarded by m_mutex: a loss seen while the table was unreadable (review of 25fc28096)
     Active m_active;
     quint64 m_serial = 0;
     int m_lastUplinkIndex = 0;
