@@ -182,6 +182,7 @@ public:
         m_nodeId = r.nodeId;
         m_profileId = r.profileId;
         m_stubSha = r.configSha256;
+        m_stubWire = r.stub; // air-D S2: kept in the records this session writes from now on
         m_wallAtStart = nowWallMs;
         m_monoAtStart = nowMs;
         m_adoptedStartedWallMs = r.startedWallMs;
@@ -219,6 +220,7 @@ public:
         m_lastNowMs = nowMs;
         m_sessionOrder = r.sessionOrder; // the lease's start (no new start is made)
         m_tunnelOrder = r.tunnelOrder;   // the tunnel's identity (review round 44 F3)
+        m_stubWire = r.stub;             // the stub it was started with (air-D S2)
         m_nodeId = r.nodeId;
         m_profileId = r.profileId;
         m_stubSha = r.configSha256;
@@ -450,6 +452,9 @@ public:
     // (VpnConnectionTunnelControl::bringUpUpstream) and the record names it by. Equal to sessionOrder() unless a provisional
     // session's confirmation was retried after an order-floor denial (a new order for the lease, the same tunnel).
     qint64 tunnelOrder() const { return m_tunnelOrder >= 0 ? m_tunnelOrder : m_sessionOrder; }
+    // The stub of the node this session was started with, in the /v1/subscription node form (UpstreamEngine.h::upstreamStubWireJson;
+    // for an adopted session: the record's). Empty = not known.
+    const QJsonObject &stubWire() const { return m_stubWire; }
     QString tunnelApiBase() const { return m_machine.route().apiBase; }
 
     // Contract §1 upstream_lease for the envelope / the hand-over. expires_in_ms is relative to now.
@@ -545,6 +550,7 @@ private:
         m_nonce = upstreamNewSessionNonce();
         m_floorRetried = false; // this leg has not been retried after an order-floor denial yet (onAcquireReply)
         m_tunnelOrder = -1;     // no tunnel of this start yet (set at its bring-up)
+        m_stubWire = QJsonObject();
     }
 
     QVector<UpstreamOwnerEvent> endSession(qint64 nowMs)
@@ -607,6 +613,7 @@ private:
         r.meterTags = currentMeterTags();
         r.sessionOrder = m_sessionOrder;
         r.tunnelOrder = tunnelOrder();
+        r.stub = m_stubWire;
         return p;
     }
     // The session's record is kept by this process: the GUI owner (macOS / Windows) or, with the extension renewing, iOS.
@@ -831,6 +838,7 @@ private:
         m_nodeId = stub.nodeId;
         m_profileId = stub.upstream->profileId;
         m_stubSha = stub.upstream->configSha256;
+        m_stubWire = upstreamStubWireJson(stub); // the record names the session by it after a relaunch (air-D S2)
         m_standby = standby;
         m_wallAtStart = nowWallMs;
         m_monoAtStart = nowMs;
@@ -1383,6 +1391,7 @@ private:
     QString m_nonce;                           // the session nonce of the current start (resetSession)
     qint64 m_sessionOrder = -1;                // its order: strictly increasing across starts, persisted (m_order)
     qint64 m_tunnelOrder = -1;                 // the order the running tunnel was brought up with (tunnelOrder())
+    QJsonObject m_stubWire;                    // the stub of the session's node (stubWire())
     UpstreamSessionOrder m_order;
     static constexpr int kUnsentMaxSends = 3;
     qint64 m_lastNowMs = 0;       // the owner's last clock reading (a deadline for a release made without one)

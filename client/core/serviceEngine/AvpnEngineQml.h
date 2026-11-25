@@ -1171,6 +1171,9 @@ private:
     // ourStopPending: a stop of ours was still unconfirmed when this fact came (read before the state cleared the latch)
     bool tryAdoptObservedTunnel(const char *why, bool ourStopPending = false);
     void identifyAdoptedSession();
+    // air-D S2: the adopted provider session's stub joins the candidates (its node may not be in the pool after a relaunch).
+    void restoreAdoptedUpstreamNode();
+    bool unnamedProviderSession() const; // a provider session the engine cannot name: judged as one, never by whoami
     bool awaitNativeStatus();
     void onStopRetryTimer();
     void resolveUnconfirmedStop();
