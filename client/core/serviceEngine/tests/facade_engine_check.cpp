@@ -589,6 +589,7 @@ static void ownStopJoinScenarios()
             f->seatFails(A);
             f->deliverAll();
             CHECK(!f->has("external_loss") && f->nat.ups == (QStringList{A, B}) && !f->has("stop_joined_owner_stop"));
+            CHECK(f->has("native_event_stale state=1")); // the late answer to A's stop never reaches B's leg
             f->comesUp();
             CHECK(f->connectedOn(B));
             runs[legacy ? 0 : 1] = f->journal;
