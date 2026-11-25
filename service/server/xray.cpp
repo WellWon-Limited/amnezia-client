@@ -1,4 +1,5 @@
 #include "xray.h"
+#include "tribe_scan.h" // AVPN (round mac-D3): the Xray routes' ownership record
 #include "core/utils/networkUtilities.h"
 #ifdef Q_OS_MAC
 #include "router_mac.h"
@@ -168,6 +169,10 @@ bool Xray::startXray(const QString &cfg)
     m_uplinkIfaceName = defaultIface.name();
     m_uplinkGateway = defaultGateway;
     if (!m_uplinkIfaceName.isEmpty()) {
+        // AVPN (round mac-D3): the pair is recorded before it is added, so a service killed under this session removes
+        // it at its next start (tribe_scan.h kTribeXrayRoutesRecord) instead of leaving it to a later session.
+        if (!avpn::tribeXrayRoutesWillBeAdded(m_uplinkIfaceName, m_uplinkGateway))
+            qWarning() << "[xray] the uplink routes could not be recorded (not IPv4, or the record is not writable)";
         const bool installed = RouterMac::Instance().routeAddXray(m_uplinkIfaceName, m_uplinkGateway);
         if (!installed) {
             qWarning() << "[xray] failed to install xray routes on" << m_uplinkIfaceName;
@@ -256,6 +261,7 @@ bool Xray::stopXray()
 #ifdef Q_OS_MAC
     if (!m_uplinkIfaceName.isEmpty()) {
         RouterMac::Instance().routeDeleteXray(m_uplinkIfaceName, m_uplinkGateway);
+        avpn::tribeXrayRoutesDeleted(); // AVPN (round mac-D3)
     }
     m_uplinkIfaceName.clear();
     m_uplinkGateway.clear();

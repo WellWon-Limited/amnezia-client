@@ -91,7 +91,7 @@ rem="$(body "$SCAN" 'QList<TribeScanHalfRoute> tribeScanRemoveHalfRoutes(const Q
 has "$rem" 'if (e == 0 || e == ESRCH)' && has "$rem" 'recordDrop(ops, gone);' || bad "R6: a removal forgets a route it could not delete"
 rec="$(body "$SCAN" 'int tribeScanRecoverHalfRoutes(const TribeScanRouteOps &ops)')"
 has "$rec" 'same = same || l.gateway == r.gateway;' || bad "R6: recovery deletes a recorded route without the live gateway matching"
-wr="$(body "$SCAN" 'bool writeRoutesRecord(const QByteArray &bytes)')"
+wr="$(body "$SCAN" 'bool writeRecordAt(const char *file, const QByteArray &bytes)')" # round mac-D3: one writer for the scan's and the Xray record
 has "$wr" '::fsync(f.handle())' && has "$wr" '::rename(' || bad "R6: the record is not written durably"
 has "$(body "$SCAN" 'void clearLeftoverUplinkRoutes()')" 'tribeScanRecoverHalfRoutes(systemRouteOps())' \
   || bad "R6: the service start does not recover the recorded routes"
@@ -109,6 +109,21 @@ if [ "$fail" = "0" ]; then
   if ! TRIBE_SCAN_ENGINE=0 bash "$ROOT/service/server/tests/build_tribe_scan.sh"; then
     bad "service/server/tests/build_tribe_scan.sh failed"
   fi
+fi
+# R8 (round mac-D3): an Xray session's own pair is recorded before it is added, cleared after it is deleted, and a
+# record a killed service left is recovered at the next service start (with the scan's, from its own file).
+XRS="$ROOT/service/server/xray.cpp"
+TS="$ROOT/service/server/tribe_scan.cpp"
+r1=$(grep -nF 'avpn::tribeXrayRoutesWillBeAdded(m_uplinkIfaceName, m_uplinkGateway)' "$XRS" | head -1 | cut -d: -f1)
+r2=$(grep -nF 'RouterMac::Instance().routeAddXray(m_uplinkIfaceName, m_uplinkGateway)' "$XRS" | head -1 | cut -d: -f1)
+[ -n "$r1" ] && [ -n "$r2" ] && [ "$r1" -lt "$r2" ] || bad "R8: the Xray uplink pair is not recorded before it is added"
+d1=$(grep -nF 'RouterMac::Instance().routeDeleteXray(m_uplinkIfaceName, m_uplinkGateway);' "$XRS" | head -1 | cut -d: -f1)
+d2=$(grep -nF 'avpn::tribeXrayRoutesDeleted();' "$XRS" | head -1 | cut -d: -f1)
+[ -n "$d1" ] && [ -n "$d2" ] && [ "$d2" -gt "$d1" ] || bad "R8: the Xray uplink record is not cleared after the delete"
+body "$TS" 'void clearLeftoverUplinkRoutes()' | grep -qF 'tribeScanRecoverHalfRoutes(systemRouteOps(kTribeXrayRoutesRecord))' \
+  || bad "R8: the service start does not recover the Xray uplink record"
+if body "$TS" 'TribeScanRouteArm tribeScanArmHalfRoutes(' | grep -qF 'kTribeXrayRoutesRecord'; then
+  bad "R8: a scan's arm touches the Xray session's record (a live Xray pair would be deleted)"
 fi
 [ "$fail" = "0" ] && echo "check_mac_scan_uplink_routes_wiring: ok"
 exit "$fail"

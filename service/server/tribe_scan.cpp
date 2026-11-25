@@ -241,15 +241,15 @@ QByteArray dumpInetRoutes()
 
 // The ownership record (tribe_scan.h): read whole; written durably - a temporary file, fsync, rename, then the
 // directory synced - so a record that says "about to add" is on disk before the RTM_ADD (review N3). "" removes it.
-QByteArray readRoutesRecord()
+QByteArray readRecordAt(const char *file)
 {
-    QFile f(QString::fromLatin1(kTribeScanRoutesRecord));
+    QFile f(QString::fromLatin1(file));
     return f.open(QIODevice::ReadOnly) ? f.read(4096) : QByteArray();
 }
 
-bool writeRoutesRecord(const QByteArray &bytes)
+bool writeRecordAt(const char *file, const QByteArray &bytes)
 {
-    const QString path = QString::fromLatin1(kTribeScanRoutesRecord);
+    const QString path = QString::fromLatin1(file);
     const QString dir = QFileInfo(path).absolutePath();
     auto syncDir = [&dir]() {
         const int d = ::open(QFile::encodeName(dir).constData(), O_RDONLY);
@@ -280,14 +280,14 @@ bool writeRoutesRecord(const QByteArray &bytes)
     return syncDir();
 }
 
-TribeScanRouteOps systemRouteOps()
+TribeScanRouteOps systemRouteOps(const char *record = kTribeScanRoutesRecord)
 {
     TribeScanRouteOps ops;
     ops.pinned = pinnedRouteExists;
     ops.write = writeHalfRoute;
     ops.table = dumpInetRoutes;
-    ops.recordRead = readRoutesRecord;
-    ops.recordWrite = writeRoutesRecord;
+    ops.recordRead = [record]() { return readRecordAt(record); };
+    ops.recordWrite = [record](const QByteArray &bytes) { return writeRecordAt(record, bytes); };
     return ops;
 }
 
@@ -317,6 +317,11 @@ void clearLeftoverUplinkRoutes()
     const int removed = tribeScanRecoverHalfRoutes(systemRouteOps());
     if (removed > 0)
         qInfo() << "[tribescan] uplink routes of an earlier service instance removed:" << removed;
+    // Round mac-D3: the same recovery for an Xray session's pair (tribe_scan.h kTribeXrayRoutesRecord) - a service
+    // killed under own Xray never ran the Xray session stop, and its routes waited for a later Xray session to end.
+    const int xray = tribeScanRecoverHalfRoutes(systemRouteOps(kTribeXrayRoutesRecord));
+    if (xray > 0)
+        qInfo() << "[xray] uplink routes of an earlier service instance's Xray session removed:" << xray;
 }
 #endif
 
@@ -1649,4 +1654,37 @@ void tribeScanBeforeTunnelChange(const char *reason)
         g_host->stopAllBeforeTunnelChange(reason);
 }
 
+} // namespace avpn
+
+// ---- round mac-D3: the ownership record of an Xray session's pinned-socket routes (tribe_scan.h) -------------------
+namespace avpn {
+QList<TribeScanHalfRoute> tribeXrayHalfRoutes(int ifindex, const QString &gatewayV4)
+{
+    const QHostAddress gw(gatewayV4);
+    if (ifindex <= 0 || gw.protocol() != QAbstractSocket::IPv4Protocol)
+        return {};
+    const quint32 g = gw.toIPv4Address();
+    return { TribeScanHalfRoute { kTribeScanHalfLow, g, ifindex }, TribeScanHalfRoute { kTribeScanHalfHigh, g, ifindex } };
+}
+
+bool tribeXrayRoutesWillBeAdded(const QString &ifname, const QString &gateway)
+{
+#ifdef Q_OS_MACOS
+    const QList<TribeScanHalfRoute> routes = tribeXrayHalfRoutes(QNetworkInterface::interfaceIndexFromName(ifname), gateway);
+    if (routes.isEmpty())
+        return false;
+    return writeRecordAt(kTribeXrayRoutesRecord, tribeScanHalfRoutesRecord(routes));
+#else
+    (void)ifname;
+    (void)gateway;
+    return false;
+#endif
+}
+
+void tribeXrayRoutesDeleted()
+{
+#ifdef Q_OS_MACOS
+    writeRecordAt(kTribeXrayRoutesRecord, QByteArray());
+#endif
+}
 } // namespace avpn

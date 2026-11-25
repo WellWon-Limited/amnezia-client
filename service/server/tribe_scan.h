@@ -327,6 +327,15 @@ QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int 
 // The record (one line each, "half <dst> <gateway> <ifindex>" in hex/decimal); parse keeps only well-formed half routes.
 inline constexpr char kTribeScanRoutesRecord[] = "/Library/Application Support/TribeVPN/scan/uplink-routes";
 QByteArray tribeScanHalfRoutesRecord(const QList<TribeScanHalfRoute> &routes);
+// Round mac-D3: an Xray session's own pair (0/1 + 128/1 via the uplink's router, scoped to the uplink) is owned by the
+// service's Xray core session - Xray::startXray adds it (RouterMac::routeAddXray), Xray::stopXray deletes it. A service
+// killed under own Xray never ran the stop, and the pair stayed until a later Xray session's stop. The same intent log
+// as the scan's, in its own record (the scan's recover before each arm must never delete a live Xray session's pair):
+// written durably before the add, cleared after the delete, recovered at service start (clearLeftoverRoutes).
+inline constexpr char kTribeXrayRoutesRecord[] = "/Library/Application Support/TribeVPN/scan/xray-uplink-routes";
+QList<TribeScanHalfRoute> tribeXrayHalfRoutes(int ifindex, const QString &gatewayV4); // empty unless IPv4 + an index
+bool tribeXrayRoutesWillBeAdded(const QString &ifname, const QString &gateway);
+void tribeXrayRoutesDeleted();
 QList<TribeScanHalfRoute> tribeScanParseHalfRoutesRecord(const QByteArray &record);
 
 // The probe children of this process (macOS; the engine spawns `<binary> probe` per AmneziaWG session):

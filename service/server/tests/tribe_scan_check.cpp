@@ -1816,6 +1816,29 @@ static void uplinkRoutes()
         CHECK(k.disk.isEmpty());
     }
     {
+        // Round mac-D3: an Xray session's own pair (RouterMac::routeAddXray, scoped to the uplink via its router). The
+        // service is killed under that session: its record names the pair, the next service start removes it - before,
+        // the pair waited for a later Xray session's stop.
+        const QList<TribeScanHalfRoute> xr = tribeXrayHalfRoutes(FakeKernel::kUp, QStringLiteral("192.0.2.1"));
+        CHECK(xr.size() == 2 && xr.at(0).dst == kTribeScanHalfLow && xr.at(1).dst == kTribeScanHalfHigh);
+        CHECK(xr.at(0).gateway == FakeKernel::kRouter && xr.at(0).ifindex == FakeKernel::kUp);
+        CHECK(tribeXrayHalfRoutes(FakeKernel::kUp, QStringLiteral("fe80::1")).isEmpty()); // an IPv6 gateway: no pair
+        CHECK(tribeXrayHalfRoutes(0, QStringLiteral("192.0.2.1")).isEmpty());
+        FakeKernel k;
+        k.defaultOff();
+        for (const TribeScanHalfRoute &r : xr) // what routeAddXray wrote (flags of `route add -net ... -ifscope`)
+            k.routes << FakeKernel::Route{r.dst, 1, RTF_UP | RTF_IFSCOPE | RTF_STATIC | RTF_GATEWAY, r.ifindex, r.gateway};
+        k.disk = tribeScanHalfRoutesRecord(xr); // Xray::startXray recorded it first (tribeXrayRoutesWillBeAdded)
+        CHECK(k.halves() == 2);
+        CHECK_EQ(tribeScanRecoverHalfRoutes(k.ops()), 2); // the service start (clearLeftoverUplinkRoutes)
+        CHECK(k.halves() == 0 && k.disk.isEmpty());
+        // A stop that ran (Xray::stopXray: delete, then the record cleared): nothing for the next start to do.
+        FakeKernel s;
+        s.defaultOff();
+        CHECK_EQ(tribeScanRecoverHalfRoutes(s.ops()), 0);
+        CHECK(s.writes.isEmpty());
+    }
+    {
         FakeKernel k; // a delete that fails stays recorded and is retried by the next recovery
         k.defaultOff();
         k.awgTunnel();
