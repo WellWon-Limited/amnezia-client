@@ -1188,6 +1188,18 @@ static void stopNothingNative()
     CHECK(!avpn::stopNeedsGuardedStop(false, false, true, ObservedTunnel::Unknown, false));      // maybe up: not ours
     CHECK(avpn::stopNeedsGuardedStop(true, false, true, ObservedTunnel::Connected, true));       // native work: as before
     CHECK(!avpn::stopNeedsGuardedStop(true, true, true, ObservedTunnel::Connected, true));       // a stop already runs
+    // Device round air-D 25.11 (N4 pair 2): one native stop at a time - the facade's stop joins the owner's own stop of a
+    // leg in flight (its answer confirms both); nothing native - confirmed at once; otherwise the facade's own stop.
+    using avpn::FacadeStop;
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Disconnected, false, false) == FacadeStop::ConfirmedAtOnce);
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Transitional, true, true) == FacadeStop::JoinOwnerStop); // the replay
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Error, true, true) == FacadeStop::JoinOwnerStop);
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Disconnected, true, true) == FacadeStop::JoinOwnerStop); // answer not seen
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Connected, true, true) == FacadeStop::JoinOwnerStop);
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Connected, true, false) == FacadeStop::IssueStop);  // restart of a session
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Transitional, true, false) == FacadeStop::IssueStop);
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Unknown, false, false) == FacadeStop::IssueStop);   // maybe up: stop it
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Connected, false, false) == FacadeStop::IssueStop); // an adopted session
     // Device round 19.11: airplane mode while connected - the failover fails with no network under it.
     using avpn::FailedAttemptIntent;
     CHECK(avpn::failedAttemptIntent(true, false, true) == FailedAttemptIntent::Wait);   // the airplane case

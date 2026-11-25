@@ -7341,10 +7341,14 @@ void AvpnEngineQml::guardedStop(const char *why)
     if (m_probe) m_probe->cancel();
     if (!m_wantConnected)
         cancelSeatFirst(); // a stop that does not reconnect: a seat taken for a switch goes back
+    // One native stop at a time (device round air-D 25.11, DebugSnapshot.h facadeStopAction): read before requestStop
+    // below, which makes the owner's stop the facade's.
+    const avpn::FacadeStop how = avpn::facadeStopAction(observedTunnelOf(m_lastTunnelState), m_engine.ownerHoldsNativeLeg(),
+                                                        m_engine.ownerStopInFlight());
     // B1 (race measurement 18.11): a stop while nothing native runs - the race prelude, an attempt that ended before
     // any leg - has no Disconnected to wait for: the stop is confirmed at once and the operation settles through the
     // one function (the orb stayed dead until a relaunch).
-    if (avpn::stopFindsNothingNative(observedTunnelOf(m_lastTunnelState), m_engine.ownerHoldsNativeLeg())) {
+    if (how == avpn::FacadeStop::ConfirmedAtOnce) {
         m_engine.requestStop();
         m_latch.awaitingStopConfirm = false;
         settleOperation("stop_nothing_native");
@@ -7380,7 +7384,10 @@ void AvpnEngineQml::guardedStop(const char *why)
     // AVPN (разбор 2026-09-23): стоп с намерением ON — часть перезапуска; фоновое время iOS берём ДО
     // стопа, чтобы свёрнутое приложение дожило до Disconnected и отправило старт.
     syncRestartGuard();
-    m_tunnel.down();
+    if (how == avpn::FacadeStop::IssueStop)
+        m_tunnel.down();
+    else // the owner's native stop of its leg is in flight: its one Disconnected confirms this stop too
+        reliabilityEvent(QStringLiteral("stop_joined_owner_stop why=%1 leg=%2").arg(QLatin1String(why)).arg(m_engine.attemptLeg()));
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (BUG-6): туннель был адоптирован без протокола этой GUI-сессии — down() демона не
     // достигнет (null-протокол), гасим напрямую. Терминальный Disconnected приедет ретрансляцией

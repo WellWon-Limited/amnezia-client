@@ -591,6 +591,29 @@ inline bool stopNeedsGuardedStop(bool stoppable, bool stopInFlight, bool opInFli
     return stoppable || (opInFlight && stopFindsNothingNative(observed, ownerHoldsNativeLeg));
 }
 
+// One native stop at a time (device round air-D 25.11, iPhone Air, N4 pair 2, journal 00:11:10-00:11:16). Scanner row A
+// was tapped and its provider leg waited for its seat; row B was tapped 0.7 s later (the newest pick wins). A's seat
+// request failed and the attempt owner stopped A's leg itself (its StopPath down()); the facade's restart for B then sent
+// a SECOND native stop on top of it. Nothing native ran, so each stop got its own Disconnected (iOS answers a stop of a
+// session that is already down at once; the desktop and Android answer a stop with no protocol at once too). The
+// facade's one mark of its stop (Op::Stopping, the latch) was taken by the answer to the OWNER's stop; the answer to the
+// facade's own stop then came with no stop of ours pending and read as the external loss of §13: "intent_off
+// why=external_loss", B never started, the VPN stayed off. Upstream Amnezia has one actor and one stop per teardown. So
+// a stop the facade asks for while the owner's own native stop of a leg is in flight JOINS that stop: the facade marks
+// it its own (Op::Stopping, the latch, its watchdog, the owner's StoppedByUser) and sends nothing more; that stop's one
+// answer confirms both. Every Disconnected that answers a stop of ours then finds that stop pending, in any phase of an
+// attempt, "nothing was started yet" included; only a Disconnected with no stop of ours pending is external.
+//  ConfirmedAtOnce - nothing native to stop (B1, stopFindsNothingNative): confirmed at once, no native stop;
+//  JoinOwnerStop   - the owner's own native stop of a leg is in flight (ServiceEngine::ownerStopInFlight);
+//  IssueStop       - the facade sends the native stop (m_tunnel.down()).
+enum class FacadeStop { ConfirmedAtOnce, JoinOwnerStop, IssueStop };
+inline FacadeStop facadeStopAction(ObservedTunnel observed, bool ownerHoldsNativeLeg, bool ownerStopInFlight)
+{
+    if (stopFindsNothingNative(observed, ownerHoldsNativeLeg))
+        return FacadeStop::ConfirmedAtOnce;
+    return ownerStopInFlight ? FacadeStop::JoinOwnerStop : FacadeStop::IssueStop;
+}
+
 // Device round 19.11 (airplane mode for 20 s while connected): the live check failed, the failover walked 12 servers
 // in 0.7 s with no network under it, the attempt ended "nothing proven", the intent was dropped and the VPN stayed
 // off after the network came back. What a failed attempt does to the person's intent:
