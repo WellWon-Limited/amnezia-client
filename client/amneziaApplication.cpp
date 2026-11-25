@@ -2,6 +2,7 @@
 #ifdef AVPN_ENGINE_ENABLED
 #include "core/serviceEngine/LaunchGuard.h" // AVPN (self-update v2)
 #include "core/serviceEngine/NetAwait.h" // AVPN (android5): TribeNetworkAccessManager
+#include "core/serviceEngine/QuitSessionPolicy.h" // AVPN (macOS quit, review M2)
 #endif
 
 #include <QClipboard>
@@ -101,15 +102,25 @@ AmneziaApplication::~AmneziaApplication()
         // AVPN (round mac-B, test Mac 25.11.2026): the AmneziaWG session itself was torn down on quit all the same - the
         // protocol outlived this call and its destructor (stop() -> "deactivate") ran in the teardown. It is released to
         // the daemon here, on its own thread: the daemon socket closes without a deactivate (releaseSessionToDaemon).
+        // Review M2: only a session that is UP is handed over; an attempt still in progress is ended (nobody would
+        // finish it) - QuitSessionPolicy.h.
         VpnConnection *connection = m_vpnConnection.get();
         QMetaObject::invokeMethod(
                 connection,
                 [connection]() {
                     const QSharedPointer<VpnProtocol> protocol = connection->vpnProtocol();
-                    if (auto *wg = qobject_cast<WireguardProtocol *>(protocol.data()))
+                    auto *wg = qobject_cast<WireguardProtocol *>(protocol.data());
+                    switch (avpn::quitSessionAction(!protocol.isNull(), wg != nullptr,
+                                                    connection->connectionState() == Vpn::ConnectionState::Connected)) {
+                    case avpn::QuitSessionAction::ReleaseToDaemon:
                         wg->releaseSessionToDaemon();
-                    else if (protocol)
+                        break;
+                    case avpn::QuitSessionAction::EndSession:
                         connection->disconnectFromVpn();
+                        break;
+                    case avpn::QuitSessionAction::Nothing:
+                        break;
+                    }
                 },
                 Qt::BlockingQueuedConnection);
 #endif
