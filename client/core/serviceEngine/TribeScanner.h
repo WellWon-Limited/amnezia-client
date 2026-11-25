@@ -270,6 +270,7 @@ inline constexpr char kScanCapsAwgWithheldField[] = "awg_unavailable";
 inline constexpr char kScanBudgetStoreKey[] = "avpn/scanBudget";
 inline constexpr char kScanCacheStorePrefix[] = "avpn/scanCache/";
 inline constexpr char kScanCacheIndexKey[] = "avpn/scanCacheIndex";
+inline constexpr char kScanPoolStoreKey[] = "avpn/scanPool"; // the last GET /v1/scan/pool answer (scanPoolToJson)
 inline constexpr int kScanCacheMaxNetworks = 8;
 
 // Store key of a network's cached result: its weak fingerprint alone, hashed (nothing readable on disk). Not the

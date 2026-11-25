@@ -637,13 +637,19 @@ inline QString scanScopeOf(const QString &raw)
 // live tunnel is probed in every scope and saved in that scope's result: it never counts for another country (review
 // round 36, F2).
 // A row the list shows as available (view.available): a proven working row - fresh or cached, a tapped row while it
-// connects, the proven live connection; never «Не удалось» (a failed probe or tap) nor «Не проверено».
+// connects - and the live connection, which reads «Подключено» as soon as data flows through it (ScanCurrent::working,
+// the engine's own data check) whether or not the scan's sized check through it answered (device round air-D, E1: that
+// check could not reach our API - "live_probe warm status=0" - the row read «Подключено», the rings left it out).
+// Never «Не удалось» (a failed probe or tap) nor «Не проверено».
 inline bool scanRowShownAvailable(const ScanRowView &r)
 {
-    if (r.unavailable || !r.verified)
+    if (r.unavailable)
         return false;
-    return r.state == ScanRowState::Works || r.state == ScanRowState::Slow || r.state == ScanRowState::Connecting
-           || r.state == ScanRowState::Connected;
+    if (r.current)
+        return r.state == ScanRowState::Connected;
+    if (!r.verified)
+        return false;
+    return r.state == ScanRowState::Works || r.state == ScanRowState::Slow || r.state == ScanRowState::Connecting;
 }
 
 inline bool scanRowInScope(const QString &countryCode, const QString &scope)

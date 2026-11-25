@@ -4615,7 +4615,8 @@ static qint64 firstFoundAt(const World &w, qint64 from)
 // scope, counted in one place: cached rows too, a row that failed after a tap no more.
 static void availableIsWhatTheListShows()
 {
-    // a cached result of 3 working rows shown while the VPN is connected (its proof not taken yet): 3, not 0 / 1
+    // a cached result of 3 working rows shown while the VPN is connected: the 3 rows and the «Подключено» one (E1, air-D:
+    // the live connection is counted as the list shows it), never 0 / 1
     {
         World w = baseWorld("available", hostMac(), ScanNetKind::Wifi);
         ScanOpen o = openOf(w, QStringLiteral("1"), true);
@@ -4631,7 +4632,7 @@ static void availableIsWhatTheListShows()
         m.shown(o, kT0);
         const QJsonObject v = viewJson(m, kT0);
         CHECK(rowsInState(v, "works") + rowsInState(v, "slow") == 3 && rowsInState(v, "connected") == 1);
-        CHECK(v.value(QLatin1String("available")).toInt() == 3);
+        CHECK(v.value(QLatin1String("available")).toInt() == 4);
     }
     // a finished scan: every working row of the list; a row tapped and failed is «Не удалось» and no more counted
     {
@@ -4966,6 +4967,28 @@ static void progressCountsWhatIsChecked()
     for (const Recorded &r : d.steps)
         if (phaseOf(r.view) == QLatin1String("reach"))
             CHECK(r.view.value(QLatin1String("stage_count")).toInt() <= r.view.value(QLatin1String("stage_total")).toInt());
+}
+
+// E1 (device round air-D, iPhone Air, 25.11): a scan WHILE CONNECTED (Германия 1 Xray). The round's lines: "action
+// probe_live_tunnel bytes=65536", "api live_probe warm status=0" (our API did not answer through the tunnel), "api
+// probe_batch status=0 asked=10 granted=0 fail=transport", "persist_results rows=1"; the list: Германия 1 «Подключено»,
+// Финляндия 1 Xray «Доступно», Белые списки 1, 2 «Не проверено" - the rings said 1. The live connection carries data (the
+// engine's check), it reads «Подключено» and is counted like the list shows it, proven by the scan's own check or not.
+static void connectedRowIsCounted()
+{
+    World w = baseWorld("connected_count", hostMac(), ScanNetKind::Wifi);
+    w.current = QStringLiteral("2:xray");
+    w.liveProbeWorks = false;   // "api live_probe warm status=0"
+    w.cutApp = QStringLiteral("batch"); // "api probe_batch status=0 ... fail=transport": the providers stay unchecked
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, w.current, true)));
+    w.runMs = 12000;
+    Driver d(w);
+    d.run();
+    const QJsonObject v = lastView(d);
+    const QJsonObject live = rowOf(v, QStringLiteral("2:xray"));
+    CHECK(phaseOf(v) == QLatin1String("done") && live.value(QLatin1String("state")).toString() == QLatin1String("connected"));
+    const int shown = rowsInState(v, "works") + rowsInState(v, "slow") + rowsInState(v, "connected");
+    CHECK(rowsInState(v, "connected") == 1 && v.value(QLatin1String("available")).toInt() == shown);
 }
 
 static void refusedEndsScope()
@@ -5508,6 +5531,7 @@ int main(int argc, char **argv)
     oneVerdictPerRow();
     failedCandidatesAreNoResult();
     progressCountsWhatIsChecked();
+    connectedRowIsCounted();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();

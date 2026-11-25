@@ -229,8 +229,14 @@ PageType {
     // the result shows nothing of its scope (a scan the machine refused at once, a network change): its summary
     // (the live connection's row, when there is one, is always above it and does not count)
     readonly property bool scopeStart: !choosing && !scanning && !blocked && !emptyResult && otherCount === 0
+    // the pool's answer is known (fetched now or kept from an earlier launch): scope_whitelist stays -1 until then; the
+    // countries before it are the manifest's first screen, never the pool's size (device round air-D, E1: «8 серверов»
+    // instead of 228 when the fetch failed through the tunnel) - no total is shown then
+    readonly property bool poolKnown: Number(barView.scope_whitelist ?? -1) >= 0
     // the servers of a scope: «Все страны» scans every row of the pool - the countries AND the white lists (review F3)
     function scopeCount(cc) {
+        if (!poolKnown)
+            return 0
         if (cc === "whitelist")
             return Math.max(0, poolWhitelist)
         let n = cc === "" ? Math.max(0, poolWhitelist) : 0
@@ -1172,7 +1178,7 @@ PageType {
         height: Theme.scan.rowHeight
         selected: chosen
         title: name
-        subtitle: count > 0 ? ScanTexts.servers(count) : ""
+        subtitle: count > 0 && root.poolKnown ? ScanTexts.servers(count) : ""
         monoSubtitle: false
         leftItem: Item {
             width: Theme.scan.flag
