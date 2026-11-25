@@ -32,6 +32,7 @@
 #include <QTimeZone>
 #include <QThread>
 #include <cstdio>
+#include <functional>
 
 using namespace avpn;
 
@@ -553,6 +554,141 @@ int main(int argc, char **argv)
         CHECK(HealthLoop::probeSpannedSuspension(40'000, 100'002, 8'000));
         CHECK(!HealthLoop::probeSpannedSuspension(40'000, 50'000, 8'000) && HealthLoop::probeSpannedSuspension(40'000, 50'001, 8'000));
         CHECK(HealthLoop::probeSpannedSuspension(40'000, 39'000, 8'000) && !HealthLoop::probeSpannedSuspension(0, 100'000, 8'000));
+    }
+    // --- Device round air-D (24-25.11, K1): Германия 1 ("9" here) on Wi-Fi; Wi-Fi off -> LTE where AmneziaWG passes nothing
+    // and no handshake completes; Wi-Fi back after 46 s. The system's own network notification never fired on that return
+    // (the journal has only the path engine's "network key=wifi"); the probes fail every 4 s from the LTE on. The
+    // extension's stall verdict at +4/+8/... s is what TribeRoamingTests "air-D" reports: 2a705d9c7 51, 55, 59, ... (the
+    // LTE silence counted on the Wi-Fi); tribe.19 0 (its roam restart brought data back at +1 s).
+    {
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}}, {}, {});
+        path::NetworkObservation wifi;
+        wifi.medium = path::NetMedium::Wifi;
+        wifi.gateway = QStringLiteral("192.168.1.1");
+        wifi.subnet = QStringLiteral("192.168.1.0/24");
+        path::NetworkObservation lte;
+        lte.medium = path::NetMedium::Cellular;
+        lte.carrier = QStringLiteral("250-01");
+        lte.radio = QStringLiteral("lte");
+        path::NetworkObservation none;
+        struct AirD { bool failedOver = false; qint64 at = -1; QString stateOnWifi; };
+        // verdict(t) / probeOk(t) at t s after the return; restart = the tribe.19 app (iOS); hsAgeAtReturn = the age of the
+        // last handshake at the return (none completes away). The engine's clock is driven (probes every 4 s).
+        const auto run = [&](bool restart, const std::function<qint64(qint64)> &verdict, const std::function<bool(qint64)> &probeOk,
+                             qint64 awaySec, qint64 hsAgeAtReturn, bool airplane = false, qint64 horizon = 80) {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            qint64 clockMs = 1'800'000'000'000LL;
+            eng.setNowMsForTest([&clockMs] { return clockMs; });
+            eng.setTunnel(&tun);
+            eng.setRestartEvidenceOnNetworkChange(restart);
+            eng.observeNetwork(wifi);
+            QString err;
+            CHECK(eng.loadSubscription(subJson({ EE, US }, 7), err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+            CHECK(eng.connect(err));
+            CHECK(upConnected(eng));
+            const qint64 returnMs = clockMs + awaySec * 1000;
+            const qint64 handshake = returnMs / 1000 - hsAgeAtReturn;
+            eng.observeNetwork(airplane ? none : lte); // away: the probes fail every 4 s there
+            for (qint64 a = 4; a < awaySec; a += 4) {
+                clockMs += 4000;
+                tun.st = mkStats(handshake, 1000, 5000 + a * 1500);
+                eng.tick(clockMs / 1000);
+                eng.feedProbeResult(false, clockMs - 3000);
+            }
+            AirD r;
+            clockMs = returnMs;
+            eng.observeNetwork(wifi); // t = 0: the Wi-Fi is back
+            tun.st = mkStats(handshake, 1000, 5000 + awaySec * 1500);
+            eng.tick(clockMs / 1000);
+            if (eng.feedProbeResult(false, clockMs - 3000)) { r.failedOver = true; r.at = 0; } // started on the old network
+            for (qint64 t = 4; t <= horizon && !r.failedOver; t += 4) {
+                clockMs = returnMs + t * 1000;
+                tun.st = mkStats(handshake, 1000 + (probeOk(t) ? t * 20'000 : 0), 5000 + (awaySec + t) * 1500);
+                tun.st.dataStallSec = verdict(t);
+                tun.st.dataStallAtMs = clockMs - 300; // the status request of this second
+                eng.tick(clockMs / 1000);
+                if (eng.state() != EngineState::Connected) { // a health verdict
+                    fprintf(stderr, "air-D run: engine state %d at +%llds (switch log: %s)\n", int(eng.state()), (long long)t,
+                            qPrintable(eng.switchLog().join(QStringLiteral(" | ")).right(300)));
+                    r.failedOver = true; r.at = t; break;
+                }
+                if (eng.feedProbeResult(probeOk(t), clockMs - 3000)) { r.failedOver = true; r.at = t; }
+            }
+            r.stateOnWifi = eng.pathStateHere(QStringLiteral("9"));
+            return r;
+        };
+        const auto oldVerdict = [](qint64 t) { return 47 + t; };       // 2a705d9c7: the LTE silence counted
+        const auto newVerdict = [](qint64) { return qint64(0); };      // tribe.19: data back at +1 s
+        const auto failing = [](qint64) { return false; };
+        const auto fromT2 = [](qint64 t) { return t >= 2; };           // data back at +1 s: the probes answer again
+        const AirD before = run(false, oldVerdict, failing, 46, 70);
+        fprintf(stderr, "air-D 2a705d9c7 rule: failover=%d at +%llds, Германия 1 on the Wi-Fi: %s\n", int(before.failedOver),
+                (long long)before.at, qPrintable(before.stateOnWifi));
+        CHECK(before.failedOver && before.at <= 30 && before.stateOnWifi != QLatin1String("working")); // the false mark
+        const AirD after = run(true, newVerdict, fromT2, 46, 70);
+        fprintf(stderr, "air-D tribe.19: failover=%d, Германия 1 on the Wi-Fi: %s\n", int(after.failedOver), qPrintable(after.stateOnWifi));
+        CHECK(!after.failedOver && after.stateOnWifi == QLatin1String("working"));
+        // An extension before tribe.19 (its verdict still counts the LTE) with this app: the verdict is clamped to what
+        // was observed on the Wi-Fi, the probes answer once data is back: no failover either.
+        CHECK(!run(true, oldVerdict, fromT2, 46, 70).failedOver);
+        // The server really dead on the Wi-Fi: the extension's verdict counts from the roam (t), the probes keep failing:
+        // the failover comes ~45-50 s after the return and marks the node on the Wi-Fi - correctly.
+        const AirD dead = run(true, [](qint64 t) { return t; }, failing, 46, 70);
+        fprintf(stderr, "air-D dead on the Wi-Fi: failover=%d at +%llds, mark: %s\n", int(dead.failedOver), (long long)dead.at, qPrintable(dead.stateOnWifi));
+        CHECK(dead.failedOver && dead.at >= 45 && dead.at <= 52 && dead.stateOnWifi != QLatin1String("working"));
+        // U1: airplane 49 s, then the healthy tunnel answers (the probes of the app recover after ~20 s); the last handshake
+        // was 120 s before the airplane. The system's notifications fire at airplane on and off (U1 journal); the second
+        // falls into the cooldown of the series (REV-5: no grace). 2a705d9c7 read the handshake age (120 + 49 + 12 s)
+        // as "re-keys fail" and failed over; tribe.19 counts it from the return.
+        const auto u1 = [&](bool restart) {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            qint64 clockMs = 1'800'000'000'000LL;
+            eng.setNowMsForTest([&clockMs] { return clockMs; });
+            eng.setTunnel(&tun);
+            eng.setRestartEvidenceOnNetworkChange(restart);
+            eng.observeNetwork(wifi);
+            QString err;
+            CHECK(eng.loadSubscription(subJson({ EE, US }, 7), err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+            CHECK(eng.connect(err));
+            CHECK(upConnected(eng));
+            const qint64 handshake = clockMs / 1000 - 120;
+            path::NetworkObservation offline;
+            offline.medium = path::NetMedium::Offline;
+            eng.observeNetwork(offline);
+            eng.noteNetworkChange(clockMs / 1000);   // the system's notification (airplane on)
+            clockMs += 49'000;                       // offline: no uplink - no probe, no health tick
+            eng.observeNetwork(wifi);
+            eng.noteNetworkChange(clockMs / 1000);   // the system's notification (airplane off)
+            const qint64 backMs = clockMs;
+            tun.st = mkStats(handshake, 1000, 9000);
+            eng.tick(clockMs / 1000);
+            bool failedOver = eng.feedProbeResult(false, clockMs - 3000); // started while offline
+            for (qint64 t = 4; t <= 60 && !failedOver; t += 4) {
+                clockMs = backMs + t * 1000;
+                tun.st = mkStats(handshake, 1000 + t * 20'000, 9000 + t * 1500); // the tunnel carries data
+                eng.tick(clockMs / 1000);
+                failedOver = eng.feedProbeResult(t >= 20, clockMs - 3000) || eng.state() != EngineState::Connected;
+            }
+            return failedOver;
+        };
+        const bool airOld = u1(false), airNew = u1(true);
+        fprintf(stderr, "air-D U1 airplane 49 s: 2a705d9c7 failover=%d; tribe.19 failover=%d\n", int(airOld), int(airNew));
+        CHECK(airOld && !airNew);
+        // Flapping every 25 s on a dead path: the evidence restarts at most until 120 s after the first change of the
+        // series, so the verdict is not muted forever.
+        {
+            HealthLoop h;
+            for (qint64 t = 0; t <= 300; t += 25)
+                h.noteEvidenceRestart(1000 + t);
+            CHECK(h.evidenceSinceEpoch() == 1000 + 120);
+            h.noteEvidenceRestart(1000 + 300 + 120); // a quiet 120 s, then a change: a new series
+            CHECK(h.evidenceSinceEpoch() == 1000 + 420);
+            CHECK(h.handshakeForVerdict(900) == 1420 && h.handshakeForVerdict(2000) == 2000 && h.handshakeForVerdict(0) == 0);
+        }
     }
 #endif
 
