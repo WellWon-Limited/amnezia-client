@@ -921,8 +921,11 @@ int main(int argc, char **argv)
 
     // ---- round mac-D3: the block across the app's own transitions (KillSwitch::setHold) -------------------------
     {
-        static qint64 clockMs = 1'000'000;
-        KillSwitch::setClockForTest([]() { return clockMs; });
+        // Round mac-D4: the wall clock (persisted deadline) and the monotonic one (the running lease) move apart only
+        // in H18/H19; every other step moves both.
+        static qint64 wallMs = 1'700'000'000'000LL;
+        static qint64 monoMs = 1'000'000;
+        KillSwitch::setClocksForTest([]() { return wallMs; }, []() { return monoMs; });
         const QStringList api = { QStringLiteral("192.0.2.80"), QStringLiteral("198.51.100.80") }; // the API edges
         auto held = [&](const char *name) {
             g_case = name;
@@ -992,9 +995,9 @@ int main(int argc, char **argv)
         endHeld();
 
         g_case = "H7 renewals keep it; the person's Stop (release) lifts it at once";
-        clockMs += 5000;
+        wallMs += 5000; monoMs += 5000;
         CHECK(ks()->setHold(8000, api));
-        clockMs += 5000;
+        wallMs += 5000; monoMs += 5000;
         ks()->holdTick();
         xrayStop(xray2);
         CHECK(blockInForce()); // 10 s after arming, renewed at 5 s: still held
@@ -1016,10 +1019,10 @@ int main(int argc, char **argv)
         awgStart(tA);
         awgStop();
         CHECK(blockInForce());
-        clockMs += 7000;
+        wallMs += 7000; monoMs += 7000;
         ks()->holdTick();
         CHECK(blockInForce());
-        clockMs += 1001;
+        wallMs += 1001; monoMs += 1001;
         ks()->holdTick();
         checkAllGone();
 
@@ -1038,15 +1041,43 @@ int main(int argc, char **argv)
         awgStop();
         serviceStart();
         CHECK(blockInForce());
-        clockMs += 8001;
+        CHECK(ks()->holdTimerActive()); // round mac-D4: init() schedules the end itself (the tick below only stands in for it)
+        wallMs += 8001; monoMs += 8001;
         ks()->holdTick();
+        checkAllGone();
+
+        g_case = "H18 the wall clock steps back 1 h after the last renewal (no app): the block still ends within the bound";
+        reboot();
+        CHECK(ks()->setHold(8000, api));
+        awgStart(tA);
+        awgStop();
+        CHECK(blockInForce());
+        wallMs -= 3600LL * 1000;
+        monoMs += 8001;
+        ks()->holdTick();
+        checkAllGone();
+
+        g_case = "H19 the wall clock steps forward 1 h: a lease the app renews keeps the block";
+        reboot();
+        CHECK(ks()->setHold(8000, api));
+        awgStart(tA);
+        awgStop();
+        wallMs += 3600LL * 1000;
+        monoMs += 2000;
+        ks()->holdTick();
+        CHECK(blockInForce());
+        CHECK(ks()->setHold(8000, api)); // the app's next renewal
+        monoMs += 2000;
+        ks()->holdTick();
+        CHECK(blockInForce());
+        CHECK(ks()->setHold(0, {}));
         checkAllGone();
 
         g_case = "H12 a service start after the lease ended: the self-heal as before";
         reboot();
         CHECK(ks()->setHold(8000, api));
         awgStart(tA);
-        clockMs += 9000;
+        wallMs += 9000; monoMs += 9000;
         serviceStart();
         checkAllGone();
 
@@ -1096,7 +1127,7 @@ int main(int argc, char **argv)
         CHECK_EQ(tableOf(QStringLiteral("110.allowNets"), QStringLiteral("allownets")), (QStringList { kAwgPeer, api.first() }));
         CHECK(ks()->setHold(0, {}));
         checkAllGone();
-        KillSwitch::setClockForTest(nullptr);
+        KillSwitch::setClocksForTest(nullptr, nullptr);
     }
 
     g_case = "every command modelled";

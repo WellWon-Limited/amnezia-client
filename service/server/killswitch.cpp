@@ -3,6 +3,7 @@
 
 #include <QApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QHostAddress>
 #include <QTimer>
 #include <QRegularExpression>
@@ -48,10 +49,22 @@ static bool isValidIpOrCidr(const QString &value) {
 
 KillSwitch* s_instance = nullptr;
 
-// AVPN (round mac-D3): the lease's clock (wall clock: the deadline outlives the process).
-static qint64 systemClockMs() { return QDateTime::currentMSecsSinceEpoch(); }
-static qint64 (*s_clockMs)() = &systemClockMs;
-void KillSwitch::setClockForTest(qint64 (*clock)()) { s_clockMs = clock ? clock : &systemClockMs; }
+// AVPN (round mac-D3/D4): the lease's clocks. The running lease is measured on the monotonic clock - a wall clock that
+// steps back (no app renewing) must not keep a block beyond its ttl, one that steps forward must not end a lease the app
+// renews (review of 99635acf2, finding 1). The wall clock only carries the deadline across a service restart.
+static qint64 systemWallMs() { return QDateTime::currentMSecsSinceEpoch(); }
+static qint64 systemMonoMs()
+{
+    static QElapsedTimer t = []() { QElapsedTimer e; e.start(); return e; }();
+    return t.elapsed() + 1; // never 0: 0 means "no lease"
+}
+static qint64 (*s_wallMs)() = &systemWallMs;
+static qint64 (*s_monoMs)() = &systemMonoMs;
+void KillSwitch::setClocksForTest(qint64 (*wallMs)(), qint64 (*monoMs)())
+{
+    s_wallMs = wallMs ? wallMs : &systemWallMs;
+    s_monoMs = monoMs ? monoMs : &systemMonoMs;
+}
 static const QString kHoldUntilKey = QStringLiteral("Conf/killSwitchHoldUntilMs");
 static const QString kHoldAddrsKey = QStringLiteral("Conf/killSwitchHoldAddrs");
 
@@ -78,10 +91,12 @@ bool KillSwitch::init()
     // the VPN wanted on - mid-switch or mid-session) keeps the block that process left until the app's next session
     // opens or the lease ends; the dead session's passes go, the API edges stay. Never beyond kHoldMaxMs.
     {
+        // The one place the wall clock is judged: the deadline a previous process persisted, at most kHoldMaxMs away.
         const qint64 until = m_appSettigns->value(kHoldUntilKey, 0).toLongLong();
-        const qint64 now = s_clockMs();
+        const qint64 now = s_wallMs();
         if (until > now && until - now <= kHoldMaxMs && MacOSFirewall::isInstalled()) {
-            m_holdUntilMs = until;
+            m_holdUntilWallMs = until;
+            m_holdDeadlineMs = s_monoMs() + (until - now);
             m_holdAddrs = m_appSettigns->value(kHoldAddrsKey).toStringList();
             m_sessionAllowAddrs.clear();
             keepBlockForNextSession();
@@ -117,8 +132,9 @@ bool KillSwitch::refresh(bool enabled)
 
 #ifdef Q_OS_MACOS
     // AVPN (round mac-D3): the client sends refresh(false) for the kill switch turned off too - nothing is held then.
-    if (!enabled && m_holdUntilMs > 0) {
-        m_holdUntilMs = 0;
+    if (!enabled && m_holdDeadlineMs > 0) {
+        m_holdDeadlineMs = 0;
+        m_holdUntilWallMs = 0;
         m_holdAddrs.clear();
         persistHold();
     }
@@ -504,8 +520,9 @@ bool KillSwitch::setHold(int ttlMs, const QStringList &controlPlaneAddrs)
             qWarning() << "IPC: rejected an invalid control-plane address of the kill switch hold";
     }
     if (ttlMs > 0) {
-        const bool fresh = m_holdUntilMs == 0;
-        m_holdUntilMs = s_clockMs() + qMin(ttlMs, kHoldMaxMs);
+        const bool fresh = m_holdDeadlineMs == 0;
+        m_holdDeadlineMs = s_monoMs() + qMin(ttlMs, kHoldMaxMs);
+        m_holdUntilWallMs = s_wallMs() + qMin(ttlMs, kHoldMaxMs);
         const bool addrsChanged = addrs != m_holdAddrs;
         m_holdAddrs = addrs;
         persistHold();
@@ -516,8 +533,9 @@ bool KillSwitch::setHold(int ttlMs, const QStringList &controlPlaneAddrs)
             keepBlockForNextSession(); // the seat request of the next leg goes to the current edges
         return true;
     }
-    const bool had = m_holdUntilMs > 0;
-    m_holdUntilMs = 0;
+    const bool had = m_holdDeadlineMs > 0;
+    m_holdDeadlineMs = 0;
+    m_holdUntilWallMs = 0;
     m_holdAddrs.clear();
     persistHold();
     if (m_holdTimer)
@@ -534,16 +552,26 @@ bool KillSwitch::setHold(int ttlMs, const QStringList &controlPlaneAddrs)
 #endif
 }
 
+bool KillSwitch::holdTimerActive() const
+{
+#ifdef Q_OS_MACOS
+    return m_holdTimer && m_holdTimer->isActive();
+#else
+    return false;
+#endif
+}
+
 void KillSwitch::holdTick()
 {
 #ifdef Q_OS_MACOS
-    if (m_holdUntilMs == 0)
+    if (m_holdDeadlineMs == 0)
         return;
-    if (s_clockMs() < m_holdUntilMs) {
+    if (s_monoMs() < m_holdDeadlineMs) {
         armHoldTimer();
         return;
     }
-    m_holdUntilMs = 0;
+    m_holdDeadlineMs = 0;
+    m_holdUntilWallMs = 0;
     m_holdAddrs.clear();
     persistHold();
     qInfo() << "[killswitch] kill switch hold: expired (no renewal from the app)";
@@ -555,7 +583,7 @@ void KillSwitch::holdTick()
 #ifdef Q_OS_MACOS
 bool KillSwitch::holdActive() const
 {
-    return m_holdUntilMs > 0 && s_clockMs() < m_holdUntilMs;
+    return m_holdDeadlineMs > 0 && s_monoMs() < m_holdDeadlineMs;
 }
 
 // The block stays: pf and every anchor of the ended session; its pass table also lets the API edges through (the next
@@ -587,8 +615,8 @@ void KillSwitch::persistHold()
 {
     if (!m_appSettigns)
         return;
-    if (m_holdUntilMs > 0) {
-        m_appSettigns->setValue(kHoldUntilKey, m_holdUntilMs);
+    if (m_holdDeadlineMs > 0) {
+        m_appSettigns->setValue(kHoldUntilKey, m_holdUntilWallMs);
         m_appSettigns->setValue(kHoldAddrsKey, m_holdAddrs);
     } else {
         m_appSettigns->remove(kHoldUntilKey);
@@ -603,7 +631,7 @@ void KillSwitch::armHoldTimer()
         m_holdTimer->setSingleShot(true);
         connect(m_holdTimer, &QTimer::timeout, this, &KillSwitch::holdTick);
     }
-    const qint64 left = m_holdUntilMs - s_clockMs();
+    const qint64 left = m_holdDeadlineMs - s_monoMs();
     m_holdTimer->start(int(qBound(qint64(0), left + 10, qint64(kHoldMaxMs) + 10)));
 }
 #endif

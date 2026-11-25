@@ -45,7 +45,10 @@ public:
     // macOS only (the platform whose service owns a kill-switch session); elsewhere a no-op.
     bool setHold(int ttlMs, const QStringList &controlPlaneAddrs);
     void holdTick(); // the lease's end (its timer; the host check calls it with its clock)
-    static void setClockForTest(qint64 (*clock)());
+    // The lease runs on the process's monotonic clock; the wall clock is only what is persisted for a restart (judged
+    // once in init()). The host check replaces both.
+    static void setClocksForTest(qint64 (*wallMs)(), qint64 (*monoMs)());
+    bool holdTimerActive() const; // the host check: the lease's end is scheduled
     static constexpr int kHoldMaxMs = 15000;
 
 private:
@@ -61,7 +64,8 @@ private:
     void liftHeldBlock(const char *why);
     void persistHold();
     void armHoldTimer();
-    qint64 m_holdUntilMs = 0;        // wall clock; 0 = no lease
+    qint64 m_holdDeadlineMs = 0;     // monotonic clock (round mac-D4); 0 = no lease
+    qint64 m_holdUntilWallMs = 0;    // the same deadline on the wall clock - persisted for a service restart only
     QStringList m_holdAddrs;         // the API edges a seat request needs while no session is open
     QStringList m_sessionAllowAddrs; // the pass table of the session that is (or was last) open
     bool m_blockHeld = false;        // the block of an ended session stays, owned by the lease
