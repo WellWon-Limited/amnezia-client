@@ -729,8 +729,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
 #endif
     connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamSessionAdopted, this,
             [this](const QString &nodeId) {
-                // macOS: the daemon's live Xray session is this upstream node (its record) - identify it.
+                // macOS: the daemon's live Xray session is this upstream node (its record) - identify it (air-D S2: by the
+                // record's stub when the node is not in the pool now, a Scanner row's profile).
                 syncIntent(); // I7: an adopted session is stamped with the value in force
+                restoreAdoptedUpstreamNode();
                 m_engine.adoptTunnelConnected(nodeId, QStringLiteral("xray"), QString());
                 reliabilityEvent(QStringLiteral("upstream_adopt node=%1").arg(nodeId));
                 emit changed();
@@ -4276,6 +4278,10 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
     m_latch.needStatusBeforeStart = false;
     m_statusRequestAttempts = 0;
     m_statusRetryTimer.stop();
+    // C3 of 24.11 + air-D S2 of 25.11 (iOS): the seat of an adopted provider session is this app's again, and its record's stub joins
+    // the candidates BEFORE the engine adopts by node id - so the session is named even when its node is not in the pool now.
+    m_tunnel.adoptUpstreamSession();
+    restoreAdoptedUpstreamNode();
     const QString nodeId = metadata.value(QStringLiteral("node_id")).toString();
     const QString proto = metadata.value(QStringLiteral("proto")).toString();
     const QString endpoint = metadata.value(QStringLiteral("endpoint")).toString();
@@ -4288,7 +4294,6 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
         reliabilityEvent(QStringLiteral("adopt_identity_pending"));
     }
     identifyAdoptedSession();
-    m_tunnel.adoptUpstreamSession(); // C3 of 24.11 (iOS): the seat of an adopted provider session is this app's again
     reliabilityEvent(QStringLiteral("adopt_%1 verdict=%2 node=%3")
                          .arg(QLatin1String(why)).arg(int(verdict)).arg(m_engine.currentNodeId()));
     syncAttempt();
@@ -4335,14 +4340,15 @@ void AvpnEngineQml::identifyAdoptedSession()
         return;
     const QString proto = metadata.value(QStringLiteral("proto")).toString();
     const QString endpoint = metadata.value(QStringLiteral("endpoint")).toString();
+    // C3 of 24.11 + air-D S2: the metadata came after the adoption - the seat and the record's stub first, then the identity.
+    m_tunnel.adoptUpstreamSession();
+    restoreAdoptedUpstreamNode();
     // В фазе Connected adoptTunnelConnected только уточняет identity (возвращает false).
     m_engine.adoptTunnelConnected(metadata.value(QStringLiteral("node_id")).toString(), proto, endpoint);
     if (!m_engine.currentIdentityKnown())
         m_engine.tryIdentifyCurrentNode(); // по endpoint-подсказке сессии (K5/B3)
-    if (m_engine.currentIdentityKnown()) {
+    if (m_engine.currentIdentityKnown())
         reliabilityEvent(QStringLiteral("adopt_identity_resolved node=%1").arg(m_engine.currentNodeId()));
-        m_tunnel.adoptUpstreamSession(); // C3 of 24.11: the metadata came after the adoption
-    }
 #endif
 }
 
@@ -8696,6 +8702,37 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok, const QString &failReason)
 
 // The one data check of every raised path (the path engine's RunDataCheck puts every transport into Verifying):
 // an upstream node - its sized /v1/probe; our node - ONE GET /v1/whoami (generate_204 only as its tiebreak).
+// air-D S2 (25.11): a provider session adopted after a relaunch is NAMED by its node even when the node is not in the pool now - a
+// Scanner row's profile lives only in memory (ServiceEngine::offerScanNodes), a standby-pack candidate only once the pack is loaded.
+// The adopted record's stub (VpnConnectionTunnelControl::adoptedUpstreamStub) joins the candidates through the subscription's own
+// parser before the engine adopts by node id. Nothing when the node is known or no adopted session has a stub.
+void AvpnEngineQml::restoreAdoptedUpstreamNode()
+{
+    const QJsonObject stub = m_tunnel.adoptedUpstreamStub();
+    const QString nodeId = stub.value(QStringLiteral("node_id")).toString();
+    if (nodeId.isEmpty() || m_engine.nodeById(nodeId))
+        return;
+    m_engine.offerScanNodes(QJsonArray{stub});
+    syncStandbyCandidates();
+    if (m_engine.nodeById(nodeId)) // refused (switch off, another upstream revision): asked again on the next identification, silently
+        reliabilityEvent(QStringLiteral("adopt_stub_restored node=%1").arg(nodeId));
+}
+
+// The live tunnel is a provider session although the engine cannot name its node: this app owns its seat (an adopted record) or,
+// on iOS / macOS NE, the session's own metadata says so. Such a session is never judged by whoami.
+bool AvpnEngineQml::unnamedProviderSession() const
+{
+    if (m_engine.currentIdentityKnown())
+        return false;
+    if (m_tunnel.upstreamActive() && !m_tunnel.upstreamPreparing())
+        return true;
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    return IosController::Instance()->sessionMetadata().value(QStringLiteral("upstream")).toInt() == 1;
+#else
+    return false;
+#endif
+}
+
 void AvpnEngineQml::startDataPathVerification()
 {
     m_upstreamFallbackVerify = false;
@@ -8706,8 +8743,10 @@ void AvpnEngineQml::startDataPathVerification()
         const avpn::TunnelStats st = m_tunnel.readStats();
         m_verifyRxStart = st.valid ? st.rxBytes : -1;
     }
-    // Upstream nodes: their own check (sized /v1/probe through the provider); whoami never applies.
-    if (m_engine.currentNodeIsUpstream()) {
+    // Upstream nodes: their own check (sized /v1/probe through the provider); whoami never applies - also to a provider session the
+    // engine cannot name (air-D S2 of 25.11: an adopted Scanner-row session with no identity was judged by whoami, which calls every
+    // exit that is not ours "bypass", and a working provider tunnel was replaced).
+    if (m_engine.currentNodeIsUpstream() || unnamedProviderSession()) {
         startUpstreamVerification();
         return;
     }

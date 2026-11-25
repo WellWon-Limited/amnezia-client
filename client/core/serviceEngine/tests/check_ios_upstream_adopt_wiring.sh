@@ -85,18 +85,37 @@ m2="$(first_line "$ios_ad" 'm_upOwner.adoptHandedOver(')"
 { [ -n "$m1" ] && [ -n "$m2" ] && [ "$m1" -lt "$m2" ]; } || bad "R4: the match must come before the adoption"
 has "$(grep -v '^[[:space:]]*//' "$ADH")" 'void adoptUpstreamSession();' || bad "R4: the adapter must declare adoptUpstreamSession()"
 
-# R5
+# R5 (+ device round air-D 25.11, S2): on every iOS adoption the seat is owned and the record's stub joins the candidates AFTER the
+# adoption verdict and BEFORE the engine adopts by node id (a Scanner row's node is not in the pool after a relaunch); the same when
+# the metadata comes late (identifyAdoptedSession) and on the macOS record adoption.
 tao="$(body_of "$FAC" 'bool AvpnEngineQml::tryAdoptObservedTunnel(')"
 ios_tao="$(printf '%s\n' "$tao" | awk '/^#if defined\(Q_OS_IOS\) \|\| defined\(MACOS_NE\)/ { on = 1; next } /^#else/ && on { exit } on { print }')"
-has "$ios_tao" 'm_tunnel.adoptUpstreamSession();' \
-    || bad "R5: every iOS adoption of a live tunnel must give the adapter the chance to own its seat (tryAdoptObservedTunnel)"
-t1="$(first_line "$ios_tao" 'm_engine.adoptTunnelConnected(nodeId, proto, endpoint)')"
-t2="$(first_line "$ios_tao" 'm_tunnel.adoptUpstreamSession();')"
-{ [ -n "$t1" ] && [ -n "$t2" ] && [ "$t1" -lt "$t2" ]; } || bad "R5: the seat follows the engine's adoption, never precedes it"
+t0="$(first_line "$ios_tao" 'if (verdict == TunnelAdoption::Reject)')"
+t1="$(first_line "$ios_tao" 'm_tunnel.adoptUpstreamSession();')"
+t2="$(first_line "$ios_tao" 'restoreAdoptedUpstreamNode();')"
+t3="$(first_line "$ios_tao" 'm_engine.adoptTunnelConnected(nodeId, proto, endpoint)')"
+{ [ -n "$t0" ] && [ -n "$t1" ] && [ -n "$t2" ] && [ -n "$t3" ] && [ "$t0" -lt "$t1" ] && [ "$t1" -lt "$t2" ] && [ "$t2" -lt "$t3" ]; } \
+    || bad "R5/S2: tryAdoptObservedTunnel must own the seat, then restore the record's stub, after the verdict and before the engine adopts by node id"
 ias="$(body_of "$FAC" 'void AvpnEngineQml::identifyAdoptedSession()')"
-res="$(printf '%s\n' "$ias" | awk '/if \(m_engine.currentIdentityKnown\(\)\) \{/ { on = 1 } on { print } on && /^    \}/ { exit }')"
-has "$res" 'm_tunnel.adoptUpstreamSession();' \
-    || bad "R5: an adopted identity that resolves late must also reach adoptUpstreamSession (identifyAdoptedSession)"
+i1="$(first_line "$ias" 'm_tunnel.adoptUpstreamSession();')"
+i2="$(first_line "$ias" 'restoreAdoptedUpstreamNode();')"
+i3="$(first_line "$ias" 'm_engine.adoptTunnelConnected(metadata.value(QStringLiteral("node_id")).toString(), proto, endpoint);')"
+{ [ -n "$i1" ] && [ -n "$i2" ] && [ -n "$i3" ] && [ "$i1" -lt "$i2" ] && [ "$i2" -lt "$i3" ]; } \
+    || bad "R5/S2: a late identity (identifyAdoptedSession) must own the seat and restore the stub before it adopts by node id"
+mac="$(awk '/upstreamSessionAdopted, this,/ { on = 1 } on { print } on && /\}\);/ { exit }' "$FAC" | grep -v '^[[:space:]]*//')"
+m1="$(first_line "$mac" 'restoreAdoptedUpstreamNode();')"
+m2="$(first_line "$mac" 'm_engine.adoptTunnelConnected(nodeId, QStringLiteral("xray"), QString());')"
+{ [ -n "$m1" ] && [ -n "$m2" ] && [ "$m1" -lt "$m2" ]; } || bad "S2: the macOS record adoption must restore the stub before it identifies the node"
+ran="$(body_of "$FAC" 'void AvpnEngineQml::restoreAdoptedUpstreamNode()')"
+has "$ran" 'const QJsonObject stub = m_tunnel.adoptedUpstreamStub();' && has "$ran" 'm_engine.offerScanNodes(QJsonArray{stub});' \
+    && has "$ran" 'syncStandbyCandidates();' || bad "S2: the adopted stub must go through the subscription's parser into the candidates"
+dpv="$(body_of "$FAC" 'void AvpnEngineQml::startDataPathVerification()')"
+has "$dpv" 'if (m_engine.currentNodeIsUpstream() || unnamedProviderSession()) {' \
+    || bad "S2: a provider session the engine cannot name must never be judged by whoami"
+ups="$(body_of "$FAC" 'bool AvpnEngineQml::unnamedProviderSession() const')"
+has "$ups" 'if (m_engine.currentIdentityKnown())' && has "$ups" 'm_tunnel.upstreamActive() && !m_tunnel.upstreamPreparing()' \
+    && has "$ups" 'sessionMetadata().value(QStringLiteral("upstream")).toInt() == 1' \
+    || bad "S2: an unnamed provider session = an owned (not prepared) seat or the session's own upstream metadata"
 
 # R6 (the end of an adopted session takes the existing path)
 dn="$(body_of "$ADP" 'void VpnConnectionTunnelControl::down()')"
