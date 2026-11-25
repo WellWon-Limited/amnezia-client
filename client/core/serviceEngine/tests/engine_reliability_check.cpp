@@ -711,6 +711,73 @@ int main(int argc, char **argv)
         const bool airOld = u1(false), airNew = u1(true);
         fprintf(stderr, "air-D U1 airplane 49 s: 2a705d9c7 failover=%d; tribe.19 failover=%d\n", int(airOld), int(airNew));
         CHECK(airOld && !airNew);
+        // Review of tribe.19, L3: a really dead tunnel (no handshake since 600 s, no data) whose network key changes every
+        // 60 s (Wi-Fi / LTE), the app probing once a minute (background), 30 s after each change. 28cd57c32 reset the
+        // failed-probe count at every change: it never passed 1. tribe.20 resets it only inside the series bound.
+        const auto everyMinute = [&](bool restart) {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            qint64 clockMs = 1'800'000'000'000LL;
+            eng.setNowMsForTest([&clockMs] { return clockMs; });
+            eng.setTunnel(&tun);
+            eng.setRestartEvidenceOnNetworkChange(restart);
+            eng.observeNetwork(wifi);
+            QString err;
+            CHECK(eng.loadSubscription(subJson({ EE, US }, 7), err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+            CHECK(eng.connect(err));
+            CHECK(upConnected(eng));
+            const qint64 startMs = clockMs;
+            const qint64 handshake = clockMs / 1000 - 600;
+            for (int minute = 0; minute < 12; ++minute) {
+                clockMs = startMs + minute * 60'000LL;
+                eng.observeNetwork(minute % 2 ? lte : wifi);
+                if (!restart) eng.noteNetworkChange(clockMs / 1000); // 28cd57c32: every key change reset the count
+                clockMs += 30'000;
+                tun.st = mkStats(handshake, 1000, 9000 + minute * 60'000);
+                eng.tick(clockMs / 1000);
+                if (eng.feedProbeResult(false, clockMs - 3000) || eng.state() != EngineState::Connected)
+                    return qint64(minute * 60 + 30);
+            }
+            return qint64(-1);
+        };
+        const qint64 l3Old = everyMinute(false), l3New = everyMinute(true);
+        fprintf(stderr, "L3 key every 60 s, probes every 60 s, dead tunnel: count reset at every change: failover %s; tribe.20: at %llds\n",
+                l3Old < 0 ? "never" : qPrintable(QString::number(l3Old)), (long long)l3New);
+        CHECK(l3Old < 0 && l3New > 0 && l3New <= 400);
+        // Q3: a refinement of the SAME network (the subnet appears behind the same gateway) is no network change for the
+        // verdicts: no grace, no count reset, no evidence restart; nor is a system notification (e.g. our own tunnel).
+        {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            qint64 clockMs = 1'800'000'000'000LL;
+            eng.setNowMsForTest([&clockMs] { return clockMs; });
+            eng.setTunnel(&tun);
+            eng.setRestartEvidenceOnNetworkChange(true);
+            path::NetworkObservation bare = wifi;
+            bare.subnet.clear();
+            eng.observeNetwork(bare);
+            QString err;
+            CHECK(eng.loadSubscription(subJson({ EE, US }, 7), err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+            CHECK(eng.connect(err));
+            CHECK(upConnected(eng));
+            clockMs += 200'000;
+            tun.st = mkStats(clockMs / 1000 - 300, 1000, 9000);  // dead: no handshake for 300 s
+            eng.tick(clockMs / 1000);
+            bool failedOver = false;
+            for (int i = 0; i < 3; ++i)
+                failedOver = eng.feedProbeResult(false, clockMs - 3000) || failedOver;
+            eng.observeNetwork(wifi);                 // the same Wi-Fi, now with its subnet: a new key, not a new network
+            failedOver = eng.feedProbeResult(false, clockMs - 3000) || failedOver;
+            CHECK(failedOver);                        // the 4th failure, the handshake 300 s old: the failover
+        }
+        {
+            HealthLoop h;
+            h.noteEvidenceRestart(1000);
+            CHECK(h.noteChangeSeries(1100) && h.evidenceSinceEpoch() == 1000); // a system notification moves nothing
+            CHECK(!h.noteChangeSeries(1121 + 0) || h.evidenceSinceEpoch() == 1000);
+        }
         // Flapping every 25 s on a dead path: the evidence restarts at most until 120 s after the first change of the
         // series, so the verdict is not muted forever.
         {

@@ -386,8 +386,12 @@ order "$cfg_start" '#ifdef Q_OS_IOS' 'freezeCachedFeatures(c.features, /\*ios=\*
 # tribe.17 (its review: TribeRoaming.swift only) = tribe.16's patches unchanged.
 # tribe.18 (the second review: TribeRoaming.swift only) = tribe.17's patches unchanged.
 # tribe.19 (device round air-D: TribeRoaming.swift only) = tribe.18's patches unchanged.
-grep -q 'self.requires("awg-apple/3.1.4-tribe.19")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.19"
-grep -q '^    version = "3.1.4-tribe.19"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.19"
+# tribe.20 (review of tribe.19: TribeRoaming.swift only) = tribe.19's patches unchanged.
+grep -q 'self.requires("awg-apple/3.1.4-tribe.20")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.20"
+grep -q '^    version = "3.1.4-tribe.20"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.20"
+list20="$(awk '/^  "3.1.4-tribe.20":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+[ -n "$list20" ] && [ "$list20" = "$(awk '/^  "3.1.4-tribe.19":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')" ] \
+    || bad "E7: tribe.20 must carry the package patches of tribe.19 unchanged, in the same order"
 list19="$(awk '/^  "3.1.4-tribe.19":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
 [ -n "$list19" ] && [ "$list19" = "$(awk '/^  "3.1.4-tribe.18":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')" ] \
     || bad "E7: tribe.19 must carry the package patches of tribe.18 unchanged, in the same order"
