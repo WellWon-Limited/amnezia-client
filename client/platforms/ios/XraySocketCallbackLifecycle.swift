@@ -284,8 +284,10 @@ enum XrayHevStop: Equatable {
 // again - never after a failed start (the error used to be dropped: "Connected" with no hev running). A failed
 // restart is tried once more after any earlier hev run of the process has returned (bounded); a second failure ends
 // the tunnel with that error (cancelTunnelWithError), so the app sees it end. A restart superseded by a newer one or
-// by the session's stop touches nothing; a lease that ended (decision E) leaves the tunnel to the app's dead-session
-// path, still reasserting.
+// by the session's stop touches nothing. A lease that ended (decision E) clears `reasserting` without a restart: the
+// tunnel is then exactly where an ordinary terminal answer leaves it (core stopped, tunnel kept, Connected), and the
+// app - whose status poll reads only a Connected tunnel (ios_controller.mm checkStatus) - reads the terminal code
+// and leaves the node through its dead-session path (review R50 1: still reasserting, the app never learned it).
 enum XrayRoamRestart: Equatable {
     case connected
     case superseded
@@ -328,8 +330,14 @@ struct XrayRoamDriver {
         case .connected:
             setReasserting(false)
             completion(nil)
-        case .superseded, .leaseEnded:
+        case .superseded:
             log("Tribe roaming (xray): restart \(next) (\(String(describing: error)))")
+            completion(error)
+        case .leaseEnded:
+            // Review R50 1: back to the state of an ordinary terminal answer (Connected, core stopped by the lease):
+            // the app polls the status of a Connected tunnel only, reads the terminal code there and leaves the node.
+            log("Tribe roaming (xray): restart \(next) (\(String(describing: error))); the app leaves the node")
+            setReasserting(false)
             completion(error)
         case .retry:
             log("Tribe roaming (xray): in-place restart failed (\(String(describing: error))); once more after the earlier hev returned")

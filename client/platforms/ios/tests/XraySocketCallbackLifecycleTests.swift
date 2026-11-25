@@ -252,7 +252,7 @@ private final class SystemCompletions: @unchecked Sendable {
     }
 }
 
-private enum FakeStartError: Error { case superseded, hevBusy }
+private enum FakeStartError: Error { case superseded, hevBusy, leaseTerminal }
 
 private final class ModelHev: XrayHevControl, @unchecked Sendable {
     enum Native { case scoped, unsynchronized }
@@ -442,16 +442,21 @@ private final class ProviderModel: @unchecked Sendable {
 
     // handle(networkChange:) through the provider's XrayRoamDriver
     let roamQueue = DispatchQueue(label: "test.roam")
+    var leaseStopped = false                       // tribeUpstream.coreStoppedByLease (upstreamLeaseTerminal)
+    var duringRestartStop: (() -> Void)?           // something that lands between the restart's stop and its start
     func roam(completion: @escaping (Error?) -> Void) {
         let driver = XrayRoamDriver(
-            stopCore: { [self] in nativeStop() },
+            stopCore: { [self] in nativeStop(); duringRestartStop?() },
             startCore: { [self] done in
                 stateLock.lock(); coreStarts += 1; stateLock.unlock()
+                // startXray's guard (PacketTunnelProvider+Xray.swift): a core the lease stopped is never started
+                guard !leaseStopped else { done(FakeStartError.leaseTerminal); return }
                 generation = session.beginSession(protocolName: "xray", preservingCounters: true)
                 queueHevWorker(answer: done)
             },
-            classify: { error in
-                (superseded: (error as? FakeStartError) == .superseded, leaseEnded: false)
+            classify: { [self] error in
+                (superseded: (error as? FakeStartError) == .superseded,
+                 leaseEnded: (error as? FakeStartError) == .leaseTerminal || leaseStopped)
             },
             sessionStopping: { [self] in slot.sessionStopping },
             waitEarlierRun: { [self] in _ = runs.waitIdle(until: Date().addingTimeInterval(idleWait)) },
@@ -616,7 +621,31 @@ private func testRoamRestartFailure() {
         usleep(100_000)
         _ = m.slot.stopBegan()
         expect(done.wait(timeout: .now() + 5) == .success, "the restart ended")
-        expect(m.cancels.isEmpty && !m.clearedWithoutHev, "a stopping session got no retry and no tunnel error")
+        expect(m.cancels.isEmpty && !m.clearedWithoutHev && m.reasserting,
+               "a stopping session got no retry, no tunnel error, reasserting untouched (reasserting \(m.reasserting))")
+        _ = m.workers.wait(timeout: .now() + 3)
+    }
+    // 5. (review R50 1) the seat ends during the restart (a terminal renewal answer between its stop and its start):
+    //    the start is refused, nothing is retried and the tunnel is not cancelled, and `reasserting` is cleared - the
+    //    tunnel is back in the state of an ordinary terminal answer (Connected, core stopped by the lease), where the
+    //    app's status poll (Connected only) reads `upstream.state = terminal` and leaves the node (onUpstreamLeave).
+    do {
+        let m = ProviderModel(hev: ModelHev(native: .scoped))
+        m.queueHevWorker()
+        expect(waitUntil(2) { m.hevRunning() }, "A runs")
+        usleep(30_000)
+        m.duringRestartStop = { [m] in m.leaseStopped = true }
+        let done = DispatchSemaphore(value: 0)
+        var result: Error?? = .none
+        m.roam { result = .some($0); done.signal() }
+        expect(done.wait(timeout: .now() + 3) == .success, "the restart ended")
+        let refused = result.flatMap { $0 }.map { ($0 as? FakeStartError) == .leaseTerminal } ?? false
+        expect(refused && m.coreStarts == 1 && m.cancels.isEmpty,
+               "the lease's refusal is final: no retry, no tunnel error (result \(String(describing: result)), starts \(m.coreStarts), cancels \(m.cancels))")
+        expect(!m.reasserting,
+               "a lease that ended during the restart must not leave the tunnel reasserting (the app never polls a reasserting tunnel)")
+        expect(!m.hevRunning(), "no hev was started for a core the lease stopped")
+        _ = m.stop()
         _ = m.workers.wait(timeout: .now() + 3)
     }
 }
