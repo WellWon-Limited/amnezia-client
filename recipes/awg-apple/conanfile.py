@@ -63,7 +63,9 @@ class AwgApple(ConanFile):
     # never released either: rebuilt from this recipe it gets tribe.17's TribeRoaming.swift.
     # tribe.18: tribe.17's patches + TribeRoaming.swift after the second review (handshake by time only, the
     # engine's RandomTrailers spellings, service TX settled over the handshake window). tribe.17 never shipped.
-    version = "3.1.4-tribe.18"
+    # tribe.19: tribe.18's patches + TribeRoaming.swift after device round air-D (a roam is another network;
+    # a stale session is proved at once on the new path). tribe.18 never shipped.
+    version = "3.1.4-tribe.19"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
@@ -126,6 +128,8 @@ class AwgApple(ConanFile):
     _xray_pins["3.1.4-tribe.17"] = _xray_pins["3.1.4-tribe.16"]
     # tribe.18 = tribe.17 (same patches) with the TribeRoaming.swift of the second review.
     _xray_pins["3.1.4-tribe.18"] = _xray_pins["3.1.4-tribe.17"]
+    # tribe.19 = tribe.18 (same patches) with the TribeRoaming.swift of device round air-D.
+    _xray_pins["3.1.4-tribe.19"] = _xray_pins["3.1.4-tribe.18"]
 
     @property
     def _pins(self):

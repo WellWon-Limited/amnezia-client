@@ -540,6 +540,10 @@ void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
     if (m_raceWait)
         endRaceWait("network_changed"); // its session was asked for the old network
     prepareProber(); // the host warms up for the new network (caps, probe session)
+    // K1 (air-D): the path engine's network key is the change the verdicts must see (on iOS the system's own network
+    // notification sees our tunnel, not the Wi-Fi return): the grace window, the probe count and the evidence restart.
+    if (m_restartEvidence && m_state == EngineState::Connected)
+        noteNetworkChange();
     feedOwner(path::AttemptEvent::networkChanged(nowMs(), m_net.current()));
 }
 
@@ -1432,7 +1436,12 @@ void ServiceEngine::noteHealthyTick(const TunnelStats &stats, qint64 nowEpoch)
 void ServiceEngine::noteNetworkChange(qint64 nowEpoch)
 {
     m_probeFailStreak = 0; // failures of the old path say nothing about the new one (fourth review of 141, H2)
-    m_health.noteNetworkChange(nowEpoch >= 0 ? nowEpoch : QDateTime::currentSecsSinceEpoch());
+    const qint64 now = nowEpoch >= 0 ? nowEpoch : nowMs() / 1000; // nowMs(): the wall clock (a test sets its own)
+    m_health.noteNetworkChange(now);
+    if (m_restartEvidence) { // K1 (air-D): silence observed on the old network is no evidence on this one
+        m_health.noteEvidenceRestart(now);
+        m_evidenceSinceMs = nowEpoch >= 0 ? nowEpoch * 1000 : nowMs();
+    }
 }
 
 bool ServiceEngine::onRebindResult(bool performed, const QString &reason)
@@ -1483,6 +1492,14 @@ bool ServiceEngine::notifyConnectionLost()
     return onDead(/*tunnelStillUp=*/false, QStringLiteral("dead (failover)")); // реальный обрыв: туннель уже опущен → up() сразу
 }
 
+bool ServiceEngine::feedProbeResult(bool ok, qint64 startedAtMs)
+{
+    // K1 (air-D): a failure of a probe that started before the last network change belongs to the old network.
+    if (!ok && m_restartEvidence && startedAtMs > 0 && startedAtMs < m_evidenceSinceMs)
+        return false;
+    return feedProbeResult(ok);
+}
+
 // AVPN awg31-xray-v1: живая проба через туннель (QualityProbe фасада) — xray-половина DEAD-критерия.
 bool ServiceEngine::feedProbeResult(bool ok)
 {
@@ -1504,12 +1521,15 @@ bool ServiceEngine::feedProbeResult(bool ok)
         if (m_probeFailStreak < xrayProbeFailCyclesTuned())
             return false;
     } else {
-        const qint64 nowEpoch = QDateTime::currentSecsSinceEpoch();
+        const qint64 nowEpoch = nowMs() / 1000; // the wall clock (a test sets its own)
         // tribe.17 (device round 24.11 B1): the extension's stall verdict corroborates too, while fresh; -1 on every
         // platform but iOS with a tribe.17 extension (TunnelStats::dataStallSec), where this is the rule of 141.
         const TunnelStats live = m_tunnel ? m_tunnel->readStats() : TunnelStats{};
-        const qint64 dataStallSec = HealthLoop::freshDataStall(live.dataStallSec, live.dataStallAtMs,
-                                                               QDateTime::currentMSecsSinceEpoch());
+        qint64 dataStallSec = HealthLoop::freshDataStall(live.dataStallSec, live.dataStallAtMs, nowMs());
+        // K1 (air-D): never longer than what was observed on this network (an extension before tribe.19 does not
+        // restart its verdict at a roam).
+        if (m_restartEvidence && dataStallSec > 0 && m_health.evidenceSinceEpoch() > 0)
+            dataStallSec = qMin(dataStallSec, qMax<qint64>(0, nowEpoch - m_health.evidenceSinceEpoch()));
         if (!HealthLoop::probeDeadCorroborated(m_probeFailStreak, awgProbeFailCyclesTuned(),
                                                m_health.inNetworkGrace(nowEpoch), m_health.latestHandshakeEpoch(),
                                                nowEpoch, awgProbeDeadHandshakeAgeSTuned(), dataStallSec,

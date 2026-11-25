@@ -1022,6 +1022,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // Эндпоинты по приоритету: свой бэкенд-пинг (тот же путь, что и control plane) → публичный фолбэк.
     // Поток RTT → m_signal (EWMA+гистерезис) → liveBars 0..5. Запуск — из onTick(), когда Connected.
     m_probe = new QualityProbe(m_nam, this);
+#ifdef Q_OS_IOS
+    // Device round air-D (K1): on iOS every network change restarts what the AmneziaWG verdicts count (ServiceEngine).
+    m_engine.setRestartEvidenceOnNetworkChange(true);
+#endif
     m_probe->setEndpoints({livePingUrl(),
                            QStringLiteral("https://connectivitycheck.gstatic.com/generate_204")});
     connect(m_probe, &QualityProbe::result, this, [this](int rttMs, bool reachable) {
@@ -1065,7 +1069,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                                                                    m_probe->timeoutBudgetMs()))
             return;
 #endif
-        if (m_engine.feedProbeResult(reachable)) { // a dead live session: the failover attempt of the owner
+        if (m_engine.feedProbeResult(reachable, m_probe->startedWallMs())) { // a dead live session: the failover attempt of the owner
             syncAttempt();
             emit changed();
         }

@@ -371,6 +371,13 @@ public:
     // platform, called only from the facade's Q_OS_IOS block (PLATFORM-SCOPING §2).
     bool reenterVerifying();
     bool feedProbeResult(bool ok);
+    // Device round air-D (K1): `startedAtMs` = when the probe started (wall clock; -1 = unknown). With the evidence
+    // restart on, a failed probe that started before the last network change says nothing about this network.
+    bool feedProbeResult(bool ok, qint64 startedAtMs);
+    // Device round air-D (K1, iOS opts in): every network change - the path engine's network key too, which on iOS is
+    // the one that sees a Wi-Fi return (the system's default network is our own tunnel) - restarts what the verdicts
+    // count: the handshake age, the extension's stall verdict, the failed-probe count. Off = the rule of 141.
+    void setRestartEvidenceOnNetworkChange(bool on) { m_restartEvidence = on; }
 
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
@@ -714,6 +721,8 @@ private:
     QList<SubscriptionNode> m_merged;          // subscription nodes + pack candidates (the pick pool)
     void rebuildCandidates();
     int           m_probeFailStreak = 0; // xray: провалы живой пробы подряд (feedProbeResult)
+    bool          m_restartEvidence = false; // K1 (air-D): see setRestartEvidenceOnNetworkChange
+    qint64        m_evidenceSinceMs = 0;     // K1: the last network change (wall clock, ms)
     qint64        m_upStartedMs = 0;     // момент последнего up()
     std::optional<Subscription> m_pendingReseed; // отложенное тело reseed (применить в терминале)
 };
