@@ -157,7 +157,18 @@ drv="$(code "$IOS/XraySocketCallbackLifecycle.swift")"
 has "$drv" 'guard failed else { return .connected }' && has "$drv" 'return attempt < 2 ? .retry : .endTunnel' \
     || bad "P6: only a restart that did not fail is connected; one retry, then the end"
 
+# ---- P7 (device rounds air-F / air-G, case W4) ----
+# The in-place restart of the Xray core keeps the session's network settings: startXray applies them only through
+# XrayNetworkSettingsStep, and the step keeps them for a restart of a session that has them.
+XR="$IOS/PacketTunnelProvider+Xray.swift"
+sx="$(sbody "$XR" 'func startXray(preservingCounters: Bool = false,')"
+has "$sx" 'let settingsStep = XrayNetworkSettingsStep.forStart(inSessionRestart: preservingCounters,' || bad "P7: startXray decides the settings step"
+[ "$(printf '%s\n' "$sx" | grep -c 'setTunnelNetworkSettings(')" = "1" ] || bad "P7: one place applies the network settings"
+has "$sx" 'setTunnelNetworkSettings(settings, completionHandler: settingsReady)' || bad "P7: the settings are applied only in the .apply step"
+has "$sx" 'if !preservingCounters { xrayNetworkSettingsApplied = false }' || bad "P7: a fresh start forgets the previous session's settings"
+has "$drv" 'inSessionRestart && appliedInSession ? .keep : .apply' || bad "P7: an in-session restart keeps applied settings"
+
 if [ "$fail" -ne 0 ]; then
     exit 1
 fi
-echo "ios start park wiring: OK (P1 controller, P2 facade, P3 extension + app log, P4 owner + engine, P5 hev stop + renewer, P6 roam restart)"
+echo "ios start park wiring: OK (P1 controller, P2 facade, P3 extension + app log, P4 owner + engine, P5 hev stop + renewer, P6 roam restart, P7 settings kept)"

@@ -123,6 +123,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // kill-switch: XrayConfig.restartOnPathLoss=1 -> прежнее поведение (рестарт на любую смену).
     var xrayRestartOnPathLoss = false
     var xrayAppliedUplinkSignature: String?
+    // AVPN (case W4, XrayNetworkSettingsStep): this session's network settings are applied (a fresh start clears it).
+    var xrayNetworkSettingsApplied = false
 
     // AVPN (волна AWG 3.1 + Xray, этап D3): runtime-статус и жизненный цикл xray-пути.
     // Сессия (поколение + счётчики rx/tx tun-интерфейса hev), реестр сырого контекста

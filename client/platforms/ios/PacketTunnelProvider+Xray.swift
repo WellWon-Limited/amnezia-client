@@ -356,11 +356,17 @@ extension PacketTunnelProvider {
 
             let updatedData = try JSONSerialization.data(withJSONObject: jsonDict, options: [])
 
-            setTunnelNetworkSettings(settings) { [weak self] error in
+            // AVPN (case W4): an in-place restart of the core keeps the session's network settings - applying the
+            // same ones again takes the routes down for about 2 s and connections leave outside the tunnel.
+            if !preservingCounters { xrayNetworkSettingsApplied = false }
+            let settingsStep = XrayNetworkSettingsStep.forStart(inSessionRestart: preservingCounters,
+                                                                appliedInSession: xrayNetworkSettingsApplied)
+            let settingsReady: (Error?) -> Void = { [weak self] error in
                 guard let self else {
                     completionHandler(XrayErrors.supersededSession)
                     return
                 }
+                if error == nil && settingsStep == .apply { self.xrayNetworkSettingsApplied = true }
                 // AVPN (этап D3): стоп/рестарт успел сменить поколение — этот старт стейл.
                 guard self.xrayRuntimeSession.isCurrent(generation: sessionGeneration) else {
                     completionHandler(XrayErrors.supersededSession)
@@ -399,6 +405,13 @@ extension PacketTunnelProvider {
                         completionHandler(error)
                     }
                 }
+            }
+            switch settingsStep {
+            case .apply:
+                setTunnelNetworkSettings(settings, completionHandler: settingsReady)
+            case .keep:
+                xrayLog(.info, message: "Tribe roaming (xray): network settings kept, core restart only")
+                settingsReady(nil)
             }
         } catch {
             fail(error)
