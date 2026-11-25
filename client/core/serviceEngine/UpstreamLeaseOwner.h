@@ -1005,6 +1005,19 @@ public:
         return endSession(nowMs);
     }
 
+    // Round mac-D5 (review of 07c91000c): the app's exit has begun (AvpnEngineQml::beginExit -> the adapter, once). A provider
+    // start that is not up is abandoned by its owner through the existing cancels: a seat taken before a switch (prepare) and a
+    // start whose tunnel has not come up end here; an acquire in flight stays the machine's, cancelled - its grant is given back
+    // by the machine (no BringUp, no Prepared) and a floor denial of it re-issues nothing. A session whose tunnel is up is left to
+    // its stop (the quit's userStop); nothing here stops a tunnel (endSession emits releases and the record only).
+    bool startNotUp() const { return m_active && (m_prepareOnly || !m_tunnelIsUp); } // what abandonForExit ends
+    QVector<UpstreamOwnerEvent> abandonForExit(qint64 nowMs)
+    {
+        if (preparing())
+            return disconnect(nowMs);
+        return abortStart(nowMs);
+    }
+
     // Nothing holds a start: not a release (round 9 R1), not a cancelled acquire of an older start (it is left to finish, the
     // machine releases its grant - the server gives the new start another lease and ends the old one as replaced).
     // The live session holds this lease id (a late or orphan answer of the same id must not release it).

@@ -38,5 +38,17 @@ printf '%s\n' "$(body "$SE" 'bool ServiceEngine::connect(QString &error)')" | gr
 awk '/case path::EffectType::StartPath: \{/ { on = 1; n = 0 } on { n++; if ($0 ~ /if \(m_exiting\)/) found = 1; if (n > 3) on = 0 } END { exit found ? 0 : 1 }' "$SE" \
   || bad "Q4: a leg is raised without asking whether the exit has begun"
 
+# Q5 (round mac-D5): the provider start's asynchronous half - its grant, a re-acquire, a prepared seat - is abandoned by its
+# owner when the exit begins: beginExit tells the adapter once, the adapter hands it to the shipped owner's abandonForExit, and
+# no seat is taken for a switch after it.
+printf '%s\n' "$be" | grep -qF 'm_tunnel.abandonUpstreamStartsForExit();' || bad "Q5: beginExit does not abandon the provider start that is not up"
+VTC="$ROOT/client/core/serviceEngine/VpnConnectionTunnelControl.cpp"
+printf '%s\n' "$(body "$VTC" 'void VpnConnectionTunnelControl::abandonUpstreamStartsForExit()')" | grep -qF 'applyUpstreamEvents(m_upOwner.abandonForExit(upstreamClockMs()));' \
+  || bad "Q5: the adapter does not hand the exit to the lease owner"
+grep -qF 'QVector<UpstreamOwnerEvent> abandonForExit(qint64 nowMs)' "$ROOT/client/core/serviceEngine/UpstreamLeaseOwner.h" || bad "Q5: the owner has no exit cancel"
+printf '%s\n' "$(body "$VTC" 'void VpnConnectionTunnelControl::abandonUpstreamStartsForExit()')" | grep -qF 'if (!m_upOwner.startNotUp())' \
+  || bad "Q5: the adapter's exit cancel is not limited to a start that is not up"
+grep -B1 -F '&& avpn::upstreamSeatFirst(intent.needsRestart' "$ENG" | grep -qF 'if (!m_exiting' || bad "Q5: a seat can be taken for a switch after the exit began"
+
 [ "$fail" = 0 ] && echo "check_upstream_quit_wiring: ok"
 exit "$fail"

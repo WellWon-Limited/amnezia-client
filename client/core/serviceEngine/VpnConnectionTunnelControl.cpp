@@ -1113,6 +1113,14 @@ void VpnConnectionTunnelControl::cancelUpstreamPrepare()
     applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
 }
 
+void VpnConnectionTunnelControl::abandonUpstreamStartsForExit()
+{
+    if (!m_upOwner.startNotUp())
+        return; // nothing, or a session whose tunnel is up (the quit's stop ends it)
+    qInfo() << "avpn upstream: the app is exiting - the start of" << m_upOwner.nodeId() << "is not up: abandoned, its seat goes back";
+    applyUpstreamEvents(m_upOwner.abandonForExit(upstreamClockMs()));
+}
+
 void VpnConnectionTunnelControl::upstreamTunnelUp()
 {
     if (m_upOwner.active())

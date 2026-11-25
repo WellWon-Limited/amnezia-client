@@ -7980,7 +7980,8 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
         // Seat first (D4 of 16.11): a provider node is not worth the working tunnel until its seat and a valid
         // profile are in hand - the seat is taken through the live tunnel now; onUpstreamPrepared restarts.
         const avpn::SubscriptionNode *target = m_engine.nodeById(nodeId);
-        if (avpn::upstreamSeatFirst(intent.needsRestart, target && avpn::isUpstreamNode(*target), m_tunnel.upstreamActive())) {
+        if (!m_exiting // round mac-D5: no seat is taken for a switch once the exit has begun
+            && avpn::upstreamSeatFirst(intent.needsRestart, target && avpn::isUpstreamNode(*target), m_tunnel.upstreamActive())) {
             if (const quint64 prepareId = m_tunnel.prepareUpstream(m_engine.subscription(), *target)) {
                 m_seatFirst = avpn::UpstreamSeatFirst{true, nodeId, prevPin, persist, m_intentSerial, prepareId};
                 m_needsRestart = false; // the live tunnel stays until the seat is in hand
@@ -12587,6 +12588,7 @@ void AvpnEngineQml::beginExit()
         return;
     m_exiting = true;
     m_engine.setExiting();
+    m_tunnel.abandonUpstreamStartsForExit(); // round mac-D5: the provider start's asynchronous half (grant, re-acquire, prepare)
     m_killSwitchHoldTimer.stop();
     reliabilityEvent(QStringLiteral("app_exit_begun"));
 }

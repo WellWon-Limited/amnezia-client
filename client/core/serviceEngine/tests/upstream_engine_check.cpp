@@ -5240,6 +5240,78 @@ static AcquireReply floorDenial(qint64 floorOrder)
     r.fromTribeApi = true;
     return r;
 }
+// Round mac-D5 (review of 07c91000c): the app's exit has begun (AvpnEngineQml::beginExit -> VpnConnectionTunnelControl::
+// abandonUpstreamStartsForExit -> UpstreamLeaseOwner::abandonForExit) while a provider start is not up. Its asynchronous half -
+// the grant, a floor denial's re-issue, a prepared seat - starts nothing; a grant is given back.
+static void exitAbandonsStart()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const QString profile = a.upstream->profileId, sha = a.upstream->configSha256;
+    const qint64 T = 21000000;
+    const auto has = [](const QVector<UpstreamOwnerEvent> &ev, UpstreamOwnerEventKind k) {
+        for (const UpstreamOwnerEvent &e : ev)
+            if (e.kind == k)
+                return true;
+        return false;
+    };
+    const auto count = [](const FakeIo &io, const char *what) {
+        int n = 0;
+        for (const FakeIo::Call &c : io.calls)
+            n += c.what == QLatin1String(what) ? 1 : 0;
+        return n;
+    };
+    UpstreamLeaseOwner::Options op;
+    op.keepOwnership = true; // the macOS / Windows GUI owner
+    {
+        // the acquire is in flight, the exit begins, the grant arrives: no BringUp, that grant's seat goes back
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(op);
+        o.begin(a, 1, std::nullopt, T, 1000);
+        const quint64 acq = io.last("acquire")->id;
+        CHECK(o.startNotUp());
+        o.abandonForExit(T + 50);
+        const QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(acq, granted(profile, sha, 3), T + 300);
+        CHECK(!has(ev, UpstreamOwnerEventKind::BringUp) && !o.active());
+        CHECK(count(io, "release") == 1 && count(io, "acquire") == 1);
+    }
+    {
+        // ... a floor denial arrives instead: nothing is asked again
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(op);
+        o.begin(a, 1, std::nullopt, T, 1000);
+        const quint64 acq = io.last("acquire")->id;
+        o.abandonForExit(T + 50);
+        const QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(acq, floorDenial(525252), T + 300);
+        CHECK(count(io, "acquire") == 1 && !has(ev, UpstreamOwnerEventKind::BringUp));
+    }
+    {
+        // a seat taken before a switch under a live own tunnel (prepare): its grant switches nothing, the seat goes back
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(op);
+        o.prepare(a, 1, T, 1000);
+        const quint64 acq = io.last("acquire")->id;
+        o.abandonForExit(T + 50);
+        const QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(acq, granted(profile, sha, 3), T + 300);
+        CHECK(!has(ev, UpstreamOwnerEventKind::Prepared) && !has(ev, UpstreamOwnerEventKind::BringUp) && !o.preparing());
+        CHECK(count(io, "release") == 1);
+    }
+    {
+        // a provider session that is UP is not touched here (the quit's userStop ends it): no release, still active
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(op);
+        o.begin(a, 1, std::nullopt, T, 1000);
+        CHECK(has(o.onAcquireReply(io.last("acquire")->id, granted(profile, sha, 3), T + 300), UpstreamOwnerEventKind::BringUp));
+        o.tunnelUp(T + 400);
+        const int released = count(io, "release");
+        CHECK(!o.startNotUp());
+        CHECK(o.abandonForExit(T + 500).isEmpty() && o.active() && count(io, "release") == released);
+    }
+}
+
 // Round 18 R1: the owner hands the client the hedge for exactly the acquire the machine sends before a possible provisional start
 // (LeaseAction::beforeProvisionalStart) of a session that has a pack entry to start from (provisionalFallback). Every other acquire waits
 // the full lease share - above all an ACTIVE session's re-acquire after its lease ran out (a direct request of a profile WITH a pack
@@ -5796,6 +5868,7 @@ int main(int argc, char **argv)
     orderFloorCheck();
     floorDenialRetry();
     hedgeDecision();
+    exitAbandonsStart();
     earlyRefusals();
     scanOfferedRows();
     quitEndsUpstreamSession();

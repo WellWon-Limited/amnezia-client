@@ -134,6 +134,8 @@ public:
     // configured, a provider session is live): the caller switches the old way.
     quint64 prepareUpstream(const Subscription &sub, const SubscriptionNode &node);
     void cancelUpstreamPrepare();
+    // Round mac-D5: the app's exit has begun - the provider start that is not up is abandoned (UpstreamLeaseOwner::abandonForExit).
+    void abandonUpstreamStartsForExit();
     bool upstreamRequestSent() const override { return m_upOwner.requestSent(); }
     void startRefused() override; // ITunnelControl: the native start never happened (Android permission refused)
     bool upstreamPreparing() const { return m_upOwner.preparing(); }
