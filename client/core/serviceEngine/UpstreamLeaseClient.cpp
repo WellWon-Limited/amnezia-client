@@ -159,6 +159,7 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         return;
     }
     auto answered = std::make_shared<bool>(false);
+    const qint64 sentAtMs = QDateTime::currentMSecsSinceEpoch(); // round mac-D2: the answer's time in the log
     m_acquiresOut.insert(requestId, profileId); // until its HTTP request ends (it outlives the attempt's wait)
     QTimer::singleShot(waitMs, r, [this, requestId, answered, waitMs, hedged, target]() {
         if (*answered)
@@ -175,7 +176,7 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         if (onAcquire)
             onAcquire(requestId, classifyAcquireReply(0, {}, {}, m_pubKeyHex));
     });
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId, answered, route, profileId, target]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, answered, route, profileId, target, sentAtMs]() {
         r->deleteLater();
         m_acquiresOut.remove(requestId);
         noteHostOutcome(target, r); // the host rule (UpstreamLeaseWire.h::upstreamDirectBase)
@@ -185,6 +186,15 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         // Lab 14.11 D1: an answer of our server (any status, any body) never starts from the standby pack.
         const bool fromTribeApi = upstreamFromTribeApi(r->rawHeader(QByteArray(kUpstreamTribeApiHeader)));
         const AcquireReply reply = classifyAcquireReply(status, body, sig, m_pubKeyHex, fromTribeApi);
+        // Round mac-D2: every seat request's answer in the log - its HTTP status, kind and time only (no lease id,
+        // host or token); a seat could not be told acquired from the log before.
+        qInfo().noquote() << QStringLiteral("avpn upstream: seat request answered status=%1 kind=%2 in %3 ms%4")
+                                 .arg(status)
+                                 .arg(QLatin1String(reply.kind == LeaseReplyKind::Granted   ? "granted"
+                                                    : reply.kind == LeaseReplyKind::Refused ? "refused"
+                                                                                           : "failed"))
+                                 .arg(QDateTime::currentMSecsSinceEpoch() - sentAtMs)
+                                 .arg(*answered ? QStringLiteral(" (after the attempt moved on)") : QString());
         // Round 12 R2: the server's floor for the start orders, from ANY answer that carries it (also a late one of an older start).
         if (const qint64 floorOrder = upstreamOrderFloorOf(reply); floorOrder >= 0 && onSessionOrderFloor)
             onSessionOrderFloor(floorOrder);
@@ -396,6 +406,9 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
             }
             return;
         case UpstreamReleaseTry::Answered:
+            // Round mac-D2: a release the server answered, in the log (status and tries only): a freed seat was
+            // silent before - only resends and give-ups were logged.
+            qInfo().noquote() << QStringLiteral("avpn upstream: seat release answered status=%1 tries=%2").arg(status).arg(attempt + 1);
             if (bgKey)
                 avpn::bgtask::end(avpn::bgtask::Reason::Release, bgKey, avpn::bgtask::EndWhy::Settled);
             if (onReleaseDone)
