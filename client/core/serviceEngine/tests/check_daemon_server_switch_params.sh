@@ -7,6 +7,9 @@
 #       Daemon::supportServerSwitching itself (current.<field>) or by avpn::interfaceSettingsThatDiffer (live.<field>,
 #       client/daemon/serverswitchpolicy.h). A new AmneziaWG parameter written by addInterface fails here until the
 #       switch decision knows it.
+#   P3  Windows: the per-peer firewall rules of WindowsFirewall::enablePeerTraffic (tagged by the peer key, removed only
+#       with a peer of another key) - every field it reads but the key itself must be compared too: on a switch with the
+#       same key the old config's rules stay (review of f37b06b0e: the extra allowed DNS servers).
 #   P2  supportServerSwitching refuses an in-place switch when interfaceSettingsThatDiffer names a setting.
 # The decision itself runs on the real daemon in build_daemon_server_switch.sh. Run by the check sweep.
 set -eu
@@ -61,6 +64,20 @@ check_platform Linux "$C/platforms/linux/daemon/wireguardutilslinux.cpp" Wiregua
 # Windows: the [Interface] section of toWgConf (members read without "config.")
 check_platform Windows "$C/platforms/windows/daemon/wireguardutilswindows.cpp" WireguardUtilsWindows \
   "$C/daemon/interfaceconfig.cpp|QString InterfaceConfig::toWgConf(const QMap<QString, QString>& extra) const {|"
+
+# ---- P3 ------------------------------------------------------------------------------------------------------
+peerfw="$(fields "$(body "$C/platforms/windows/daemon/windowsfirewall.cpp" 'bool WindowsFirewall::enablePeerTraffic(const InterfaceConfig& config) {')" 'config\.')"
+if [ -z "$peerfw" ]; then
+  bad "P3 Windows: WindowsFirewall::enablePeerTraffic reads no config field (signature moved?)"
+else
+  n=0
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ "$f" != m_serverPublicKey ] || continue # the key is the rules' tag: another key removes them
+    n=$((n + 1))
+    compared "$f" || bad "P3 Windows: enablePeerTraffic applies $f per peer, kept on a same-key switch, and the switch decision does not compare it"
+  done <<< "$peerfw"
+  echo "P3 Windows: $n per-peer firewall fields, all compared"
+fi
 
 # ---- P2 ------------------------------------------------------------------------------------------------------
 grep -qF 'const QStringList differ = avpn::interfaceSettingsThatDiffer(current, config);' <<< "$sw" \

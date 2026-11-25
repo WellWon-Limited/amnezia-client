@@ -276,6 +276,15 @@ int main(int argc, char **argv)
         b["allowedIPAddressRanges"] = QJsonArray{QJsonObject{{"address", "10.0.0.0"}, {"range", 8}, {"isIpv6", false}}};
         expectNewInterface(QStringLiteral("3 kill switch on, other allowed ranges"), a, b);
     }
+    // Windows: the peer's firewall rules (enablePeerTraffic) are kept on a switch with the SAME peer key - an extra allowed DNS
+    // server dropped from the list would stay allowed (review of f37b06b0e)
+    {
+        QJsonObject a = node(kKeyA, kHostA, true);
+        a["allowedDnsServers"] = QJsonArray{QStringLiteral("198.51.100.53"), QStringLiteral("203.0.113.53")};
+        QJsonObject b = node(kKeyA, kHostA, true);
+        b["allowedDnsServers"] = QJsonArray{QStringLiteral("198.51.100.53")};
+        expectNewInterface(QStringLiteral("3 kill switch on, same peer, other allowed DNS servers"), a, b);
+    }
 
     // ---- 4. what stays in place: only the peer differs ---------------------------------------------------------------
     // kill switch off, the same interface settings, another peer and host: switchServer replaces the peer and routes
@@ -287,6 +296,12 @@ int main(int argc, char **argv)
         QJsonObject b = node(kKeyB, kHostB, false);
         b["allowedIPAddressRanges"] = QJsonArray{QJsonObject{{"address", "10.0.0.0"}, {"range", 8}, {"isIpv6", false}}};
         expectInPlace(QStringLiteral("4 kill switch off, other allowed ranges"), node(kKeyA, kHostA, false), b);
+    }
+    // kill switch off, other allowed DNS servers: no firewall applies them
+    {
+        QJsonObject b = node(kKeyB, kHostB, false);
+        b["allowedDnsServers"] = QJsonArray{QStringLiteral("198.51.100.53")};
+        expectInPlace(QStringLiteral("4 kill switch off, other allowed DNS servers"), node(kKeyA, kHostA, false), b);
     }
 
     // ---- 5. the decision names settings, never their values ----------------------------------------------------------

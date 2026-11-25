@@ -65,10 +65,13 @@ inline QStringList interfaceSettingsThatDiffer(const InterfaceConfig& live, cons
   note(live.m_primaryDnsServer == next.m_primaryDnsServer, "primary_dns");
   note(live.m_secondaryDnsServer == next.m_secondaryDnsServer, "secondary_dns");
   note(live.m_killSwitchEnabled == next.m_killSwitchEnabled, "kill_switch");
-  // The kill switch session's own inputs, only while it is on (addInterface opens it only then).
+  // The kill switch session's own inputs, only while it is on (addInterface opens it only then). Windows adds its rules per
+  // peer (WindowsFirewall::enablePeerTraffic, tagged by the peer key) and removes them only with a peer of another key, so on a
+  // switch with the same key a rule of the old config stays: the extra allowed DNS servers are such an input too.
   if (live.m_killSwitchEnabled || next.m_killSwitchEnabled) {
     note(live.m_allowedIPAddressRanges == next.m_allowedIPAddressRanges, "kill_switch_allowed_ips");
     note(live.m_excludedAddresses == next.m_excludedAddresses, "kill_switch_excluded_addresses");
+    note(live.m_allowedDnsServers == next.m_allowedDnsServers, "allowed_dns_servers");
   }
   return names;
 }
