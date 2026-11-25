@@ -11,6 +11,7 @@
 
 #include <QByteArray>
 #include <QDeadlineTimer>  // AVPN (round mac-B): the UAPI waits
+#include <QElapsedTimer>  // AVPN (round mac-B review M3): their measured length
 #include <QDir>
 #include <QFile>
 #include <QLocalSocket>
@@ -96,12 +97,16 @@ bool WireguardUtilsMacos::addInterface(const InterfaceConfig& config) {
 
   QDir appPath(QCoreApplication::applicationDirPath());
   QStringList wgArgs = {"-f", "utun"};
+  // AVPN (round mac-B review M3): how long the daemon's only thread waits for the tunnel process (journal line below)
+  QElapsedTimer waitTimer;
+  waitTimer.start();
   m_tunnel.start(appPath.filePath("amneziawg-go"), wgArgs);
   if (!m_tunnel.waitForStarted(WG_TUN_PROC_TIMEOUT)) {
     logger.error() << "Unable to start tunnel process due to timeout";
     m_tunnel.kill();
     return false;
   }
+  const qint64 startedMs = waitTimer.elapsed();
 
   m_ifname = waitForTunnelName(wgNameFile);
   if (m_ifname.isNull()) {
@@ -110,6 +115,7 @@ bool WireguardUtilsMacos::addInterface(const InterfaceConfig& config) {
     return false;
   }
   logger.debug() << "Created wireguard interface" << m_ifname;
+  logger.info() << "[tunnel wait] process started" << startedMs << "ms, interface name" << waitTimer.elapsed() << "ms";
 
   // Start the routing table monitor.
   m_rtmonitor = new MacosRouteMonitor(m_ifname, this);
@@ -487,6 +493,8 @@ QString WireguardUtilsMacos::uapiCommand(const QString& command) {
   socket.write(message);
   socket.waitForBytesWritten(int(std::max<qint64>(1, uapiDeadline.remainingTime())));
 
+  QElapsedTimer uapiTimer; // AVPN (round mac-B review M3): the wait's real length (journal: set commands, slow gets)
+  uapiTimer.start();
   QByteArray reply;
   while (!reply.contains("\n\n")) {
     if (uapiDeadline.hasExpired()) {
@@ -501,6 +509,8 @@ QString WireguardUtilsMacos::uapiCommand(const QString& command) {
     }
   }
 
+  if (!command.startsWith(QLatin1String("get=")) || uapiTimer.elapsed() >= 200)
+    logger.info() << "[tunnel wait] uapi" << command.section(QLatin1Char('='), 0, 0) << uapiTimer.elapsed() << "ms";
   return QString::fromUtf8(reply).trimmed();
 }
 
