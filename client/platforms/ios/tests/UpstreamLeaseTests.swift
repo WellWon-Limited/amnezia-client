@@ -627,6 +627,59 @@ private func testTunables() {
     expect(invalid?.tunables?.hevMaxSessionCount == nil, "absent stays absent")
 }
 
+// AVPN (round air-H 25.11): the core inbound's UDP idle level - the same rule and shape as the backend normalizer's
+// (tests/test_upstream_inbound_udp_idle.py); before the change the type did not exist and no start bounded the
+// inbound's UDP associations (the device round's killed provider sessions).
+private func testInboundUdpIdle() {
+    expect(XrayTunables.inboundUdpIdleSeconds(nil) == 5, "absent tunables = 5 s default")
+    expect(XrayTunables.inboundUdpIdleSeconds(decodeConfig(#"{"config":"{}","xray_tunables":{}}"#)?.tunables) == 5,
+           "absent key = 5 s default")
+    expect(decodeConfig(#"{"config":"{}","xray_tunables":{"udp_idle_s":0}}"#)?.tunables?.udpIdleSeconds == 0, "0 = off")
+    expect(decodeConfig(#"{"config":"{}","xray_tunables":{"udp_idle_s":-3}}"#)?.tunables?.udpIdleSeconds == 0, "negative = off")
+    expect(decodeConfig(#"{"config":"{}","xray_tunables":{"udp_idle_s":1}}"#)?.tunables?.udpIdleSeconds == 2, "floor 2")
+    expect(decodeConfig(#"{"config":"{}","xray_tunables":{"udp_idle_s":9999}}"#)?.tunables?.udpIdleSeconds == 300, "cap 300")
+    expect(decodeConfig(#"{"config":"{}","xray_tunables":{"udp_idle_s":"x"}}"#)?.tunables?.udpIdleSeconds == 5,
+           "present but invalid = default")
+
+    func cfg(_ json: String) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+    }
+    // Own config shape (XrayConfigBuilder + ensureInboundAuth): socks inbound, one VLESS outbound, policy level 0.
+    var own = cfg(#"{"inbounds":[{"protocol":"socks","listen":"::1","port":1080,"settings":{"udp":true,"auth":"password"}}],"outbounds":[{"protocol":"vless","settings":{"vnext":[{"users":[{"id":"u"}]}]}}],"policy":{"levels":{"0":{"handshake":5,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5}}}}"#)
+    expect(XrayInboundUdpIdle.apply(to: &own, seconds: 5) == "applied:5s", "own config applied")
+    let ib = (own["inbounds"] as? [[String: Any]])?.first?["settings"] as? [String: Any]
+    expect((ib?["userLevel"] as? Int) == 9, "inbound userLevel 9")
+    let levels = (own["policy"] as? [String: Any])?["levels"] as? [String: Any]
+    expect(canonical(levels?["9"] ?? [:]) == canonical(["handshake": 5, "connIdle": 5, "uplinkOnly": 2, "downlinkOnly": 5]),
+           "level 9 = level 0 with connIdle 5 \(canonical(levels?["9"] ?? [:]))")
+    expect(canonical(levels?["0"] ?? [:]) == canonical(["handshake": 5, "connIdle": 300, "uplinkOnly": 2, "downlinkOnly": 5]),
+           "level 0 untouched (outbounds keep their TCP idle)")
+    let once = canonical(own)
+    expect(XrayInboundUdpIdle.apply(to: &own, seconds: 5) == "kept:level_in_config" && canonical(own) == once,
+           "idempotent: a config whose inbound names a level is left as it is")
+    // A provider profile from a 1.21.2 server already carries the level: kept byte for byte.
+    var served = cfg(#"{"inbounds":[{"tag":"tribe-in","protocol":"socks","settings":{"auth":"password","userLevel":9}}],"outbounds":[{"protocol":"vless"}],"policy":{"levels":{"9":{"connIdle":5}}}}"#)
+    let servedBefore = canonical(served)
+    expect(XrayInboundUdpIdle.apply(to: &served, seconds: 30) == "kept:level_in_config" && canonical(served) == servedBefore,
+           "server's level wins")
+    // A provider profile without policy (an older server): policy created with level 9 only.
+    var bare = cfg(#"{"inbounds":[{"tag":"tribe-in","protocol":"socks","settings":{"auth":"password"}}],"outbounds":[{"protocol":"vless"},{"protocol":"freedom"}]}"#)
+    expect(XrayInboundUdpIdle.apply(to: &bare, seconds: 5) == "applied:5s", "bare profile applied")
+    expect(canonical((bare["policy"] as? [String: Any])?["levels"] ?? [:]) == canonical(["9": ["connIdle": 5]]), "only level 9")
+    // A level an outbound already uses is never taken.
+    var used = cfg(#"{"inbounds":[{"protocol":"socks","settings":{"auth":"password"}}],"outbounds":[{"protocol":"vless","settings":{"vnext":[{"users":[{"id":"u","level":9}]}]}}]}"#)
+    let usedBefore = canonical(used)
+    expect(XrayInboundUdpIdle.apply(to: &used, seconds: 5) == "skipped:level_in_use" && canonical(used) == usedBefore,
+           "level in use: unchanged")
+    var off = cfg(#"{"inbounds":[{"protocol":"socks","settings":{}}],"outbounds":[]}"#)
+    let offBefore = canonical(off)
+    expect(XrayInboundUdpIdle.apply(to: &off, seconds: 0) == "off" && canonical(off) == offBefore, "0 = off, unchanged")
+    var odd = cfg(#"{"inbounds":[{"protocol":"socks","settings":{}}],"outbounds":[],"policy":[1]}"#)
+    expect(XrayInboundUdpIdle.apply(to: &odd, seconds: 5) == "skipped:shape", "non-object policy left alone")
+    var noSocks = cfg(#"{"inbounds":[{"protocol":"http"}],"outbounds":[]}"#)
+    expect(XrayInboundUdpIdle.apply(to: &noSocks, seconds: 5) == "skipped:no_socks_inbound", "no socks inbound")
+}
+
 private func testGeo() {
     let config = #"{"routing":{"rules":[{"domain":["geosite:category-ru","ext:custom.dat:x"],"outboundTag":"direct"},{"ip":["geoip:ru","!geoip:private"],"outboundTag":"direct"}]},"dns":{"servers":[{"domains":["notgeosite:x"]}]}}"#
     expect(XrayGeoAssets.files(inConfig: config) == ["custom.dat", "geoip.dat", "geosite.dat"], "geo files \(XrayGeoAssets.files(inConfig: config))")
@@ -1052,6 +1105,7 @@ struct UpstreamLeaseTestsMain {
         testWire()
         testEnvelope()
         testTunables()
+        testInboundUdpIdle()
         testGeo()
         testRenewerFlow()
         testRenewerRelease()

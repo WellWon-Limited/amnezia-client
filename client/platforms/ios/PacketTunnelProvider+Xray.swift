@@ -343,6 +343,11 @@ extension PacketTunnelProvider {
             let socksCredentials = ensureInboundAuth(jsonDict: &jsonDict, port: port, address: address)
             // AVPN (upstream nodes): the lease renewer's requests go through this inbound.
             tribeUpstream.socks = (port: port, user: socksCredentials.username, pass: socksCredentials.password)
+            // AVPN (round air-H 25.11): the inbound's UDP associations (one per DNS query) close after N idle seconds
+            // instead of hev's 60 - own and provider sessions alike (XrayTunables.swift, XrayInboundUdpIdle).
+            let udpIdle = XrayInboundUdpIdle.apply(
+                to: &jsonDict, seconds: XrayTunables.inboundUdpIdleSeconds(xrayConfig.tunables))
+            xrayLog(.info, message: "Tribe xray: inbound UDP idle \(udpIdle)")
             // AVPN (upstream nodes): per-outbound counters for meter_scope "proxy" (merged, never replacing).
             mergeUpstreamStatsKeys(into: &jsonDict)
             // AVPN (floor 19.11, §28 on the Xray path): the RU split inside the core (no system routes for it).

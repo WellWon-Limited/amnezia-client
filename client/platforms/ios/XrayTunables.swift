@@ -23,18 +23,24 @@ struct XrayTunables: Decodable, Equatable {
     static let taskStackDefault = 24576
     // The literal written before this change (setupAndRunTun2socks).
     static let legacyTaskStackSize = 20480
+    // AVPN (round air-H 25.11): idle seconds of a UDP association of the core's socks inbound (XrayInboundUdpIdle).
+    // ABSENT = the default (not the behaviour before: before, provider rows were killed by iOS); 0 = off.
+    static let udpIdleRange = 2...300
+    static let udpIdleDefaultSeconds = 5
 
     var memoryLimitMiB: Int?
     var hevTcpBufferSize: Int?
     var hevMaxSessionCount: Int?
     var hevTaskStackSize: Int?
+    var udpIdleSeconds: Int?
 
     init(memoryLimitMiB: Int? = nil, hevTcpBufferSize: Int? = nil, hevMaxSessionCount: Int? = nil,
-         hevTaskStackSize: Int? = nil) {
+         hevTaskStackSize: Int? = nil, udpIdleSeconds: Int? = nil) {
         self.memoryLimitMiB = memoryLimitMiB
         self.hevTcpBufferSize = hevTcpBufferSize
         self.hevMaxSessionCount = hevMaxSessionCount
         self.hevTaskStackSize = hevTaskStackSize
+        self.udpIdleSeconds = udpIdleSeconds
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -42,6 +48,7 @@ struct XrayTunables: Decodable, Equatable {
         case hevTcpBufferSize = "hev_tcp_buffer_size"
         case hevMaxSessionCount = "hev_max_session_count"
         case hevTaskStackSize = "hev_task_stack_size"
+        case udpIdleSeconds = "udp_idle_s"
     }
 
     init(from decoder: Decoder) throws {
@@ -55,6 +62,13 @@ struct XrayTunables: Decodable, Equatable {
         hevTcpBufferSize = value(.hevTcpBufferSize, Self.tcpBufferRange, Self.tcpBufferDefault)
         hevMaxSessionCount = value(.hevMaxSessionCount, Self.maxSessionRange, Self.maxSessionDefault)
         hevTaskStackSize = value(.hevTaskStackSize, Self.taskStackRange, Self.taskStackDefault)
+        if c.contains(.udpIdleSeconds) {
+            if let raw = try? c.decode(Double.self, forKey: .udpIdleSeconds), raw.isFinite {
+                udpIdleSeconds = raw <= 0 ? 0 : Self.clamp(raw, Self.udpIdleRange) // 0 or less = off
+            } else {
+                udpIdleSeconds = Self.udpIdleDefaultSeconds
+            }
+        }
     }
 
     static func clamp(_ raw: Double, _ range: ClosedRange<Int>) -> Int {
@@ -69,12 +83,82 @@ struct XrayTunables: Decodable, Equatable {
         return Int64(mib) * 1024 * 1024
     }
 
+    // Idle seconds of the core inbound's UDP associations for this start; 0 = leave the inbound's level alone.
+    static func inboundUdpIdleSeconds(_ tunables: XrayTunables?) -> Int {
+        tunables?.udpIdleSeconds ?? udpIdleDefaultSeconds
+    }
+
     // The hev `misc:` lines this config adds, in order (each line without indentation).
     static func hevMiscLines(_ tunables: XrayTunables?) -> [String] {
         var lines = ["task-stack-size: \(tunables?.hevTaskStackSize ?? legacyTaskStackSize)"]
         if let size = tunables?.hevTcpBufferSize { lines.append("tcp-buffer-size: \(size)") }
         if let count = tunables?.hevMaxSessionCount { lines.append("max-session-count: \(count)") }
         return lines
+    }
+}
+
+// AVPN (round air-H 25.11): every UDP association of the core's socks inbound closes after N idle seconds. Each DNS
+// query of the phone reaches the core as its own socks UDP ASSOCIATE from hev and lived 60 s after its answer (hev's
+// idle); page loads kept 100-200 of them at ~90-120 KB each, and iOS killed the 50 MB extension 26-45 s into browsing on
+// provider rows. In Xray the inbound's policy level decides only its handshake deadline, its links' buffer policy and
+// this idle limit (proxy/socks TempUDPConn closes the association and its TCP control connection); TCP idle stays with
+// each outbound's level. The same rule as the backend normalizer's (upstream_normalize._apply_inbound_udp_idle, contract
+// 1.21.2): the inbound gets `settings.userLevel` = `level`, `policy.levels.<level>` = a copy of level "0" with `connIdle`.
+// A config whose inbound already names a level is left as it is (the server's provider profile since 1.21.2); a level
+// some outbound or other inbound uses is never taken. Foundation-only and pure (tests/UpstreamLeaseTests.swift).
+enum XrayInboundUdpIdle {
+    static let level = 9
+
+    // Applies to the first socks inbound of `config`; returns what happened, for the extension log.
+    @discardableResult
+    static func apply(to config: inout [String: Any], seconds: Int) -> String {
+        guard seconds > 0 else { return "off" }
+        guard var inbounds = config["inbounds"] as? [[String: Any]],
+              let index = inbounds.firstIndex(where: {
+                  ($0["protocol"] as? String)?.caseInsensitiveCompare("socks") == .orderedSame })
+        else { return "skipped:no_socks_inbound" }
+        let settings = inbounds[index]["settings"] as? [String: Any] ?? [:]
+        if settings["userLevel"] != nil { return "kept:level_in_config" }
+        var policy = [String: Any]()
+        if let existing = config["policy"] {
+            guard let dict = existing as? [String: Any] else { return "skipped:shape" }
+            policy = dict
+        }
+        var levels = [String: Any]()
+        if let existing = policy["levels"] {
+            guard let dict = existing as? [String: Any] else { return "skipped:shape" }
+            levels = dict
+        }
+        var others = inbounds
+        others.remove(at: index)
+        if references(level, in: config["outbounds"] ?? []) || references(level, in: others) {
+            return "skipped:level_in_use"
+        }
+        var entry = levels["0"] as? [String: Any] ?? [:]
+        entry["connIdle"] = seconds
+        levels[String(level)] = entry
+        policy["levels"] = levels
+        config["policy"] = policy
+        var newSettings = settings
+        newSettings["userLevel"] = level
+        inbounds[index]["settings"] = newSettings
+        config["inbounds"] = inbounds
+        return "applied:\(seconds)s"
+    }
+
+    private static func references(_ level: Int, in node: Any) -> Bool {
+        if let dict = node as? [String: Any] {
+            for (key, value) in dict {
+                if key == "level" || key == "userLevel" {
+                    if let n = value as? NSNumber, n.intValue == level, n.doubleValue == Double(level) { return true }
+                    if let s = value as? String, s == String(level) { return true }
+                }
+                if references(level, in: value) { return true }
+            }
+        } else if let array = node as? [Any] {
+            return array.contains { references(level, in: $0) }
+        }
+        return false
     }
 }
 

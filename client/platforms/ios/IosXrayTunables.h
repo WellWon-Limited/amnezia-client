@@ -22,6 +22,9 @@ namespace avpn_ios {
 inline constexpr char kXrayHevTcpBufferSizeKey[] = "xray_hev_tcp_buffer_size";
 inline constexpr char kXrayHevMaxSessionCountKey[] = "xray_hev_max_session_count";
 inline constexpr char kXrayHevTaskStackSizeKey[] = "xray_hev_task_stack_size";
+// AVPN (round air-H 25.11): idle seconds of the core inbound's UDP associations (XrayTunables.swift udp_idle_s).
+// Absent: the extension's default (5 s); 0 or less: off; else 2..300 (the extension clamps again).
+inline constexpr char kXrayUdpIdleKey[] = "xray_udp_idle_s";
 
 // The number of /v1/config `numbers` under key, or NaN when the server did not send it.
 inline double xrayTuningNumberOrAbsent(const char *key)
@@ -53,6 +56,16 @@ inline int xrayHevTaskStackSizeConfigured()
     const double v = xrayTuningNumberOrAbsent(kXrayHevTaskStackSizeKey);
     return xrayTuningPresent(v) ? hevTaskStackSizeFrom(v) : -1;
 }
+// -1 = absent (the extension's default applies), 0 = off, else seconds clamped to 2..300.
+inline int xrayUdpIdleSecondsConfigured()
+{
+    const double v = xrayTuningNumberOrAbsent(kXrayUdpIdleKey);
+    if (!xrayTuningPresent(v))
+        return -1;
+    if (!std::isfinite(v) || v <= 0)
+        return std::isfinite(v) ? 0 : -1;
+    return v < 2 ? 2 : (v > 300 ? 300 : int(v));
+}
 
 // The `xray_tunables` object; empty = no number configured (the caller then leaves the key out).
 inline QJsonObject xrayTunablesForEnvelope()
@@ -66,6 +79,8 @@ inline QJsonObject xrayTunablesForEnvelope()
         o.insert(QStringLiteral("hev_max_session_count"), v);
     if (const int v = xrayHevTaskStackSizeConfigured(); v > 0)
         o.insert(QStringLiteral("hev_task_stack_size"), v);
+    if (const int v = xrayUdpIdleSecondsConfigured(); v >= 0)
+        o.insert(QStringLiteral("udp_idle_s"), v);
     return o;
 }
 
