@@ -132,16 +132,15 @@ TribeScanStopResult engineStopAll(int waitMs, qint64 hostEpoch)
     return tribeScanParseStopReply(engineMessage(msg, opts));
 }
 
-TribeScanUplink readUplink()
+// The facts of one interface (index, name, flags, addresses) with the given gateway.
+TribeScanUplink uplinkOf(const QNetworkInterface &iface, const QString &gateway)
 {
     TribeScanUplink u;
-    const QPair<QString, QNetworkInterface> gi = NetworkUtilities::getGatewayAndIface();
-    const QNetworkInterface &iface = gi.second;
     if (!iface.isValid())
         return u;
     u.name = iface.name();
     u.index = iface.index();
-    u.gateway = gi.first;
+    u.gateway = gateway;
     const QNetworkInterface::InterfaceFlags f = iface.flags();
     u.up = f.testFlag(QNetworkInterface::IsUp) && f.testFlag(QNetworkInterface::IsRunning);
     u.loopback = f.testFlag(QNetworkInterface::IsLoopBack) || iface.type() == QNetworkInterface::Loopback;
@@ -149,6 +148,12 @@ TribeScanUplink readUplink()
     for (const QNetworkAddressEntry &e : iface.addressEntries())
         u.addresses << e.ip().toString();
     return u;
+}
+
+TribeScanUplink readUplinkByHelper()
+{
+    const QPair<QString, QNetworkInterface> gi = NetworkUtilities::getGatewayAndIface();
+    return uplinkOf(gi.second, gi.first);
 }
 
 #ifdef Q_OS_MACOS
@@ -942,6 +947,27 @@ quint32 tribeScanDefaultRouter(const QByteArray &dump, int ifindex)
     return primary ? primary : scoped;
 }
 
+TribeScanDefaultRoute tribeScanPrimaryDefault(const QByteArray &dump)
+{
+    TribeScanDefaultRoute primary;
+    TribeScanDefaultRoute scoped;
+#ifdef Q_OS_MACOS
+    forEachDumpRoute(dump, [&](const DumpRoute &r) {
+        if (!(r.h.rtm_flags & RTF_GATEWAY) || !r.gwInet || r.gw == 0 || r.dst != 0 || (r.haveMask && r.mask != 0)
+            || r.h.rtm_index <= 0)
+            return;
+        TribeScanDefaultRoute &slot = (r.h.rtm_flags & RTF_IFSCOPE) ? scoped : primary;
+        if (slot.ifindex == 0) {
+            slot.ifindex = int(r.h.rtm_index);
+            slot.gateway = r.gw;
+        }
+    });
+#else
+    Q_UNUSED(dump)
+#endif
+    return primary.ifindex ? primary : scoped;
+}
+
 QStringList tribeScanParseProcArgs(const QByteArray &b)
 {
     QStringList argv;
@@ -1068,6 +1094,31 @@ TribeScanKillResult tribeScanKillProbeChildren(const QString &binaryPath, int de
 #endif
     return res;
 }
+
+namespace {
+// The path the probes bind to: the interface of the primary IPv4 default route and its router.
+// macOS (round mac-D2, 25.11.2026): read from the retried route-table dump (dumpInetRoutes). The upstream helper
+// (NetworkUtilities::getGatewayAndIface) sizes its buffer once; when the table grows between the size query and
+// the dump - an AmneziaWG session and a scan add routes all the time - it gives up and answers "no gateway", and the
+// host took that as a lost uplink: the scan's routes went ("uplink_changed") and the generation moved twice
+// (device round D: 1 AmneziaWG scan of 3). A table that cannot be read is unknown, not "no uplink" (unreadable).
+TribeScanUplink readUplink()
+{
+#ifdef Q_OS_MACOS
+    const QByteArray table = dumpInetRoutes();
+    if (table.isEmpty()) {
+        TribeScanUplink u;
+        u.unreadable = true;
+        return u;
+    }
+    const TribeScanDefaultRoute d = tribeScanPrimaryDefault(table);
+    if (d.ifindex > 0)
+        return uplinkOf(QNetworkInterface::interfaceFromIndex(d.ifindex), QHostAddress(d.gateway).toString());
+    // No IPv4 default route: an IPv6-only uplink, as the helper reports it (its gateway is IPv6).
+#endif
+    return readUplinkByHelper();
+}
+} // namespace
 
 TribeScanDeps tribeScanServiceDeps()
 {
@@ -1379,6 +1430,10 @@ QByteArray TribeScanHost::process(const QByteArray &message, const TribeScanAwgL
 
 void TribeScanHost::sample(const TribeScanUplink &up, bool loss)
 {
+    if (up.unreadable) { // a failed table read says nothing about the path: the generation and the routes stay
+        qInfo() << "[tribescan] uplink not readable (route table read failed) - no path fact";
+        return;
+    }
     const QByteArray fp = tribeScanUplinkFingerprint(up);
     ScanNetSource g;
     bool publish = false;

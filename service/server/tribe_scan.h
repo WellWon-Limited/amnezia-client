@@ -140,6 +140,7 @@ struct TribeScanUplink {
     bool up = false;       // IsUp and IsRunning
     bool loopback = false;
     bool virtualType = false; // QNetworkInterface::Virtual (wintun, wireguard-nt, utun where Qt says so)
+    bool unreadable = false;  // the route table could not be read: the uplink is unknown - never a path fact
 };
 
 // utun / ipsec / ppp / gif / stf / bridge / awdl / llw (the list of macosroutemonitor.cpp isVirtualIfname).
@@ -278,6 +279,13 @@ TribeScanHalfNeed tribeScanHalvesNeeded(const QByteArray &dump, int uplinkIndex)
 QList<TribeScanHalfRoute> tribeScanScopedHalfRoutes(const QByteArray &dump);
 // From the same dump: the IPv4 router of the default route on `ifindex` (0 = none).
 quint32 tribeScanDefaultRouter(const QByteArray &dump, int ifindex);
+// From the same dump: the primary IPv4 default route (dst 0, mask 0, an IPv4 gateway, not scoped) - the uplink the
+// probes bind to; a scoped default only when there is no primary one; ifindex 0 = none. A /1 is no default.
+struct TribeScanDefaultRoute {
+    int ifindex = 0;
+    quint32 gateway = 0;
+};
+TribeScanDefaultRoute tribeScanPrimaryDefault(const QByteArray &dump);
 
 struct TribeScanRouteArm {
     int result = 0;                  // 1 = added, 0 = not needed (pinned sockets route through the table), -1 = needed, not in force

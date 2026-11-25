@@ -742,6 +742,19 @@ static void generation()
     CHECK_EQ(changed, 1);
     h.host->notePathEvent(false); // nothing moved
     CHECK_EQ(changed, 1);
+    // Round mac-D2 (device round D 10:24:24): a route-table read that failed is unknown, never a path fact - the
+    // generation stays, with a loss mark too; the uplink read right after it is the same path.
+    {
+        TribeScanUplink unreadable;
+        unreadable.unreadable = true;
+        h.setUplink(unreadable);
+        h.host->notePathEvent(false);
+        h.host->notePathEvent(true);
+        CHECK_EQ(changed, 1);
+        h.setUplink(phys());
+        h.host->notePathEvent(false);
+        CHECK_EQ(changed, 1);
+    }
 
     fake::engine().reply = [](const QByteArray &, const QByteArray &) { return QByteArray(R"({"type":"scan_ack","scan_id":"g","accepted":0,"mem_mb":null})"); };
     CHECK_EQ(h.send(R"({"action":"scan_freeze","scan_id":"g"})"), 0);
@@ -1563,6 +1576,24 @@ static void uplinkRoutes()
     CHECK_EQ(tribeScanDefaultRouter(dump, 11), 0u);         // a /8 is no default
     CHECK_EQ(tribeScanDefaultRouter(dump.left(dump.size() - 3), 7), 0xC0000201u); // a cut dump: no read past its end
     CHECK_EQ(tribeScanDefaultRouter(QByteArray(), 7), 0u);
+    // The uplink itself from the same dump (round mac-D2: readUplink no longer uses the helper that gave up when the
+    // table grew): the primary default wins over a scoped one, the tunnel's 0/1 and the scoped half routes.
+    {
+        const QByteArray first = dumpEntry(scoped, 7, kTribeScanHalfLow, true, 0xC0000201u, 5)    // a half route first
+                                 + dumpEntry(RTF_UP | RTF_STATIC, 20, 0, false, 0, 5)             // the tunnel's 0/1
+                                 + dumpEntry(scoped, 9, 0, true, 0xC6336401u, 0)                  // scoped default en9
+                                 + dumpEntry(RTF_UP | RTF_GATEWAY | RTF_STATIC, 7, 0, true, 0xC0000201u, 0); // primary en7
+        TribeScanDefaultRoute d = tribeScanPrimaryDefault(first);
+        CHECK_EQ(d.ifindex, 7);
+        CHECK_EQ(d.gateway, 0xC0000201u);
+        d = tribeScanPrimaryDefault(dumpEntry(scoped, 9, 0, true, 0xC6336401u, 0)); // only a scoped default
+        CHECK_EQ(d.ifindex, 9);
+        CHECK_EQ(d.gateway, 0xC6336401u);
+        d = tribeScanPrimaryDefault(dumpEntry(scoped, 7, kTribeScanHalfLow, true, 0xC0000201u, 5)
+                                    + dumpEntry(RTF_UP | RTF_STATIC, 20, 0, false, 0, 5)); // halves and a link gateway only
+        CHECK_EQ(d.ifindex, 0);
+        CHECK_EQ(tribeScanPrimaryDefault(QByteArray()).ifindex, 0);
+    }
 
     // The scoped half routes this process writes are no path fact - the kernel's delete report of one (as the test Mac
     // showed it: GATEWAY, STATIC, PRCLONING, IFSCOPE, CONDEMNED, the /1 mask trimmed to 5 bytes) read as a loss of the
@@ -1863,6 +1894,16 @@ static void uplinkRoutes()
     fake::engine().reply = progress;
     h.clock += 2000;
     CHECK_EQ(h.send(startRequest(QStringLiteral("rt3")), &r), 0);
+    // A failed route-table read under the scan (round mac-D2): no path fact - the scan's routes stay.
+    {
+        TribeScanUplink unreadable;
+        unreadable.unreadable = true;
+        h.setUplink(unreadable);
+        h.host->notePathEvent(false);
+        h.host->notePathEvent(true);
+        CHECK_EQ(countOf(fake::engine().orderSnapshot(), QStringLiteral("routes:disarm:")), 0);
+        h.setUplink(phys());
+    }
     TribeScanUplink moved = phys();
     moved.gateway = QStringLiteral("192.0.2.254");
     h.setUplink(moved);

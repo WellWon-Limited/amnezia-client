@@ -16,6 +16,8 @@
 #       check every candidate's entry for a pinned route before the engine gets them;
 #   R6  (review N3) the record is an intent log: durable before an add, trimmed only by deletes that happened,
 #       recovered (live gateway must match) at service start and before each arm.
+#   R7  (round mac-D2) the uplink is read from the retried route-table dump (a table that grows during the read is
+#       read again, never "no gateway"), and a read that still failed is no path fact (sample ignores it).
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -93,6 +95,14 @@ wr="$(body "$SCAN" 'bool writeRoutesRecord(const QByteArray &bytes)')"
 has "$wr" '::fsync(f.handle())' && has "$wr" '::rename(' || bad "R6: the record is not written durably"
 has "$(body "$SCAN" 'void clearLeftoverUplinkRoutes()')" 'tribeScanRecoverHalfRoutes(systemRouteOps())' \
   || bad "R6: the service start does not recover the recorded routes"
+
+# ---- R7 ------------------------------------------------------------------------------------------------------
+up="$(code "$SCAN" | awk '/^TribeScanUplink readUplink\(\)$/ { on = 1 } on { print } on && /^}$/ { exit }')"
+has "$up" 'const QByteArray table = dumpInetRoutes();' && has "$up" 'u.unreadable = true;' \
+  && has "$up" 'tribeScanPrimaryDefault(table)' || bad "R7: macOS readUplink does not read the retried route dump (unreadable = unknown)"
+smp="$(body "$SCAN" 'void TribeScanHost::sample(const TribeScanUplink &up, bool loss)')"
+[ "$(printf '%s\n' "$smp" | grep -n 'if (up.unreadable)' | cut -d: -f1)" = "3" ] \
+  || bad "R7: sample does not drop an unreadable uplink read before the generation is observed"
 
 # ---- the behaviour (service host checks, without the real engine stage) ---------------------------------------
 if [ "$fail" = "0" ]; then
