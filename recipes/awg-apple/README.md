@@ -8,7 +8,8 @@ and macOS Network Extension targets compile.
 
 | Version | Patches | Notes |
 |---|---|---|
-| `3.1.4-tribe.18` | the patches of tribe.17 | current (iOS 142, not released); tribe.17 after the second review (section "tribe.18 behaviour"): a handshake only by its time moving, RandomTrailers as the engine reads it, service TX settled over the handshake window. TribeRoaming.swift + the gate `tests/check_engine_spellings.sh` |
+| `3.1.4-tribe.19` | the patches of tribe.18 | current (iOS 142, not released); tribe.18 after device round air-D (section "tribe.19 behaviour"): a fresh-port roam is another network, a stale session is proved at once on the new path. TribeRoaming.swift only |
+| `3.1.4-tribe.18` | the patches of tribe.17 | superseded by tribe.19, not released; tribe.17 after the second review (section "tribe.18 behaviour"): a handshake only by its time moving, RandomTrailers as the engine reads it, service TX settled over the handshake window. TribeRoaming.swift + the gate `tests/check_engine_spellings.sh` |
 | `3.1.4-tribe.17` | the patches of tribe.16 (0017 included) | superseded by tribe.18, not released; tribe.16 after its review (section "tribe.17 behaviour"): service traffic from the session's configuration, idle end of an episode, sampling gaps, the stall verdict `data_stall_s` for the app. TribeRoaming.swift only |
 | `3.1.4-tribe.16` | the patches of tribe.15 + 0017 | built into 142 dev builds of 24-25.11, not released, superseded by tribe.17 (rebuilt from this recipe it gets tribe.17's TribeRoaming.swift); one definition of "data is flowing" for the stall ladder, its budget and the app's failover (`TribeDataFlow` in `TribeRoaming.swift`, section "tribe.16 behaviour"); 0017 = the adapter's `roamingCounters()` also reads `dataQuietSeconds`, the provider replies it as `data_quiet_s`. tribe.14 and tribe.15 were never released: no `TribeRoaming.swift` snapshot is frozen for them (rebuilt from this recipe they get tribe.16's ladder) |
 | `3.1.4-tribe.15` | the patches of tribe.14 (+ engine patch 0014, host limits) | built into 5.1.111 / 142 dev builds before tribe.16, not released |
@@ -1020,6 +1021,40 @@ Second review (`~/avpn-build/phone-diag/reviews/round45-wifi2-out.md`): four rar
   late); against 2e641743d: G2 fresh port at 4 s and restart at 14 s, G3 fresh port at 100 s, G4 fresh port
   at 4 s; here none.
 
+## tribe.19 behaviour: device round air-D (TribeRoaming.swift only)
+
+Device round air-D (iPhone, build 4039020f9 = tribe.17; `~/avpn-build/phone-diag/air-D/RESULTS.txt` W1, U1): Германия 1
+(AWG) on Wi-Fi, Wi-Fi off -> LTE, on which AmneziaWG passed no data and completed no handshake that night, Wi-Fi back after
+46-61 s. The old tunnel never recovered in place on the Wi-Fi (roam_fresh_ports +1, soft_restarts +0) and the app failed
+over at +15.6 / +22.0 / +28.4 s, marking Германия 1 "в этой сети не отвечает" on the Wi-Fi where it connects in 2 s.
+
+- **K1, a roam is another network.** A fresh-port roam (a path back after a real loss, or another interface) ends the
+  episode, restarts the stall clock and the demand counts (`TribeStallTracker.noteNewNetwork`), re-arms the budget episode
+  and restarts the exported verdict (`observedSince`): silence observed on the old network is not evidence here. A
+  same-port bump (path event without a loss) is unchanged. (tribe.9-18 kept the stall clock across a roam.)
+- **K2, prove a stale session at once.** If the session had no confirmed data path at that roam - stalled, a repair
+  episode open, or no inbound data since the previous fresh-port roam - the arbiter asks for ONE soft restart on the next
+  tick (`roamRestartSince`): `wgTurnOff` + `wgTurnOn` on the same TUN (the existing in-place restart): a new device with a
+  new socket, whose first packet starts a new handshake on the new path at once: uapi.go:568-573 (`if peer.device.isUp()
+  { peer.Start(); if peer.pkaOn { peer.SendKeepalive() }; peer.SendStagedPackets() }` - a new device's peer with
+  PersistentKeepalive set), then send.go:438-439 (`if keypair == nil ... { peer.SendHandshakeInitiation(false) }`). The fresh port alone keeps the old keypair (send.go: a keepalive starts a handshake only for
+  an expiring key). Through the shared budget (rolling cap 4 / 120 s, same-kind cooldown 8-10 s); given up once data
+  comes in, after 30 s or at the next roam; never more than one per roam.
+- Timelines after a roam: (a) a server that works on the new network: the fresh port at once, the soft restart on the
+  next tick when the session was stale (<= 1 s; <= 5 s when the watchdog idled), the handshake one round trip later, data
+  within ~1-3 s (replay: data at +1 s); no failover, no mark. (b) A server dead on the new network: the ladder goes on
+  (stage-3 fresh port +30 s, soft restart +90 s), the exported verdict counts from the roam and reaches 45 s at +45 s
+  (fleet bundle: its own unanswered initiations are the demand), the app fails over at ~+48 s and marks the node on that
+  network - correctly. (c) Flapping every 20-30 s on a dead path: one soft restart per roam at most, never more than 4 in
+  any 120 s (replay: 19 in 10 min); the app's evidence restarts at most until 120 s after the first change of the series.
+- App side (outside the package, iOS): the path engine's network key is a network change for the verdicts
+  (`ServiceEngine::observeNetwork`; the system's own notification sees our tunnel, not the Wi-Fi return, and did not fire
+  in air-D): grace window, probe count, and the evidence restart (`HealthLoop::noteEvidenceRestart`): the handshake age,
+  the stall verdict and the byte rule count from the change; a failed probe that started before it is not counted.
+- Not changed: during an app failover (a server switch) iOS sends traffic outside the VPN for the ~2-6 s between the old
+  tunnel's stop and the new one's start (air-D W1 r3-r5: a page from a Russian exit); with K2 a roam onto a network where
+  the server works no longer needs a switch at all.
+
 ## Rebuilding the package (isolated Conan home, nothing in the global cache changes)
 
 ```sh
@@ -1087,7 +1122,7 @@ v4-only VPN (sum.golang.org writes fail), point Go at an already verified module
 `GOPROXY=file://<GOPATH>/pkg/mod/cache/download GOSUMDB=off GOTOOLCHAIN=local`.
 
 The app build picks the package up through the root `conanfile.py`
-(`self.requires("awg-apple/3.1.4-tribe.18")`); CMake configure exports all `recipes/` itself
+(`self.requires("awg-apple/3.1.4-tribe.19")`); CMake configure exports all `recipes/` itself
 (`client/cmake/recipes_bootstrap.cmake`), so use the same `CONAN_HOME` for configure. Rollback =
 pin the root requirement back to `awg-apple/3.1.4-tribe.12` (then drop `TribeDataWatch.swift` and the
 three data-watch provider files from the two `networkextension/CMakeLists.txt` and their calls from
