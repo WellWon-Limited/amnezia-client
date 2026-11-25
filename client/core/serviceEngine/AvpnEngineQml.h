@@ -1126,6 +1126,10 @@ private:
     void syncIntent();
     // AVPN (round mac-D3, macOS desktop): the service's lease on the intent (VpnConnection::syncKillSwitchHold).
     void syncKillSwitchHold();
+    // AVPN (round mac-D4): the app's exit has begun - set once at the first aboutToQuit handler; from then on nothing new
+    // starts (guardedStart, the engine's gate: ServiceEngine::setExiting) and the kill switch lease is only released.
+    void beginExit();
+    bool m_exiting = false;
     QString choiceJournal() const;
     // Pin a server the person tapped. A server the transport mode cannot serve switches the mode to Auto and is
     // selected (coordinator decision 9 of 18.11: the latest explicit action wins; the UI gets a notice).

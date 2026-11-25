@@ -150,6 +150,11 @@ public:
 
     // Подключиться: выбрать ноду и поднять туннель. [СКАФФОЛД: выбор=первый, реальный скоринг в C-4]
     bool connect(QString &error);
+    // Round mac-D4: the app's exit has begun (the facade's first aboutToQuit, AvpnEngineQml::beginExit) - nothing new
+    // starts from here: connect() refuses and a leg the attempt owner asks for is not raised (no tunnel, no seat
+    // request); a running tunnel is left as it is. Never cleared: the process ends.
+    void setExiting() { m_exiting = true; }
+    bool exiting() const { return m_exiting; }
 
     EngineState state() const { return m_state; }
     // AVPN: подписка уже загружена (есть ноды) → connect() можно звать ЛОКАЛЬНО, без сетевого startFlow
@@ -694,6 +699,7 @@ private:
     bool m_raceFirst = false; // the race runs and the owner waits for its first proven path (or its end)
     QSet<QString> m_raceFailed; // paths whose probe failed in the race of this tap: last in this attempt's order
     bool m_attemptAfterLiveLoss = false; // the attempt in flight (or just ended) is the failover of a lost live session
+    bool m_exiting = false; // round mac-D4: setExiting
     bool raceAllowed() const;
     void beginRaceForTap();
     // The race of this tap waits for the prober's session (caps().ready) for at most the race's own wait

@@ -406,6 +406,14 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
     for (const path::AttemptEffect &e : effects) {
         switch (e.type) {
         case path::EffectType::StartPath: {
+            if (m_exiting) {
+                // Round mac-D4: the app's exit has begun - the leg is not raised (no tunnel, no seat request); the owner
+                // hears it ended with nothing proven and walks to its end the same way.
+                appendSwitchLog(QStringLiteral("leg %1 not raised: the app is exiting").arg(e.path.id.id));
+                m_ownerQueue << path::AttemptEvent::pathFailed(nowMs(), e.stamp, path::PathOutcome::Inconclusive,
+                                                               /*tunnelGone=*/true);
+                break;
+            }
             const SubscriptionNode *n = findNode(e.path.id.id);
             // pick=proof: the path a race proof named (AttemptOwner.h "Lead"); pick=order: the head of the order
             attemptJournal(QStringLiteral("attempt_leg attempt=%1 net_gen=%2 leg=%3 node=%4 kind=%5 timeout_ms=%6 "
@@ -1308,6 +1316,10 @@ bool ServiceEngine::connect(QString &error)
     if (!m_tunnel) {
         error = QStringLiteral("no tunnel adapter set");
         m_state = EngineState::Error;
+        return false;
+    }
+    if (m_exiting) { // round mac-D4: the app's exit has begun - no new attempt
+        error = QStringLiteral("the app is exiting");
         return false;
     }
     m_modeGate.sessionStartedByUs(); // 5.1.109 (S4.1): never re-judged as an adopted session

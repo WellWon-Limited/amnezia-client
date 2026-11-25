@@ -181,7 +181,9 @@ VC="$ROOT/client/vpnConnection.cpp"
 has "$(body "$VC" 'void VpnConnection::syncKillSwitchHold(bool intentOn, const QStringList &controlPlaneAddrs)')" 'iface->setKillSwitchHold(ttl,' \
   || bad "K7: VpnConnection does not send the lease"
 ENG="$ROOT/client/core/serviceEngine/AvpnEngineQml.cpp"
-has "$(body "$ENG" 'void AvpnEngineQml::syncKillSwitchHold()')" 'Q_ARG(bool, m_wantConnected)' || bad "K7: the lease does not follow the person's intent"
+skh="$(body "$ENG" 'void AvpnEngineQml::syncKillSwitchHold()')"
+has "$skh" 'const bool hold = m_wantConnected && !m_exiting;' && has "$skh" 'Q_ARG(bool, hold)' \
+  || bad "K7: the lease does not follow the person's intent, or can be armed again once the exit has begun (round mac-D4)"
 has "$(body "$ENG" 'void AvpnEngineQml::syncIntent()')" 'syncKillSwitchHold();' || bad "K7: an intent change (Stop / Connect) does not reach the lease at once"
 grep -q 'connect(&m_killSwitchHoldTimer, &QTimer::timeout, this, \[this\]() { syncKillSwitchHold(); });' "$ENG" || bad "K7: the lease is not renewed"
 qr=$(grep -n '"syncKillSwitchHold", Qt::QueuedConnection, Q_ARG(bool, false)' "$ENG" | head -1 | cut -d: -f1)

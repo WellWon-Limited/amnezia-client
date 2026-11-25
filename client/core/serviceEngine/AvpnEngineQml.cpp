@@ -654,7 +654,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // AVPN (round mac-D3): a quit gives the lease on the intent back first (queued ahead of the stop the quit sends):
     // a session the quit ends lifts its block; an AmneziaWG session the quit leaves running keeps its own.
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this] {
-        m_killSwitchHoldTimer.stop();
+        beginExit(); // round mac-D4: the first aboutToQuit handler - nothing new starts from here
         if (m_conn)
             QMetaObject::invokeMethod(m_conn, "syncKillSwitchHold", Qt::QueuedConnection, Q_ARG(bool, false),
                                       Q_ARG(QStringList, QStringList()));
@@ -3460,8 +3460,11 @@ void AvpnEngineQml::syncKillSwitchHold()
         if (ip.protocol() == QAbstractSocket::IPv4Protocol && controlPlane.size() < 16)
             controlPlane << ip.toString();
     }
-    QMetaObject::invokeMethod(m_conn, "syncKillSwitchHold", Qt::QueuedConnection, Q_ARG(bool, m_wantConnected),
-                              Q_ARG(QStringList, controlPlane));
+    // Round mac-D4: once the exit has begun the lease is only ever released (a tick or an intent sync inside the quit's
+    // pump must not arm it again after the aboutToQuit release).
+    const bool hold = m_wantConnected && !m_exiting;
+    QMetaObject::invokeMethod(m_conn, "syncKillSwitchHold", Qt::QueuedConnection, Q_ARG(bool, hold),
+                              Q_ARG(QStringList, hold ? controlPlane : QStringList()));
 #endif
 }
 
@@ -6954,6 +6957,8 @@ void AvpnEngineQml::reconcile()
 // op-in-flight + сторож; m_busy держим до прихода Connected (UI «подбираем…»).
 void AvpnEngineQml::guardedStart()
 {
+    if (m_exiting)
+        return; // round mac-D4: the app's exit has begun - no start, no preparation, no seat request
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // 5.1.109 (S4.1): the runtime gate is looked at BEFORE the start preparation, so the card and
     // connect() read the same value. A start is in flight here (the intent is set): with "Xray"
@@ -12576,8 +12581,19 @@ void AvpnEngineQml::finishUpstreamVerify(int epoch, const avpn::UpstreamVerdictR
 // tunnel down; journal "guarded_stop why=user") plus one line "upstream session ended on app quit"; the event
 // loop runs nested for at most kUpstreamQuitStopBoundMs, then the exit goes on regardless. A crash or a force
 // kill never gets here: the seat is freed at TTL and the next start adopts the session by its lease record.
+void AvpnEngineQml::beginExit()
+{
+    if (m_exiting)
+        return;
+    m_exiting = true;
+    m_engine.setExiting();
+    m_killSwitchHoldTimer.stop();
+    reliabilityEvent(QStringLiteral("app_exit_begun"));
+}
+
 void AvpnEngineQml::endUpstreamSessionOnQuit()
 {
+    beginExit(); // round mac-D4: the quit's pump below runs the event loop - a queued reconcile must start nothing
 #if AVPN_UPSTREAM_GUI_OWNER
     const bool tunnelUp = m_lastTunnelState != Vpn::Disconnected && m_lastTunnelState != Vpn::Unknown;
     const bool upstreamSession = tunnelUp && (m_engine.currentNodeIsUpstream() || m_tunnel.upstreamActive());

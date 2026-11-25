@@ -1625,6 +1625,60 @@ static void quitEndsUpstreamSession()
         h.releaseAnsweredAt = 500;
         CHECK(!runUpstreamQuit(AppExitKind::Hide, true, false, h.hooks(true)) && h.pumps == 0);
     }
+    {
+        // Round mac-D4 (review finding 5): a provider leg ended (Disconnected), the intent is kept, its seat's release is in
+        // flight and a reconcile is queued - the person quits. The exit has begun (the facade's first aboutToQuit ->
+        // ServiceEngine::setExiting): the queued start starts nothing (no attempt, no leg, no seat request) and the quit
+        // waits only for the release, within the bound.
+        Rig r;
+        upstreamRig(r);
+        r.disconnected = true;
+        r.releaseAnsweredAt = 700;
+        const auto acquires = [&r]() {
+            int n = 0;
+            for (const FakeIo::Call &c : r.io.calls)
+                n += c.what == QLatin1String("acquire") ? 1 : 0;
+            return n;
+        };
+        const int acquiresBefore = acquires();
+        const qsizetype upsBefore = r.t.ups.size();
+        r.e.setExiting();
+        QString err;
+        CHECK(!r.e.connect(err)); // the queued reconcile's start
+        CHECK(r.t.ups.size() == upsBefore && acquires() == acquiresBefore);
+        CHECK(runUpstreamQuit(AppExitKind::Quit, true, /*upstreamSession=*/false, r.hooks(true)));
+        CHECK(r.t.ups.size() == upsBefore && acquires() == acquiresBefore && r.t.downs == 0);
+        CHECK(r.clock >= 700 && r.clock < 700 + 50);
+    }
+    {
+        // ... and an attempt already walking: the leg the owner asks for after the exit began is not raised.
+        Rig r;
+        QString err;
+        setFlags(true);
+        r.e.setTunnel(&r.t);
+        CHECK(r.e.loadSubscription(body(QJsonArray{awgNode("9", 9, "EE"), awgNode("8", 8, "FI")}), err));
+        CHECK(r.e.connect(err));
+        const qsizetype upsFirst = r.t.ups.size();
+        CHECK(upsFirst == 1); // the first leg is up
+        r.e.setExiting();
+        r.e.onTunnelDisconnected(); // that leg dies while the exit runs
+        CHECK(r.t.ups.size() == upsFirst); // no next leg
+        CHECK(!r.e.attemptRunning());
+    }
+    {
+        // ... an own AmneziaWG tunnel up (a failover from a provider row) with the old seat's release in flight: the quit
+        // waits for the release and leaves the tunnel running (BUG-6) - no stop is sent.
+        Rig r;
+        QString err;
+        setFlags(true);
+        r.e.setTunnel(&r.t);
+        CHECK(r.e.loadSubscription(body(QJsonArray{awgNode("9", 9, "EE"), stubNode("aaaaaaaaaaaaaaa0", 1, 0)}), err));
+        CHECK(r.e.adoptTunnelConnected(QStringLiteral("9"), QStringLiteral("awg"), QString()));
+        r.releaseAnsweredAt = 500;
+        r.e.setExiting();
+        CHECK(runUpstreamQuit(AppExitKind::Quit, true, /*upstreamSession=*/false, r.hooks(true)));
+        CHECK(r.t.downs == 0 && r.t.ups.isEmpty() && r.clock >= 500 && r.clock < 550);
+    }
     for (AppExitKind k : {AppExitKind::Restart, AppExitKind::Hide}) {
         Rig r;
         upstreamRig(r);

@@ -24,5 +24,19 @@ ret=$(printf '%s\n' "$r" | grep -nF 'return false;' | head -1 | cut -d: -f1)
 [ -n "$first" ] && [ -n "$ret" ] && [ "$first" -lt "$ret" ] || bad "Q3: runUpstreamQuit can return before it asks whether a release is pending"
 grep -qF 'return kind != AppExitKind::Hide && upstreamNodesOn && h.releaseSettled && !h.releaseSettled();' "$UE" \
   || bad "Q3: the pending-release rule changed"
+# Q4 (round mac-D4, review finding 5): once the exit has begun nothing new starts - one latch the facade sets at its
+# first aboutToQuit handler, read where attempts start (guardedStart) and passed to the engine's gate (connect, every leg).
+be="$(body "$ENG" 'void AvpnEngineQml::beginExit()')"
+printf '%s\n' "$be" | grep -qF 'm_exiting = true;' && printf '%s\n' "$be" | grep -qF 'm_engine.setExiting();' || bad "Q4: beginExit does not latch the facade and the engine"
+printf '%s\n' "$q" | grep -qF 'beginExit();' || bad "Q4: the quit path does not begin the exit before it pumps the event loop"
+fq=$(grep -n 'beginExit(); // round mac-D4: the first aboutToQuit handler' "$ENG" | head -1 | cut -d: -f1)
+first=$(grep -n 'QCoreApplication::aboutToQuit, this' "$ENG" | head -1 | cut -d: -f1)
+[ -n "$fq" ] && [ -n "$first" ] && [ "$fq" -gt "$first" ] && [ $((fq - first)) -le 2 ] || bad "Q4: the first aboutToQuit handler does not begin the exit"
+printf '%s\n' "$(body "$ENG" 'void AvpnEngineQml::guardedStart()')" | sed -n 2,4p | grep -qF 'if (m_exiting)' || bad "Q4: guardedStart does not read the latch first"
+SE="$ROOT/client/core/serviceEngine/ServiceEngine.cpp"
+printf '%s\n' "$(body "$SE" 'bool ServiceEngine::connect(QString &error)')" | grep -qF 'if (m_exiting) {' || bad "Q4: the engine's connect does not refuse once the exit has begun"
+awk '/case path::EffectType::StartPath: \{/ { on = 1; n = 0 } on { n++; if ($0 ~ /if \(m_exiting\)/) found = 1; if (n > 3) on = 0 } END { exit found ? 0 : 1 }' "$SE" \
+  || bad "Q4: a leg is raised without asking whether the exit has begun"
+
 [ "$fail" = 0 ] && echo "check_upstream_quit_wiring: ok"
 exit "$fail"
