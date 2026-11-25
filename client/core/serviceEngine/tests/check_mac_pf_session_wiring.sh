@@ -16,6 +16,8 @@
 #       disableKillSwitch; the service start: strict -> disableAllTraffic, else disableKillSwitch;
 #   K5  uninstall flushes every sub-anchor after the main ruleset dropped them; install starts with uninstall;
 #       the strict block is reloaded before the flush; the block over a live session never installs.
+#   K6  (round mac-C, review N1) DNS passes only through a tunnel: a session writes 310.blockDNS for its own tun
+#       (setDnsPass, before its table), the static file's pass names the utun interfaces, no 310 pass rule without "on".
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -146,6 +148,20 @@ ab="$(body "$FW" 'void MacOSFirewall::addBlockToSession()')"
 has "$ab" 'enableAnchor(anchor);' || bad "K5: the block over a live session does not switch the block anchors on"
 if has "$ab" 'install();'; then bad "K5: the block over a live session installs (flushes the session's anchors)"; fi
 if has "$ab" 'flushAnchors('; then bad "K5: the block over a live session flushes anchors"; fi
+
+# ---- K6 ------------------------------------------------------------------------------------------------------
+asr="$(body "$FW" 'void MacOSFirewall::applySessionRules(const FirewallParams& params, const QString& tunnelIfname)')"
+dp=$(at "$asr" 'setDnsPass(tunnelIfname);')
+dt=$(at "$asr" 'setAnchorTable(QStringLiteral("310.blockDNS"), true, QStringLiteral("dnsaddr"), params.dnsServers);')
+[ "${dp:-0}" -gt 0 ] && [ "${dt:-0}" -gt "${dp:-0}" ] || bad "K6: a session does not write its DNS pass for its own tun before its table"
+sdp="$(body "$FW" 'void MacOSFirewall::setDnsPass(const QString& tunnelIfname)')"
+has "$sdp" 'avpn::pf::dnsSessionRules(tunnelIfname)' && has "$sdp" 'reloadAnchor(QStringLiteral("310.blockDNS"));' \
+  || bad "K6: setDnsPass does not write the session's rules (or the static file for an unknown tun)"
+dnsFile="$ROOT/deploy/data/macos/pf/tribe.310.blockDNS.conf"
+if grep -v '^[[:space:]]*#' "$dnsFile" | grep -E '^[[:space:]]*pass' | grep -vqE '^[[:space:]]*pass out on \$utunInterfaces '; then
+  bad "K6: tribe.310.blockDNS.conf passes DNS without naming the tunnel interfaces"
+fi
+grep -q 'pass out on %1 proto { tcp, udp } to <dnsaddr> port 53' "$OWN" || bad "K6: dnsSessionRules does not name the session's tun"
 
 [ "$fail" = "0" ] && echo "check_mac_pf_session_wiring: ok"
 exit "$fail"

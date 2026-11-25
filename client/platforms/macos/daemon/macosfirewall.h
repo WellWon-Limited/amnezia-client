@@ -80,6 +80,9 @@ private:
     // AVPN: 200.allowVPN of a session: only its own tun; an unknown tun gets the static file, written
     // explicitly (never the rule an earlier session left in the kernel).
     static void setTunnelPass(const QString &tunnelIfname);
+    // AVPN (round mac-C, review N1): 310.blockDNS of a session: DNS to its resolvers only through its own tun; an
+    // unknown tun gets the static file (every utun, never a physical interface).
+    static void setDnsPass(const QString &tunnelIfname);
 
 public:
     // AVPN (pf state ownership): the command seam of the host check

@@ -44,6 +44,7 @@
 //   P17 a createTun no session takes is dropped by the next session opened or by a stop
 //   P18 strict turned on over a live session keeps its rules; the block outlives it; strict off = no pf
 //   P19 the table model itself (the man page lines above)
+//   P20 DNS passes to the session's resolvers only through its own tun (static file: tunnels only) - review N1
 // Build and run: tests/build_mac_pf_session.sh. PF_CHECK_API_57F10A133 builds the same sequences against the
 // entry points of commit 57f10a133 (setTunnelInterface / clearTunnelInterface, AWG through applySessionRules).
 #include "platforms/macos/daemon/macosfirewall.h"
@@ -307,10 +308,18 @@ static int model(const QString &command)
         return 0;
     }
     if ((m = loadStdinRe.match(command)).hasMatch()) {
-        QStringList rules;
-        for (const QString &line : m.captured(1).split(QLatin1Char('\n'), Qt::SkipEmptyParts))
-            rules << line.simplified();
-        g_k.setRules(QStringLiteral("tribe/") + m.captured(2), rules);
+        // pfctl -a <path> -f -: like a file - the rules replace the anchor's, a table is defined as written
+        const PfFile f = parsePf(m.captured(1));
+        const QString path = QStringLiteral("tribe/") + m.captured(2);
+        Anchor &a = g_k.anchors[path];
+        a.rules = f.rules;
+        for (auto it = f.tables.cbegin(); it != f.tables.cend(); ++it) {
+            Table &t = a.tables[it.key()];
+            t.persist = it.value().persist;
+            if (it.value().hasList)
+                t.addrs = it.value().addrs;
+        }
+        g_k.settle(path);
         return 0;
     }
     if ((m = reloadRe.match(command)).hasMatch()) {
@@ -386,6 +395,12 @@ static QStringList nonEmptyAnchors()
     return out;
 }
 static QStringList pass(const QString &ifname) { return { QStringLiteral("pass out on %1 flags any no state").arg(ifname) }; }
+// 310.blockDNS of a session with its own tun (round mac-C, review N1): DNS to its resolvers only through that tun.
+static QStringList dnsRules(const QString &ifname)
+{
+    return { QStringLiteral("block return out proto { tcp, udp } to port 53 flags any no state"),
+             QStringLiteral("pass out on %1 proto { tcp, udp } to <dnsaddr> port 53 flags any no state").arg(ifname) };
+}
 
 // Documentation addresses only (RFC 5737).
 static const QString kAwgPeer = QStringLiteral("192.0.2.10");
@@ -483,6 +498,7 @@ static void checkXray(const QString &tun)
     CHECK_EQ(rulesOf(QStringLiteral("400.allowPIA")), fileRules(QStringLiteral("400.allowPIA")));
     CHECK_EQ(tableOf(QStringLiteral("110.allowNets"), QStringLiteral("allownets")), QStringList { kXrayServer });
     CHECK_EQ(tableOf(QStringLiteral("310.blockDNS"), QStringLiteral("dnsaddr")), (QStringList { kXrayDns1, kXrayDns2 }));
+    CHECK_EQ(rulesOf(QStringLiteral("310.blockDNS")), dnsRules(tun)); // N1: never a pass on the physical interface
     CHECK(g_k.tokenHeld && g_k.mainRefsTribe);
 }
 
@@ -493,6 +509,7 @@ static void checkAwg(const QString &utun)
     CHECK_EQ(rulesOf(QStringLiteral("400.allowPIA")), QStringList());
     CHECK_EQ(tableOf(QStringLiteral("110.allowNets"), QStringLiteral("allownets")), QStringList { kAwgPeer });
     CHECK_EQ(tableOf(QStringLiteral("310.blockDNS"), QStringLiteral("dnsaddr")), QStringList { kAwgDns });
+    CHECK_EQ(rulesOf(QStringLiteral("310.blockDNS")), dnsRules(utun)); // N1: never a pass on the physical interface
     CHECK(!hasTable(QStringLiteral("120.blockNets"), QStringLiteral("blocknets")));
     CHECK(g_k.tokenHeld && g_k.mainRefsTribe);
 }
@@ -627,6 +644,31 @@ int main(int argc, char **argv)
     reboot();
     xrayStart(QStringLiteral("en0")); // never a pass on the uplink
     CHECK_EQ(rulesOf(QStringLiteral("200.allowVPN")), fileRules(QStringLiteral("200.allowVPN")));
+    CHECK_EQ(rulesOf(QStringLiteral("310.blockDNS")), fileRules(QStringLiteral("310.blockDNS")));
+
+    g_case = "P20 DNS passes only through a tunnel (round mac-C, review N1)";
+    {
+        const QStringList file = fileRules(QStringLiteral("310.blockDNS"));
+        bool passOnTunsOnly = false;
+        for (const QString &r : file) {
+            if (!r.startsWith(QLatin1String("pass")))
+                continue;
+            passOnTunsOnly = r.startsWith(QLatin1String("pass out on { utun0, utun1,")) && !r.contains(QLatin1String("en0"));
+            CHECK(passOnTunsOnly); // the static file: every pass names the tunnels, never "any interface"
+        }
+        CHECK(passOnTunsOnly);
+        CHECK(avpn::pf::dnsSessionRules(QStringLiteral("utun4")).size() == 3);
+        for (const char *bad : { "", "en0", "utun", "bridge0", "utun4; pfctl -d" })
+            CHECK(avpn::pf::dnsSessionRules(QString::fromLatin1(bad)).isEmpty());
+        reboot();
+        awgStart(tA);
+        awgStop();
+        xrayStart(xray); // the next session's DNS pass is its own tun, not the earlier one's
+        CHECK_EQ(rulesOf(QStringLiteral("310.blockDNS")), dnsRules(xray));
+        openVpnStart(); // a later session without a tun of its own: the static file again
+        CHECK_EQ(rulesOf(QStringLiteral("310.blockDNS")), file);
+        CHECK_EQ(tableOf(QStringLiteral("310.blockDNS"), QStringLiteral("dnsaddr")), (QStringList { kXrayDns1, kXrayDns2 }));
+    }
 
     g_case = "P8 strict, no session: AWG -> strict stop";
     reboot();
@@ -747,7 +789,8 @@ int main(int argc, char **argv)
             bool emptyTable = false;
             for (const PfTableDef &d : f.tables)
                 emptyTable = emptyTable || (d.hasList && d.addrs.isEmpty());
-            CHECK(emptyTable == (a.kind == avpn::pf::AnchorKind::StaticRuleSessionTable));
+            CHECK(emptyTable == (a.kind == avpn::pf::AnchorKind::StaticRuleSessionTable
+                                 || a.kind == avpn::pf::AnchorKind::SessionRuleSessionTable));
             for (const PfTableDef &d : f.tables)
                 CHECK(!d.persist); // every bundled table lives only while its rule does (P19)
             if (f.rules.isEmpty())

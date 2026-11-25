@@ -16,6 +16,9 @@
 //    writes it explicitly (MacOSFirewall::setAnchorTable: -T replace, or -T kill when unused).
 //  - SessionRule: the rule depends on the session (200.allowVPN: the session's own tun only, wave 3). It
 //    is written explicitly by the session that owns it and never taken over from the kernel.
+//  - SessionRuleSessionTable: both the rule and its table are the session's (310.blockDNS: DNS passes to the
+//    session's resolvers only through its own tun - round mac-C review N1; the table is written as for
+//    StaticRuleSessionTable). Written explicitly by the session, never taken over from the kernel.
 //  - ScanRule: 160.allowScan, armed by the probe host for one scan and flushed when the scan ends
 //    (service/server/tribe_scan.cpp); a tunnel session neither writes nor flushes it.
 //  - Unused: declared in tribe.conf, never enabled (upstream PIA leftovers); flushed on every stop.
@@ -34,7 +37,7 @@
 namespace avpn {
 namespace pf {
 
-enum class AnchorKind { Static, StaticRuleSessionTable, SessionRule, ScanRule, Unused, Retired };
+enum class AnchorKind { Static, StaticRuleSessionTable, SessionRule, SessionRuleSessionTable, ScanRule, Unused, Retired };
 
 struct AnchorSpec {
     const char *name;
@@ -56,7 +59,7 @@ inline const QList<AnchorSpec> &anchors()
         { "250.blockIPv6", AnchorKind::Static, true },
         { "290.allowDHCP", AnchorKind::Static, false },
         { "300.allowLAN", AnchorKind::Static, false },                    // static table <lanips>
-        { "310.blockDNS", AnchorKind::StaticRuleSessionTable, false },    // table <dnsaddr>
+        { "310.blockDNS", AnchorKind::SessionRuleSessionTable, false },   // its tun + table <dnsaddr>
         { "350.allowHnsd", AnchorKind::Unused, false },
         { "400.allowPIA", AnchorKind::Static, false },
         { "999.quarantine", AnchorKind::Retired, false },                 // 7d36adc96 .. a69449817 (Aug-Sep 2026)
@@ -133,6 +136,25 @@ inline QStringList tunnelPassRules(const QString &ifname)
     if (!isTunnelIfname(ifname))
         return {};
     return { QStringLiteral("pass out on %1 flags any no state").arg(ifname) };
+}
+
+// 310.blockDNS of a session (round mac-C, review N1): every DNS query is blocked except to the session's resolvers
+// (table <dnsaddr>, written after these rules) and only through the session's own tun. The bundled file passed them
+// on ANY interface: a socket bound to the physical interface (IP_BOUND_IF - mDNSResponder's scoped queries, any
+// application) then sent DNS in clear whenever a route scoped to that interface existed - under own Xray always (its
+// session installs 0/1 + 128/1 scoped to the uplink), under AmneziaWG while the Scanner's half routes were in place
+// (test Mac 25.11: one query of a plain user process left en0 in clear in both cases). Nothing of ours needs DNS
+// outside the tun: the system resolver's queries follow the tunnel's routes, the service's own sockets pass
+// 400.allowPIA (Xray) or go through the tunnel (AmneziaWG), the Scanner's probes pass 160.allowScan (quick).
+// Empty = the tun is unknown or not a tun name; the caller then writes the static file (every utun, never a
+// physical interface).
+inline QStringList dnsSessionRules(const QString &ifname)
+{
+    if (!isTunnelIfname(ifname))
+        return {};
+    return { QStringLiteral("block return out proto { tcp, udp } to port 53 flags any no state"),
+             QStringLiteral("table <dnsaddr> {}"),
+             QStringLiteral("pass out on %1 proto { tcp, udp } to <dnsaddr> port 53 flags any no state").arg(ifname) };
 }
 
 } // namespace pf

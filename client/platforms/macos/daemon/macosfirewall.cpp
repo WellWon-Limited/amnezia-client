@@ -286,6 +286,18 @@ void MacOSFirewall::setTunnelPass(const QString& tunnelIfname)
     reloadAnchor(kTunnelAnchor);
 }
 
+// AVPN (round mac-C, review N1, macospfanchors.h dnsSessionRules): 310.blockDNS of one session - DNS to its resolvers
+// only through its own tun; an unknown tun gets the static file (every utun, never a physical interface).
+void MacOSFirewall::setDnsPass(const QString& tunnelIfname)
+{
+    const QStringList rules = avpn::pf::dnsSessionRules(tunnelIfname);
+    if (!rules.isEmpty()) {
+        setAnchorWithRules(QStringLiteral("310.blockDNS"), true, rules);
+        return;
+    }
+    reloadAnchor(QStringLiteral("310.blockDNS"));
+}
+
 void MacOSFirewall::applySessionRules(const FirewallParams& params, const QString& tunnelIfname)
 {
     // double-check + ensure our firewall is installed and enabled. This is necessary as
@@ -304,7 +316,7 @@ void MacOSFirewall::applySessionRules(const FirewallParams& params, const QStrin
     setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
     setAnchorEnabled(QStringLiteral("290.allowDHCP"), true);
     setAnchorEnabled(QStringLiteral("300.allowLAN"), true);
-    setAnchorEnabled(QStringLiteral("310.blockDNS"), true);
+    setDnsPass(tunnelIfname);
     setAnchorTable(QStringLiteral("310.blockDNS"), true, QStringLiteral("dnsaddr"), params.dnsServers);
     // Set either way: the AmneziaWG kill switch never passes the service's group, and an Xray session's
     // pass must not outlive it.

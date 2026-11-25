@@ -6,9 +6,13 @@
 //    sockets on the uplink are DROPPED without the scan exemption and PASS with it; a user application's
 //    identical packets are dropped in both cases; the exemption does not open another interface;
 //  - the Xray kill switch (KillSwitch::enableKillSwitch, splitTunnelType 0): 400.allowPIA already passes
-//    the service's sockets (no exemption needed), a user application's are dropped.
+//    the service's sockets (no exemption needed), a user application's are dropped;
+//  - DNS (round mac-C, review N1): a user application's query to the session's resolvers from a socket bound to the
+//    physical interface is dropped under both kill switches, with and without the scan's exemption, with the
+//    session's own 310.blockDNS and with the static file; the same query through the tunnel passes.
 // Packets are modelled, nothing is sent and pfctl is never run. Run by build_tribe_scan.sh (macOS).
 #include "platforms/macos/daemon/macosfirewall.h"
+#include "platforms/macos/daemon/macospfanchors.h"
 
 #include <QDir>
 #include <QFile>
@@ -419,6 +423,56 @@ int main(int argc, char **argv)
     Ruleset xrScan = xr;
     xrScan.enabled[QStringLiteral("160.allowScan")] = rulesAnchor(ex);
     CHECK(evaluate(xrScan, svc) && !evaluate(xrScan, user)); // the exemption changes nothing for users there
+
+    // --- DNS (round mac-C, review N1): the resolvers only through the tunnel --------------------------------------------
+    // The session's resolvers are public (the test Mac: 1.1.1.1 and 1.0.0.1); a socket bound to the physical interface
+    // reaches them whenever a route scoped to it exists (own Xray always, AmneziaWG during a scan).
+    const QString resolver = QStringLiteral("1.1.1.1");
+    Packet userDnsUplink = user;
+    userDnsUplink.proto = QStringLiteral("udp");
+    userDnsUplink.dst = resolver;
+    userDnsUplink.dstPort = 53;
+    Packet userDnsTun = userDnsUplink;
+    Packet otherDnsTun = userDnsUplink;
+    otherDnsTun.dst = QStringLiteral("9.9.9.9"); // not a session resolver
+    auto withDns = [&](Ruleset rs, const Anchor &dnsAnchor) {
+        Anchor d = dnsAnchor;
+        d.tables[QStringLiteral("dnsaddr")] = {resolver, QStringLiteral("1.0.0.1")};
+        rs.enabled[QStringLiteral("310.blockDNS")] = d;
+        return rs;
+    };
+    struct DnsCase {
+        const char *name;
+        Ruleset rs;
+        QString tun;
+    };
+    const QList<DnsCase> dnsCases = {
+        {"awg, session 310", withDns(awg, rulesAnchor(avpn::pf::dnsSessionRules(QStringLiteral("utun9")))), QStringLiteral("utun9")},
+        {"awg+scan, session 310", withDns(awgScan, rulesAnchor(avpn::pf::dnsSessionRules(QStringLiteral("utun9")))), QStringLiteral("utun9")},
+        {"awg, static 310", withDns(awg, fileAnchor(QStringLiteral("310.blockDNS"))), QStringLiteral("utun9")},
+        {"awg+scan, static 310", withDns(awgScan, fileAnchor(QStringLiteral("310.blockDNS"))), QStringLiteral("utun9")},
+        {"xray, session 310", withDns(xr, rulesAnchor(avpn::pf::dnsSessionRules(QStringLiteral("utun22")))), QStringLiteral("utun22")},
+        {"xray+scan, session 310", withDns(xrScan, rulesAnchor(avpn::pf::dnsSessionRules(QStringLiteral("utun22")))), QStringLiteral("utun22")},
+        {"xray, static 310", withDns(xr, fileAnchor(QStringLiteral("310.blockDNS"))), QStringLiteral("utun22")},
+    };
+    for (const DnsCase &c : dnsCases) {
+        const bool leak = evaluate(c.rs, userDnsUplink, &why);
+        if (leak)
+            std::fprintf(stderr, "  %s: a user's DNS on en0 to the resolver passes: %s\n", c.name, qPrintable(why));
+        CHECK(!leak);
+        userDnsTun.ifname = c.tun;
+        otherDnsTun.ifname = c.tun;
+        CHECK(evaluate(c.rs, userDnsTun));   // through the tunnel: passes
+        CHECK(!evaluate(c.rs, otherDnsTun)); // another resolver through the tunnel: still blocked
+        Packet svcDnsUplink = userDnsUplink;
+        svcDnsUplink.group = QStringLiteral("tribevpn");
+        svcDnsUplink.user = QStringLiteral("root");
+        // the service's own resolution on the uplink: under Xray 400.allowPIA, during a scan 160.allowScan; under
+        // AmneziaWG without a scan it is not needed (the service's lookups follow the tunnel's routes)
+        const bool svcPass = evaluate(c.rs, svcDnsUplink);
+        CHECK(svcPass == (c.rs.enabled.contains(QStringLiteral("400.allowPIA")) || c.rs.enabled.contains(QStringLiteral("160.allowScan"))));
+    }
+    std::printf("dns: a user's query to the session resolver on en0 is dropped in %d kill switch cases\n", int(dnsCases.size()));
 
     CHECK(g_skipped == 0);
     std::printf("pf_scan_exemption_check: %d checks, %d failed\n", g_checks, g_failed);
