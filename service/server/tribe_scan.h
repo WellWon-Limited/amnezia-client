@@ -43,13 +43,15 @@
 //    same pair scoped to the uplink for its own pinned core sockets (RouterMac::routeAddXray, upstream #2479), and
 //    with the VPN off nothing hides the primary default. So the host adds that pair - 0/1 and 128/1 via the
 //    uplink's IPv4 router, scoped to the uplink - for the scan's lifetime, only when a socket pinned to the uplink
-//    has no route, and deletes exactly what it added: with the pf exemption (every end of a scan), when the uplink
-//    changes under it, and at service start (crash recovery). What it added is recorded in a root-owned file next
-//    to the pf token (kTribeScanRoutesRecord) - the kernel keeps no mark of who added a route (RTF_PROTO3 is not
-//    stored: the delete report of such a route carries none). A route it found (an Xray session's) is never
-//    touched. Scoped routes serve pinned lookups only: the tunnel's own traffic keeps its 0/1 + 128/1. Needed but
-//    not in force = the no-uplink refusal (host_options.bind_interface): a pinned probe there could only fail,
-//    which would read as "nothing works".
+//    has no route through the table (tribeScanHalvesNeeded), and deletes exactly what it added: with the pf
+//    exemption (every end of a scan), when the uplink changes under it, and at service start (crash recovery).
+//    Ownership is an intent log in a root-owned file next to the pf token (kTribeScanRoutesRecord; the kernel keeps
+//    no mark of who added a route - RTF_PROTO3 is not stored): written durably before an add, trimmed after a
+//    delete (protocol at tribeScanArmHalfRoutes). A route it found (an Xray session's) is never touched. Then every
+//    candidate's entry address must have a pinned route: a scan never probes a target it cannot reach, which the
+//    app would store as "not working" (review N2). Needed but not in force = the no-uplink refusal
+//    (host_options.bind_interface). Scoped routes serve pinned lookups only; under the kill switch a user's pinned
+//    socket still meets pf on the uplink, which passes DNS only through the tunnel (macospfanchors.h dnsSessionRules).
 //
 // What it never does: start, stop or reconfigure a tunnel; register a socket callback; log a request, a
 // reply, a config, a token, a host, an address or an interface name (only ids, codes and sizes); retry.
@@ -219,6 +221,7 @@ struct TribeScanRequestInfo {
     QString scanId;
     qint64 deadlineMs = -1;
     bool hasAwgMini = false; // a candidate of kind awg_mini (scan_start / scan_add)
+    QList<quint32> entryIps; // the IPv4 entry addresses of the candidates (host order; others are not listed)
 };
 TribeScanRequestInfo tribeScanInspectRequest(const QByteArray &message);
 bool tribeScanKnownAction(const QString &action);
@@ -253,31 +256,67 @@ struct TribeScanHalfRoute {
 };
 inline constexpr quint32 kTribeScanHalfLow = 0x00000000u;  // 0.0.0.0/1
 inline constexpr quint32 kTribeScanHalfHigh = 0x80000000u; // 128.0.0.0/1
-// A destination in each half the pinned-route test asks the kernel about (a UDP connect: no packet is sent).
+// A destination in each half the kernel is asked about after an arm (a pinned UDP connect: no packet is sent).
 inline constexpr quint32 kTribeScanTestLow = 0x01010101u;  // 1.1.1.1
 inline constexpr quint32 kTribeScanTestHigh = 0xC0000201u; // 192.0.2.1 (TEST-NET-1)
 
+// Which half a socket pinned to the uplink cannot reach through the routing table (review N2, round mac-C: one sample
+// address per half decided for the whole half, and an AmneziaWG exclusion such as 1.1.1.1/32 via the uplink made the
+// low half look routed while every other address of it stayed hidden). Read from the table itself: a half is NEEDED
+// when an unscoped route of ANOTHER interface lies in it (an AmneziaWG 0/1 via its utun, a VPN's finer split, a static
+// host route into a tunnel) - such a route hides the primary default from pinned lookups for its addresses - and no
+// route scoped to the uplink covers the whole half (0/1 or 128/1 with RTF_IFSCOPE on the uplink: an Xray session's
+// pair, or ours). Ignored: defaults, cloned and link-layer entries, and the special ranges a probe never dials
+// (127/8, 169.254/16, 224/4 and above).
+struct TribeScanHalfNeed {
+    bool low = false;
+    bool high = false;
+    bool any() const { return low || high; }
+};
+TribeScanHalfNeed tribeScanHalvesNeeded(const QByteArray &dump, int uplinkIndex);
+// From the same dump: the scoped half routes on any interface (dst 0/1 or 128/1, RTF_IFSCOPE, an IPv4 gateway).
+QList<TribeScanHalfRoute> tribeScanScopedHalfRoutes(const QByteArray &dump);
+// From the same dump: the IPv4 router of the default route on `ifindex` (0 = none).
+quint32 tribeScanDefaultRouter(const QByteArray &dump, int ifindex);
+
 struct TribeScanRouteArm {
-    int result = 0;                  // 1 = added, 0 = not needed (pinned sockets route, or no IPv4 router), -1 = needed, not in force
+    int result = 0;                  // 1 = added, 0 = not needed (pinned sockets route through the table), -1 = needed, not in force
     QList<TribeScanHalfRoute> added; // what this arm added, never a route it found
 };
-// The kernel as the arm sees it: pinned(ifindex, dst) = a socket pinned to ifindex has a route to dst;
-// write(add, route) = 0 on success, else errno (EEXIST: a route of someone else is there).
+// The kernel and the disk as the half routes see them. pinned(ifindex, dst) = a socket pinned to ifindex has a route to
+// dst; write(add, route) = 0 on success, else errno (EEXIST on add: a route is there - never ours; ESRCH on delete: it
+// is gone); table() = the AF_INET route table (NET_RT_DUMP); recordRead / recordWrite = the ownership record
+// (recordWrite("") removes it; true only once the bytes are durable).
 struct TribeScanRouteOps {
     std::function<bool(int ifindex, quint32 dst)> pinned;
     std::function<int(bool add, const TribeScanHalfRoute &r)> write;
+    std::function<QByteArray()> table;
+    std::function<QByteArray()> recordRead;
+    std::function<bool(const QByteArray &bytes)> recordWrite;
 };
-// Adds the pair for `u` via `router` (host order, 0 = none known) where pinned sockets have no route, then checks
-// they route; on any failure deletes what it added and answers -1.
+// The ownership record is an intent log (review N3): it names every half route this host has added or is about to
+// add, and nothing else. Protocol:
+//   arm     - recover first (below); read the table; nothing needed -> nothing written. Else record += the routes to
+//             add (durable BEFORE the first RTM_ADD - no record, no add), add each (EEXIST: someone else's -> record -=
+//             it), check the table and a pinned lookup per half; any failure removes what was added and answers -1;
+//   remove  - delete each route; record -= the ones deleted or already gone (ESRCH); a failed delete stays recorded
+//             and is retried by the next recover;
+//   recover - at service start and before each arm: for each recorded route, the live table decides - absent: gone
+//             (a reboot, a removal) -> forgotten; present scoped to the same interface but via another gateway:
+//             someone else's now -> forgotten, never deleted; present as recorded: ours -> deleted.
+// A kill between any two steps leaves the record a superset of what is ours in the kernel, and recover removes it.
+// Residual: a route someone else adds in the instant between our table read and our RTM_ADD gets EEXIST and is
+// dropped from the record - but if the service dies inside that same instant the record still names it, and a later
+// recover could delete it while its gateway is unchanged.
 TribeScanRouteArm tribeScanArmHalfRoutes(const TribeScanUplink &u, quint32 router, const TribeScanRouteOps &ops);
-void tribeScanDisarmHalfRoutes(const QList<TribeScanHalfRoute> &added, const TribeScanRouteOps &ops);
+// Returns the routes that could not be deleted (they stay in the record).
+QList<TribeScanHalfRoute> tribeScanRemoveHalfRoutes(const QList<TribeScanHalfRoute> &routes, const TribeScanRouteOps &ops);
+// Returns how many recorded routes were deleted.
+int tribeScanRecoverHalfRoutes(const TribeScanRouteOps &ops);
 // The routing-socket message of an RTM_ADD (add) or RTM_DELETE of one half route: RTA_DST, RTA_GATEWAY, RTA_NETMASK,
 // RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE, rtm_index = the scope. "" outside macOS.
 QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int seq);
-// From an AF_INET NET_RT_DUMP: the IPv4 router of the default route on `ifindex` (0 = none).
-quint32 tribeScanDefaultRouter(const QByteArray &dump, int ifindex);
-// The record of the half routes this host added (one line each, "half <dst> <gateway> <ifindex>" in hex/decimal);
-// parse keeps only well-formed half routes.
+// The record (one line each, "half <dst> <gateway> <ifindex>" in hex/decimal); parse keeps only well-formed half routes.
 inline constexpr char kTribeScanRoutesRecord[] = "/Library/Application Support/TribeVPN/scan/uplink-routes";
 QByteArray tribeScanHalfRoutesRecord(const QList<TribeScanHalfRoute> &routes);
 QList<TribeScanHalfRoute> tribeScanParseHalfRoutesRecord(const QByteArray &record);
@@ -334,6 +373,9 @@ struct TribeScanDeps {
     std::function<TribeScanRouteArm(const TribeScanUplink &u)> armRoutes;
     std::function<void(const QList<TribeScanHalfRoute> &added)> disarmRoutes;
     std::function<void()> clearLeftoverRoutes;
+    // A socket pinned to the uplink has a route to this IPv4 target (review N2: checked for every candidate's entry
+    // before the engine gets the scan - a target the scan cannot route to would be stored as "not working").
+    std::function<bool(int ifindex, quint32 dst)> pinnedRoute;
     // awg_mini: the checked probe binary ("" = none; worker thread) and the live AmneziaWG tunnel (main
     // thread, at the arrival of each message).
     std::function<QString()> awgProbeBinary;
@@ -402,6 +444,7 @@ private:
         quint64 serial = 0;
         bool armed = false;
         QList<TribeScanHalfRoute> routes; // the half routes this scan added
+        int uplinkIndex = 0;              // the uplink its probes are pinned to
     };
 
     // worker thread; `live` / `tunnelChanges` as they were when the message arrived (main thread)
@@ -413,6 +456,8 @@ private:
     // The uplink moved: the active scan's half routes lead to a router it may no longer have - they go now (the
     // scan itself is ended by the app, its generation moved too). Any thread.
     void dropRoutes(const char *why);
+    // How many of the request's entry addresses a socket pinned to `uplinkIndex` cannot reach (review N2). Any thread.
+    int unroutedTargets(const TribeScanRequestInfo &req, int uplinkIndex) const;
     void scheduleDisarm(quint64 serial, qint64 afterMs);           // any thread -> main
     void readRouteSocket();                                        // main thread (macOS)
     // The engine stops (waitMs), probe children die, the exemption goes; a stop the engine does not confirm

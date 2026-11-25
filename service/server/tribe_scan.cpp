@@ -9,6 +9,7 @@
 #include <QFile>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -233,29 +234,56 @@ QByteArray dumpInetRoutes()
     return QByteArray();
 }
 
+// The ownership record (tribe_scan.h): read whole; written durably - a temporary file, fsync, rename, then the
+// directory synced - so a record that says "about to add" is on disk before the RTM_ADD (review N3). "" removes it.
+QByteArray readRoutesRecord()
+{
+    QFile f(QString::fromLatin1(kTribeScanRoutesRecord));
+    return f.open(QIODevice::ReadOnly) ? f.read(4096) : QByteArray();
+}
+
+bool writeRoutesRecord(const QByteArray &bytes)
+{
+    const QString path = QString::fromLatin1(kTribeScanRoutesRecord);
+    const QString dir = QFileInfo(path).absolutePath();
+    auto syncDir = [&dir]() {
+        const int d = ::open(QFile::encodeName(dir).constData(), O_RDONLY);
+        if (d < 0)
+            return false;
+        const bool ok = ::fsync(d) == 0;
+        ::close(d);
+        return ok;
+    };
+    if (bytes.isEmpty()) {
+        if (QFile::exists(path) && !QFile::remove(path))
+            return false;
+        syncDir();
+        return true;
+    }
+    if (!QDir().mkpath(dir))
+        return false;
+    const QString tmp = path + QStringLiteral(".tmp");
+    QFile f(tmp);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    const bool written = f.write(bytes) == bytes.size() && f.flush() && ::fsync(f.handle()) == 0;
+    f.close();
+    if (!written || ::rename(QFile::encodeName(tmp).constData(), QFile::encodeName(path).constData()) != 0) {
+        QFile::remove(tmp);
+        return false;
+    }
+    return syncDir();
+}
+
 TribeScanRouteOps systemRouteOps()
 {
     TribeScanRouteOps ops;
     ops.pinned = pinnedRouteExists;
     ops.write = writeHalfRoute;
+    ops.table = dumpInetRoutes;
+    ops.recordRead = readRoutesRecord;
+    ops.recordWrite = writeRoutesRecord;
     return ops;
-}
-
-// The record of what this host added (tribe_scan.h): written after an arm that added, gone after the disarm.
-void writeRoutesRecord(const QList<TribeScanHalfRoute> &routes)
-{
-    const QString path = QString::fromLatin1(kTribeScanRoutesRecord);
-    if (routes.isEmpty()) {
-        QFile::remove(path);
-        return;
-    }
-    QDir().mkpath(QFileInfo(path).absolutePath());
-    QSaveFile f(path);
-    if (f.open(QIODevice::WriteOnly)) {
-        f.write(tribeScanHalfRoutesRecord(routes));
-        if (!f.commit())
-            qWarning() << "[tribescan] uplink routes record not written";
-    }
 }
 
 TribeScanRouteArm armUplinkRoutes(const TribeScanUplink &u)
@@ -264,11 +292,7 @@ TribeScanRouteArm armUplinkRoutes(const TribeScanUplink &u)
     in_addr a{};
     if (::inet_pton(AF_INET, u.gateway.toLatin1().constData(), &a) == 1)
         router = ntohl(a.s_addr);
-    if (router == 0) // getGatewayAndIface may hand an IPv6 gateway: the IPv4 one of the same interface
-        router = tribeScanDefaultRouter(dumpInetRoutes(), u.index);
     const TribeScanRouteArm r = tribeScanArmHalfRoutes(u, router, systemRouteOps());
-    if (!r.added.isEmpty())
-        writeRoutesRecord(r.added);
     if (r.result > 0)
         qInfo() << "[tribescan] uplink routes for pinned probes added:" << r.added.size();
     else if (r.result < 0)
@@ -278,21 +302,16 @@ TribeScanRouteArm armUplinkRoutes(const TribeScanUplink &u)
 
 void disarmUplinkRoutes(const QList<TribeScanHalfRoute> &added)
 {
-    tribeScanDisarmHalfRoutes(added, systemRouteOps());
-    writeRoutesRecord({}); // one scan holds routes at a time: nothing of ours is left
+    const QList<TribeScanHalfRoute> left = tribeScanRemoveHalfRoutes(added, systemRouteOps());
+    if (!left.isEmpty())
+        qWarning() << "[tribescan] uplink routes not removed, kept for a retry:" << left.size();
 }
 
 void clearLeftoverUplinkRoutes()
 {
-    QFile f(QString::fromLatin1(kTribeScanRoutesRecord));
-    if (!f.exists())
-        return;
-    const QList<TribeScanHalfRoute> left = f.open(QIODevice::ReadOnly) ? tribeScanParseHalfRoutesRecord(f.read(4096))
-                                                                        : QList<TribeScanHalfRoute>();
-    f.close();
-    tribeScanDisarmHalfRoutes(left, systemRouteOps()); // ESRCH: already gone (a reboot)
-    writeRoutesRecord({});
-    qInfo() << "[tribescan] uplink routes of an earlier service instance removed:" << left.size();
+    const int removed = tribeScanRecoverHalfRoutes(systemRouteOps());
+    if (removed > 0)
+        qInfo() << "[tribescan] uplink routes of an earlier service instance removed:" << removed;
 }
 #endif
 
@@ -487,8 +506,12 @@ TribeScanRequestInfo tribeScanInspectRequest(const QByteArray &message)
     const QJsonValue d = o.value(QLatin1String("deadline_ms"));
     if (d.isDouble())
         r.deadlineMs = qint64(d.toDouble());
-    for (const QJsonValue &c : o.value(QLatin1String("candidates")).toArray())
+    for (const QJsonValue &c : o.value(QLatin1String("candidates")).toArray()) {
         r.hasAwgMini = r.hasAwgMini || c.toObject().value(QLatin1String("kind")).toString() == QLatin1String("awg_mini");
+        const QHostAddress entry(c.toObject().value(QLatin1String("entry")).toObject().value(QLatin1String("ip")).toString());
+        if (entry.protocol() == QAbstractSocket::IPv4Protocol && !r.entryIps.contains(entry.toIPv4Address()))
+            r.entryIps << entry.toIPv4Address();
+    }
     return r;
 }
 
@@ -640,33 +663,151 @@ TribeScanRouteEvent tribeScanRouteEvent(const char *msg, qsizetype len, int upli
 #endif
 }
 
+namespace {
+// The special ranges a probe never dials: loopback, link-local, multicast and above (a route of another interface
+// there hides nothing a probe needs).
+bool halfSpecial(quint32 dst)
+{
+    return (dst >> 24) == 127 || (dst >> 16) == 0xA9FE || dst >= 0xE0000000u;
+}
+
+// The ownership record, edited as a set: += before an add, -= after a delete (tribe_scan.h).
+QList<TribeScanHalfRoute> recordNow(const TribeScanRouteOps &ops)
+{
+    return ops.recordRead ? tribeScanParseHalfRoutesRecord(ops.recordRead()) : QList<TribeScanHalfRoute>();
+}
+
+bool recordAdd(const TribeScanRouteOps &ops, const QList<TribeScanHalfRoute> &routes)
+{
+    if (!ops.recordWrite)
+        return false;
+    QList<TribeScanHalfRoute> rec = recordNow(ops);
+    for (const TribeScanHalfRoute &r : routes)
+        if (!rec.contains(r))
+            rec << r;
+    return ops.recordWrite(tribeScanHalfRoutesRecord(rec));
+}
+
+bool recordDrop(const TribeScanRouteOps &ops, const QList<TribeScanHalfRoute> &routes)
+{
+    if (!ops.recordWrite || routes.isEmpty())
+        return true;
+    QList<TribeScanHalfRoute> rec = recordNow(ops);
+    for (const TribeScanHalfRoute &r : routes)
+        rec.removeAll(r);
+    return ops.recordWrite(tribeScanHalfRoutesRecord(rec));
+}
+} // namespace
+
+TribeScanHalfNeed tribeScanHalvesNeeded(const QByteArray &dump, int uplinkIndex)
+{
+    TribeScanHalfNeed hidden;
+    TribeScanHalfNeed served;
+#ifdef Q_OS_MACOS
+    forEachDumpRoute(dump, [&](const DumpRoute &r) {
+        if (!(r.h.rtm_flags & RTF_UP) || (r.h.rtm_flags & (RTF_WASCLONED | RTF_LLINFO)))
+            return;
+        const quint32 mask = r.haveMask ? r.mask : ((r.h.rtm_flags & RTF_HOST) ? 0xFFFFFFFFu : 0u);
+        if (r.h.rtm_flags & RTF_IFSCOPE) {
+            // a route scoped to the uplink that serves a whole half: the half itself, or a scoped default
+            if (int(r.h.rtm_index) != uplinkIndex || !r.gwInet)
+                return;
+            if (mask == 0 && r.dst == 0) {
+                served.low = served.high = true;
+            } else if (mask == 0x80000000u && r.dst == kTribeScanHalfLow) {
+                served.low = true;
+            } else if (mask == 0x80000000u && r.dst == kTribeScanHalfHigh) {
+                served.high = true;
+            }
+            return;
+        }
+        if (int(r.h.rtm_index) == uplinkIndex || mask == 0 || halfSpecial(r.dst))
+            return; // the uplink's own routes, the default, the special ranges
+        ((r.dst & 0x80000000u) ? hidden.high : hidden.low) = true; // a /1 or longer lies in one half
+    });
+#else
+    Q_UNUSED(dump)
+    Q_UNUSED(uplinkIndex)
+#endif
+    TribeScanHalfNeed need;
+    need.low = hidden.low && !served.low;
+    need.high = hidden.high && !served.high;
+    return need;
+}
+
+QList<TribeScanHalfRoute> tribeScanScopedHalfRoutes(const QByteArray &dump)
+{
+    QList<TribeScanHalfRoute> out;
+#ifdef Q_OS_MACOS
+    forEachDumpRoute(dump, [&](const DumpRoute &r) {
+        if (!(r.h.rtm_flags & RTF_IFSCOPE) || !r.gwInet || !r.haveMask || r.mask != 0x80000000u)
+            return;
+        if (r.dst != kTribeScanHalfLow && r.dst != kTribeScanHalfHigh)
+            return;
+        TribeScanHalfRoute h;
+        h.dst = r.dst;
+        h.gateway = r.gw;
+        h.ifindex = r.h.rtm_index;
+        out << h;
+    });
+#else
+    Q_UNUSED(dump)
+#endif
+    return out;
+}
+
 TribeScanRouteArm tribeScanArmHalfRoutes(const TribeScanUplink &u, quint32 router, const TribeScanRouteOps &ops)
 {
     TribeScanRouteArm r;
-    if (!tribeScanUplinkUsable(u) || !ops.pinned || !ops.write)
+    if (!tribeScanUplinkUsable(u) || !ops.write || !ops.table || !ops.recordWrite)
         return r;
-    const bool lowOk = ops.pinned(u.index, kTribeScanTestLow);
-    const bool highOk = ops.pinned(u.index, kTribeScanTestHigh);
-    if (lowOk && highOk)
-        return r; // pinned sockets route (VPN off: the primary default; Xray: its own scoped pair)
-    bool failed = router == 0; // needed, and no IPv4 router to route through
-    for (const auto &half : {std::make_pair(kTribeScanHalfLow, lowOk), std::make_pair(kTribeScanHalfHigh, highOk)}) {
-        if (failed || half.second)
+    tribeScanRecoverHalfRoutes(ops); // an earlier crash or a failed delete: ours go first
+    const QByteArray table = ops.table();
+    const TribeScanHalfNeed need = tribeScanHalvesNeeded(table, u.index);
+    if (!need.any())
+        return r; // pinned sockets route through the table (VPN off: the primary default; Xray: its own scoped pair)
+    if (router == 0) // getGatewayAndIface may hand an IPv6 gateway: the IPv4 one of the same interface
+        router = tribeScanDefaultRouter(table, u.index);
+    if (router == 0) {
+        r.result = -1; // needed, and no IPv4 router to route through
+        return r;
+    }
+    QList<TribeScanHalfRoute> intent;
+    for (const quint32 half : {kTribeScanHalfLow, kTribeScanHalfHigh}) {
+        if (half == kTribeScanHalfLow ? !need.low : !need.high)
             continue;
         TribeScanHalfRoute route;
-        route.dst = half.first;
+        route.dst = half;
         route.gateway = router;
         route.ifindex = u.index;
+        intent << route;
+    }
+    if (!recordAdd(ops, intent)) { // the intent is on disk before the first add, or nothing is added
+        r.result = -1;
+        return r;
+    }
+    bool failed = false;
+    QList<TribeScanHalfRoute> notOurs;
+    for (const TribeScanHalfRoute &route : intent) {
         const int e = ops.write(true, route);
         if (e == 0)
             r.added << route;
-        else if (e != EEXIST) // EEXIST: someone's route is there - never ours to delete; the check below decides
+        else if (e == EEXIST)
+            notOurs << route; // someone's route arrived since the table read: never ours to delete
+        else
             failed = true;
     }
+    recordDrop(ops, notOurs);
     if (!failed)
-        failed = !ops.pinned(u.index, kTribeScanTestLow) || !ops.pinned(u.index, kTribeScanTestHigh);
+        failed = tribeScanHalvesNeeded(ops.table(), u.index).any()
+                 || (ops.pinned && (!ops.pinned(u.index, kTribeScanTestLow) || !ops.pinned(u.index, kTribeScanTestHigh)));
     if (failed) {
-        tribeScanDisarmHalfRoutes(r.added, ops);
+        tribeScanRemoveHalfRoutes(r.added, ops); // what is deleted leaves the record; a failed delete stays for a retry
+        QList<TribeScanHalfRoute> neverAdded;
+        for (const TribeScanHalfRoute &route : intent)
+            if (!r.added.contains(route) && !notOurs.contains(route))
+                neverAdded << route;
+        recordDrop(ops, neverAdded);
         r.added.clear();
         r.result = -1;
         return r;
@@ -675,14 +816,51 @@ TribeScanRouteArm tribeScanArmHalfRoutes(const TribeScanUplink &u, quint32 route
     return r;
 }
 
-void tribeScanDisarmHalfRoutes(const QList<TribeScanHalfRoute> &added, const TribeScanRouteOps &ops)
+QList<TribeScanHalfRoute> tribeScanRemoveHalfRoutes(const QList<TribeScanHalfRoute> &routes, const TribeScanRouteOps &ops)
 {
-    if (!ops.write)
-        return;
-    for (const TribeScanHalfRoute &route : added)
-        ops.write(false, route); // ESRCH: already gone - nothing left to do
+    QList<TribeScanHalfRoute> gone;
+    QList<TribeScanHalfRoute> left;
+    for (const TribeScanHalfRoute &route : routes) {
+        const int e = ops.write ? ops.write(false, route) : EINVAL;
+        if (e == 0 || e == ESRCH)
+            gone << route;
+        else
+            left << route; // stays recorded: the next recover retries it
+    }
+    recordDrop(ops, gone);
+    return left;
 }
 
+int tribeScanRecoverHalfRoutes(const TribeScanRouteOps &ops)
+{
+    const QList<TribeScanHalfRoute> rec = recordNow(ops);
+    if (rec.isEmpty()) {
+        if (ops.recordRead && ops.recordWrite && !ops.recordRead().isEmpty())
+            ops.recordWrite(QByteArray()); // unreadable leftovers: nothing of them can be told ours
+        return 0;
+    }
+    const QList<TribeScanHalfRoute> live = ops.table ? tribeScanScopedHalfRoutes(ops.table()) : QList<TribeScanHalfRoute>();
+    QList<TribeScanHalfRoute> forget;
+    QList<TribeScanHalfRoute> ours;
+    for (const TribeScanHalfRoute &r : rec) {
+        bool present = false;
+        bool same = false;
+        for (const TribeScanHalfRoute &l : live) {
+            if (l.dst == r.dst && l.ifindex == r.ifindex) {
+                present = true;
+                same = same || l.gateway == r.gateway;
+            }
+        }
+        if (!present || !same)
+            forget << r; // gone (a reboot, a removal), or someone else's via another gateway: never deleted
+        else
+            ours << r;
+    }
+    recordDrop(ops, forget);
+    const int before = int(ours.size());
+    const QList<TribeScanHalfRoute> left = tribeScanRemoveHalfRoutes(ours, ops);
+    return before - int(left.size());
+}
 
 QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int seq)
 {
@@ -735,7 +913,7 @@ QList<TribeScanHalfRoute> tribeScanParseHalfRoutesRecord(const QByteArray &recor
         r.gateway = f.at(2).toUInt(&ok2, 16);
         r.ifindex = f.at(3).toInt(&ok3);
         if (ok1 && ok2 && ok3 && (r.dst == kTribeScanHalfLow || r.dst == kTribeScanHalfHigh) && r.gateway != 0
-            && r.ifindex > 0 && r.ifindex < 65536 && !out.contains(r) && out.size() < 4)
+            && r.ifindex > 0 && r.ifindex < 65536 && !out.contains(r) && out.size() < 16)
             out << r;
     }
     return out;
@@ -903,6 +1081,7 @@ TribeScanDeps tribeScanServiceDeps()
     d.armRoutes = armUplinkRoutes;
     d.disarmRoutes = disarmUplinkRoutes;
     d.clearLeftoverRoutes = clearLeftoverUplinkRoutes;
+    d.pinnedRoute = pinnedRouteExists;
     d.awgProbeBinary = checkedServiceAwgProbeBinary;
 #else
     // Windows: the WFP kill switch already permits the service executable (IPv4 and IPv6 ALE layers,
@@ -1105,6 +1284,17 @@ QByteArray TribeScanHost::process(const QByteArray &message, const TribeScanAwgL
         }
     }
     if (add) {
+        int index = 0;
+        {
+            QMutexLocker l(&m_mutex);
+            index = m_active.serial != 0 ? m_active.uplinkIndex : 0;
+        }
+        if (const int unrouted = index > 0 ? unroutedTargets(req, index) : 0) {
+            // Review N2: the same rule as a start - never a probe of a target the scan cannot reach (the app ends
+            // those candidates «Не проверено»).
+            qInfo() << "[tribescan] scan_add refused: targets without a pinned route:" << unrouted;
+            return QByteArray(kErrNoUplink);
+        }
         const QByteArray reply = m_deps.message ? m_deps.message(message, tribeScanHostOptions(gen, nullptr, nullptr, epoch))
                                                 : QByteArray(kErrInternal);
         const TribeScanReplyInfo r = tribeScanInspectReply(reply);
@@ -1129,7 +1319,17 @@ QByteArray TribeScanHost::process(const QByteArray &message, const TribeScanAwgL
         }
         if (!previous.isEmpty() && m_deps.disarmRoutes)
             m_deps.disarmRoutes(previous);
-        const TribeScanRouteArm routes = arm >= 0 && m_deps.armRoutes ? m_deps.armRoutes(up) : TribeScanRouteArm();
+        TribeScanRouteArm routes = arm >= 0 && m_deps.armRoutes ? m_deps.armRoutes(up) : TribeScanRouteArm();
+        // Review N2: every candidate's entry must have a route for a socket pinned to the uplink - a probe of a
+        // target the scan cannot reach would come back "dial" and be stored as "not working".
+        const int unrouted = arm >= 0 && routes.result >= 0 ? unroutedTargets(req, up.index) : 0;
+        if (unrouted > 0) {
+            if (!routes.added.isEmpty() && m_deps.disarmRoutes)
+                m_deps.disarmRoutes(routes.added);
+            routes = TribeScanRouteArm();
+            routes.result = -1;
+            qInfo() << "[tribescan] scan_start targets without a pinned route:" << unrouted << "of" << req.entryIps.size();
+        }
         if (routes.result < 0 && arm > 0 && m_deps.disarmFirewall)
             m_deps.disarmFirewall(); // fail closed below: the exemption armed for it goes too
         QMutexLocker l(&m_mutex);
@@ -1142,6 +1342,7 @@ QByteArray TribeScanHost::process(const QByteArray &message, const TribeScanAwgL
             m_active.serial = ++m_serial;
             m_active.armed = arm > 0;
             m_active.routes = routes.added;
+            m_active.uplinkIndex = up.index;
             serial = m_active.serial;
         }
     }
@@ -1195,6 +1396,16 @@ void TribeScanHost::sample(const TribeScanUplink &up, bool loss)
         publishGeneration(g);
     if (moved)
         dropRoutes("uplink_changed");
+}
+
+int TribeScanHost::unroutedTargets(const TribeScanRequestInfo &req, int uplinkIndex) const
+{
+    if (!m_deps.pinnedRoute)
+        return 0;
+    int n = 0;
+    for (const quint32 ip : req.entryIps)
+        n += m_deps.pinnedRoute(uplinkIndex, ip) ? 0 : 1;
+    return n;
 }
 
 void TribeScanHost::dropRoutes(const char *why)

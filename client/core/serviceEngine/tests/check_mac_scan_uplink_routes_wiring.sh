@@ -10,8 +10,12 @@
 #       with the no-uplink reply and removes the exemption armed for it;
 #   R3  every end of the scan removes them with the exemption (endActive); a move of the uplink removes them at once
 #       (sample -> dropRoutes); the service start removes what a previous instance recorded;
-#   R4  the route listener knows this process (its own scoped half routes are no path fact); the routes are scoped and
-#       recorded on arm, the record goes on disarm; the pinned test is a UDP connect (no packet).
+#   R4  the route listener knows this process (its own scoped half routes are no path fact); the routes are scoped;
+#       the pinned test is a UDP connect (no packet);
+#   R5  (review N2) the need is read from the routing table, never from one sample address; scan_start and scan_add
+#       check every candidate's entry for a pinned route before the engine gets them;
+#   R6  (review N3) the record is an intent log: durable before an add, trimmed only by deletes that happened,
+#       recovered (live gateway must match) at service start and before each arm.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -59,19 +63,36 @@ has "$ctor" 'm_deps.clearLeftoverRoutes();' || bad "R3: the service start does n
 # ---- R4 ------------------------------------------------------------------------------------------------------
 has "$(body "$SCAN" 'void TribeScanHost::readRouteSocket()')" 'tribeScanRouteEvent(buf, qsizetype(n), index, qint64(::getpid()))' \
   || bad "R4: the route listener does not tell its own half routes from path facts"
-msg="$(body "$SCAN" 'QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int seq)')"
-has "$msg" 'RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE;' || bad "R4: the half routes are not scoped"
-has "$(body "$SCAN" 'TribeScanRouteArm armUplinkRoutes(const TribeScanUplink &u)')" 'writeRoutesRecord(r.added);' \
-  || bad "R4: an arm does not record what it added"
-has "$(body "$SCAN" 'void disarmUplinkRoutes(const QList<TribeScanHalfRoute> &added)')" 'writeRoutesRecord({});' \
-  || bad "R4: a disarm keeps the record"
-clr="$(body "$SCAN" 'void clearLeftoverUplinkRoutes()')"
-has "$clr" 'tribeScanParseHalfRoutesRecord(' && has "$clr" 'tribeScanDisarmHalfRoutes(left, systemRouteOps());' \
-  || bad "R4: the service start does not delete the recorded routes"
 has "$(body "$SCAN" 'TribeScanRouteEvent tribeScanRouteEvent(const char *msg, qsizetype len, int uplinkIndex, qint64 ownPid)')" \
   '(h.rtm_flags & RTF_IFSCOPE) && isHalfRouteMessage(msg, len)' || bad "R4: the listener does not drop its own scoped half routes"
+msg="$(body "$SCAN" 'QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int seq)')"
+has "$msg" 'RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE;' || bad "R4: the half routes are not scoped"
 pin="$(body "$SCAN" 'bool pinnedRouteExists(int ifindex, quint32 dst)')"
 has "$pin" 'SOCK_DGRAM' && has "$pin" 'IP_BOUND_IF' || bad "R4: the pinned-route test is not a pinned UDP connect"
+
+# ---- R5 (review N2: the table decides; every target is checked) -------------------------------------------------
+arm="$(body "$SCAN" 'TribeScanRouteArm tribeScanArmHalfRoutes(const TribeScanUplink &u, quint32 router, const TribeScanRouteOps &ops)')"
+has "$arm" 'tribeScanHalvesNeeded(table, u.index)' || bad "R5: the need is not read from the routing table"
+if has "$arm" 'ops.pinned(u.index, kTribeScanTestLow);' && ! has "$arm" 'tribeScanHalvesNeeded(ops.table(), u.index).any()'; then
+  bad "R5: one sample address decides a whole half again"
+fi
+has "$mac" 'd.pinnedRoute = pinnedRouteExists;' || bad "R5: the macOS service does not check the targets' routes"
+has "$proc" 'unroutedTargets(req, up.index)' || bad "R5: scan_start does not check every candidate's entry"
+has "$proc" 'unroutedTargets(req, index)' || bad "R5: scan_add does not check every candidate's entry"
+
+# ---- R6 (review N3: the record is an intent log) -------------------------------------------------------------------
+recAt=$(at "$arm" 'if (!recordAdd(ops, intent)) {')
+addAt=$(at "$arm" 'const int e = ops.write(true, route);')
+[ "${recAt:-0}" -gt 0 ] && [ "${addAt:-0}" -gt "${recAt:-0}" ] || bad "R6: an add is not preceded by its durable intent"
+has "$arm" 'tribeScanRecoverHalfRoutes(ops);' || bad "R6: an arm does not recover first"
+rem="$(body "$SCAN" 'QList<TribeScanHalfRoute> tribeScanRemoveHalfRoutes(const QList<TribeScanHalfRoute> &routes, const TribeScanRouteOps &ops)')"
+has "$rem" 'if (e == 0 || e == ESRCH)' && has "$rem" 'recordDrop(ops, gone);' || bad "R6: a removal forgets a route it could not delete"
+rec="$(body "$SCAN" 'int tribeScanRecoverHalfRoutes(const TribeScanRouteOps &ops)')"
+has "$rec" 'same = same || l.gateway == r.gateway;' || bad "R6: recovery deletes a recorded route without the live gateway matching"
+wr="$(body "$SCAN" 'bool writeRoutesRecord(const QByteArray &bytes)')"
+has "$wr" '::fsync(f.handle())' && has "$wr" '::rename(' || bad "R6: the record is not written durably"
+has "$(body "$SCAN" 'void clearLeftoverUplinkRoutes()')" 'tribeScanRecoverHalfRoutes(systemRouteOps())' \
+  || bad "R6: the service start does not recover the recorded routes"
 
 # ---- the behaviour (service host checks, without the real engine stage) ---------------------------------------
 if [ "$fail" = "0" ]; then

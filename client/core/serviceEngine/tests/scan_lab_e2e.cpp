@@ -251,6 +251,7 @@ TribeScanDeps labServiceDeps()
     d.armRoutes = [](const TribeScanUplink &) { return TribeScanRouteArm(); }; // never the kernel's routes here
     d.disarmRoutes = [](const QList<TribeScanHalfRoute> &) {};
     d.clearLeftoverRoutes = []() {};
+    d.pinnedRoute = [](int, quint32) { return true; };
     d.awgProbeBinary = []() { return QString(); };
     d.awgLive = []() {
         TribeScanAwgLive l;
