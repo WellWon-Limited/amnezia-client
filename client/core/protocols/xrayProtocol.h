@@ -1,6 +1,7 @@
 #ifndef XRAYPROTOCOL_H
 #define XRAYPROTOCOL_H
 
+#include <functional>
 #include "QProcess"
 #include <QtCore/qsharedpointer.h>
 #include <QHostAddress>
@@ -20,11 +21,16 @@ class XrayProtocol : public VpnProtocol
 public:
     XrayProtocol(const QJsonObject &configuration, QObject *parent = nullptr);
     virtual ~XrayProtocol() override;
+    // AVPN (round mac-D3): called once when the service holding the session is gone (the tun2socks replica lost its
+    // source), before the session's Error state - VpnConnection tells the facade "component lost" (daemonLost), as
+    // WireguardProtocol::daemonSocketLost does for AmneziaWG, so the intent stays and the session is reconnected.
+    void setServiceLostHandler(std::function<void()> handler) { m_serviceLost = std::move(handler); }
 
     ErrorCode start() override;
     void stop() override;
 
 private:
+    std::function<void()> m_serviceLost; // AVPN (round mac-D3)
     // AVPN: every step that runs the event loop (an IPC wait) may see this session stopped or this object
     // destroyed when it returns - the steps take the session they belong to and give up when it is over.
     ErrorCode setupRouting(quint64 session);

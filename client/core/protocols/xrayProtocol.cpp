@@ -329,6 +329,8 @@ void XrayProtocol::onTun2SocksReplicaState(quint64 session, QRemoteObjectReplica
     if (!(oldState == QRemoteObjectReplica::Valid && state == QRemoteObjectReplica::Suspect))
         return;
     qWarning() << "XrayProtocol: the service holding this session is gone (tun2socks replica lost its source) - the session ends";
+    if (m_serviceLost)
+        m_serviceLost(); // round mac-D3: a component loss, told before the Error state below
     // Its core, tun2socks and kill switch went with it, and a new service holds nothing of this session: no teardown
     // calls (the first of them waited the 30 s default on the dead connection while Connected stayed on screen).
     m_sessionOpen = false;

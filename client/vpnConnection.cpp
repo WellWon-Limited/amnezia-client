@@ -18,6 +18,7 @@
 #ifdef AMNEZIA_DESKTOP
     #include "core/utils/ipcClient.h"
     #include <core/protocols/wireGuardProtocol.h>
+    #include <core/protocols/xrayProtocol.h> // AVPN (round mac-D3): setServiceLostHandler
     #include <QRemoteObjectPendingCallWatcher>
 #endif
 
@@ -496,6 +497,10 @@ void VpnConnection::createProtocolConnections()
     // AVPN (волна-4): сокет демона оборвался сам — потеря компонента (см. ControllerImpl::daemonSocketLost).
     if (auto *wg = qobject_cast<WireguardProtocol *>(m_vpnProtocol.data()))
         connect(wg, &WireguardProtocol::daemonSocketLost, this, &VpnConnection::daemonLost);
+    // AVPN (round mac-D3): the service gone under an Xray session is the same component loss (the facade keeps the
+    // intent and reconnects - AvpnEngineQml daemonLost -> LossClass::Component), not an external one that drops it.
+    if (auto *xray = dynamic_cast<XrayProtocol *>(m_vpnProtocol.data()))
+        xray->setServiceLostHandler([this]() { emit daemonLost(); });
 #endif
 }
 

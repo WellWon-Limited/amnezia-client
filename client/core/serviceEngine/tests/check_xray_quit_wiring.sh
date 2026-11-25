@@ -180,5 +180,13 @@ has "$pstart" 'm_xrayGeneration = avpn::XraySessionLedger::service().generation;
 has "$lost" 'process->xrayGeneration(), avpn::XraySessionLedger::service());' || bad "Q9: the lost-client decision does not read the session identity"
 has "$lost" 'avpn::decideLostController(' || bad "Q9: the lost-client decision is not the tested one"
 
+# ---- Q10 (round mac-D3): the service gone under an Xray session is a component loss, as for AmneziaWG ---------------
+VCN="$ROOT/client/vpnConnection.cpp"
+XPC="$ROOT/client/core/protocols/xrayProtocol.cpp"
+grep -qF 'xray->setServiceLostHandler([this]() { emit daemonLost(); });' "$VCN" || bad "Q10: VpnConnection does not tell the facade the Xray service loss (daemonLost)"
+rs="$(body "$XPC" 'void XrayProtocol::onTun2SocksReplicaState(')"
+l1=$(at "$rs" 'm_serviceLost();'); l2=$(at "$rs" 'failSession(ErrorCode::AmneziaServiceConnectionFailed);')
+[ "${l1:-0}" -gt 0 ] && [ "${l2:-0}" -gt "${l1:-0}" ] || bad "Q10: the service loss is not told before the session's Error state"
+
 [ "$fail" = "0" ] && echo "check_xray_quit_wiring: ok"
 exit "$fail"

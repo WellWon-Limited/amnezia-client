@@ -239,6 +239,8 @@ static void failureAlive(FakeService &svc)
     tun->writeErr(kStackLine);
     CHECK(waitFor([&]() { return proto->connectionState() == Vpn::ConnectionState::Connected; }));
     const int stopsBefore = svc.count(QStringLiteral("xrayStop"));
+    int lost = 0; // round mac-D3: a tun2socks crash with the service alive is not the loss of the service
+    proto->setServiceLostHandler([&lost]() { ++lost; });
     tun->exit(1, QProcess::CrashExit);
     CHECK(waitFor([&]() { return proto->connectionState() == Vpn::ConnectionState::Error; }));
     pump(200);
@@ -248,6 +250,7 @@ static void failureAlive(FakeService &svc)
     proto->stop(); // VpnConnection's stop after the error: no second teardown
     CHECK(svc.count(QStringLiteral("xrayStop")) == stopsBefore + 1);
     CHECK(proto->connectionState() == Vpn::ConnectionState::Disconnected);
+    CHECK(lost == 0);
 }
 
 static void destructorQuiet(FakeService &svc)
@@ -285,11 +288,21 @@ static void serviceGone(FakeService &svc)
     tun->writeErr(kStackLine);
     CHECK(waitFor([&]() { return proto->connectionState() == Vpn::ConnectionState::Connected; }));
     const int teardownsBefore = svc.count(QStringLiteral("disableKillSwitch")) + svc.count(QStringLiteral("xrayStop"));
+    // Round mac-D3: the loss of the service is told as such (VpnConnection::daemonLost: the facade keeps the intent and
+    // reconnects, as for AmneziaWG) - once, and before the Error state the facade classifies.
+    QStringList order;
+    proto->setServiceLostHandler([&order]() { order << QStringLiteral("service_lost"); });
+    QObject::connect(proto.get(), &VpnProtocol::connectionStateChanged, [&order](Vpn::ConnectionState st) {
+        if (st == Vpn::ConnectionState::Error)
+            order << QStringLiteral("error");
+    });
     QElapsedTimer endClock;
     endClock.start();
     svc.hosts.back().reset(); // the host of the session's process object goes away, as with the service
     const bool ended = waitFor([&]() { return proto->connectionState() == Vpn::ConnectionState::Error; }, 5000);
     CHECK(ended);
+    pump(100);
+    CHECK(order == (QStringList{QStringLiteral("service_lost"), QStringLiteral("error")}));
     CHECK(endClock.elapsed() < 2000); // at once - no wait on the dead connection
     CHECK(proto->lastError() == ErrorCode::AmneziaServiceConnectionFailed);
     // the gone service's session is not torn down in another service (it holds nothing of it; on the device the first
