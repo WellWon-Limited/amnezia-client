@@ -12,6 +12,8 @@ QtObject {
 
     // ── screen ──
     readonly property string title: qsTr("Сканер")
+    // the header's caption at the right edge, on the choice and on a result (owner 25.11)
+    readonly property string titleCaption: qsTr("Подбор серверов")
     readonly property string netWifi: qsTr("Wi‑Fi")
     readonly property string netCellular: qsTr("Сотовая")
     // the last check: the line under the rings once a result is shown («Проверено: только что»)

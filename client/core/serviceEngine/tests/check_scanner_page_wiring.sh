@@ -14,6 +14,9 @@
 #  shown as selected and taken by the machine (a vanished selection falls back to «Все страны»); «Все страны» counts
 #  the white lists too; a stopped result is marked wherever it is shown (view.partial, slots[].partial) and a
 #  PersistResults with store false only feeds the evidence; a second row tap while one connects is not dropped.
+#  owner 25.11 (143): the title stands right after the back arrow with «Подбор серверов» at the right edge on its
+#  baseline (the shared header stays centred by default); the count badge is the server icon and the number, its
+#  accessible name the whole phrase; the rings are one size on the choice too (no heroIdle, no size animation).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CLIENT="$(cd "$HERE/../../.." && pwd)"
@@ -107,6 +110,31 @@ printf '%s\n' "$refresh" | grep -qE 'insert\(QStringLiteral\("state"\)' && bad "
 grep -qF 'dispatch(m_m.tunnelNoDataHere(ids, now()));' "$FACADE" || bad "D1: the ledger's S6 fact must reach the machine (tunnelNoDataHere)"
 grep -qF 'readonly property bool available: rowState === "works" || rowState === "slow"' "$CLIENT/ui/qml/Tribe/components/TribeScanRow.qml" \
     || bad "D1: a slow row must read «Доступно» (it is counted)"
+
+# owner 25.11 (143): the header - «Сканер» right after the back arrow, «Подбор серверов» at the right edge
+HEADER="$CLIENT/ui/qml/Tribe/components/TribeHeader.qml"
+ICONS="$CLIENT/ui/qml/Tribe/components/TribeStrokeIcon.qml"
+THEME="$CLIENT/ui/qml/Tribe/Theme.qml"
+hdr="$(awk '/^    TribeHeader \{/ { on = 1 } on { print } on && /^    \}/ { exit }' "$PAGE")"
+printf '%s\n' "$hdr" | grep -qE '^\s*titleAlignment: Qt\.AlignLeft\s*$' \
+    || bad "143: the title must stand right after the back arrow (titleAlignment: Qt.AlignLeft)"
+printf '%s\n' "$hdr" | grep -qE '^\s*caption: ScanTexts\.titleCaption\s*$' || bad "143: the header's right caption must be ScanTexts.titleCaption"
+grep -qF 'readonly property string titleCaption: qsTr("Подбор серверов")' "$TEXTS" || bad "143: the caption must say «Подбор серверов»"
+grep -qE '^\s*property int titleAlignment: Qt\.AlignHCenter\s*$' "$HEADER" || bad "143: the shared header must stay centred by default"
+grep -qF 'anchors.baseline: titleText.baseline' "$HEADER" || bad "143: the caption must stand on the title's baseline"
+# the count badge: the server icon and the number; the screen reader and the UI driver read the whole phrase
+badge="$(awk '/objectName: "scannerCountBadge"/ { on = 1 } on { print } on && /^        \}/ { exit }' "$PAGE")"
+printf '%s\n' "$badge" | grep -qE '^\s*icon: "server"\s*$' || bad "143: the count badge must show the server icon"
+printf '%s\n' "$badge" | grep -qE '^\s*text: String\(badgesRow\.count\)\s*$' || bad "143: the count badge must show the number only"
+printf '%s\n' "$badge" | grep -qE '^\s*Accessible\.name: ScanTexts\.servers\(badgesRow\.count\)\s*$' \
+    || bad "143: the count badge's accessible name must be the whole phrase («228 серверов»)"
+grep -qE '^\s*"server": "M' "$ICONS" || bad "143: the kit must have the server icon"
+# the rings: one size in one place in every state, no animation between the choice and a result
+grep -q 'heroIdle' "$PAGE" "$THEME" && bad "143: no small rings on the choice (Theme.scan.heroIdle must be gone)"
+grep -qE 'heroFrac|heroAnim' "$PAGE" && bad "143: no size animation between the choice and a result"
+rings="$(awk '/id: ringsBox/ { on = 1 } on { print } on && /SignalRing \{/ { exit }' "$PAGE")"
+printf '%s\n' "$rings" | grep -qE '^\s*scale:' && bad "143: the rings must never be scaled down"
+printf '%s\n' "$rings" | grep -qF 'y: (Theme.scan.hero - height) / 2' || bad "143: the rings must be centred on the full band (Theme.scan.hero)"
 
 [ "$fail" = 0 ] && echo "scanner page wiring: ok"
 exit "$fail"
