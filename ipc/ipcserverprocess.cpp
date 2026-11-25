@@ -1,6 +1,7 @@
 #include "ipcserverprocess.h"
 #include "ipc.h"
 #include <QProcess>
+#include <QFileInfo> // AVPN (round mac-D2)
 
 #ifndef Q_OS_IOS
 
@@ -19,6 +20,10 @@ IpcServerProcess::IpcServerProcess(QObject *parent) :
     connect(m_process.data(), &QProcess::errorOccurred, [&](QProcess::ProcessError error){
         qDebug() << "IpcServerProcess errorOccurred " << error;
     });
+    // AVPN (round mac-D2): when the child's first output came, once per start - with the exec time below it tells a
+    // "[STACK]" line that never reached the app (device round D 10:24:34) apart: no exec, no output, or not read.
+    connect(m_process.data(), &QProcess::readyReadStandardError, this, [this]() { noteFirstOutput("stderr", m_firstErrNoted); });
+    connect(m_process.data(), &QProcess::readyReadStandardOutput, this, [this]() { noteFirstOutput("stdout", m_firstOutNoted); });
 
 #ifndef Q_OS_WIN
     avpn::OwnedChildren::service().add(m_process.data(), m_program); // AVPN
@@ -50,10 +55,29 @@ void IpcServerProcess::start()
     m_control.onStarted();
     m_xrayGeneration = avpn::XraySessionLedger::service().generation; // AVPN (review F2)
 #endif
+    m_firstErrNoted = m_firstOutNoted = false; // AVPN (round mac-D2)
+    m_startClock.start();
     m_process->start();
     qDebug() << "IpcServerProcess started, " << m_process->program() << m_process->arguments();
 
-    m_process->waitForStarted();
+    const bool running = m_process->waitForStarted();
+    // AVPN (round mac-D2): "started" above is the request; this is the child really running (fork + exec).
+    qInfo().noquote() << QStringLiteral("[ipcproc] %1 running=%2 pid=%3 after %4 ms")
+                             .arg(QFileInfo(m_process->program()).fileName())
+                             .arg(running ? 1 : 0)
+                             .arg(qint64(m_process->processId()))
+                             .arg(m_startClock.elapsed());
+}
+
+// AVPN (round mac-D2)
+void IpcServerProcess::noteFirstOutput(const char *channel, bool &noted)
+{
+    if (noted)
+        return;
+    noted = true;
+    qInfo().noquote() << QStringLiteral("[ipcproc] %1 first %2 at +%3 ms")
+                             .arg(QFileInfo(m_process->program()).fileName(), QLatin1String(channel))
+                             .arg(m_startClock.isValid() ? m_startClock.elapsed() : -1);
 }
 
 void IpcServerProcess::terminate() {

@@ -20,6 +20,8 @@
 // QtRO source of ipc/ipc_process_interface.rep; call sites - check_xray_quit_wiring.sh.
 
 #include <QByteArray>
+#include <QDebug>
+#include <QElapsedTimer>
 #include <QList>
 #include <QObject>
 #include <QPointer>
@@ -97,9 +99,15 @@ public:
     ProcessStderrReader(IpcProcessInterfaceReplica *process, Sink sink, QObject *parent = nullptr)
         : QObject(parent), m_process(process), m_sink(std::move(sink))
     {
+        m_clock.start(); // round mac-D2: the reader's own timeline in the log (its first signal and reads)
         connect(
                 process, &IpcProcessInterfaceReplica::readyReadStandardError, this,
                 [this]() {
+                    if (!m_readyNoted) {
+                        m_readyNoted = true;
+                        qInfo().noquote() << QStringLiteral("[proc reader] first ready signal at +%1 ms (stopped=%2 in_flight=%3)")
+                                                 .arg(m_clock.elapsed()).arg(m_stopped ? 1 : 0).arg(m_pump.inFlight ? 1 : 0);
+                    }
                     if (!m_stopped && m_pump.onReady())
                         issueRead();
                 },
@@ -128,6 +136,14 @@ private:
                     QList<QByteArray> lines;
                     if (watcher->error() == QRemoteObjectPendingCall::NoError)
                         lines = m_lines.feed(watcher->returnValue().toByteArray());
+                    if (m_readsNoted < 2) { // round mac-D2: the first reads of this process, in the log
+                        ++m_readsNoted;
+                        qInfo().noquote() << QStringLiteral("[proc reader] read %1 answered at +%2 ms error=%3 bytes=%4 lines=%5")
+                                                 .arg(m_readsNoted).arg(m_clock.elapsed()).arg(int(watcher->error()))
+                                                 .arg(watcher->error() == QRemoteObjectPendingCall::NoError
+                                                          ? watcher->returnValue().toByteArray().size() : -1)
+                                                 .arg(lines.size());
+                    }
                     if (!lines.isEmpty()) {
                         // The sink may block, stop this reader or destroy it (with its protocol).
                         const QPointer<ProcessStderrReader> self(this);
@@ -146,6 +162,9 @@ private:
     LineAssembler m_lines;
     bool m_stopped = false;
     int m_readsIssued = 0;
+    QElapsedTimer m_clock;     // round mac-D2
+    bool m_readyNoted = false; // round mac-D2
+    int m_readsNoted = 0;      // round mac-D2
 };
 
 } // namespace avpn

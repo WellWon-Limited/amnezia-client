@@ -3,6 +3,7 @@
 
 #include "ipc.h"
 #include <QObject>
+#include <QElapsedTimer> // AVPN (round mac-D2)
 
 #ifndef Q_OS_IOS
 #include "rep_ipc_process_interface_source.h"
@@ -62,6 +63,11 @@ private:
     avpn::ChildControl m_control; // AVPN
     quint64 m_xrayGeneration = 0; // AVPN (review F2)
 #endif
+    // AVPN (round mac-D2): the start's clock and whether its first stderr / stdout was noted (one log line each)
+    QElapsedTimer m_startClock;
+    bool m_firstErrNoted = false;
+    bool m_firstOutNoted = false;
+    void noteFirstOutput(const char *channel, bool &noted);
 };
 
 #else
