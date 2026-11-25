@@ -42,12 +42,14 @@
 //    "not in table"; the scan ended in 0.3 s with nothing found). An Xray session never had this: it installs the
 //    same pair scoped to the uplink for its own pinned core sockets (RouterMac::routeAddXray, upstream #2479), and
 //    with the VPN off nothing hides the primary default. So the host adds that pair - 0/1 and 128/1 via the
-//    uplink's IPv4 router, scoped to the uplink, tagged RTF_PROTO3 (RTPRF_OURS) - for the scan's lifetime, only
-//    when a socket pinned to the uplink has no route, and deletes exactly what it added: with the pf exemption
-//    (every end of a scan), when the uplink changes under it, and at service start (crash recovery: tagged ones
-//    only). A route it found (an Xray session's) is never touched. Scoped routes serve pinned lookups only: the
-//    tunnel's own traffic keeps its 0/1 + 128/1. Needed but not in force = the no-uplink refusal
-//    (host_options.bind_interface): a pinned probe there could only fail, which would read as "nothing works".
+//    uplink's IPv4 router, scoped to the uplink - for the scan's lifetime, only when a socket pinned to the uplink
+//    has no route, and deletes exactly what it added: with the pf exemption (every end of a scan), when the uplink
+//    changes under it, and at service start (crash recovery). What it added is recorded in a root-owned file next
+//    to the pf token (kTribeScanRoutesRecord) - the kernel keeps no mark of who added a route (RTF_PROTO3 is not
+//    stored: the delete report of such a route carries none). A route it found (an Xray session's) is never
+//    touched. Scoped routes serve pinned lookups only: the tunnel's own traffic keeps its 0/1 + 128/1. Needed but
+//    not in force = the no-uplink refusal (host_options.bind_interface): a pinned probe there could only fail,
+//    which would read as "nothing works".
 //
 // What it never does: start, stop or reconfigure a tunnel; register a socket callback; log a request, a
 // reply, a config, a token, a host, an address or an interface name (only ids, codes and sizes); retry.
@@ -230,9 +232,10 @@ struct TribeScanReplyInfo {
 TribeScanReplyInfo tribeScanInspectReply(const QByteArray &reply);
 
 // One PF_ROUTE message (macOS): `resample` = worth a fresh uplink sample; `loss` = the current uplink
-// (index) lost its default route, an address or its link. Cloned and host routes are ignored, and so are this
-// host's own half routes (ownPid sent them, scoped and tagged RTF_PROTO3): its own plumbing is no path fact - the
-// delete at a scan's end would otherwise read as a loss and move the generation after every scan under AmneziaWG.
+// (index) lost its default route, an address or its link. Cloned and host routes are ignored, and so are the
+// scoped half routes this process writes itself (ownPid: the scan's, an Xray session's routeAddXray): its own
+// plumbing is no path fact - the delete at a scan's end read as a loss and moved the generation twice after every
+// scan under AmneziaWG (test Mac 25.11: the rows just found turned stale).
 struct TribeScanRouteEvent {
     bool resample = false;
     bool loss = false;
@@ -269,12 +272,15 @@ struct TribeScanRouteOps {
 TribeScanRouteArm tribeScanArmHalfRoutes(const TribeScanUplink &u, quint32 router, const TribeScanRouteOps &ops);
 void tribeScanDisarmHalfRoutes(const QList<TribeScanHalfRoute> &added, const TribeScanRouteOps &ops);
 // The routing-socket message of an RTM_ADD (add) or RTM_DELETE of one half route: RTA_DST, RTA_GATEWAY, RTA_NETMASK,
-// RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE | RTF_PROTO3, rtm_index = the scope. "" outside macOS.
+// RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE, rtm_index = the scope. "" outside macOS.
 QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int seq);
-// From an AF_INET NET_RT_DUMP: the half routes a scan host added (scoped, static, gateway, RTF_PROTO3), and the
-// IPv4 router of the default route on `ifindex` (0 = none).
-QList<TribeScanHalfRoute> tribeScanTaggedHalfRoutes(const QByteArray &dump);
+// From an AF_INET NET_RT_DUMP: the IPv4 router of the default route on `ifindex` (0 = none).
 quint32 tribeScanDefaultRouter(const QByteArray &dump, int ifindex);
+// The record of the half routes this host added (one line each, "half <dst> <gateway> <ifindex>" in hex/decimal);
+// parse keeps only well-formed half routes.
+inline constexpr char kTribeScanRoutesRecord[] = "/Library/Application Support/TribeVPN/scan/uplink-routes";
+QByteArray tribeScanHalfRoutesRecord(const QList<TribeScanHalfRoute> &routes);
+QList<TribeScanHalfRoute> tribeScanParseHalfRoutesRecord(const QByteArray &record);
 
 // The probe children of this process (macOS; the engine spawns `<binary> probe` per AmneziaWG session):
 //  - tribeScanParseProcArgs: argv from a KERN_PROCARGS2 buffer (argc, exec path, padding, argv...);
@@ -324,7 +330,7 @@ struct TribeScanDeps {
     std::function<void()> disarmFirewall;
     // The uplink's half routes for the pinned probe sockets (macOS; nothing elsewhere): armRoutes adds them where a
     // socket pinned to the uplink has no route and tells what it added; disarmRoutes deletes exactly those;
-    // clearLeftoverRoutes deletes the tagged ones a previous service instance left (it died mid-scan). Any thread.
+    // clearLeftoverRoutes deletes the recorded ones a previous service instance left (it died mid-scan). Any thread.
     std::function<TribeScanRouteArm(const TribeScanUplink &u)> armRoutes;
     std::function<void(const QList<TribeScanHalfRoute> &added)> disarmRoutes;
     std::function<void()> clearLeftoverRoutes;

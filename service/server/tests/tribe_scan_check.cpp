@@ -1424,7 +1424,7 @@ struct FakeKernel {
 static void uplinkRoutes()
 {
 #ifdef Q_OS_MACOS
-    // The message the service writes: RTM_ADD / RTM_DELETE of one half, scoped to the uplink, tagged.
+    // The message the service writes: RTM_ADD / RTM_DELETE of one half, scoped to the uplink.
     TribeScanHalfRoute hi;
     hi.dst = kTribeScanHalfHigh;
     hi.gateway = 0xC0000201u; // 192.0.2.1
@@ -1442,50 +1442,80 @@ static void uplinkRoutes()
         CHECK_EQ(int(h.rtm_index), 7);
         CHECK_EQ(h.rtm_seq, 42);
         CHECK_EQ(h.rtm_addrs, RTA_DST | RTA_GATEWAY | RTA_NETMASK);
-        CHECK_EQ(h.rtm_flags, RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE | RTF_PROTO3);
+        CHECK_EQ(h.rtm_flags, RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE);
         CHECK_EQ(saAt(m, sizeof(h)), kTribeScanHalfHigh);
         CHECK_EQ(saAt(m, sizeof(h) + sizeof(sockaddr_in)), 0xC0000201u);
         CHECK_EQ(saAt(m, sizeof(h) + 2 * sizeof(sockaddr_in)), 0x80000000u); // a /1 mask
     }
 
-    // The route table: only the tagged half routes are ours; the default's IPv4 router per interface.
-    const int tagged = RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE | RTF_PROTO3;
-    const QByteArray dump = dumpEntry(RTF_UP | RTF_GATEWAY | RTF_STATIC, 7, 0, true, 0xC0000201u, 0)        // primary default en7
-                            + dumpEntry(RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE, 9, 0, true, 0xC6336401u, 0) // scoped default en9
-                            + dumpEntry(RTF_UP | RTF_STATIC, 20, 0, false, 0, 5)                         // the tunnel's 0/1
-                            + dumpEntry(tagged, 7, kTribeScanHalfLow, true, 0xC0000201u, 5)               // ours
-                            + dumpEntry(tagged, 7, kTribeScanHalfHigh, true, 0xC0000201u, 5)              // ours
-                            + dumpEntry(RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE, 7, kTribeScanHalfLow, true, 0xC0000201u, 5) // Xray's
-                            + dumpEntry(tagged | RTF_HOST, 7, kTribeScanHalfLow, true, 0xC0000201u, -1)  // a host route
-                            + dumpEntry(tagged, 7, 0x0A000000u, true, 0xC0000201u, 5, 0xFF);             // 10/8: not a half
-    const QList<TribeScanHalfRoute> ours = tribeScanTaggedHalfRoutes(dump);
-    CHECK_EQ(int(ours.size()), 2);
-    if (ours.size() == 2) {
-        CHECK(ours.at(0).dst == kTribeScanHalfLow && ours.at(0).gateway == 0xC0000201u && ours.at(0).ifindex == 7);
-        CHECK(ours.at(1).dst == kTribeScanHalfHigh && ours.at(1).gateway == 0xC0000201u && ours.at(1).ifindex == 7);
-    }
+    // The route table: the default's IPv4 router per interface (the uplink's router when getGatewayAndIface
+    // hands an IPv6 gateway).
+    const int scoped = RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE;
+    const QByteArray dump = dumpEntry(RTF_UP | RTF_GATEWAY | RTF_STATIC, 7, 0, true, 0xC0000201u, 0)   // primary default en7
+                            + dumpEntry(scoped, 9, 0, true, 0xC6336401u, 0)                          // scoped default en9
+                            + dumpEntry(RTF_UP | RTF_STATIC, 20, 0, false, 0, 5)                     // the tunnel's 0/1
+                            + dumpEntry(scoped, 7, kTribeScanHalfLow, true, 0xC0000201u, 5)          // a half route
+                            + dumpEntry(scoped, 11, 0x0A000000u, true, 0xC0000201u, 5, 0xFF);        // 10/8 on en11
     CHECK_EQ(tribeScanDefaultRouter(dump, 7), 0xC0000201u);
     CHECK_EQ(tribeScanDefaultRouter(dump, 9), 0xC6336401u); // a scoped default when there is no primary one
     CHECK_EQ(tribeScanDefaultRouter(dump, 20), 0u);         // the tunnel has no IPv4 router
-    CHECK(tribeScanTaggedHalfRoutes(dump.left(dump.size() - 3)).size() <= 2); // a cut dump: no read past its end
-    CHECK(tribeScanTaggedHalfRoutes(QByteArray()).isEmpty());
+    CHECK_EQ(tribeScanDefaultRouter(dump, 11), 0u);         // a /8 is no default
+    CHECK_EQ(tribeScanDefaultRouter(dump.left(dump.size() - 3), 7), 0xC0000201u); // a cut dump: no read past its end
+    CHECK_EQ(tribeScanDefaultRouter(QByteArray(), 7), 0u);
 
-    // Its own half routes are no path fact (their delete at a scan's end would read as a loss); anyone else's are.
-    rt_msghdr rt{};
-    rt.rtm_msglen = sizeof(rt);
-    rt.rtm_version = RTM_VERSION;
-    rt.rtm_type = RTM_DELETE;
-    rt.rtm_flags = tagged;
-    rt.rtm_index = 7;
-    rt.rtm_pid = 4242;
-    TribeScanRouteEvent e = tribeScanRouteEvent(reinterpret_cast<const char *>(&rt), sizeof(rt), 7, 4242);
-    CHECK(!e.resample && !e.loss);
-    e = tribeScanRouteEvent(reinterpret_cast<const char *>(&rt), sizeof(rt), 7, 4243);
-    CHECK(e.resample && e.loss);
-    rt.rtm_flags = RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE; // own but untagged (Xray's routeDeleteXray)
-    e = tribeScanRouteEvent(reinterpret_cast<const char *>(&rt), sizeof(rt), 7, 4242);
-    CHECK(e.resample && e.loss);
+    // The scoped half routes this process writes are no path fact - the kernel's delete report of one (as the test Mac
+    // showed it: GATEWAY, STATIC, PRCLONING, IFSCOPE, CONDEMNED, the /1 mask trimmed to 5 bytes) read as a loss of the
+    // uplink and moved the generation after every scan; anyone else's still counts, and so does any other route.
+    const auto report = [](int type, int pid, int flags, quint32 dst, int maskLen, quint8 maskByte) {
+        QByteArray m = dumpEntry(flags, 7, dst, true, 0xC0000201u, maskLen, maskByte);
+        rt_msghdr h{};
+        std::memcpy(&h, m.constData(), sizeof(h));
+        h.rtm_type = u_char(type);
+        h.rtm_pid = pid;
+        std::memcpy(m.data(), &h, sizeof(h));
+        return m;
+    };
+    const int deleted = RTF_GATEWAY | RTF_DONE | RTF_STATIC | RTF_PRCLONING | RTF_IFSCOPE | RTF_CONDEMNED;
+    const auto ev = [](const QByteArray &m, qint64 pid) { return tribeScanRouteEvent(m.constData(), m.size(), 7, pid); };
+    for (const quint32 half : {kTribeScanHalfLow, kTribeScanHalfHigh}) {
+        TribeScanRouteEvent e = ev(report(RTM_DELETE, 4242, deleted, half, 5, 0x80), 4242);
+        CHECK(!e.resample && !e.loss);
+        e = ev(report(RTM_ADD, 4242, RTF_UP | RTF_GATEWAY | RTF_DONE | RTF_STATIC | RTF_IFSCOPE, half, 5, 0x80), 4242);
+        CHECK(!e.resample && !e.loss);
+        e = ev(report(RTM_DELETE, 4243, deleted, half, 5, 0x80), 4242); // another process's
+        CHECK(e.resample && e.loss);
+    }
+    TribeScanRouteEvent e = ev(report(RTM_DELETE, 4242, RTF_GATEWAY | RTF_DONE | RTF_STATIC, kTribeScanHalfLow, 5, 0x80), 4242);
+    CHECK(e.resample && e.loss); // not scoped: not one of these
+    e = ev(report(RTM_DELETE, 4242, deleted, 0, 0, 0), 4242);
+    CHECK(e.resample && e.loss); // a scoped default of the uplink: a path fact
+    e = ev(report(RTM_DELETE, 4242, deleted, 0x0A000000u, 5, 0xFF), 4242);
+    CHECK(e.resample && e.loss); // a scoped /8: not a half
+    e = ev(report(RTM_DELETE, 4242, deleted, kTribeScanHalfHigh, 5, 0x80), -1);
+    CHECK(e.resample && e.loss); // no pid given (the tests above): as before
 #endif
+
+    // The record of what was added: written as it was, read back as it was; anything else in it is dropped.
+    {
+        TribeScanHalfRoute lo;
+        lo.dst = kTribeScanHalfLow;
+        lo.gateway = 0xC0000201u;
+        lo.ifindex = 11;
+        TribeScanHalfRoute up = lo;
+        up.dst = kTribeScanHalfHigh;
+        const QByteArray rec = tribeScanHalfRoutesRecord({lo, up});
+        CHECK_EQ(rec, QByteArray("half 0 c0000201 11\nhalf 80000000 c0000201 11\n"));
+        CHECK(tribeScanParseHalfRoutesRecord(rec) == (QList<TribeScanHalfRoute>{lo, up}));
+        CHECK(tribeScanHalfRoutesRecord({}).isEmpty());
+        CHECK(tribeScanParseHalfRoutesRecord("half a000000 c0000201 11\n"        // not a half
+                                             "half 0 0 11\n"                     // no gateway
+                                             "half 0 c0000201 0\n"               // no interface
+                                             "full 0 c0000201 11\n"              // not a record line
+                                             "half 0 c0000201 11 extra\n"
+                                             "half 0 c0000201 11\nhalf 0 c0000201 11\n") // a duplicate
+              == (QList<TribeScanHalfRoute>{lo}));
+        CHECK(tribeScanParseHalfRoutesRecord(QByteArray(5000, 'x')).isEmpty());
+    }
 
     // The arm (portable): nothing when pinned sockets route; the pair where they do not; never a route it found.
     TribeScanUplink u = phys();
@@ -1541,7 +1571,7 @@ static void uplinkRoutes()
     // The host: the routes live exactly as long as the scan's pf exemption, and go first when the uplink moves.
     fake::engine().reset();
     Harness h;
-    CHECK_EQ(h.routeClears.load(), 1); // crash recovery at start: a previous instance's tagged routes
+    CHECK_EQ(h.routeClears.load(), 1); // crash recovery at start: the routes a previous instance recorded
     const auto progress = [](const QByteArray &msg, const QByteArray &) -> QByteArray {
         const QJsonObject o = obj(msg);
         const QString id = o.value(QLatin1String("scan_id")).toString();

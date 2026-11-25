@@ -9,9 +9,9 @@
 #   R2  scan_start arms them after the pf exemption and before the engine; needed-but-not-in-force refuses the scan
 #       with the no-uplink reply and removes the exemption armed for it;
 #   R3  every end of the scan removes them with the exemption (endActive); a move of the uplink removes them at once
-#       (sample -> dropRoutes); the service start removes a previous instance's tagged ones;
-#   R4  the route listener knows this process (its own half routes are no path fact); the routes are tagged and
-#       scoped, and the pinned test is a UDP connect (no packet).
+#       (sample -> dropRoutes); the service start removes what a previous instance recorded;
+#   R4  the route listener knows this process (its own scoped half routes are no path fact); the routes are scoped and
+#       recorded on arm, the record goes on disarm; the pinned test is a UDP connect (no packet).
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -60,7 +60,16 @@ has "$ctor" 'm_deps.clearLeftoverRoutes();' || bad "R3: the service start does n
 has "$(body "$SCAN" 'void TribeScanHost::readRouteSocket()')" 'tribeScanRouteEvent(buf, qsizetype(n), index, qint64(::getpid()))' \
   || bad "R4: the route listener does not tell its own half routes from path facts"
 msg="$(body "$SCAN" 'QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int seq)')"
-has "$msg" 'RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE | RTF_PROTO3' || bad "R4: the half routes are not scoped and tagged"
+has "$msg" 'RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE;' || bad "R4: the half routes are not scoped"
+has "$(body "$SCAN" 'TribeScanRouteArm armUplinkRoutes(const TribeScanUplink &u)')" 'writeRoutesRecord(r.added);' \
+  || bad "R4: an arm does not record what it added"
+has "$(body "$SCAN" 'void disarmUplinkRoutes(const QList<TribeScanHalfRoute> &added)')" 'writeRoutesRecord({});' \
+  || bad "R4: a disarm keeps the record"
+clr="$(body "$SCAN" 'void clearLeftoverUplinkRoutes()')"
+has "$clr" 'tribeScanParseHalfRoutesRecord(' && has "$clr" 'tribeScanDisarmHalfRoutes(left, systemRouteOps());' \
+  || bad "R4: the service start does not delete the recorded routes"
+has "$(body "$SCAN" 'TribeScanRouteEvent tribeScanRouteEvent(const char *msg, qsizetype len, int uplinkIndex, qint64 ownPid)')" \
+  '(h.rtm_flags & RTF_IFSCOPE) && isHalfRouteMessage(msg, len)' || bad "R4: the listener does not drop its own scoped half routes"
 pin="$(body "$SCAN" 'bool pinnedRouteExists(int ifindex, quint32 dst)')"
 has "$pin" 'SOCK_DGRAM' && has "$pin" 'IP_BOUND_IF' || bad "R4: the pinned-route test is not a pinned UDP connect"
 

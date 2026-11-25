@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -16,6 +17,7 @@
 #include <QNetworkInterface>
 #include <QProcess>
 #include <QRandomGenerator>
+#include <QSaveFile>
 #include <QSocketNotifier>
 #include <QThread>
 #include <QTimer>
@@ -239,6 +241,23 @@ TribeScanRouteOps systemRouteOps()
     return ops;
 }
 
+// The record of what this host added (tribe_scan.h): written after an arm that added, gone after the disarm.
+void writeRoutesRecord(const QList<TribeScanHalfRoute> &routes)
+{
+    const QString path = QString::fromLatin1(kTribeScanRoutesRecord);
+    if (routes.isEmpty()) {
+        QFile::remove(path);
+        return;
+    }
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QSaveFile f(path);
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(tribeScanHalfRoutesRecord(routes));
+        if (!f.commit())
+            qWarning() << "[tribescan] uplink routes record not written";
+    }
+}
+
 TribeScanRouteArm armUplinkRoutes(const TribeScanUplink &u)
 {
     quint32 router = 0;
@@ -248,6 +267,8 @@ TribeScanRouteArm armUplinkRoutes(const TribeScanUplink &u)
     if (router == 0) // getGatewayAndIface may hand an IPv6 gateway: the IPv4 one of the same interface
         router = tribeScanDefaultRouter(dumpInetRoutes(), u.index);
     const TribeScanRouteArm r = tribeScanArmHalfRoutes(u, router, systemRouteOps());
+    if (!r.added.isEmpty())
+        writeRoutesRecord(r.added);
     if (r.result > 0)
         qInfo() << "[tribescan] uplink routes for pinned probes added:" << r.added.size();
     else if (r.result < 0)
@@ -258,14 +279,19 @@ TribeScanRouteArm armUplinkRoutes(const TribeScanUplink &u)
 void disarmUplinkRoutes(const QList<TribeScanHalfRoute> &added)
 {
     tribeScanDisarmHalfRoutes(added, systemRouteOps());
+    writeRoutesRecord({}); // one scan holds routes at a time: nothing of ours is left
 }
 
 void clearLeftoverUplinkRoutes()
 {
-    const QList<TribeScanHalfRoute> left = tribeScanTaggedHalfRoutes(dumpInetRoutes());
-    if (left.isEmpty())
+    QFile f(QString::fromLatin1(kTribeScanRoutesRecord));
+    if (!f.exists())
         return;
-    tribeScanDisarmHalfRoutes(left, systemRouteOps());
+    const QList<TribeScanHalfRoute> left = f.open(QIODevice::ReadOnly) ? tribeScanParseHalfRoutesRecord(f.read(4096))
+                                                                        : QList<TribeScanHalfRoute>();
+    f.close();
+    tribeScanDisarmHalfRoutes(left, systemRouteOps()); // ESRCH: already gone (a reboot)
+    writeRoutesRecord({});
     qInfo() << "[tribescan] uplink routes of an earlier service instance removed:" << left.size();
 }
 #endif
@@ -483,6 +509,79 @@ TribeScanReplyInfo tribeScanInspectReply(const QByteArray &reply)
     return r;
 }
 
+#ifdef Q_OS_MACOS
+namespace {
+inline qsizetype saRoundUp(qsizetype len) { return len > 0 ? (1 + ((len - 1) | qsizetype(sizeof(uint32_t) - 1))) : qsizetype(sizeof(uint32_t)); }
+
+// The IPv4 address bytes of a routing sockaddr (the kernel trims masks to their last non-zero byte), host order.
+quint32 saInet(const char *sa, qsizetype room)
+{
+    if (room < 2)
+        return 0;
+    const qsizetype saLen = qMin<qsizetype>(quint8(sa[0]), room);
+    quint8 b[4] = {0, 0, 0, 0};
+    for (qsizetype i = 4; i < saLen && i < 8; ++i)
+        b[i - 4] = quint8(sa[i]);
+    return (quint32(b[0]) << 24) | (quint32(b[1]) << 16) | (quint32(b[2]) << 8) | quint32(b[3]);
+}
+
+struct DumpRoute {
+    rt_msghdr h;
+    quint32 dst = 0;
+    bool haveMask = false;
+    quint32 mask = 0;
+    bool gwInet = false;
+    quint32 gw = 0;
+};
+
+template <typename F>
+void forEachDumpRoute(const QByteArray &dump, F f)
+{
+    const char *p = dump.constData();
+    const char *end = p + dump.size();
+    while (end - p >= qsizetype(sizeof(rt_msghdr))) {
+        DumpRoute r;
+        std::memcpy(&r.h, p, sizeof(r.h));
+        if (r.h.rtm_msglen < sizeof(rt_msghdr) || p + r.h.rtm_msglen > end)
+            return;
+        const char *sa = p + sizeof(rt_msghdr);
+        const char *next = p + r.h.rtm_msglen;
+        p = next;
+        bool haveDst = false;
+        for (int i = 0; i < RTAX_MAX && sa < next; ++i) {
+            if (!(r.h.rtm_addrs & (1 << i)))
+                continue;
+            const qsizetype room = next - sa;
+            const quint8 family = room >= 2 ? quint8(sa[1]) : 0;
+            if (i == RTAX_DST && family == AF_INET) {
+                r.dst = saInet(sa, room);
+                haveDst = true;
+            } else if (i == RTAX_GATEWAY && family == AF_INET) {
+                r.gwInet = true;
+                r.gw = saInet(sa, room);
+            } else if (i == RTAX_NETMASK) {
+                r.haveMask = true;
+                r.mask = saInet(sa, room);
+            }
+            sa += saRoundUp(quint8(sa[0]));
+        }
+        if (haveDst)
+            f(r);
+    }
+}
+
+// One routing message (an rt_msghdr and its sockaddrs) about 0.0.0.0/1 or 128.0.0.0/1 with an IPv4 gateway.
+bool isHalfRouteMessage(const char *msg, qsizetype len)
+{
+    bool half = false;
+    forEachDumpRoute(QByteArray::fromRawData(msg, len), [&](const DumpRoute &r) {
+        half = half || (r.gwInet && r.haveMask && r.mask == 0x80000000u && (r.dst == kTribeScanHalfLow || r.dst == kTribeScanHalfHigh));
+    });
+    return half;
+}
+} // namespace
+#endif
+
 TribeScanRouteEvent tribeScanRouteEvent(const char *msg, qsizetype len, int uplinkIndex, qint64 ownPid)
 {
     TribeScanRouteEvent ev;
@@ -503,8 +602,8 @@ TribeScanRouteEvent tribeScanRouteEvent(const char *msg, qsizetype len, int upli
         // say nothing about the uplink; only gateway routes do (the default route among them).
         if ((h.rtm_flags & (RTF_HOST | RTF_WASCLONED | RTF_LLINFO)) || !(h.rtm_flags & RTF_GATEWAY))
             return ev;
-        // This host's own half routes (sent by this process, scoped, tagged): never a path fact.
-        if (ownPid >= 0 && qint64(h.rtm_pid) == ownPid && (h.rtm_flags & RTF_IFSCOPE) && (h.rtm_flags & RTF_PROTO3))
+        // The scoped half routes this process writes itself (the scan's, an Xray session's): never a path fact.
+        if (ownPid >= 0 && qint64(h.rtm_pid) == ownPid && (h.rtm_flags & RTF_IFSCOPE) && isHalfRouteMessage(msg, len))
             return ev;
         ev.resample = true;
         ev.loss = type == RTM_DELETE && uplinkIndex > 0 && h.rtm_index == uplinkIndex;
@@ -584,68 +683,6 @@ void tribeScanDisarmHalfRoutes(const QList<TribeScanHalfRoute> &added, const Tri
         ops.write(false, route); // ESRCH: already gone - nothing left to do
 }
 
-#ifdef Q_OS_MACOS
-namespace {
-inline qsizetype saRoundUp(qsizetype len) { return len > 0 ? (1 + ((len - 1) | qsizetype(sizeof(uint32_t) - 1))) : qsizetype(sizeof(uint32_t)); }
-
-// The IPv4 address bytes of a routing sockaddr (the kernel trims masks to their last non-zero byte), host order.
-quint32 saInet(const char *sa, qsizetype room)
-{
-    if (room < 2)
-        return 0;
-    const qsizetype saLen = qMin<qsizetype>(quint8(sa[0]), room);
-    quint8 b[4] = {0, 0, 0, 0};
-    for (qsizetype i = 4; i < saLen && i < 8; ++i)
-        b[i - 4] = quint8(sa[i]);
-    return (quint32(b[0]) << 24) | (quint32(b[1]) << 16) | (quint32(b[2]) << 8) | quint32(b[3]);
-}
-
-struct DumpRoute {
-    rt_msghdr h;
-    quint32 dst = 0;
-    bool haveMask = false;
-    quint32 mask = 0;
-    bool gwInet = false;
-    quint32 gw = 0;
-};
-
-template <typename F>
-void forEachDumpRoute(const QByteArray &dump, F f)
-{
-    const char *p = dump.constData();
-    const char *end = p + dump.size();
-    while (end - p >= qsizetype(sizeof(rt_msghdr))) {
-        DumpRoute r;
-        std::memcpy(&r.h, p, sizeof(r.h));
-        if (r.h.rtm_msglen < sizeof(rt_msghdr) || p + r.h.rtm_msglen > end)
-            return;
-        const char *sa = p + sizeof(rt_msghdr);
-        const char *next = p + r.h.rtm_msglen;
-        p = next;
-        bool haveDst = false;
-        for (int i = 0; i < RTAX_MAX && sa < next; ++i) {
-            if (!(r.h.rtm_addrs & (1 << i)))
-                continue;
-            const qsizetype room = next - sa;
-            const quint8 family = room >= 2 ? quint8(sa[1]) : 0;
-            if (i == RTAX_DST && family == AF_INET) {
-                r.dst = saInet(sa, room);
-                haveDst = true;
-            } else if (i == RTAX_GATEWAY && family == AF_INET) {
-                r.gwInet = true;
-                r.gw = saInet(sa, room);
-            } else if (i == RTAX_NETMASK) {
-                r.haveMask = true;
-                r.mask = saInet(sa, room);
-            }
-            sa += saRoundUp(quint8(sa[0]));
-        }
-        if (haveDst)
-            f(r);
-    }
-}
-} // namespace
-#endif
 
 QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int seq)
 {
@@ -655,7 +692,7 @@ QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int 
     h.rtm_version = RTM_VERSION;
     h.rtm_type = add ? RTM_ADD : RTM_DELETE;
     h.rtm_index = u_short(r.ifindex);
-    h.rtm_flags = RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE | RTF_PROTO3;
+    h.rtm_flags = RTF_UP | RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE;
     h.rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK;
     h.rtm_seq = seq;
     const auto inet = [](quint32 hostOrder) {
@@ -676,25 +713,31 @@ QByteArray tribeScanHalfRouteMessage(bool add, const TribeScanHalfRoute &r, int 
 #endif
 }
 
-QList<TribeScanHalfRoute> tribeScanTaggedHalfRoutes(const QByteArray &dump)
+QByteArray tribeScanHalfRoutesRecord(const QList<TribeScanHalfRoute> &routes)
+{
+    QByteArray out;
+    for (const TribeScanHalfRoute &r : routes)
+        out += QByteArray("half ") + QByteArray::number(r.dst, 16) + ' ' + QByteArray::number(r.gateway, 16) + ' '
+               + QByteArray::number(r.ifindex) + '\n';
+    return out;
+}
+
+QList<TribeScanHalfRoute> tribeScanParseHalfRoutesRecord(const QByteArray &record)
 {
     QList<TribeScanHalfRoute> out;
-#ifdef Q_OS_MACOS
-    const int need = RTF_GATEWAY | RTF_STATIC | RTF_IFSCOPE | RTF_PROTO3;
-    forEachDumpRoute(dump, [&](const DumpRoute &r) {
-        if ((r.h.rtm_flags & need) != need || !r.gwInet || !r.haveMask || r.mask != 0x80000000u)
-            return;
-        if (r.dst != kTribeScanHalfLow && r.dst != kTribeScanHalfHigh)
-            return;
-        TribeScanHalfRoute route;
-        route.dst = r.dst;
-        route.gateway = r.gw;
-        route.ifindex = r.h.rtm_index;
-        out << route;
-    });
-#else
-    Q_UNUSED(dump)
-#endif
+    for (const QByteArray &line : record.split('\n')) {
+        const QList<QByteArray> f = line.trimmed().split(' ');
+        if (f.size() != 4 || f.at(0) != "half")
+            continue;
+        bool ok1 = false, ok2 = false, ok3 = false;
+        TribeScanHalfRoute r;
+        r.dst = f.at(1).toUInt(&ok1, 16);
+        r.gateway = f.at(2).toUInt(&ok2, 16);
+        r.ifindex = f.at(3).toInt(&ok3);
+        if (ok1 && ok2 && ok3 && (r.dst == kTribeScanHalfLow || r.dst == kTribeScanHalfHigh) && r.gateway != 0
+            && r.ifindex > 0 && r.ifindex < 65536 && !out.contains(r) && out.size() < 4)
+            out << r;
+    }
     return out;
 }
 
