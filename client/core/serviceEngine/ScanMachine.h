@@ -922,10 +922,15 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (!n.sameNetwork(m_net))
+        if (ownTunnelNotice(n)) {
+            // the person's own row connect is raising a tunnel: nothing of the network the list belongs to changed
+            if (n.kind != ScanNetKind::Unknown)
+                adoptOwnTunnelGeneration(n);
+        } else if (!n.sameNetwork(m_net)) {
             applyNetworkChange(n, cached, now, s);
-        else
+        } else {
             refineKey(n.key);
+        }
         m_net.radio = n.radio;
         finishStep(s, now);
         return s;
@@ -967,6 +972,35 @@ private:
     // device round 11, iPhone Air 20.11 13:05, a row connect turned "unknown" into "cell:asn:<N>:4g" and the list of 20
     // rows shrank to the connected one). Not a network change: the list, its result and its slots stay; what is
     // reported from now on carries the new key. A scan already running reports under the key it started with.
+    // Device round air-D, E3 (and air-C N8 pair 2): a row tapped, its tunnel comes up, and the platform's path monitor
+    // reports our own utun - a new generation of the SAME network ("network kind=wifi key=wifi:asn:12389 gen=f48c..."
+    // while the path engine said "scan_network_key_refined net_gen=19"), or a moment of "kind=unknown" while the tunnel
+    // switches. That rebuilt the list from the cached result in another order and the second tap hit another row. While
+    // a row's connect runs (m_connectingId), such a notice is our own tunnel: a moment without a network says nothing,
+    // and the same kind and fingerprint (the physical network) keep the list, its rows and their order; only a notice
+    // of another network (kind or fingerprint) rebuilds it - the one exception to "rows never move under the finger".
+    bool ownTunnelNotice(const ScanNetwork &n) const
+    {
+        if (m_connectingId.isEmpty() || scanPhaseScanning(m_phase))
+            return false;
+        return n.kind == ScanNetKind::Unknown || (n.kind == m_net.kind && n.fingerprint == m_net.fingerprint);
+    }
+    // The new generation taken in place: the rows measured on this network a moment ago stay current evidence.
+    void adoptOwnTunnelGeneration(const ScanNetwork &n)
+    {
+        const QString was = m_net.generation();
+        const QString gen = n.generation();
+        for (Row &r : m_rows)
+            if (!r.cached && r.generation == was)
+                r.generation = gen;
+        if (m_scanNet.generation() == was) {
+            m_scanNet.sources = n.sources;
+            m_scanNet.key = n.key;
+        }
+        refineKey(n.key);
+        m_net.sources = n.sources;
+    }
+
     void refineKey(const QString &key)
     {
         if (m_rowsKey == m_net.key)

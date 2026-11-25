@@ -5024,6 +5024,47 @@ static void droppedRequestIsNoVerdict()
     CHECK(d.m.rowTapped(b, t + 7000).has(ScanActionKind::ConnectRow)); // tappable again
 }
 
+// E3 (device round air-D, pair 1): a row tapped (Германия 2), its tunnel coming up, and the path monitor's notice of our
+// own utun 0.5 s later - "network kind=wifi key=wifi:asn:12389 gen=f48c..." with the path engine's
+// "scan_network_key_refined net_gen=19" (the same physical network) - rebuilt the list from the cached result in another
+// order; the second tap, aimed at the row under the finger, hit another row. While a row's connect runs the list keeps
+// its rows and order on such a notice (and on a moment of "kind=unknown"); another network still rebuilds it.
+static void ownTunnelNoticeKeepsTheList()
+{
+    World w = baseWorld("own_tunnel", hostMac(), ScanNetKind::Wifi);
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+    w.runMs = 9000;
+    Driver d(w);
+    d.run();
+    const QJsonObject v0 = lastView(d);
+    const QStringList ids0 = rowIds(v0);
+    QString a;
+    for (const QJsonValue &x : v0.value(QLatin1String("rows")).toArray())
+        if (a.isEmpty() && x.toObject().value(QLatin1String("state")).toString() == QLatin1String("works"))
+            a = x.toObject().value(QLatin1String("id")).toString();
+    CHECK(ids0.size() >= 3 && !a.isEmpty());
+    const qint64 t = d.now + 1000;
+    d.m.rowTapped(a, t);
+    const double build = viewJson(d.m, t).value(QLatin1String("list_build")).toDouble();
+    // a moment without a network while the tunnel switches, then the same Wi-Fi with a new generation and a refined key
+    ScanNetwork none = scanNet(ScanNetKind::Unknown, QStringLiteral("unknown"), 7);
+    d.m.networkChanged(none, ScanCachedResult(), t + 450);
+    ScanNetwork same = w.net;
+    same.key = w.net.key + QStringLiteral(":asn:12389");
+    same.sources = {ScanNetSource{QStringLiteral("app"), kAppEpoch, 9}};
+    d.m.networkChanged(same, ScanCachedResult(), t + 500);
+    const QJsonObject v1 = viewJson(d.m, t + 500);
+    CHECK(v1.value(QLatin1String("list_build")).toDouble() == build);
+    CHECK(rowIds(v1) == ids0); // every row in its place
+    bool cached = false;
+    for (const QJsonValue &x : v1.value(QLatin1String("rows")).toArray())
+        cached = cached || x.toObject().value(QLatin1String("flags")).toArray().contains(QStringLiteral("cache"));
+    CHECK(!cached && rowOf(v1, a).value(QLatin1String("state")).toString() == QLatin1String("connecting"));
+    // another network (another fingerprint) still rebuilds the list
+    d.m.networkChanged(scanNet(ScanNetKind::Wifi, QStringLiteral("wifi:asn:64999"), 1, QStringLiteral("gw2")), ScanCachedResult(), t + 900);
+    CHECK(viewJson(d.m, t + 900).value(QLatin1String("list_build")).toDouble() != build);
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -5566,6 +5607,7 @@ int main(int argc, char **argv)
     progressCountsWhatIsChecked();
     connectedRowIsCounted();
     droppedRequestIsNoVerdict();
+    ownTunnelNoticeKeepsTheList();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();
