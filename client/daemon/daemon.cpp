@@ -14,6 +14,7 @@
 
 #include "leakdetector.h"
 #include "logger.h"
+#include "serverswitchpolicy.h"  // AVPN (awg audit 25.11.2026): what an in-place server switch cannot change
 #ifdef Q_OS_MACOS
 #  include "../platforms/macos/daemon/splitdnsresolverfiles.h" // AVPN (Tribe split-DNS)
 #endif
@@ -675,11 +676,21 @@ bool Daemon::supportServerSwitching(const InterfaceConfig& config) const {
   const InterfaceConfig& current =
       m_connections.value(config.m_hopType).m_config;
 
-  return current.m_privateKey == config.m_privateKey &&
-         current.m_deviceIpv4Address == config.m_deviceIpv4Address &&
-         current.m_deviceIpv6Address == config.m_deviceIpv6Address &&
-         current.m_serverIpv4Gateway == config.m_serverIpv4Gateway &&
-         current.m_serverIpv6Gateway == config.m_serverIpv6Gateway;
+  if (!(current.m_privateKey == config.m_privateKey &&
+        current.m_deviceIpv4Address == config.m_deviceIpv4Address &&
+        current.m_deviceIpv6Address == config.m_deviceIpv6Address &&
+        current.m_serverIpv4Gateway == config.m_serverIpv4Gateway &&
+        current.m_serverIpv6Gateway == config.m_serverIpv6Gateway)) {
+    return false;
+  }
+  // AVPN (awg audit 25.11.2026): switchServer re-sends only the peer; the interface keeps what addInterface applied
+  // (AmneziaWG jc/s/h/i, 3.x settings, MTU, DNS, the kill switch session) - serverswitchpolicy.h.
+  const QStringList differ = avpn::interfaceSettingsThatDiffer(current, config);
+  if (!differ.isEmpty()) {
+    logger.debug() << "Server switching needs a new interface, settings differ:" << differ.join(',');
+    return false;
+  }
+  return true;
 }
 
 bool Daemon::switchServer(const InterfaceConfig& config) {
