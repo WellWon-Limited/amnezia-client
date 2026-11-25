@@ -205,7 +205,7 @@ int tabIndex(const QString &page)
 // The commands that act for the person: the engine is told a person is here before each (SystemAwake.h).
 const QStringList &personCommands()
 {
-    static const QStringList l{QStringLiteral("connect"), QStringLiteral("stop"), QStringLiteral("nav"),
+    static const QStringList l{QStringLiteral("connect"), QStringLiteral("stop"), QStringLiteral("replace"), QStringLiteral("nav"),
                                QStringLiteral("servers"), QStringLiteral("choose"), QStringLiteral("auto"),
                                QStringLiteral("mode"), QStringLiteral("scan.open"), QStringLiteral("scan.select"),
                                QStringLiteral("scan.start"), QStringLiteral("scan.stop"), QStringLiteral("scan.rows"),
@@ -216,7 +216,7 @@ const QStringList &personCommands()
 
 const QStringList &actionCommands()
 {
-    static const QStringList l{QStringLiteral("connect"), QStringLiteral("stop"), QStringLiteral("nav"),
+    static const QStringList l{QStringLiteral("connect"), QStringLiteral("stop"), QStringLiteral("replace"), QStringLiteral("nav"),
                                QStringLiteral("choose"), QStringLiteral("auto"), QStringLiteral("mode"),
                                QStringLiteral("scan.open"), QStringLiteral("scan.select"), QStringLiteral("scan.start"),
                                QStringLiteral("scan.stop"), QStringLiteral("scan.connect"), QStringLiteral("scan.back"),
@@ -424,6 +424,7 @@ void App::handle(const QString &cmd, const QJsonObject &args, QObject *ctx, cons
     else if (cmd == QLatin1String("state")) r = cmdState();
     else if (cmd == QLatin1String("connect")) r = cmdConnect(&err);
     else if (cmd == QLatin1String("stop")) r = cmdStop(&err);
+    else if (cmd == QLatin1String("replace")) r = cmdReplace(&err);
     else if (cmd == QLatin1String("nav")) r = cmdNav(args, &err);
     else if (cmd == QLatin1String("servers")) r = cmdServers(&err);
     else if (cmd == QLatin1String("choose")) r = cmdChoose(args, &err);
@@ -446,7 +447,7 @@ void App::handle(const QString &cmd, const QJsonObject &args, QObject *ctx, cons
 QJsonObject App::cmdHelp()
 {
     QJsonArray c;
-    for (const char *n : {"help", "state", "connect", "stop", "nav", "servers", "choose", "auto", "mode", "scan.open",
+    for (const char *n : {"help", "state", "connect", "stop", "replace", "nav", "servers", "choose", "auto", "mode", "scan.open",
                           "scan.select", "scan.start", "scan.stop", "scan.rows", "scan.connect", "scan.back",
                           "window.show", "shot", "mark", "wait", "quit"})
         c << QString::fromLatin1(n);
@@ -621,6 +622,26 @@ QJsonObject App::cmdStop(QString *err)
         return {};
     return {{QStringLiteral("tapped"), true}, {QStringLiteral("face_before"), before},
             {QStringLiteral("after"), stateBrief()}};
+}
+
+// «Заменить сервер» on the home page (round mac-D2): the button's own function, its guards included - connected: the
+// next live node (rotateNext); off or an ended attempt: the server choice; busy: nothing. Hidden with an expired
+// access (the page shows the renewal instead): refused, as no one can press it.
+QJsonObject App::cmdReplace(QString *err)
+{
+    if (!engine(err))
+        return {};
+    QObject *home = showPage(QStringLiteral("connect"), err);
+    if (!home)
+        return {};
+    if (prop(home, "subExpired").toBool())
+        return {{QStringLiteral("pressed"), false}, {QStringLiteral("reason"), QStringLiteral("not_shown")}};
+    const QString before = face();
+    QVariant did;
+    if (!js(home, "onReplaceServerClicked", {}, &did, err))
+        return {};
+    return {{QStringLiteral("pressed"), true}, {QStringLiteral("did"), did.toString()},
+            {QStringLiteral("face_before"), before}, {QStringLiteral("after"), stateBrief()}};
 }
 
 // ---- navigation --------------------------------------------------------------------------------------------------

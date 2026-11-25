@@ -240,6 +240,20 @@ PageType {
     readonly property real sceneOrbSqueeze: Math.min(sceneDeficit, 32 + Theme.space.lg - 16)
     readonly property real sceneCaptionSqueeze: Math.min(sceneDeficit - sceneOrbSqueeze, 30 - 16)
 
+    // «Заменить сервер» (refreshBtn): a live connection -> the next live node (rotateNext, CONNECT-INVARIANTS §11);
+    // off or an ended attempt -> the server choice; busy -> nothing. One function, so the development builds' test
+    // channel (DevControlApp `replace`) presses exactly this button. Returns what it did.
+    function onReplaceServerClicked() {
+        if (!root.hasEngine) return "no_engine"
+        if (TribeEngine.busy) return "busy"
+        if (!root.isOn) {
+            root.requestServerPicker()
+            return "server_choice"
+        }
+        TribeEngine.rotateNext()   // round-robin на следующую живую ноду (заворот) // AVPN
+        return "rotate_next"
+    }
+
     function onOrbClicked() {
         if (!previewSim && typeof TribeEngine !== "undefined") {
             // AVPN (белые списки): тап по коннекту при активном режиме — вернуть попап-объяснение
@@ -1436,15 +1450,7 @@ PageType {
                 // CONNECT-INVARIANTS §11); with nothing to replace - off, or an attempt that ended - it opens the
                 // server choice. It never starts a connection by itself: the orb does. Busy (connecting, switching,
                 // stopping): nothing.
-                onClicked: {
-                    if (!root.hasEngine) return
-                    if (TribeEngine.busy) return
-                    if (!root.isOn) {
-                        root.requestServerPicker()
-                        return
-                    }
-                    TribeEngine.rotateNext()   // round-robin на следующую живую ноду (заворот) // AVPN
-                }
+                onClicked: root.onReplaceServerClicked()
             }
         }
 

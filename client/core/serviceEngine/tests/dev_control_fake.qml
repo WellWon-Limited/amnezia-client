@@ -1,7 +1,7 @@
 // AVPN (desktop test rig): the app's QML shape for tests/dev_control_check.cpp - the main window (objectName
 // mainWindow), PageStart (pageStart: goAvpnTab, openScanner, the handlers of the current page's signals), its stack
 // (tabBarStackView.currentItem) and bottom bar (avpnBottomNav.activated), and the pages' functions and signals the
-// channel calls (PageConnectTribe.onOrbClicked, PageServersTribe.tapRow / tapAuto / tapMode and its shownKeys /
+// channel calls (PageConnectTribe.onOrbClicked / onReplaceServerClicked, PageServersTribe.tapRow / tapAuto / tapMode and its shownKeys /
 // rowsByKey, the Scanner page's select / pane and its bar's action / fire, systemBack). The page bodies are stand-ins; check_dev_control_wiring.sh pins the real ones.
 import QtQuick
 import QtQuick.Window
@@ -97,6 +97,13 @@ Window {
                 if (TribeEngine.whitelistMode === true)
                     TribeEngine.setWhitelistAcked(false)
                 TribeEngine.orbTap()
+            }
+            property bool subExpired: false
+            function onReplaceServerClicked() {
+                if (TribeEngine.busy) return "busy"
+                if (TribeEngine.state !== "connected") { requestServerPicker(); return "server_choice" }
+                TribeEngine.rotateNext()
+                return "rotate_next"
             }
         }
     }

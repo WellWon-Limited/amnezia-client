@@ -5,6 +5,7 @@
 # file - the rest of the button's path down to the engine (the page's host handler, the engine call).
 # fn	call	decl_file	decl	button_file	button_call
 cmdConnect	js:onOrbClicked	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	function onOrbClicked() {	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	onClicked: root.onOrbClicked()
+cmdReplace	js:onReplaceServerClicked	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	function onReplaceServerClicked() {	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	onClicked: root.onReplaceServerClicked()
 cmdStop	js:onOrbClicked	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	function onOrbClicked() {	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	onClicked: root.onOrbClicked()
 showPage	sig:activated	client/ui/qml/Tribe/components/TribeBottomNav.qml	signal activated(int index)	client/ui/qml/Tribe/components/TribeBottomNav.qml	nav.currentIndex = index; nav.activated(index)
 showPage	sig:requestServerPicker	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	signal requestServerPicker()	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	root.requestServerPicker()
@@ -66,3 +67,4 @@ chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	TribeScanner.showSlot(selec
 chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	if (hasScanner) TribeScanner.retry()
 chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	TribeScanner.stop()
 chain	client/ui/qml/Tribe/Pages/PageScannerTribe.qml	function systemBack() { navBack() }
+chain	client/ui/qml/Tribe/Pages/PageConnectTribe.qml	TribeEngine.rotateNext()   // round-robin на следующую живую ноду (заворот) // AVPN

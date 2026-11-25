@@ -58,6 +58,7 @@ public:
         return QStringLiteral("stop");
     }
     Q_INVOKABLE void start() { calls << QStringLiteral("start"); }
+    Q_INVOKABLE void rotateNext() { calls << QStringLiteral("rotateNext"); }
     Q_INVOKABLE void stop() { calls << QStringLiteral("stop"); }
     Q_INVOKABLE void pinAndReconnect(const QString &id) { calls << QStringLiteral("pinAndReconnect:") + id; }
     Q_INVOKABLE void selectAuto() { calls << QStringLiteral("selectAuto"); }

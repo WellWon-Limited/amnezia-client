@@ -321,7 +321,7 @@ int main(int argc, char **argv)
         CHECK(!ok(r) && errOf(r).startsWith("unknown_command") && r.value("id").toString() == "u1",
               "unknown command -> error with the id");
         r = c.ask("{\"id\":42,\"cmd\":\"help\"}");
-        CHECK(ok(r) && r.value("id").toInt() == 42 && res(r).value("commands").toArray().size() == 21, "help");
+        CHECK(ok(r) && r.value("id").toInt() == 42 && res(r).value("commands").toArray().size() == 22, "help");
         c.send("\n\r\n");
         r = c.ask("{\"cmd\":\"help\"}");
         CHECK(ok(r) && r.value("id").isNull(), "empty lines are skipped; absent id -> null");
@@ -378,6 +378,27 @@ int main(int argc, char **argv)
         eng.m_whitelistMode = false;
         eng.set("disconnected", false);
         CHECK(journal.size() >= 2 && journal.last().first == "dev_cmd", "actions are journaled as dev_cmd");
+    }
+
+    // ---- replace: «Заменить сервер» on the home page (round mac-D2) -------------------------------------------------
+    {
+        eng.set("connected", false);
+        eng.calls.clear();
+        QJsonObject r = c.cmd("replace");
+        CHECK(ok(r) && res(r).value("pressed").toBool() && res(r).value("did").toString() == "rotate_next"
+                  && eng.calls == QStringList{"rotateNext"},
+              qPrintable("replace on a live connection: the next live node (rotateNext): " + eng.calls.join(',')));
+        eng.set("connecting", true);
+        eng.calls.clear();
+        r = c.cmd("replace");
+        CHECK(ok(r) && res(r).value("did").toString() == "busy" && eng.calls.isEmpty(), "replace while busy: nothing");
+        eng.set("disconnected", false);
+        eng.calls.clear();
+        r = c.cmd("replace");
+        CHECK(ok(r) && res(r).value("did").toString() == "server_choice" && eng.calls.isEmpty()
+                  && res(r).value("after").toObject().value("page").toString() == "PageServersTribe",
+              "replace while off: the server choice, nothing started");
+        c.cmd("nav", {{"page", "connect"}});
         CHECK(!logLines.isEmpty() && logLines.last().startsWith("[avpn devctl] cmd="), "actions are logged");
     }
 

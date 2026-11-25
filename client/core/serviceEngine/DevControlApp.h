@@ -92,6 +92,7 @@ private:
     QJsonObject cmdState();
     QJsonObject cmdConnect(QString *err);
     QJsonObject cmdStop(QString *err);
+    QJsonObject cmdReplace(QString *err);
     QJsonObject cmdNav(const QJsonObject &args, QString *err);
     QJsonObject cmdServers(QString *err);
     QJsonObject cmdChoose(const QJsonObject &args, QString *err);
