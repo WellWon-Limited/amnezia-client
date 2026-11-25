@@ -1258,6 +1258,75 @@ do {
 func policy(_ p: TribeRoamingPolicy) -> TribeRoamingPolicy { p }
 // END AIR-G REPLAYS
 
+// BEGIN REVIEW R53 REPLAYS (review of tribe.22, round 53)
+// Item 2: a phone at the edge of Wi-Fi alternating Wi-Fi <-> LTE every `period` s for 300 s; the server is dead on both
+// paths (a handshake completes on every new device, or never; no application data), 1500 B/s of demand while a keypair
+// can send; every roam is a new device (rebaseAfterBackendRestart, then noteRoamRebind), as the adapter does it.
+// The claim under test: the rebase of every restart zeroes the demand counts, so the verdict would start from zero
+// on every roam for ever. It does not: inside the series (120 s from the first roam without lasting data) a roam
+// restarts the verdict by design (K1/L1, the app's own bound is the same); after it `observedSince` and the stall
+// clock no longer move, the demand of the new device reaches the ladder's threshold again within seconds of each
+// roam, and the verdict passes the app's 45 s at 120 + 45 s and stays there.
+struct EdgeRun { var reported: [Int: Int64] = [:]; var steps: [(Int, TribeStallAction)] = [] }
+func edgeReplay(period: Int, handshakeCompletes: Bool, traffic: TribeServiceTraffic, horizon: Int = 300) -> EdgeRun {
+    var policy = seamless
+    policy.serviceTraffic = traffic
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var hs: Int64 = 1_800_000_000
+    var keypair = true
+    var deviceStart = -100
+    var run = EdgeRun()
+    let initiation = traffic.handshakeTxBytes - traffic.keepaliveTxBytes
+    for t in -20...horizon {
+        var sample = s(tx, rx, hs, Double(t))
+        func newDevice() {
+            tx = 0; rx = 0; hs = 0; keypair = false; deviceStart = t
+            arbiter.rebaseAfterBackendRestart(s(0, 0, 0, Double(t)))
+            sample = s(0, 0, 0, Double(t))
+        }
+        if t >= 0 && t % period == 0 { newDevice(); arbiter.noteRoamRebind(sample, freshPort: true) }
+        let age = t - deviceStart
+        if !keypair {
+            if handshakeCompletes && age == 1 { keypair = true; tx += traffic.handshakeTxBytes; rx += 92; hs = 1_800_000_000 + Int64(t + 20) }
+            else if age % 5 == 0 { tx += initiation }            // the engine's own retries of an unanswered initiation
+        }
+        if keypair { tx += 1500 }
+        if t < 0 { rx += 20_000 }
+        sample = s(tx, rx, hs, Double(t))
+        if !(t >= 0 && t % period == 0), case .perform(let a) = arbiter.tick(sample, pathSatisfied: true, policy: policy) {
+            run.steps.append((t, a))
+            if TribeRoaming.socketOps(for: a) == [.restartBackend] { newDevice() }
+        }
+        run.reported[t] = arbiter.dataQuietSeconds(at: Double(t))
+    }
+    return run
+}
+do {
+    let fleet = TribeServiceTraffic.fromConfig(jc: "6", jmax: "50", s1: "64", s4: "64", specialJunk: ["<r 44>", nil, nil, nil, nil],
+                                               contentPaddingAddition: "10-100", randomTrailers: "0", mtu: "1280", persistentKeepalive: "25")
+    for period in [15, 20, 30, 40] {
+        for completes in [true, false] {
+            let r = edgeReplay(period: period, handshakeCompletes: completes, traffic: fleet)
+            let reach = (0...300).first { (r.reported[$0] ?? 0) >= 45 }
+            let late = (200...300).filter { (r.reported[$0] ?? 0) >= 45 }.count
+            let inside = (0...119).map { r.reported[$0] ?? 0 }.max() ?? 0
+            print("  R53 edge of Wi-Fi, a roam every \(period) s, handshake \(completes ? "completes" : "never"): data_stall_s >= 45 first at \(reach.map { "\($0) s" } ?? "never"), seconds >= 45 in 200..300: \(late), max inside the series \(inside)")
+            check(reach.map { $0 <= 120 + 45 + 3 } ?? false, "R53 edge \(period) s / \(completes): the verdict reaches the app's 45 s at the series bound + 45 s: \(String(describing: reach))")
+            check(late >= 60, "R53 edge \(period) s / \(completes): and stays reported between the roams, it does not start over: \(late) of 101 s")
+            check(inside < 45, "R53 edge \(period) s / \(completes): inside the series a roam is another network: \(inside)")
+        }
+    }
+    // The lead's exact case with a plain WireGuard session as well (roams at 0, 20, ..., 300).
+    for completes in [true, false] {
+        let r = edgeReplay(period: 20, handshakeCompletes: completes, traffic: .plain)
+        let reach = (0...300).first { (r.reported[$0] ?? 0) >= 45 }
+        check(reach.map { $0 <= 180 } ?? false, "R53 edge 20 s, plain session / \(completes): reached by 180 s: \(String(describing: reach))")
+    }
+}
+
+// END REVIEW R53 REPLAYS
+
 // patch 0015: the backend hook runs the callback first, then the operation; nil changes nothing.
 do {
     var events: [String] = []

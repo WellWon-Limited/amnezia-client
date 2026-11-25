@@ -943,6 +943,8 @@ public struct TribeRecoveryArbiter: Equatable {
     /// which step is next; taken for the verdict too (tribe.16-21) it let the stray data of a dead uplink - the echo
     /// of each step, then the server's handshakes and retransmissions, dense for 10-20 s and thinning out within the
     /// minute - start the app's wait over after every step. One minute = `TribeDataFlow.idleSeconds`.
+    /// Not shorter (review R53 3): the app acts on this number only together with its own failed probes after its
+    /// grace (HealthLoop::probeDeadCorroborated), and shorter runs of data taken for proof kept dead sessions alive.
     public static let lastingSeconds: TimeInterval = TribeDataFlow.idleSeconds
     private var lastStallAt: TimeInterval?
     private var lastStepAt: TimeInterval?

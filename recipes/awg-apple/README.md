@@ -1194,6 +1194,12 @@ of its addresses, read-only; `~/avpn-build/phone-diag/air-G/RESULTS.txt`):
   over after every step and never reached the app's 45 s (runs 2 and 4 of air-F: no failover until the tester's
   Stop). The ladder's own proof (`provesFlow`, a second stage after a step) is unchanged: it only decides which
   step is next.
+- **A roam series under a dead server (review R53 1), tested, no change.** Roams every 15-40 s for 300 s, the server
+  dead on both paths, 1500 B/s of demand: `data_stall_s` reaches 45 s at 165 s (the 120 s series bound + 45 s) and
+  stays reported between the roams, whether the new devices' handshakes complete or not (section R53 REPLAYS of the
+  test). Each restart's rebase zeroes the demand counts, but not the stall clock and not `observedSince`; at that
+  demand the count is back over the ladder's threshold 3-4 s after a roam. Below about 10 s between roams (fleet
+  session) the count never gets there and nothing is reported while the roaming lasts - not a case seen on a device.
 - **Not covered.** A session that completes its handshake and later loses its uplink while stray data keeps arriving
   densely (no 4 s gap under demand) is not seen as stalled by counters alone until the stray data thins out; the
   app's handshake-age rule (135 s) and the data watch's in-tunnel probe are the owners of that case. On a slow path
