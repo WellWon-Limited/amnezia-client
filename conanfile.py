@@ -24,7 +24,10 @@ class AmneziaVPN(ConanFile):
                 self.requires("win-split-tunnel/1.2.5.0")
                 self.requires("wintun/0.14.1")
             else:
-                self.requires("awg-go/3.1.20260828", options={"tribe_probe": os == "Macos"})
+                # amneziawg-go v3.1.20261116: upstream bug fixes only (timer race, runtime parameter changes - also
+                # the first packet after the UAPI set of S4 is no longer lost -, junk validation), no wire change;
+                # the same source pin the iOS package (awg-apple tribe.21) builds.
+                self.requires("awg-go/3.1.20261116", options={"tribe_probe": os == "Macos"})
 
             # AVPN: 1.4.0 sources, Xray core amnezia-xray-core v1.261101.0 (Go 1.27.4).
             self.requires("amnezia-xray-bindings/1.4.0-tribe.1")
@@ -39,6 +42,9 @@ class AmneziaVPN(ConanFile):
         if has_ne:
             # Official parser-fixed 3.1.4 plus the existing Tribe
             # dnsfwd/warmup/rebind patch set.
+            # tribe.21: tribe.20 on upstream amneziawg-apple v3.1.5 (HTTP/2 request body buffer capped at 32 KiB)
+            # and amneziawg-go v3.1.20261116 (bug fixes, no wire change); same patches and Swift sources + one
+            # test-only patch (the core no longer loses the first packet after a UAPI set of S4).
             # tribe.20: tribe.19 after its review (bounded roam reset, the proof restart's own allowance).
             # tribe.19: tribe.18 after device round air-D (a roam is another network; a stale session is proved
             # at once on the new path; same patches).
@@ -51,7 +57,7 @@ class AmneziaVPN(ConanFile):
             # tribe.15: tribe.14 + the probe engine's host limits (in-app probe host). tribe.14: tribe.12 (Xray core amnezia-xray-core v1.261101.0 on Go 1.27.4, LibXrayTribeHTTP,
             # FreeOSMemory loop once per process, the Scanner's probe engine) + the tunnel-side data
             # watch (patches 0012 and 0016).
-            self.requires("awg-apple/3.1.4-tribe.20")
+            self.requires("awg-apple/3.1.5-tribe.21")
             # Cut geo pair, shipped as appex resources and passed as datDir.
             self.requires("tribe-xray-geo/1.0.0")
             self.requires("hev-socks5-tunnel/2.15.0-tribe.2", options={"as_framework": True})

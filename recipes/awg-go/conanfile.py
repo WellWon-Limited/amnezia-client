@@ -14,7 +14,7 @@ import shlex
 
 class AwgGo(ConanFile):
     name = "awg-go"
-    version = "3.1.20260828"
+    version = "3.1.20261116"
     package_type = "application"
     settings = "os", "arch"
     # AVPN tribe_probe: `amneziawg-go probe`, the Scanner's AmneziaWG mini-session for the service's
@@ -72,7 +72,7 @@ class AwgGo(ConanFile):
 
     def source(self):
         get(self, f"https://github.com/amnezia-vpn/amneziawg-go/archive/refs/tags/v{self.version}.zip",
-            sha256="7adedd3ea97cf63f365f3610667817da4e8979fea996dc131d0b5693b40954e0", strip_root=True
+            sha256="a3c565f66075201aded8e3e331be7630d525db2518e28a31eb5301a23ebd33c1", strip_root=True
         )
 
     def generate(self):
@@ -167,7 +167,9 @@ class AwgGo(ConanFile):
         self.cpp_info.set_property("cmake_target_name", "amnezia::awg-go")
         self.cpp_info.set_property("cmake_extra_variables", {
             "AWG_GO_ENGINE_VERSION": self.version,
-            "AWG_GO_SOURCE_COMMIT": "1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1",
+            # The tag commit of self.version (proxy.golang.org Origin.Hash); 0828's label named a commit two
+            # before its tag.
+            "AWG_GO_SOURCE_COMMIT": "08fe3d33bbb116be09a6183d02609311b8b0c9e8",
             "AWG_GO_UAPI_ABI": "awg-uapi-v3.1",
             "AWG_GO_TRIBE_PROBE_ABI": "tribe-awg-probe-v1" if self.options.get_safe("tribe_probe") else "",
         })

@@ -1,4 +1,30 @@
 patches:
+  "3.1.5-tribe.21":
+    # tribe.20's patches byte for byte on upstream amneziawg-apple v3.1.5 (conanfile.py _upstream_pins). v3.1.4..v3.1.5
+    # changes only Sources/WireGuardApp/Config/Version.xcconfig and adds the Go runtime diff
+    # Sources/WireGuardKitGo/goruntime-http2-request-body-scratch-32k.diff; no file a patch touches differs, so every
+    # hunk applies at its recorded line. The AWG core moves to amneziawg-go v3.1.20261116 (conanfile.py build()).
+    # + 0018 (last, test only): 0014's TestTribeAwgPrimeEcho asserted that the core loses the first packet after a
+    # UAPI set of S4 (the TUN reader took the S4 offset before the set) and that one prime echo absorbs it.
+    # v3.1.20261116 (7a9b2d263) moves such a packet to the current S4, so the test now asserts that nothing is lost
+    # with or without the echo. 0014 is released and stays byte for byte.
+    - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
+    - patch_file: "patches/0002-xray-socket-protection-result.patch"
+    - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
+    - patch_file: "patches/0006-tribe-persistent-heal-soft-restart.patch"
+    - patch_file: "patches/0007-tribe-fresh-port-on-return.patch"
+    - patch_file: "patches/0008-tribe-logger-context-loss-gate.patch"
+    - patch_file: "patches/0009-tribe-userspace-direct-split.patch"
+    - patch_file: "patches/0010-tribe-upstream-http.patch"
+    - patch_file: "patches/0011-tribe-outbound-stats.patch"
+    - patch_file: "patches/0012-tribe-data-watch.patch"
+    - patch_file: "patches/0013-tribe-scan-probe.patch"
+    - patch_file: "patches/0014-tribe-scan-awg.patch"
+    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"
+    - patch_file: "patches/0016-tribe-data-watch-adapter.patch"
+    - patch_file: "patches/0017-tribe-data-quiet-export.patch"
+    - patch_file: "patches/0018-tribe-awg-first-packet-kept.patch"
   "3.1.4-tribe.20":
     # tribe.19's patches byte for byte. The change is TribeRoaming.swift (review of tribe.19): the roam's reset of
     # the stall clock and the verdict bounded by a 120 s series; the roam proof restart only for a session not
