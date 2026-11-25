@@ -24,7 +24,10 @@ class AmneziaVPN(ConanFile):
                 self.requires("win-split-tunnel/1.2.5.0")
                 self.requires("wintun/0.14.1")
             else:
-                self.requires("awg-go/3.1.20260828", options={"tribe_probe": os == "Macos"})
+                # amneziawg-go v3.1.20261116: upstream bug fixes only (timer race, runtime parameter changes - also
+                # the first packet after the UAPI set of S4 is no longer lost -, junk validation), no wire change;
+                # the same source pin the iOS package (awg-apple tribe.21) builds.
+                self.requires("awg-go/3.1.20261116", options={"tribe_probe": os == "Macos"})
 
             # AVPN: 1.4.0 sources, Xray core amnezia-xray-core v1.261101.0 (Go 1.27.4).
             self.requires("amnezia-xray-bindings/1.4.0-tribe.1")
