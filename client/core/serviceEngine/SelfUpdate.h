@@ -37,6 +37,10 @@ class SelfUpdate : public QObject
 public:
     explicit SelfUpdate(QObject *parent = nullptr);
     ~SelfUpdate() override;
+    // AVPN (round mac-E3): the relaunch step of the self-update restart on its own (the finisher's "wait for the old
+    // process, then open -n", without a bundle swap): a detached waiter opens appPath again once parentPid has exited
+    // (bounded: 30 s). With AppExitKind::Restart and the quit, it is the same restart the update makes.
+    static bool relaunchAfterExit(qint64 parentPid, const QString &appPath);
 
     // Сборка умеет обновлять себя сама (десктопный macOS). Проверяется на этапе компиляции.
     static bool isSupported();

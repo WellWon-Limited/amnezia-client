@@ -6,8 +6,8 @@
 #      never from a version string;
 #   C2 Connect (guardedStart) and the Scanner's tap pass that fact into macServicePlan; the step after the dialog is
 #      macServiceStepAfterConfirm and the dialog gets the required wording;
-#   C3 a replica that met a mismatched service is acquired again (Interface / InterfaceIfReady, and on both threads
-#      right after a successful install) - it never recovers by itself;
+#   C3 a replica that met a mismatched service never recovers in place: an install that cured an incompatible service
+#      restarts the app (the self-update restart path) and the person's request crosses it as one one-shot record;
 #   C4 the kill switch lease is not sent while incompatible (it can only fail) and is logged once.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -30,19 +30,27 @@ has "$gs" 'avpn::macInstallServiceConfirm(&cerr, plan.required);' || bad "C2: th
 has "$gs" 'avpn::macServiceStepAfterConfirm(plan, accepted);' || bad "C2: the step after the dialog is not the tested decision"
 grep -qF 'IpcClient::interfaceIncompatible()); // round mac-E2' "$ENG" || bad "C2: the Scanner's tap does not pass the fact"
 grep -qF 'Без обновления службы VPN подключиться нельзя' "$MSI" || bad "C2: no honest line for a declined required update"
-# C3
-for f in 'QSharedPointer<IpcInterfaceReplica> IpcClient::Interface()' 'QSharedPointer<IpcInterfaceReplica> IpcClient::InterfaceIfReady()'; do
-  has "$(body "$IPC" "$f")" 'refreshIfMismatched(3000);' || bad "C3: $f does not ask a mismatched replica again"
-done
-has "$(body "$IPC" 'void IpcClient::refreshIfMismatched(qint64 minIntervalMs)')" 'c.m_interface.reset(c.m_node.acquire<IpcInterfaceReplica>());' || bad "C3: refreshIfMismatched does not acquire a new replica"
+# C3 (round mac-E3): no re-acquire in place (it never recovers); an install that cured an incompatible service restarts
+# the app through the self-update restart path, and the person's request crosses it as the one-shot record
+if grep -qF 'refreshIfMismatched' "$IPC" "$ENG" "$ROOT/client/core/utils/ipcClient.h"; then bad "C3: the replica is still re-acquired in place"; fi
+gs2="$(body "$ENG" 'void AvpnEngineQml::guardedStart()')"
+has "$gs2" 'm_svcInstallCuredIncompatible = needInstall && plan.required;' || bad "C3: the start does not remember that the install cures an incompatible service"
 fs="$(body "$ENG" 'void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)')"
-has "$fs" 'IpcClient::refreshIfMismatched(0);' && has "$fs" 'QMetaObject::invokeMethod(m_conn, []() { IpcClient::refreshIfMismatched(0); }, Qt::QueuedConnection);' \
-  || bad "C3: a successful install does not refresh the replicas of both threads"
+has "$fs" 'if (avpn::restartAfterServiceInstall(ok, curedIncompatible)) {' && has "$fs" 'restartForServiceUpdate();' || bad "C3: the cured install does not restart through the tested trigger"
+rs="$(body "$ENG" 'void AvpnEngineQml::restartForServiceUpdate()')"
+for need in 'avpn::writeRestartConnect(st, r);' 'avpn::SelfUpdate::relaunchAfterExit(QCoreApplication::applicationPid(), app);' \
+            'm_appExitKind = avpn::AppExitKind::Restart;' 'tr("Готово, перезапускаем приложение…")'; do
+  has "$rs" "$need" || bad "C3: restartForServiceUpdate lacks: $need"
+done
+tl="$(body "$ENG" 'void AvpnEngineQml::takeRestartConnectAtLaunch()')"
+has "$tl" 'avpn::takeRestartConnect(st);' && has "$tl" 'avpn::restartConnectStep(r, QDateTime::currentMSecsSinceEpoch(),' || bad "C3: the launch does not take and judge the record"
+[ "$(grep -c 'takeRestartConnectAtLaunch(); }); // round mac-E3: once per launch' "$ENG")" = 1 ] || bad "C3: the record is not taken exactly once per launch"
 # C4
 kh="$(body "$ENG" 'void AvpnEngineQml::syncKillSwitchHold()')"
 a=$(printf '%s\n' "$kh" | grep -nF 'if (IpcClient::interfaceIncompatible()) {' | head -1 | cut -d: -f1)
 b=$(printf '%s\n' "$kh" | grep -nF '"syncKillSwitchHold", Qt::QueuedConnection' | head -1 | cut -d: -f1)
 [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] || bad "C4: the lease is sent over an incompatible service"
 has "$kh" 'if (!m_svcIncompatibleLogged) {' || bad "C4: the paused lease is not logged once"
+if printf '%s\n' "$kh" | grep -qF 'IpcClient::refresh'; then bad "C4: the paused lease still re-acquires (not quiet)"; fi
 [ "$fail" = 0 ] && echo "check_mac_service_contract_wiring: ok"
 exit "$fail"

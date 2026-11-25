@@ -2,6 +2,7 @@
 // (DebugSnapshot.h / ReportDelivery.h). Каждый блок — сценарий из ревью реализации; на коде до
 // фикса он либо не собирается (решения не было — фасад делал дефектное действие инлайн), либо
 // падает на утверждении (canAdoptObservedTunnel «manual OFF»).
+#include <QTemporaryDir>
 #include "../DebugSnapshot.h"
 #include "../DoctorReport.h"
 #include "../NodeRanking.h" // nodeFigure (U7)
@@ -1815,6 +1816,42 @@ static void scannerServicePlan()
     CHECK(macServiceStepAfterConfirm(macServicePlan(false, false, true, false, false), false) == MacServiceStep::StayOff);
     // An incompatible service that is not running is not "running and incompatible": the existing install / start rules.
     CHECK(!macServicePlan(true, false, false, false, true).required);
+
+    // Round mac-E3: the trigger - only an install that cured an INCOMPATIBLE service restarts the app.
+    CHECK(restartAfterServiceInstall(/*installOk=*/true, /*wasIncompatible=*/true));
+    CHECK(!restartAfterServiceInstall(true, false));  // a compatible older service replaced: no restart
+    CHECK(!restartAfterServiceInstall(false, true));  // the install failed: nothing to restart for
+    CHECK(!restartAfterServiceInstall(false, false)); // declined: no install ran
+    // ... the one-shot record across the restart (a real QSettings file)
+    {
+        QTemporaryDir dir;
+        QSettings st(dir.filePath(QStringLiteral("rc.ini")), QSettings::IniFormat);
+        const qint64 t = 1764000000000LL;
+        RestartConnectRecord w;
+        w.writtenMs = t;
+        w.kind = QStringLiteral("connect");
+        writeRestartConnect(st, w);
+        const RestartConnectRecord first = takeRestartConnect(st);
+        CHECK(first.valid() && first.kind == QLatin1String("connect"));
+        CHECK(restartConnectStep(first, t + 4000, /*serviceCompatible=*/true) == RestartConnectStep::Honour); // fresh, once
+        CHECK(!takeRestartConnect(st).valid()); // taken: a second launch finds nothing - consumed twice impossible
+        CHECK(restartConnectStep(first, t + kRestartConnectFreshMs + 1, true) == RestartConnectStep::Drop); // stale
+        CHECK(restartConnectStep(first, t - 1, true) == RestartConnectStep::Drop); // the clock went back: not "fresh"
+        CHECK(restartConnectStep(first, t + 4000, /*serviceCompatible=*/false) == RestartConnectStep::Drop); // still incompatible
+        CHECK(restartConnectStep(RestartConnectRecord(), t, true) == RestartConnectStep::Drop); // nothing written
+        RestartConnectRecord row;
+        row.writtenMs = t;
+        row.kind = QStringLiteral("row");
+        row.row = QStringLiteral("up:aaaaaaaaaaaaaaa0");
+        writeRestartConnect(st, row);
+        const RestartConnectRecord taken = takeRestartConnect(st);
+        CHECK(taken.kind == QLatin1String("row") && taken.row == row.row);
+        CHECK(restartConnectStep(taken, t + 1000, true) == RestartConnectStep::Honour);
+        RestartConnectRecord bad = row;
+        bad.row.clear();
+        CHECK(!bad.valid() && restartConnectStep(bad, t + 1000, true) == RestartConnectStep::Drop);
+        CHECK(kRestartConnectFreshMs == 60000);
+    }
 }
 
 // Owner's iPhone 16.11 (build 140), D4: a provider start refused before the core ever started (lease transport

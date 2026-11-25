@@ -1410,6 +1410,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(&m_killSwitchHoldTimer, &QTimer::timeout, this, [this]() { syncKillSwitchHold(); });
     m_killSwitchHoldTimer.start();
     QTimer::singleShot(0, this, [this]() { syncKillSwitchHold(); });
+    QTimer::singleShot(0, this, [this]() { takeRestartConnectAtLaunch(); }); // round mac-E3: once per launch
 #endif
     m_statusRetryTimer.setSingleShot(true);
     connect(&m_statusRetryTimer, &QTimer::timeout, this, [this]() {
@@ -3463,8 +3464,7 @@ void AvpnEngineQml::syncKillSwitchHold()
             qInfo() << "[killswitch] the running service's IPC contract differs from this app's - no lease until it is updated";
             reliabilityEvent(QStringLiteral("svc_incompatible lease_paused"));
         }
-        IpcClient::refreshIfMismatched(10000);
-        return;
+        return; // quiet: the one line above; the restart after the person's update is the recovery (round mac-E3)
     }
     QStringList controlPlane;
     for (const QHostAddress &ip : std::as_const(m_apiHostIps)) {
@@ -7053,6 +7053,8 @@ void AvpnEngineQml::guardedStart()
         }
         if (!(outdatedOnly && m_svcUpgradeDeclined)) {
         m_busy = true;               // орб — спиннер; текст даёт svcInstalling
+        m_svcInstallCuredIncompatible = needInstall && plan.required; // round mac-E3: finishSvcInstall restarts the app
+        m_svcInstallRow = m_exactReq.active() ? m_exactReq.row : QString();
         startSvcWorker(needInstall, [this](bool ok, const QString &ierr) { finishSvcInstall(ok, ierr); });
         return;                       // продолжение старта — из finishSvcInstall (queued)
         }
@@ -7180,16 +7182,81 @@ void AvpnEngineQml::startSvcWorker(bool needInstall, std::function<void(bool, co
 }
 
 // AVPN (beachball-фикс): финиш фоновой установки root-демона. Главный поток (queued из worker).
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+// Round mac-E3: the restart after an install that cured an incompatible service - the self-update restart path
+// (AppExitKind::Restart, the relaunch step of its finisher, the 1.5 s quit, its «перезапускаем…» text). Nothing is
+// connected at this moment (the start waited for the install); the exit latch forbids new starts during it.
+void AvpnEngineQml::restartForServiceUpdate()
+{
+    avpn::RestartConnectRecord r;
+    if (m_wantConnected) { // the person's request, if they still want it
+        r.writtenMs = QDateTime::currentMSecsSinceEpoch();
+        r.kind = m_svcInstallRow.isEmpty() ? QStringLiteral("connect") : QStringLiteral("row");
+        r.row = m_svcInstallRow;
+        QSettings st;
+        avpn::writeRestartConnect(st, r);
+    }
+    m_svcInstallRow.clear();
+    reliabilityEvent(QStringLiteral("svc_install_restart record=%1").arg(r.valid() ? r.kind : QStringLiteral("none")));
+    qInfo() << "[svc] the incompatible service is replaced - the app restarts (a new process meets the new service)";
+    m_selfUpdateStage = tr("Готово, перезапускаем приложение…");
+    emit selfUpdateChanged();
+    emit notice(m_selfUpdateStage);
+    const QString app = QDir(QCoreApplication::applicationDirPath() + QStringLiteral("/../..")).canonicalPath();
+    avpn::SelfUpdate::relaunchAfterExit(QCoreApplication::applicationPid(), app);
+    m_appExitKind = avpn::AppExitKind::Restart;
+    QTimer::singleShot(1500, qApp, &QCoreApplication::quit);
+}
+
+// Round mac-E3: the next launch takes the record (once - it is removed as it is read) and judges it when this process's
+// replica has answered: compatible and fresh -> the person's connect goes on without a second press; anything else ->
+// dropped, the app stays off. Waits for the handshake at most 10 s.
+void AvpnEngineQml::takeRestartConnectAtLaunch()
+{
+    QSettings st;
+    const avpn::RestartConnectRecord r = avpn::takeRestartConnect(st);
+    if (r.writtenMs == 0 && r.kind.isEmpty())
+        return;
+    reliabilityEvent(QStringLiteral("restart_connect taken kind=%1 age_ms=%2")
+                         .arg(r.kind).arg(QDateTime::currentMSecsSinceEpoch() - r.writtenMs));
+    auto *wait = new QTimer(this);
+    wait->setInterval(250);
+    auto polls = std::make_shared<int>(0);
+    connect(wait, &QTimer::timeout, this, [this, wait, polls, r]() {
+        const bool valid = IpcClient::interfaceValid();
+        const bool incompatible = IpcClient::interfaceIncompatible();
+        if (!valid && !incompatible && ++*polls < 40)
+            return; // the handshake has not answered yet
+        wait->stop();
+        wait->deleteLater();
+        const avpn::RestartConnectStep step = avpn::restartConnectStep(r, QDateTime::currentMSecsSinceEpoch(),
+                                                                       valid && !incompatible);
+        reliabilityEvent(QStringLiteral("restart_connect %1 kind=%2 service=%3")
+                             .arg(step == avpn::RestartConnectStep::Honour ? QStringLiteral("honoured") : QStringLiteral("dropped"),
+                                  r.kind, valid ? QStringLiteral("compatible")
+                                                : (incompatible ? QStringLiteral("incompatible") : QStringLiteral("no_answer"))));
+        if (step != avpn::RestartConnectStep::Honour)
+            return;
+        if (r.kind == QLatin1String("row"))
+            connectToNode(r.row, {}, 0, /*machineUserOrigin=*/true, /*machineForce=*/true);
+        else
+            start();
+    });
+    wait->start();
+}
+#endif
+
 void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)
 {
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
-    if (ok) {
-        // Round mac-E2: a replica that met the old (incompatible) service never recovers by itself - both threads'
-        // replicas are acquired again now, so the connect that goes on meets the service just installed.
-        IpcClient::refreshIfMismatched(0);
-        if (m_conn)
-            QMetaObject::invokeMethod(m_conn, []() { IpcClient::refreshIfMismatched(0); }, Qt::QueuedConnection);
-        m_svcIncompatibleLogged = false;
+    // Round mac-E3: the install cured an incompatible service - the app restarts itself (DebugSnapshot.h
+    // restartAfterServiceInstall); the person's connect crosses the restart as the one-shot record.
+    const bool curedIncompatible = std::exchange(m_svcInstallCuredIncompatible, false);
+    if (avpn::restartAfterServiceInstall(ok, curedIncompatible)) {
+        m_svcInstallInFlight = false;
+        m_svcInstalling = false;
+        restartForServiceUpdate();
+        return;
     }
 #endif
     m_svcInstallInFlight = false;

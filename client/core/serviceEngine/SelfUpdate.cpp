@@ -555,3 +555,29 @@ void SelfUpdate::finish(const QString &reason)
 }
 
 } // namespace avpn
+
+// AVPN (round mac-E3): see SelfUpdate.h.
+bool avpn::SelfUpdate::relaunchAfterExit(qint64 parentPid, const QString &appPath)
+{
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (parentPid <= 0 || appPath.isEmpty())
+        return false;
+    static const QString waiter = QStringLiteral(
+        "for i in $(seq 1 300); do kill -0 \"$1\" 2>/dev/null || break; sleep 0.1; done; "
+        "kill -0 \"$1\" 2>/dev/null && exit 1; open -n \"$2\"");
+    QProcess proc;
+    proc.setProgram(QStringLiteral("/bin/bash"));
+    proc.setArguments({ QStringLiteral("-c"), waiter, QStringLiteral("tribe-relaunch"), QString::number(parentPid), appPath });
+    proc.setStandardInputFile(QProcess::nullDevice());
+    proc.setStandardOutputFile(QProcess::nullDevice());
+    proc.setStandardErrorFile(QProcess::nullDevice());
+    qint64 pid = 0;
+    const bool ok = proc.startDetached(&pid);
+    qInfo() << "[selfupdate] relaunch after exit spawned:" << ok << "pid" << pid;
+    return ok;
+#else
+    Q_UNUSED(parentPid)
+    Q_UNUSED(appPath)
+    return false;
+#endif
+}

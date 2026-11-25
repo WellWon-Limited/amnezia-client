@@ -1131,6 +1131,10 @@ private:
     void beginExit();
     bool m_exiting = false;
     bool m_svcIncompatibleLogged = false; // AVPN (round mac-E2): the paused lease is logged once
+    bool m_svcInstallCuredIncompatible = false; // AVPN (round mac-E3): the running install replaces an incompatible service
+    QString m_svcInstallRow;                     // ... started by a Scanner row (its exact request crosses the restart)
+    void restartForServiceUpdate();              // AVPN (round mac-E3)
+    void takeRestartConnectAtLaunch();           // AVPN (round mac-E3)
     QString choiceJournal() const;
     // Pin a server the person tapped. A server the transport mode cannot serve switches the mode to Auto and is
     // selected (coordinator decision 9 of 18.11: the latest explicit action wins; the UI gets a notice).

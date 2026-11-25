@@ -10,6 +10,7 @@
 #include "IScanHost.h" // kScanHostOnThisBuild / scannerSwitchOn - the Scanner exists only with a probe host on this build
 #include <QHash>
 #include <QPair>
+#include <QSettings> // round mac-E3: the one-shot restart-connect record
 #include <QRegularExpression>
 #include <QString>
 #include <QStringList>
@@ -1748,6 +1749,49 @@ inline MacServicePlan macServicePlan(bool installed, bool running, bool outdated
 // What the start does after the confirmation the plan asked for: Install (accepted - the existing install path, the
 // connect goes on by itself after it), ConnectWithOld (a compatible older service declined - wave 3), StayOff (no
 // service, or an incompatible one, declined - the app stays off with one honest line).
+// Round mac-E3: an install that cured an INCOMPATIBLE service ends with the app restarting itself - a new process is the
+// only state in which every replica on every thread is provably new (device E2: a replica that met the old service never
+// recovers in place, not even acquired again on its node). A compatible older service replaced: no restart (its replica
+// reconnects by itself, as after a service kill). A failed or declined install: nothing to restart for.
+inline bool restartAfterServiceInstall(bool installOk, bool wasIncompatible) { return installOk && wasIncompatible; }
+// The person's request crosses that restart as ONE one-shot record: written just before the restart, TAKEN (read and
+// removed in one step) at the next launch, honoured only while fresh (kRestartConnectFreshMs of wall time) and once the
+// service answers compatible. Missing, stale, future-dated, already taken or still incompatible -> dropped silently: the
+// app stays off and only the next Connect asks again - a second restart can only follow a second accepted install.
+constexpr qint64 kRestartConnectFreshMs = 60000;
+struct RestartConnectRecord {
+    qint64 writtenMs = 0; // wall clock
+    QString kind;         // "connect" (Connect with the current choice) | "row" (a Scanner row's exact request)
+    QString row;
+    bool valid() const
+    {
+        return writtenMs > 0 && (kind == QLatin1String("connect") || (kind == QLatin1String("row") && !row.isEmpty()));
+    }
+};
+inline void writeRestartConnect(QSettings &st, const RestartConnectRecord &r)
+{
+    st.setValue(QStringLiteral("AvpnRestartConnect/writtenMs"), r.writtenMs);
+    st.setValue(QStringLiteral("AvpnRestartConnect/kind"), r.kind);
+    st.setValue(QStringLiteral("AvpnRestartConnect/row"), r.row);
+    st.sync();
+}
+inline RestartConnectRecord takeRestartConnect(QSettings &st)
+{
+    RestartConnectRecord r;
+    r.writtenMs = st.value(QStringLiteral("AvpnRestartConnect/writtenMs"), 0).toLongLong();
+    r.kind = st.value(QStringLiteral("AvpnRestartConnect/kind")).toString();
+    r.row = st.value(QStringLiteral("AvpnRestartConnect/row")).toString();
+    st.remove(QStringLiteral("AvpnRestartConnect")); // taken: a second launch finds nothing
+    st.sync();
+    return r;
+}
+enum class RestartConnectStep { Honour, Drop };
+inline RestartConnectStep restartConnectStep(const RestartConnectRecord &r, qint64 nowWallMs, bool serviceCompatible)
+{
+    if (!r.valid() || nowWallMs < r.writtenMs || nowWallMs - r.writtenMs > kRestartConnectFreshMs || !serviceCompatible)
+        return RestartConnectStep::Drop;
+    return RestartConnectStep::Honour;
+}
 enum class MacServiceStep { Install, ConnectWithOld, StayOff };
 inline MacServiceStep macServiceStepAfterConfirm(const MacServicePlan &p, bool accepted)
 {
