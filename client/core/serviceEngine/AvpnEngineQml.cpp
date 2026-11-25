@@ -6207,6 +6207,9 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // Ревью CL-A r2 (K3): после liveSessionFound фасад снял свой Op::Starting и ждёт реальный статус.
     // Disconnected/Error до Connected — это сорвавшийся Connect пользователя (намерение сохраняем,
     // попытка считается, reconcile повторит старт), а не внешний обрыв с тихим снятием намерения.
+    // Round mac-D3: the tunnel starts again - the drop a component loss explained is over (DebugSnapshot.h).
+    if (s == Vpn::Preparing || s == Vpn::Connecting || s == Vpn::Connected)
+        componentLossExplains(m_componentLost, m_componentLostMs, 0, false, /*tunnelStarts=*/true);
     const bool liveSessionLost = m_liveSessionPending && (s == Vpn::Disconnected || s == Vpn::Error);
     if (s == Vpn::Connected || s == Vpn::Disconnected || s == Vpn::Error) {
         m_liveSessionPending = false;
@@ -6222,9 +6225,11 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
         const bool interrupted = m_engine.attemptRunning(); // the attempt owner walks on: our own operation
         // Волна-3 (2026-09-28): класс обрыва вместо «внешний / не внешний». Намерение снимает ТОЛЬКО
         // External (§13); «нет сети» → ждём аплинк; «упал компонент» (демон) → повтор через reconcile.
-        const bool componentLost = componentLossFresh(m_componentLost, m_componentLostMs,
-                                                      QDateTime::currentMSecsSinceEpoch()); // волна-4: ≤ 30 с
-        m_componentLost = false;
+        // Round mac-D3: the mark explains the whole drop (an Xray service loss: Disconnected, then Error); a start
+        // consumes it (below).
+        const bool componentLost = componentLossExplains(m_componentLost, m_componentLostMs,
+                                                         QDateTime::currentMSecsSinceEpoch(), // волна-4: ≤ 30 с
+                                                         /*terminalState=*/true, /*tunnelStarts=*/false);
         const LossClass loss = classifyLoss(weAreOperating, engineStillSwitching ? est : engineStateBefore,
                                             interrupted, componentLost, uplinkUp());
         if (loss == LossClass::External) {

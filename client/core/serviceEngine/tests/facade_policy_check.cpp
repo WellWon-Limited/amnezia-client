@@ -691,6 +691,20 @@ static void wave4UpstreamBehaviour()
     CHECK(componentLossFresh(true, now - 1000, now));
     CHECK(!componentLossFresh(true, now - 60000, now));
     CHECK(!componentLossFresh(false, now - 1000, now));
+    // Round mac-D3: an Xray session that lost its service reports Disconnected, then Error - one drop, both explained;
+    // the next start ends the drop.
+    bool mark = true;
+    CHECK(componentLossExplains(mark, now - 100, now, /*terminal=*/true, /*starts=*/false)); // Disconnected
+    CHECK(componentLossExplains(mark, now - 100, now + 8, true, false));                     // Error 603, 8 ms later
+    CHECK(mark);
+    CHECK(!componentLossExplains(mark, now - 100, now + 500, false, /*starts=*/true) && !mark); // the reconnect starts
+    CHECK(!componentLossExplains(mark, now - 100, now + 5000, true, false)); // a later drop is not this loss
+    mark = true; // AmneziaWG: the daemon loss ends with one Disconnected, the reconnect consumes the mark
+    CHECK(componentLossExplains(mark, now - 100, now, true, false));
+    CHECK(!componentLossExplains(mark, now - 100, now + 900, false, true) && !mark);
+    mark = true; // no start after the drop (intent off elsewhere): the mark expires with its bound
+    CHECK(componentLossExplains(mark, now - 100, now, true, false));
+    CHECK(!componentLossExplains(mark, now - 100, now + 60000, true, false));
 }
 
 static void a12Outbox()

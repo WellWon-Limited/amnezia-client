@@ -187,6 +187,9 @@ grep -qF 'xray->setServiceLostHandler([this]() { emit daemonLost(); });' "$VCN" 
 rs="$(body "$XPC" 'void XrayProtocol::onTun2SocksReplicaState(')"
 l1=$(at "$rs" 'm_serviceLost();'); l2=$(at "$rs" 'failSession(ErrorCode::AmneziaServiceConnectionFailed);')
 [ "${l1:-0}" -gt 0 ] && [ "${l2:-0}" -gt "${l1:-0}" ] || bad "Q10: the service loss is not told before the session's Error state"
+grep -qF 'const bool componentLost = componentLossExplains(m_componentLost, m_componentLostMs,' "$ROOT/client/core/serviceEngine/AvpnEngineQml.cpp" \
+  && grep -qF 'componentLossExplains(m_componentLost, m_componentLostMs, 0, false, /*tunnelStarts=*/true);' "$ROOT/client/core/serviceEngine/AvpnEngineQml.cpp" \
+  || bad "Q10: the facade does not judge both terminal states of one component loss by its mark"
 
 [ "$fail" = "0" ] && echo "check_xray_quit_wiring: ok"
 exit "$fail"

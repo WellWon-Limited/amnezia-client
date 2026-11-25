@@ -1100,6 +1100,19 @@ inline bool componentLossFresh(bool flagged, qint64 lostMs, qint64 nowMs)
 {
     return flagged && lostMs > 0 && nowMs - lostMs < kComponentLossTtlMs;
 }
+// Round mac-D3: one loss of a component can end the session in two terminal states - an Xray session whose service is
+// gone reports Disconnected and then Error 603, 8 ms apart (device: the first was classified Component, the second
+// External, which dropped the intent). The mark explains the whole drop: every terminal state is judged by it within
+// its bound, and the tunnel moving again (a start: Preparing / Connecting / Connected) ends the drop and consumes it.
+// terminalState: Disconnected or Error. An AmneziaWG daemon loss (one Disconnected) is judged as before.
+inline bool componentLossExplains(bool &flagged, qint64 lostMs, qint64 nowMs, bool terminalState, bool tunnelStarts)
+{
+    if (tunnelStarts) {
+        flagged = false;
+        return false;
+    }
+    return terminalState && componentLossFresh(flagged, lostMs, nowMs);
+}
 
 inline void mergeRttSample(QHash<QString, int> &cache, const QString &nodeId, int rttMs)
 {
