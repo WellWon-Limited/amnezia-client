@@ -3,10 +3,14 @@
 # cache - the recipe revision whose exported files (conanmanifest.txt) equal the tree's recipe files, the shared
 # vectors and the libxray patches the recipe exports; with no such revision, the newest one that has a binary.
 # Revision timestamps alone are not enough: re-exporting an older recipe makes it the newest again.
+# The default ref is the version the tree's root conanfile.py requires (awg-apple tribe.21): a cache without a binary
+# of that version gives exit 1, never a package of another version (before, the default was tribe.14, so the
+# automatic pick silently fell back to that old engine).
 # Usage: find_awg_apple_package.py <repo root> <os: iOS|Macos> [<ref>]  -> prints the package folder (exit 1: none)
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -47,9 +51,21 @@ def matches(root, export_folder):
     return True
 
 
+def pinned_ref(root):
+    with open(os.path.join(root, "conanfile.py"), encoding="utf-8") as f:
+        refs = set(re.findall(r'self\.requires\("(awg-apple/[^"@#]+)"', f.read()))
+    if len(refs) != 1:
+        print(f"find_awg_apple_package: the root conanfile.py must require exactly one awg-apple, found {sorted(refs)}",
+              file=sys.stderr)
+        return None
+    return refs.pop()
+
+
 def main():
     root, want_os = sys.argv[1], sys.argv[2]
-    ref = sys.argv[3] if len(sys.argv) > 3 else "awg-apple/3.1.4-tribe.14"
+    ref = sys.argv[3] if len(sys.argv) > 3 else pinned_ref(root)
+    if ref is None:
+        return 1
     try:
         listing = json.loads(conan("list", f"{ref}#*:*", "--format=json") or "{}").get("Local Cache", {})
     except json.JSONDecodeError:

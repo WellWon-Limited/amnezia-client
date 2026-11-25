@@ -384,6 +384,52 @@ inline bool upstreamFlagFlippedOn(bool wasOn, bool isOn)
     return isOn && !wasOn;
 }
 
+// --- the wire form of a provider stub (device round air-D 25.11, S2) -------------------------------------------------
+// A provider session started from a Scanner row was force-quit and relaunched: the adoption named no node ("adopt_connected
+// verdict=1 node="), because a Scanner row's profile is not a delivered stub - it lives only in memory (ServiceEngine::offerScanNodes);
+// the data check then took the own-server route (whoami calls every exit that is not ours "bypass") and replaced the working
+// tunnel. The record keeps the stub of the node the session was started with, in the /v1/subscription node form, so a relaunched
+// app gives it back to the engine (the subscription's own parser checks it again) before the engine adopts by node id. A stub
+// carries no address and no key (decision A); the display parts (label, country, ordinal, kind) name the session on the card.
+inline QJsonObject upstreamStubWireJson(const SubscriptionNode &n)
+{
+    if (!n.upstream.has_value())
+        return QJsonObject();
+    const UpstreamStub &s = *n.upstream;
+    QJsonObject up{{QStringLiteral("profile_id"), s.profileId},
+                   {QStringLiteral("config_sha256"), s.configSha256},
+                   {QStringLiteral("probe_class"), s.probeClass == UpstreamProbeClass::Single ? QStringLiteral("single")
+                                                                                              : QStringLiteral("composite")},
+                   {QStringLiteral("protocols"), QJsonArray::fromStringList(s.protocols)},
+                   {QStringLiteral("required_geo"), QJsonArray::fromStringList(s.requiredGeo)},
+                   {QStringLiteral("size_bytes"), s.sizeBytes},
+                   {QStringLiteral("tier"), s.tier},
+                   {QStringLiteral("priority"), s.priority}};
+    if (s.ordinal > 0)
+        up.insert(QStringLiteral("ordinal"), s.ordinal);
+    if (s.labelCustom)
+        up.insert(QStringLiteral("label_custom"), true);
+    switch (s.kind) {
+    case UpstreamKind::Country: up.insert(QStringLiteral("kind"), QStringLiteral("country")); break;
+    case UpstreamKind::Whitelist: up.insert(QStringLiteral("kind"), QStringLiteral("whitelist")); break;
+    case UpstreamKind::Auto: up.insert(QStringLiteral("kind"), QStringLiteral("auto")); break;
+    case UpstreamKind::Unspecified: break;
+    }
+    QJsonObject o{{QStringLiteral("node_id"), n.nodeId},
+                  {QStringLiteral("region"), n.region},
+                  {QStringLiteral("label"), n.name},
+                  {QStringLiteral("endpoint"), QString()},
+                  {QStringLiteral("proto"), QStringLiteral("xray")},
+                  {QStringLiteral("weight"), n.weight},
+                  {QStringLiteral("manual_only"), n.manualOnly},
+                  {QStringLiteral("allowed_ips"), QJsonArray::fromStringList(n.allowedIps)},
+                  {QStringLiteral("dns"), QJsonArray::fromStringList(n.dns)},
+                  {QStringLiteral("upstream"), up}};
+    if (!n.countryCode.isEmpty())
+        o.insert(QStringLiteral("country_code"), n.countryCode);
+    return o;
+}
+
 // --- persisted lease record (macOS GUI owner; adoption after a GUI restart) ----------------------------
 
 // What the GUI keeps so that a restarted GUI that finds the daemon's Xray tunnel alive can re-identify the
@@ -410,6 +456,9 @@ struct UpstreamLeaseRecord {
     // The seat itself is released by leaseId. -1 = not known (an older record).
     qint64 tunnelOrder = -1;
     qint64 sessionOrder = -1;
+    // The stub the session was started with (upstreamStubWireJson; empty = not known, an older record): names the adopted session
+    // when its node is not in the pool after a relaunch (a Scanner row, a standby-pack candidate). No secret in it.
+    QJsonObject stub;
 
     bool valid() const
     {
@@ -433,7 +482,8 @@ struct UpstreamLeaseRecord {
                                          {QStringLiteral("meter_scope"), meterScopeName(scope)},
                                          {QStringLiteral("meter_tags"), QJsonArray::fromStringList(meterTags)},
                                          {QStringLiteral("session_order"), double(sessionOrder)},
-                                         {QStringLiteral("tunnel_order"), double(tunnelOrder)}})
+                                         {QStringLiteral("tunnel_order"), double(tunnelOrder)},
+                                         {QStringLiteral("stub"), stub}})
             .toJson(QJsonDocument::Compact);
     }
     static UpstreamLeaseRecord fromJson(const QByteArray &json)
@@ -457,6 +507,9 @@ struct UpstreamLeaseRecord {
         r.sessionOrder = qint64(o.value(QLatin1String("session_order")).toDouble(-1));
         // A record without tunnel_order (written by 1ac577c96): its one order was the tunnel's, except after the rare retry above.
         r.tunnelOrder = qint64(o.value(QLatin1String("tunnel_order")).toDouble(double(r.sessionOrder)));
+        r.stub = o.value(QLatin1String("stub")).toObject();
+        if (r.stub.value(QLatin1String("node_id")).toString() != r.nodeId)
+            r.stub = QJsonObject(); // a stub of another node never names this session
         return r;
     }
 };

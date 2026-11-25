@@ -591,6 +591,29 @@ inline bool stopNeedsGuardedStop(bool stoppable, bool stopInFlight, bool opInFli
     return stoppable || (opInFlight && stopFindsNothingNative(observed, ownerHoldsNativeLeg));
 }
 
+// One native stop at a time (device round air-D 25.11, iPhone Air, N4 pair 2, journal 00:11:10-00:11:16). Scanner row A
+// was tapped and its provider leg waited for its seat; row B was tapped 0.7 s later (the newest pick wins). A's seat
+// request failed and the attempt owner stopped A's leg itself (its StopPath down()); the facade's restart for B then sent
+// a SECOND native stop on top of it. Nothing native ran, so each stop got its own Disconnected (iOS answers a stop of a
+// session that is already down at once; the desktop and Android answer a stop with no protocol at once too). The
+// facade's one mark of its stop (Op::Stopping, the latch) was taken by the answer to the OWNER's stop; the answer to the
+// facade's own stop then came with no stop of ours pending and read as the external loss of §13: "intent_off
+// why=external_loss", B never started, the VPN stayed off. Upstream Amnezia has one actor and one stop per teardown. So
+// a stop the facade asks for while the owner's own native stop of a leg is in flight JOINS that stop: the facade marks
+// it its own (Op::Stopping, the latch, its watchdog, the owner's StoppedByUser) and sends nothing more; that stop's one
+// answer confirms both. Every Disconnected that answers a stop of ours then finds that stop pending, in any phase of an
+// attempt, "nothing was started yet" included; only a Disconnected with no stop of ours pending is external.
+//  ConfirmedAtOnce - nothing native to stop (B1, stopFindsNothingNative): confirmed at once, no native stop;
+//  JoinOwnerStop   - the owner's own native stop of a leg is in flight (ServiceEngine::ownerStopInFlight);
+//  IssueStop       - the facade sends the native stop (m_tunnel.down()).
+enum class FacadeStop { ConfirmedAtOnce, JoinOwnerStop, IssueStop };
+inline FacadeStop facadeStopAction(ObservedTunnel observed, bool ownerHoldsNativeLeg, bool ownerStopInFlight)
+{
+    if (stopFindsNothingNative(observed, ownerHoldsNativeLeg))
+        return FacadeStop::ConfirmedAtOnce;
+    return ownerStopInFlight ? FacadeStop::JoinOwnerStop : FacadeStop::IssueStop;
+}
+
 // Device round 19.11 (airplane mode for 20 s while connected): the live check failed, the failover walked 12 servers
 // in 0.7 s with no network under it, the attempt ended "nothing proven", the intent was dropped and the VPN stayed
 // off after the network came back. What a failed attempt does to the person's intent:
@@ -874,14 +897,32 @@ inline bool reissueAfterOwnAbort(bool canceled, bool timedOut)
 // 06.11.2026) - so no build ever showed ONLINE. Now the live in-tunnel probe (QualityProbe:
 // /v1/ping, then generate_204, every tick while connected) proves it as well; whoami only
 // accelerates (works) or forbids (no_data / bypass). A confirmed dead live probe (liveDead) always
-// forbids. liveProven = at least one live probe succeeded in this Connected session.
-inline bool dataFlowingNow(bool tunnelConnected, bool liveDead, const QString &pathCheck, bool liveProven)
+// forbids. liveProof = what the live probe knows about data in this Connected session:
+//  None   - nothing measured yet (a new session): the connect's check "works" may show ONLINE first;
+//  Proven - a live probe passed;
+//  Voided - review R50 2: the device's physical network went or came back since (AvpnEngineQml::noteUplinkFact, the
+//           transport staying Connected). Every earlier claim - a live pass, the connect's "works", a dead verdict -
+//           was about the network before, so ONLINE waits for a live probe that passes again. The page shows what it
+//           shows after a new connect before its first probe (the caption without amber, no ONLINE). The connect's
+//           verdict itself (pathCheck) and the path memory are not touched.
+enum class LiveProof { None, Proven, Voided };
+inline LiveProof liveProofAfterProbe(LiveProof was, bool reachable)
+{
+    return reachable ? LiveProof::Proven : was; // a failure speaks through the dead streak, not here
+}
+inline LiveProof liveProofAfterUplinkMove(LiveProof)
+{
+    return LiveProof::Voided;
+}
+inline bool dataFlowingNow(bool tunnelConnected, bool liveDead, const QString &pathCheck, LiveProof liveProof)
 {
     if (!tunnelConnected || liveDead)
         return false;
     if (pathCheck == QLatin1String("no_data") || pathCheck == QLatin1String("bypass"))
         return false;
-    return pathCheck == QLatin1String("works") || liveProven;
+    if (liveProof == LiveProof::Voided)
+        return false;
+    return pathCheck == QLatin1String("works") || liveProof == LiveProof::Proven;
 }
 
 // Decision 2026-11-05: an edge can pass small answers and still never deliver /v1/subscription (the
@@ -1293,6 +1334,10 @@ struct ScanRowStep {
     bool ended = false;
     bool superseded = false; // another action took the tunnel: the request is over without a failure (told once)
     QString supersededNode;
+    // the engine turned the intent off by itself (no action of the person: the same intent serial) before the row's own
+    // attempt began - the request is over without a verdict for the row (device round air-D, E2)
+    bool dropped = false;
+    QString droppedNode;
 };
 inline void scanRowAttemptBegin(ScanRowAttempt &a, const QString &nodeId, quint64 intentSerial, quint64 intentEpoch)
 {
@@ -1303,23 +1348,33 @@ inline void scanRowAttemptBegin(ScanRowAttempt &a, const QString &nodeId, quint6
     a.intentSerial = intentSerial;
     a.intentEpoch = intentEpoch;
 }
-// engineNode = the node the engine raises or carries now ("" = none); intentOff = the person's intent is off (the
-// chain cannot go on); attemptOver = the engine sits in its terminal Error with no attempt running; attemptEpoch = the
-// intent epoch the engine's newest attempt began under (ServiceEngine::lastAttemptIntentEpoch, 0 = none yet). An
-// attempt that ended is this chain's only when it began under the chain's epoch or later: the Error an older attempt
-// left (the row failed just before, a connect still running at the tap) ends no newer row and reports no outcome
-// for it - that attempt's own result already went to its own row.
+// engineNode = the node the engine raises or carries now ("" = none); intentOff = the intent is off (the chain cannot go
+// on); attemptOver = the engine sits in its terminal Error with no attempt running; attemptEpoch = the intent epoch the
+// engine's newest attempt began under (ServiceEngine::lastAttemptIntentEpoch, 0 = none yet).
+// A row's verdict comes only from ITS OWN attempt - one begun under the row's epoch or later. The Error an older attempt
+// left (the row failed just before, a connect still running at the tap) ends no newer row and reports no outcome for
+// it. An intent off with no action of the person (the same serial: the engine's own drop - device round air-D, E2,
+// "intent_off why=external_loss" while the older row's attempt was torn down for this tap) before the row's own attempt
+// began is no verdict either: the request is dropped (st.dropped), the row reads as before. A person's action always
+// moves the serial (superseded).
 inline ScanRowStep scanRowAttemptObserve(ScanRowAttempt &a, quint64 intentSerial, const QString &engineNode,
                                          bool dataFlowing, bool intentOff, bool attemptOver, quint64 attemptEpoch)
 {
     ScanRowStep st;
     if (!a.active)
         return st;
-    const bool gaveUp = intentOff || (attemptOver && attemptEpoch >= a.intentEpoch);
+    const bool ownAttempt = attemptEpoch >= a.intentEpoch;
+    const bool gaveUp = ownAttempt && (intentOff || attemptOver);
     if (intentSerial != a.intentSerial) { // another action took the tunnel: not this chain any more
         a.active = false;
         st.superseded = true;
         st.supersededNode = a.tapped;
+        return st;
+    }
+    if (intentOff && !ownAttempt) {
+        a.active = false;
+        st.dropped = true;
+        st.droppedNode = a.tapped;
         return st;
     }
     auto fail = [&a, &st](const QString &n) {

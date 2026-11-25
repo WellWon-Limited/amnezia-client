@@ -385,8 +385,25 @@ order "$cfg_start" '#ifdef Q_OS_IOS' 'freezeCachedFeatures(c.features, /\*ios=\*
 # tribe.16 (one definition of "data is flowing", device round 24.11 B1) = tribe.15's + 0017 last.
 # tribe.17 (its review: TribeRoaming.swift only) = tribe.16's patches unchanged.
 # tribe.18 (the second review: TribeRoaming.swift only) = tribe.17's patches unchanged.
-grep -q 'self.requires("awg-apple/3.1.4-tribe.18")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.18"
-grep -q '^    version = "3.1.4-tribe.18"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.18"
+# tribe.19 (device round air-D: TribeRoaming.swift only) = tribe.18's patches unchanged.
+# tribe.20 (review of tribe.19: TribeRoaming.swift only) = tribe.19's patches unchanged.
+# tribe.21 (upstream bump: amneziawg-apple v3.1.5, amneziawg-go v3.1.20261116) = tribe.20's patches unchanged + 0018
+# last (test only: the awg_mini prime-echo test for a core that no longer loses the first packet).
+grep -q 'self.requires("awg-apple/3.1.5-tribe.21")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.21"
+grep -q '^    version = "3.1.5-tribe.21"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.21"
+list21="$(awk '/^  "3.1.5-tribe.21":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+[ -n "$list21" ] && [ "$list21" = "$(awk '/^  "3.1.4-tribe.20":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')
+patches/0018-tribe-awg-first-packet-kept.patch" ] \
+    || bad "E7: tribe.21 must carry the package patches of tribe.20 unchanged, in the same order, and 0018 last"
+[ "$(grep -c '^diff --git ' "$RECIPE/patches/0018-tribe-awg-first-packet-kept.patch")" = "1" ] \
+    && grep -q '^diff --git a/Sources/WireGuardKitGo/tribeawg/session_test.go ' "$RECIPE/patches/0018-tribe-awg-first-packet-kept.patch" \
+    || bad "E7: patch 0018 must change the awg_mini test and nothing else"
+list20="$(awk '/^  "3.1.4-tribe.20":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+[ -n "$list20" ] && [ "$list20" = "$(awk '/^  "3.1.4-tribe.19":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')" ] \
+    || bad "E7: tribe.20 must carry the package patches of tribe.19 unchanged, in the same order"
+list19="$(awk '/^  "3.1.4-tribe.19":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+[ -n "$list19" ] && [ "$list19" = "$(awk '/^  "3.1.4-tribe.18":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')" ] \
+    || bad "E7: tribe.19 must carry the package patches of tribe.18 unchanged, in the same order"
 list18="$(awk '/^  "3.1.4-tribe.18":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
 [ -n "$list18" ] && [ "$list18" = "$(awk '/^  "3.1.4-tribe.17":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')" ] \
     || bad "E7: tribe.18 must carry the package patches of tribe.17 unchanged, in the same order"

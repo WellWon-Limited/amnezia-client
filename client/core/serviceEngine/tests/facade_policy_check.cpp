@@ -497,15 +497,15 @@ static void wave4UpstreamBehaviour()
     CHECK(!reissueAfterOwnAbort(false, false)); // answered / failed by the network -> no
     // 5.1.108: ONLINE without node_scan - the live in-tunnel probe proves data; whoami only
     // accelerates (works) or forbids (no_data / bypass); a confirmed dead probe always forbids.
-    CHECK(!dataFlowingNow(true, false, QString(), false));                      // nothing proven yet
-    CHECK(dataFlowingNow(true, false, QString(), true));                        // flag off, live probe ok
-    CHECK(dataFlowingNow(true, false, QStringLiteral("works"), false));         // whoami first
-    CHECK(dataFlowingNow(true, false, QStringLiteral("limited"), true));        // limited + live probe
-    CHECK(!dataFlowingNow(true, false, QStringLiteral("limited"), false));
-    CHECK(!dataFlowingNow(true, false, QStringLiteral("no_data"), true));       // whoami forbids
-    CHECK(!dataFlowingNow(true, false, QStringLiteral("bypass"), true));
-    CHECK(!dataFlowingNow(true, true, QStringLiteral("works"), true));          // dead live probe
-    CHECK(!dataFlowingNow(false, false, QStringLiteral("works"), true));        // tunnel not up
+    CHECK(!dataFlowingNow(true, false, QString(), LiveProof::None));                      // nothing proven yet
+    CHECK(dataFlowingNow(true, false, QString(), LiveProof::Proven));                     // flag off, live probe ok
+    CHECK(dataFlowingNow(true, false, QStringLiteral("works"), LiveProof::None));         // whoami first
+    CHECK(dataFlowingNow(true, false, QStringLiteral("limited"), LiveProof::Proven));     // limited + live probe
+    CHECK(!dataFlowingNow(true, false, QStringLiteral("limited"), LiveProof::None));
+    CHECK(!dataFlowingNow(true, false, QStringLiteral("no_data"), LiveProof::Proven));    // whoami forbids
+    CHECK(!dataFlowingNow(true, false, QStringLiteral("bypass"), LiveProof::Proven));
+    CHECK(!dataFlowingNow(true, true, QStringLiteral("works"), LiveProof::Proven));       // dead live probe
+    CHECK(!dataFlowingNow(false, false, QStringLiteral("works"), LiveProof::Proven));     // tunnel not up
     // 5.1.108: the iOS uplink fallback answers "physical path known" strictly (§25 stop input).
     CHECK(fallbackPhysicalUp(UplinkReach::Online, UplinkMedium::WiFi));
     CHECK(fallbackPhysicalUp(UplinkReach::Site, UplinkMedium::Cellular));
@@ -1188,6 +1188,18 @@ static void stopNothingNative()
     CHECK(!avpn::stopNeedsGuardedStop(false, false, true, ObservedTunnel::Unknown, false));      // maybe up: not ours
     CHECK(avpn::stopNeedsGuardedStop(true, false, true, ObservedTunnel::Connected, true));       // native work: as before
     CHECK(!avpn::stopNeedsGuardedStop(true, true, true, ObservedTunnel::Connected, true));       // a stop already runs
+    // Device round air-D 25.11 (N4 pair 2): one native stop at a time - the facade's stop joins the owner's own stop of a
+    // leg in flight (its answer confirms both); nothing native - confirmed at once; otherwise the facade's own stop.
+    using avpn::FacadeStop;
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Disconnected, false, false) == FacadeStop::ConfirmedAtOnce);
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Transitional, true, true) == FacadeStop::JoinOwnerStop); // the replay
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Error, true, true) == FacadeStop::JoinOwnerStop);
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Disconnected, true, true) == FacadeStop::JoinOwnerStop); // answer not seen
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Connected, true, true) == FacadeStop::JoinOwnerStop);
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Connected, true, false) == FacadeStop::IssueStop);  // restart of a session
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Transitional, true, false) == FacadeStop::IssueStop);
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Unknown, false, false) == FacadeStop::IssueStop);   // maybe up: stop it
+    CHECK(avpn::facadeStopAction(ObservedTunnel::Connected, false, false) == FacadeStop::IssueStop); // an adopted session
     // Device round 19.11: airplane mode while connected - the failover fails with no network under it.
     using avpn::FailedAttemptIntent;
     CHECK(avpn::failedAttemptIntent(true, false, true) == FailedAttemptIntent::Wait);   // the airplane case
@@ -1531,9 +1543,28 @@ static void scannerRowOutcomeBelongsToItsAttempt()
         st = scanRowAttemptObserve(row, 2, B, false, false, false, 21);
         st = scanRowAttemptObserve(row, 2, QString(), false, false, /*attemptOver=*/true, /*attemptEpoch=*/22);
         CHECK(st.ended && st.failed == QStringList{B});
+        // an intent off after the row's own attempt began is the row's outcome
         scanRowAttemptBegin(row, B, 3, 23);
-        st = scanRowAttemptObserve(row, 3, QString(), false, /*intentOff=*/true, false, 17);
-        CHECK(st.ended && st.failed == QStringList{B}); // the person's intent off is this chain's, whatever ran before
+        st = scanRowAttemptObserve(row, 3, B, false, false, false, 23);
+        st = scanRowAttemptObserve(row, 3, QString(), false, /*intentOff=*/true, false, 23);
+        CHECK(st.ended && st.failed == QStringList{B});
+    }
+    // (4) Device round air-D, E2 (journal 00:11:10-00:11:16): A = up:3ab948.. tapped (intent epoch 28, attempt 18 starts),
+    // B = up:7a2869.. tapped 0.7 s later (epoch 30, "exact_row_request_dropped row=A"); A's seat request hangs,
+    // "upstream_start_failed node=A code=transport", attempt 18 "superseded", then "intent_off why=external_loss" - and
+    // B was marked "scan_row_failed" with no attempt_start of its own. B's own attempt never began (the newest attempt is
+    // A's, epoch 28 < 30): the request is dropped, no verdict for B.
+    {
+        ScanRowAttempt row;
+        scanRowAttemptBegin(row, B, /*serial=*/7, /*epoch=*/30);
+        ScanRowStep st = scanRowAttemptObserve(row, 7, A, false, false, false, /*attemptEpoch=*/28); // A still raised
+        CHECK(st.failed.isEmpty() && !st.ended && !st.dropped);
+        st = scanRowAttemptObserve(row, 7, QString(), false, /*intentOff=*/true, /*attemptOver=*/false, /*attemptEpoch=*/28);
+        CHECK(st.failed.isEmpty() && !st.ended && st.dropped && st.droppedNode == B && !row.active);
+        // a person's action (the serial moves) is still "superseded", never "dropped"
+        scanRowAttemptBegin(row, B, 8, 31);
+        st = scanRowAttemptObserve(row, 9, QString(), false, true, false, 28);
+        CHECK(st.superseded && !st.dropped && st.failed.isEmpty());
     }
 }
 
@@ -1856,8 +1887,43 @@ static void nodeFigureOneRule()
     CHECK(f.ms == -1 && f.bars == -1 && !f.failed);
 }
 
+// Review R50 2: the tunnel worked, then stopped passing data (amber «трафик не проходит»); the person toggles the network
+// and the transport stays Connected. A move of the uplink fact (AvpnEngineQml::noteUplinkFact) sets the live claim back to
+// "not known yet": neither the stale failure (liveDead) nor the stale proof (a live pass, the connect's "works") shows
+// ONLINE - only a live probe that passes again does. The live fields as the facade keeps them.
+static void r50UplinkMoveVoidsTheLiveClaim()
+{
+    for (const QString &connectVerdict : {QString(), QStringLiteral("works")}) { // own AWG node / provider session
+        bool dead = false;
+        LiveProof proof = LiveProof::None;
+        const auto online = [&] { return dataFlowingNow(true, dead, connectVerdict, proof); };
+        CHECK(online() == (connectVerdict == QLatin1String("works"))); // a new session: the connect's "works" may go first
+        proof = liveProofAfterProbe(proof, true);                       // a live probe passes
+        CHECK(proof == LiveProof::Proven && online());
+        proof = liveProofAfterProbe(proof, false);                      // ...then the data stops: the dead streak
+        dead = true;
+        CHECK(proof == LiveProof::Proven && !online());                 // «Подключено, трафик не проходит»
+        // the network goes and comes back, the tunnel stays Connected: both moves void the live claim
+        for (int move = 0; move < 2; ++move) {
+            dead = false;
+            proof = liveProofAfterUplinkMove(proof);
+            CHECK(proof == LiveProof::Voided);
+            CHECK(!online()); // was ONLINE + «Защита активна» here while no data passed
+        }
+        proof = liveProofAfterProbe(proof, false); // the first probe after the return fails: still not known
+        CHECK(proof == LiveProof::Voided && !online());
+        proof = liveProofAfterProbe(proof, true);  // a fresh pass: ONLINE again
+        CHECK(proof == LiveProof::Proven && online());
+        // a move before anything was measured voids the connect's "works" as well
+        CHECK(!dataFlowingNow(true, false, connectVerdict, liveProofAfterUplinkMove(LiveProof::None)));
+        // the connect's own verdicts still forbid after a fresh pass
+        CHECK(!dataFlowingNow(true, false, QStringLiteral("no_data"), liveProofAfterProbe(LiveProof::Voided, true)));
+    }
+}
+
 int main()
 {
+    r50UplinkMoveVoidsTheLiveClaim();
     r20PhysicalLossDuringConnect();
     p5bOfflineObservation();
     p7CardNeverNamesThePinForALiveSession();

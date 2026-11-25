@@ -1,7 +1,8 @@
 #!/bin/bash
 # AVPN (Scanner, lane L4): ScanEngineReplayTests.swift - the extension's relay (TribeScanHost.swift) linked with the
-# REAL probe engine: awg-apple 3.1.4-tribe.14's libwg-go.a for macOS from the local conan cache (the recipe revision
-# of this tree, find_awg_apple_package.py; it must export LibXrayTribeScanMessage). No packet leaves this Mac (see
+# REAL probe engine: the libwg-go.a for macOS of the awg-apple version the root conanfile.py requires (tribe.21) from
+# the local conan cache (the recipe revision of this tree, find_awg_apple_package.py; it must export
+# LibXrayTribeScanMessage). No packet leaves this Mac (see
 # the test). AWG_APPLE_MAC_PACKAGE_DIR=<package folder> overrides the lookup; no package = SKIPPED (exit 0).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

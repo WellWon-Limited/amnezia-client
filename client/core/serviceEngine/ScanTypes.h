@@ -690,6 +690,24 @@ inline bool scanPoolFromJson(const QJsonObject &o, ScanPoolView &out)
     return true;
 }
 
+inline constexpr char kScanPoolStoreKey[] = "avpn/scanPool"; // the last GET /v1/scan/pool answer (scanPoolToJson + owner)
+
+// The pool answer as the server sends it (scanPoolFromJson reads it back): what TribeScanner keeps across launches. The
+// pool belongs to the device (its entitlement), not to a network: the last answer stays true until the next one, also
+// when a fetch fails (device round air-D, E1: a launch whose fetch failed through the tunnel showed «8 серверов» - the
+// manifest's first screen - instead of the pool's 228).
+inline QJsonObject scanPoolToJson(const ScanPoolView &p)
+{
+    QJsonArray countries;
+    for (const ScanPoolView::Country &c : p.countries)
+        countries << QJsonObject{{QStringLiteral("country_code"), c.countryCode}, {QStringLiteral("own"), c.own},
+                                 {QStringLiteral("provider"), c.provider}};
+    return QJsonObject{{QStringLiteral("type"), QStringLiteral("scan_pool")}, {QStringLiteral("version"), 1},
+                       {QStringLiteral("upstream_revision"), double(p.upstreamRevision)}, {QStringLiteral("countries"), countries},
+                       {QStringLiteral("functions"), QJsonArray{QJsonObject{{QStringLiteral("kind"), QStringLiteral("whitelist")},
+                                                                            {QStringLiteral("provider"), p.whitelist}}}}};
+}
+
 // --- planner inputs ----------------------------------------------------------------------------------------
 
 // An own node of the subscription as the coordinator sees it (pool row + the config builder's verdict).

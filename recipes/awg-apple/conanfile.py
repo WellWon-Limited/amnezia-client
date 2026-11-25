@@ -63,10 +63,44 @@ class AwgApple(ConanFile):
     # never released either: rebuilt from this recipe it gets tribe.17's TribeRoaming.swift.
     # tribe.18: tribe.17's patches + TribeRoaming.swift after the second review (handshake by time only, the
     # engine's RandomTrailers spellings, service TX settled over the handshake window). tribe.17 never shipped.
-    version = "3.1.4-tribe.18"
+    # tribe.19: tribe.18's patches + TribeRoaming.swift after device round air-D (a roam is another network;
+    # a stale session is proved at once on the new path). tribe.18 never shipped.
+    # tribe.20: tribe.19's patches + TribeRoaming.swift after its review (series bound on the roam reset, the
+    # proof restart's own allowance and condition). tribe.19 never shipped.
+    # tribe.21: upstream bug-fix bump. Wrapper amneziawg-apple v3.1.5 (its new Go runtime diff caps the
+    # HTTP/2 request body scratch buffer at 32 KiB) and AWG core amneziawg-go v3.1.20261116 (timer, runtime
+    # parameter change and junk validation fixes; no wire change). tribe.20's patches byte for byte + 0018, a
+    # test-only patch: the new core no longer loses the first packet after a UAPI set of S4, which the awg_mini
+    # runner's prime-echo test asserted. The same Swift sources, Xray core and Go toolchain; the awg_mini gate
+    # also runs under -race (the core's timer race is fixed). The version prefix is the upstream wrapper's; N goes on.
+    version = "3.1.5-tribe.21"
     settings = "os", "arch", "compiler"
 
-    _upstream_version = "3.1.4"
+    # Upstream wrapper version (the version's prefix) -> its archive, its tag commit and the AWG core the
+    # recipe requires for it. 3.1.4 = tribe.3-tribe.20 (go v3.1.20260828 for all of them).
+    # awg_race_gate: the core's peer timers are clean under the race detector (v3.1.20261116, 4696a459d).
+    _upstream_pins = {
+        "3.1.4": {
+            "sha256": "09d7b760d18232fdf121ed2286b2f171b501dc31137e5e7d557c1ee3a99ef772",
+            "commit": "811f5c8213e6b257e9520fff713ec4d22086e9ac",
+            "awg_go": "3.1.20260828",
+            "awg_race_gate": False,
+        },
+        "3.1.5": {
+            "sha256": "b3bd3680fa966dae67162c261e1b0a42235a0bd706ec6ea67cc04e707ef3b7a8",
+            "commit": "3bca528aca844bbe6b665d8ab5c6724cd261fd54",
+            "awg_go": "3.1.20261116",
+            "awg_race_gate": True,
+        },
+    }
+
+    @property
+    def _upstream_version(self):
+        return str(self.version).split("-", 1)[0]
+
+    @property
+    def _upstream(self):
+        return self._upstream_pins[self._upstream_version]
 
     # Released version -> frozen copy of TribeRoaming.swift + its build-gate test
     # (tribe/snapshots/<v>/, tests/snapshots/<v>/). Absent = the current tribe/TribeRoaming.swift.
@@ -126,6 +160,11 @@ class AwgApple(ConanFile):
     _xray_pins["3.1.4-tribe.17"] = _xray_pins["3.1.4-tribe.16"]
     # tribe.18 = tribe.17 (same patches) with the TribeRoaming.swift of the second review.
     _xray_pins["3.1.4-tribe.18"] = _xray_pins["3.1.4-tribe.17"]
+    # tribe.19 = tribe.18 (same patches) with the TribeRoaming.swift of device round air-D.
+    _xray_pins["3.1.4-tribe.19"] = _xray_pins["3.1.4-tribe.18"]
+    _xray_pins["3.1.4-tribe.20"] = _xray_pins["3.1.4-tribe.19"]
+    # tribe.21 = tribe.20 on the new upstream pair (_upstream_pins); core, toolchain and shared patches identical.
+    _xray_pins["3.1.5-tribe.21"] = _xray_pins["3.1.4-tribe.20"]
 
     @property
     def _pins(self):
@@ -198,7 +237,7 @@ class AwgApple(ConanFile):
         # AVPN: source is immutable official upstream; local behavior is
         # applied from conandata.yml instead of relying on a mutable fork.
         get(self, f"https://github.com/amnezia-vpn/amneziawg-apple/archive/refs/tags/v{self._upstream_version}.zip",
-            sha256="09d7b760d18232fdf121ed2286b2f171b501dc31137e5e7d557c1ee3a99ef772", strip_root=True
+            sha256=self._upstream["sha256"], strip_root=True
         )
 
     def generate(self):
@@ -283,7 +322,9 @@ class AwgApple(ConanFile):
         with prep_env.vars(self).apply():
             # AVPN: upstream wrapper is unchanged; ship the verified AWG fixes
             # for DisableCookies under load and UDP-window padding on every platform.
-            self.run("go mod edit -require=github.com/amnezia-vpn/amneziawg-go/v3@v3.1.20260828")
+            # tribe.21: v3.1.20261116 (timer duration cleared under its lock, S4 / I1-I5 safe to change on a
+            # running device, jmin > jmax and negative <r N> lengths rejected).
+            self.run(f"go mod edit -require=github.com/amnezia-vpn/amneziawg-go/v3@v{self._upstream['awg_go']}")
             if self._pins is not self._xray_pins_default:
                 # tribe.12+: our own core pin; no upstream wrapper pins it (the tidy below also
                 # raises the module's `go` line to what the core requires).
@@ -386,9 +427,13 @@ class AwgApple(ConanFile):
                 # harness of awg-probe-plan §6.4: happy path through the engine, unknown key and wrong
                 # H1, a live session on node A with the same key while B is probed, one session per
                 # node, spacing, cancel closes the device, interface binding, S4 prime echo,
-                # goroutine and fd leaks). Not under -race: amneziawg-go's own peer timer writes
-                # `duration` outside its lock (device/timers.go:41) and the detector reports it.
+                # goroutine and fd leaks). Not under -race with amneziawg-go v3.1.20260828: its peer timer
+                # writes `duration` outside its lock (device/timers.go:41) and the detector reports it.
                 self.run("go test -count=1 -tags tribescan_testkit ./tribeawg")
+                if self._upstream["awg_race_gate"]:
+                    # tribe.21: v3.1.20261116 clears `duration` under the lock (4696a459d); the same tests,
+                    # timing ones skipped, under -race (v3.1.20260828's timers.go fails it with a data race).
+                    self.run("go test -race -count=1 -tags tribescan_testkit ./tribeawg")
             # tribe.11: the userspace direct split is a build gate too (absent before 0009).
             # tribe.14: api-apple.go calls into tribeprobe.go (patch 0012), so the file list of
             # this gate carries it when it exists.
@@ -408,6 +453,21 @@ class AwgApple(ConanFile):
             autotools = Autotools(self)
             autotools.make()
             autotools.make("version-header")
+            # tribe.21 (amneziawg-apple v3.1.5): the Makefile builds the archive with a private GOROOT
+            # patched by every goruntime-*.diff. The HTTP/2 request body scratch cap (512 KiB -> 32 KiB) must
+            # be in that GOROOT, and Xray's XHTTP client (x/net/http2.Transport) must run on it: x/net wraps
+            # net/http's HTTP/2 on go1.27 (transport_wrap.go) unless built with the http2legacy tag.
+            if os.path.exists(os.path.join(self.build_folder, "goruntime-http2-request-body-scratch-32k.diff")):
+                h2 = os.path.join(self.build_folder, ".tmp", "wireguard-go-bridge", "goroot", "src", "net",
+                                  "http", "internal", "http2", "transport.go")
+                with open(h2, encoding="utf-8") as f:
+                    if "const max = 32 << 10" not in f.read():
+                        raise ConanException(f"the HTTP/2 scratch cap is missing from {h2}")
+                listed = io.StringIO()
+                self.run("go list -f '{{join .GoFiles \" \"}}' golang.org/x/net/http2", stdout=listed)
+                files = listed.getvalue().split()
+                if "transport_wrap.go" not in files or "transport.go" in files:
+                    raise ConanException(f"x/net/http2 does not wrap net/http's HTTP/2 client: {files}")
 
     def package(self):
         copy(self, "wireguard.h", src=self.build_folder, dst=os.path.join(self.package_folder, "include"))
@@ -438,8 +498,8 @@ class AwgApple(ConanFile):
             "AWG_APPLE_SOURCE_DIR": os.path.join(self.package_folder, "src", "Sources"),
             "AWG_APPLE_ADAPTER_VERSION": self.version,
             "AWG_APPLE_UPSTREAM_VERSION": self._upstream_version,
-            "AWG_APPLE_SOURCE_COMMIT": "811f5c8213e6b257e9520fff713ec4d22086e9ac",
-            "AWG_APPLE_AWG_CORE_VERSION": "3.1.20260828",
+            "AWG_APPLE_SOURCE_COMMIT": self._upstream["commit"],
+            "AWG_APPLE_AWG_CORE_VERSION": self._upstream["awg_go"],
             "AWG_APPLE_XRAY_ADAPTER_VERSION": "1.0.3",
             "AWG_APPLE_XRAY_SOURCE_COMMIT": "e8cc06d7427251fa549093e7cc32c28b0f5fbafa",
             "AWG_APPLE_XRAY_CORE_VERSION": self._pins["core"],

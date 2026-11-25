@@ -249,6 +249,14 @@ public:
     // engine's terminal state speaks for (DebugSnapshot.h scanRowAttemptObserve).
     quint64 lastAttemptIntentEpoch() const { return m_lastAttemptEpoch; }
     bool ownerHoldsNativeLeg() const { return m_owner.phase() != path::AttemptPhase::Idle; }
+    // Device round air-D 25.11 (N4 pair 2): the owner is stopping a leg and the native stop of that leg is the one the
+    // engine sent itself (its StopPath down()), whoever marked the stop the facade's since (requestStop). A stop the
+    // facade asks for meanwhile joins it: one native stop, one answer (DebugSnapshot.h facadeStopAction).
+    bool ownerStopInFlight() const
+    {
+        return m_owner.phase() == path::AttemptPhase::Stopping && m_ownerNativeStop.isValid()
+            && m_ownerNativeStop == m_owner.stoppingLeg();
+    }
 
     // ---- Stage 2: the probe race in front of the owner (path/PathRace.h) ----
     // The platform's probe host (nullptr = none: stage-1 behaviour exactly). Server switch features.path_race
@@ -376,6 +384,16 @@ public:
     // platform, called only from the facade's Q_OS_IOS block (PLATFORM-SCOPING §2).
     bool reenterVerifying();
     bool feedProbeResult(bool ok);
+    // Device round air-D (K1): `startedAtMs` = when the probe started (wall clock; -1 = unknown). With the evidence
+    // restart on, a failed probe that started before the last network change says nothing about this network.
+    bool feedProbeResult(bool ok, qint64 startedAtMs);
+    // Device round air-D (K1, iOS opts in): every network change - the path engine's network key too, which on iOS is
+    // the one that sees a Wi-Fi return (the system's default network is our own tunnel) - restarts what the verdicts
+    // count: the handshake age, the extension's stall verdict, the failed-probe count. Off = the rule of 141.
+    void setRestartEvidenceOnNetworkChange(bool on) { m_restartEvidence = on; }
+    // notePathChange: one network change as the verdicts see it (noteNetworkChange = a system notification; the path
+    // engine's real network change passes realNetworkChange).
+    void notePathChange(qint64 nowEpoch, bool realNetworkChange);
 
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
@@ -713,6 +731,7 @@ private:
     int m_legStartFailures = 0;
     bool m_checkRerun = false;
     bool m_facadeStop = false;                 // the facade itself takes the tunnel down (user stop / restart)
+    path::PathStamp m_ownerNativeStop;         // the leg whose native stop the engine sent itself (ownerStopInFlight)
     bool m_stopGivenUp = false;                // takeStopGivenUp
     quint64 m_legBuildBegun = 0;               // the leg whose own "building" was reported (onLocalBuild)
     std::optional<path::AttemptTimings> m_timingsForTest;
@@ -720,6 +739,10 @@ private:
     QList<SubscriptionNode> m_merged;          // subscription nodes + pack candidates (the pick pool)
     void rebuildCandidates();
     int           m_probeFailStreak = 0; // xray: провалы живой пробы подряд (feedProbeResult)
+    bool          m_restartEvidence = false; // K1 (air-D): see setRestartEvidenceOnNetworkChange
+    path::NetworkObservation m_lastObservation; // Q3 (review of tribe.19): what the last network change was judged against
+    bool          m_hasLastObservation = false;
+    qint64        m_evidenceSinceMs = 0;     // K1: the last network change (wall clock, ms)
     qint64        m_upStartedMs = 0;     // момент последнего up()
     std::optional<Subscription> m_pendingReseed; // отложенное тело reseed (применить в терминале)
 };

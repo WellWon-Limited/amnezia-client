@@ -128,7 +128,7 @@
 <context>
     <name>Enrollment</name>
     <message>
-        <location filename="../../core/serviceEngine/Enrollment.cpp" line="+121"/>
+        <location filename="../../core/serviceEngine/Enrollment.cpp" line="+126"/>
         <location line="+57"/>
         <location line="+173"/>
         <source>Подписка перенесена на другое устройство</source>
@@ -1829,7 +1829,7 @@ A gift for every friend!</translation>
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+282"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+288"/>
         <source>недоступно для этого режима</source>
         <translation>unavailable for this mode</translation>
     </message>
@@ -2029,12 +2029,17 @@ You can attach a photo or video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+57"/>
+        <location line="+60"/>
         <source>Сканер</source>
         <translation>Scanner</translation>
     </message>
     <message>
-        <location line="-56"/>
+        <location line="-58"/>
+        <source>Подбор серверов</source>
+        <translation>Server finder</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2150,12 +2155,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+83"/>
+        <location line="+84"/>
         <source>Отправляем отчёт…</source>
         <translation>Sending the report…</translation>
     </message>
     <message>
-        <location line="-80"/>
+        <location line="-81"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>All seats are taken right now — connecting the next server</translation>
     </message>
@@ -2168,6 +2173,11 @@ You can attach a photo or video.</translation>
         <location line="+1"/>
         <source>Не удалось подключиться — проверьте снова через минуту</source>
         <translation>Could not connect — check again in a minute</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Подключение не началось — нажмите сервер ещё раз</source>
+        <translation>The connection did not start — tap the server again</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2256,13 +2266,13 @@ You can attach a photo or video.</translation>
         <translation>Scan stopped · %1</translation>
     </message>
     <message>
-        <location line="+90"/>
+        <location line="+92"/>
         <source>ru</source>
         <comment>plural rule of this translation: ru (one/few/many) or en (one/other)</comment>
         <translation>en</translation>
     </message>
     <message>
-        <location line="-161"/>
+        <location line="-163"/>
         <source>Подключаться к VPN можно как обычно, а Сканеру нужна обновлённая служба.</source>
         <translation>You can connect to the VPN as usual, but the Scanner needs the updated service.</translation>
     </message>
@@ -2497,7 +2507,7 @@ You can attach a photo or video.</translation>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-84"/>
+        <location line="-85"/>
         <source>только что</source>
         <translation>just now</translation>
     </message>
@@ -2572,7 +2582,7 @@ You can attach a photo or video.</translation>
         <translation>Connect to Wi‑Fi — VPN usually works through it. Then open the Scanner and tap “Scan”.</translation>
     </message>
     <message>
-        <location line="+35"/>
+        <location line="+36"/>
         <source>Службу Tribe VPN нужно обновить</source>
         <translation>The Tribe VPN service needs an update</translation>
     </message>
@@ -2922,7 +2932,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>TribeHeader</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeHeader.qml" line="+29"/>
+        <location filename="../../ui/qml/Tribe/components/TribeHeader.qml" line="+38"/>
         <source>Назад</source>
         <translation>Back</translation>
     </message>
@@ -3231,7 +3241,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4587"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4642"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3331,7 +3341,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-3161"/>
+        <location line="-3168"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3427,12 +3437,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3921"/>
+        <location line="+3936"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>There is no server in the selected mode — switch to “Auto”</translation>
     </message>
     <message>
-        <location line="-3918"/>
+        <location line="-3933"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>No network — connect when it is back</translation>
     </message>
@@ -3462,7 +3472,7 @@ You can attach a photo or video.</translation>
         <translation>Recording, sent at %1</translation>
     </message>
     <message>
-        <location line="+1147"/>
+        <location line="+1154"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>This report has already been delivered</translation>
     </message>
@@ -3543,7 +3553,7 @@ You can attach a photo or video.</translation>
         <translation>baseline and amnezia see the same egress (%1) — looks like the VPN wasn&apos;t off during the baseline measurement</translation>
     </message>
     <message>
-        <location line="+1114"/>
+        <location line="+1115"/>
         <source>Установка службы VPN отменена</source>
         <translation>VPN service installation cancelled</translation>
     </message>
@@ -3553,7 +3563,7 @@ You can attach a photo or video.</translation>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
     <message>
-        <location line="+493"/>
+        <location line="+500"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation>Could not turn off the VPN. Try again or turn it off in iOS Settings.</translation>
     </message>
@@ -3589,8 +3599,8 @@ You can attach a photo or video.</translation>
         <translation>This server is unavailable right now — connecting another one</translation>
     </message>
     <message>
-        <location line="-3942"/>
-        <location line="+3954"/>
+        <location line="-3957"/>
+        <location line="+3969"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>No network — we will connect when it is back</translation>
     </message>
@@ -3610,12 +3620,12 @@ You can attach a photo or video.</translation>
         <translation>Not enough live servers to switch</translation>
     </message>
     <message>
-        <location line="+706"/>
+        <location line="+716"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray is not available in this app version</translation>
     </message>
     <message>
-        <location line="+652"/>
+        <location line="+685"/>
         <source>Введите код доступа</source>
         <translation>Enter your access code</translation>
     </message>

@@ -12,6 +12,8 @@ QtObject {
 
     // ── screen ──
     readonly property string title: qsTr("Сканер")
+    // the header's caption at the right edge, on the choice and on a result (owner 25.11)
+    readonly property string titleCaption: qsTr("Подбор серверов")
     readonly property string netWifi: qsTr("Wi‑Fi")
     readonly property string netCellular: qsTr("Сотовая")
     // the last check: the line under the rings once a result is shown («Проверено: только что»)
@@ -64,6 +66,7 @@ QtObject {
     readonly property string seatsBusy: qsTr("Сейчас все места заняты — подключаем следующую")
     readonly property string connectFailedNext: qsTr("Не удалось подключиться — подключаем следующую")
     readonly property string connectFailedLater: qsTr("Не удалось подключиться — проверьте снова через минуту")
+    readonly property string connectNotStarted: qsTr("Подключение не началось — нажмите сервер ещё раз") // the engine dropped a tapped row's request before its attempt (air-D, E2)
     readonly property string reportSent: qsTr("Отчёт отправлен в поддержку")
     readonly property string reportQueued: qsTr("Отчёт уйдёт, когда появится связь")
 
@@ -295,6 +298,7 @@ QtObject {
         switch (key) {
         case "connect_failed_next": return t.connectFailedNext
         case "connect_failed_later": return t.connectFailedLater
+        case "connect_not_started": return t.connectNotStarted
         case "report_sent": return t.reportSent
         case "report_queued": return t.reportQueued
         case "report_queue_full": return t.queueFull.arg(a.length > 0 ? a[0] : reportsPending)

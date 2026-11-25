@@ -77,6 +77,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private lazy var openVPNPacketFlowAdapter = PacketTunnelFlowAdapter(flow: packetFlow)
     private let pathMonitorQueue = DispatchQueue(label: Constants.processQueueName + ".path-monitor")
     private let networkChangeQueue = DispatchQueue(label: Constants.processQueueName + ".network-change")
+    // AVPN (review R47 H1b): the in-place Xray restart runs here, serially, not on the main queue - its stop waits for
+    // hev's run to return (bounded) and must not hold back anything the extension does on main.
+    private let networkChangeApplyQueue = DispatchQueue(label: Constants.processQueueName + ".network-change-apply")
     private let pathMonitor = NWPathMonitor()
     private var didReceiveInitialPathUpdate = false
     private var currentPath: Network.NWPath?
@@ -502,15 +505,29 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             completion(nil)
             return
         }
-        reasserting = true
         xrayLog(.info, message: "Applying network change to xray tunnel")
         noteUpstreamBytesBeforeCoreRestart() // AVPN (upstream nodes): hev zeroes its counters on restart
-        stopXray { }
         // AVPN (этап D3): рестарт внутри той же NE-сессии — кумулятив rx/tx сохраняем.
-        startXray(preservingCounters: true) { [weak self] error in
-            self?.reasserting = false
-            completion(error)
-        }
+        // AVPN (review R47 H1b): `reasserting` is cleared only by a restart that carries traffic again; a failed one is
+        // tried once more after the earlier hev returned, then ends the tunnel with its error (XrayRoamDriver).
+        let driver = XrayRoamDriver(
+            stopCore: { [weak self] in self?.stopXray { } },
+            startCore: { [weak self] done in
+                guard let self else { done(XrayErrors.supersededSession); return }
+                self.startXray(preservingCounters: true, completionHandler: done)
+            },
+            classify: { [weak self] error in
+                let xe = error as? XrayErrors
+                return (superseded: xe == .supersededSession,
+                        leaseEnded: xe == .upstreamLeaseTerminal || (self?.upstreamBlocksCoreRestart ?? false))
+            },
+            sessionStopping: { [weak self] in self?.tribeStartSlot.sessionStopping ?? true },
+            waitEarlierRun: { _ = XrayHevRuns.shared.waitIdle(until: Date().addingTimeInterval(XrayHevStop.exitLimitSeconds)) },
+            setReasserting: { [weak self] on in self?.reasserting = on },
+            endTunnel: { [weak self] error in self?.cancelTunnelWithError(error) },
+            log: { xrayLog(.error, message: $0) },
+            queue: networkChangeApplyQueue)
+        driver.run(completion: completion)
     }
 
     private func scheduleNetworkChangeHandling(for proto: TunnelProtoType, path: Network.NWPath) {
@@ -528,8 +545,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
             self.isApplyingNetworkChange = true
-            DispatchQueue.main.async {
-                self.handle(networkChange: path) { [weak self] _ in
+            // AVPN (review R47 H1b): off the main queue (the restart's stop waits for hev, bounded); its outcome is
+            // handled inside (XrayRoamDriver) - here only the "a restart is in flight" flag ends.
+            self.networkChangeApplyQueue.async {
+                self.handle(networkChange: path) { [weak self] error in
+                    if let error { xrayLog(.info, message: "Tribe roaming (xray): network change ended with \(error)") }
                     self?.networkChangeQueue.async {
                         self?.isApplyingNetworkChange = false
                     }

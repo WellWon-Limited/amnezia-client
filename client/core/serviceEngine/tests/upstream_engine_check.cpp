@@ -5575,6 +5575,102 @@ static void reviewRound44()
     TuningStore::set({}, {}, {}, {});
 }
 
+// --- device round air-D 25.11, S2: the adoption names the node for every way a provider session is started ---------------------
+// A session started from a Scanner row (Германия 9, a profile the Scanner offered beyond the delivered stubs) was force-quit and
+// relaunched: "adopt_connected verdict=1 node=" - the Scanner's profiles live only in memory, the relaunched engine did not know the
+// node, the data check took the own-server route (whoami: "bypass") and the working tunnel was replaced. The record now keeps the
+// stub the session was started with; the relaunch gives it back to the engine (the facade's restoreAdoptedUpstreamNode: offer the
+// stub, merge the candidates) before the engine adopts by node id. Each start path: the owner's record -> a relaunched engine whose
+// pool does not have the node unless it is a delivered stub -> adoption by node id -> named, a provider node, its display parts kept.
+static void adoptionNamesEveryStartPath()
+{
+    setFlags(true);
+    const qint64 T = 9300000, wall = 1764000000000LL;
+    QString err;
+    // The delivered pool (one own node, one delivered stub) as the relaunched app loads it from its last subscription.
+    const QJsonObject delivered = stubNode(QStringLiteral("aaaaaaaaaaaaaaa0"), 1, 0, sha64('a'), "NL");
+    const QByteArray poolBody = body(QJsonArray{awgNode("9", 9, "EE"), delivered});
+    // A Scanner row's profile: a stub the Scanner offered (contract 1.14.0), with its display parts (Германия 9).
+    QJsonObject scanned = stubNode(QStringLiteral("7a28697ce579f915"), 3, 2, sha64('b'), "DE");
+    {
+        QJsonObject up = scanned.value(QStringLiteral("upstream")).toObject();
+        up.insert(QStringLiteral("ordinal"), 9);
+        up.insert(QStringLiteral("kind"), QStringLiteral("country"));
+        scanned.insert(QStringLiteral("upstream"), up);
+    }
+    struct Path {
+        const char *name;
+        bool deliveredStub; // the node is in the relaunched app's subscription
+        bool seatFirst;     // started by prepare() (a pick while another tunnel works)
+    };
+    for (const Path &path : {Path{"server list", true, false}, Path{"auto", true, false}, Path{"failover", true, false},
+                             Path{"seat first", true, true}, Path{"scanner row", false, false}, Path{"scanner row, seat first", false, true},
+                             Path{"standby pack candidate", false, false}}) {
+        // Before the force-quit: the node the session was started with, as the engine had it.
+        SubscriptionNode node;
+        {
+            ServiceEngine before;
+            FakeTunnel tb;
+            before.setTunnel(&tb);
+            CHECK(before.loadSubscription(poolBody, err));
+            if (path.deliveredStub) {
+                node = *before.nodeById(QStringLiteral("up:aaaaaaaaaaaaaaa0"));
+            } else if (QLatin1String(path.name).startsWith(QLatin1String("scanner"))) {
+                CHECK(before.offerScanNodes(QJsonArray{scanned}) == 1);
+                node = before.scanOfferedNodes().value(0);
+            } else { // a candidate synthesized from the standby pack (no such stub in the subscription)
+                node = parse(body(QJsonArray{scanned})).nodes.value(0);
+                node.nodeId = QStringLiteral("up:packpackpackpack01");
+                node.upstream->profileId = QStringLiteral("packpackpackpack01");
+                node.upstream->packSourced = true;
+            }
+        }
+        CHECK(node.upstream.has_value());
+        if (!node.upstream)
+            continue;
+        UpstreamLeaseOwner::Options ios;
+        ios.keepRecord = true;
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(ios);
+        QVector<UpstreamOwnerEvent> ev;
+        if (path.seatFirst) {
+            o.prepare(node, 1, T, wall);
+            o.onAcquireReply(io.last("acquire")->id, granted(node.upstream->profileId, node.upstream->configSha256), T + 200);
+            ev = o.bringUpPrepared(T + 400);
+        } else {
+            o.begin(node, 1, std::nullopt, T, wall);
+            ev = o.onAcquireReply(io.last("acquire")->id, granted(node.upstream->profileId, node.upstream->configSha256), T + 300);
+        }
+        const UpstreamOwnerEvent *p = findEv(ev, UpstreamOwnerEventKind::Persist);
+        CHECK(p != nullptr);
+        if (!p)
+            continue;
+        const QByteArray recordJson = p->record.toJson(); // what the settings keep
+        // Relaunch: the engine loads the last subscription; the facade gives the adopted record's stub back (when the node is unknown).
+        ServiceEngine e;
+        FakeTunnel te;
+        e.setTunnel(&te);
+        CHECK(e.loadSubscription(poolBody, err));
+        // read back through the record's own reader, as adoptUpstreamSession does (fromJson), and handed on in its form (toJson)
+        const QJsonObject stub = QJsonDocument::fromJson(UpstreamLeaseRecord::fromJson(recordJson).toJson()).object()
+                                     .value(QStringLiteral("stub")).toObject();
+        if (!e.nodeById(node.nodeId)) {
+            e.offerScanNodes(QJsonArray{stub});
+            e.setStandbyCandidates(e.scanOfferedNodes()); // the facade's syncStandbyCandidates
+        }
+        e.adoptTunnelConnected(node.nodeId, QStringLiteral("xray"), QString());
+        const SubscriptionNode *named = e.nodeById(node.nodeId);
+        const bool ok = e.currentNodeId() == node.nodeId && e.currentNodeIsUpstream() && named && named->upstream
+                        && named->countryCode == node.countryCode && named->upstream->ordinal == node.upstream->ordinal
+                        && named->upstream->kind == node.upstream->kind && named->upstream->configSha256 == node.upstream->configSha256;
+        std::printf("air-D S2 adoption after a relaunch, started by %s: node=%s named=%d\n", path.name,
+                    qPrintable(e.currentNodeId().isEmpty() ? QStringLiteral("(empty)") : e.currentNodeId()), int(ok));
+        CHECK(ok);
+    }
+    setFlags(false);
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -5615,6 +5711,7 @@ int main(int argc, char **argv)
     envelopeAndParsing();
     releaseHostFallback();
     reviewRound44();
+    adoptionNamesEveryStartPath();
     if (g_fail) {
         std::printf("upstream_engine_check: %d of %d FAILED\n", g_fail, g_total);
         return 1;

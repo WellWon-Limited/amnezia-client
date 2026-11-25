@@ -11,7 +11,10 @@
 #      O3 a fresh sort only when the page opens and when the transport mode changes; the engine's changed() keeps the
 #         order; the search only filters it;
 #      O4 the values update before the order waits; the order waits while the list moves or a row is pressed;
-#      O5 a pressed row holds the order, its tap acts on its own row (tapRow(row.d) -> entry.nodeId);
+#      O5 a pressed row holds the order, its tap acts on its own row (tapRow(row.d) -> entry.nodeId); the waiting order
+#         follows only after the release was delivered (review R50 5: Qt emits pressedChanged before clicked - a new
+#         model array on the release destroyed the delegate whose onClicked was about to run; driven by touches in the
+#         offscreen harness);
 #      O6 ServerListOrder.js is in qml.qrc (else a blank page in a qrc build).
 # Run by the check sweep (every check_*.sh of this directory).
 set -u
@@ -68,7 +71,13 @@ wait_="$(printf '%s\n' "$rebuild" | grep -n 'root.orderPending = true' | head -1
 [ -n "$vals" ] && [ -n "$wait_" ] && [ "$vals" -lt "$wait_" ] || bad "O4: the values must update in place before the order waits"
 has "$p" 'readonly property bool listTouched: list.moving || list.dragging || pressedKey !== ""' \
     || bad "O4: the order waits while the list moves or a row is pressed"
-has "$p" 'onListTouchedChanged: if (!listTouched && orderPending) rebuildCountries(false)' || bad "O4: a waiting order follows on release"
+has "$p" 'onListTouchedChanged: if (!listTouched && orderPending) Qt.callLater(root.followWaitingOrder)' \
+    || bad "O5: a waiting order follows after the release was delivered (Qt.callLater), never inside pressedChanged"
+follow="$(body_of 'function followWaitingOrder() {' "$PAGE")"
+has "$follow" 'if (!root.listTouched && root.orderPending)' && has "$follow" 'root.rebuildCountries(false)' \
+    || bad "O4: the deferred follow re-checks the touch and keeps the order rule (rebuildCountries(false))"
+printf '%s\n' "$p" | grep -E 'onListTouchedChanged:.*rebuildCountries' > /dev/null \
+    && bad "O5: the release must not rebuild the model synchronously (the tap of the row is lost)"
 
 ma="$(body_of 'onPressedChanged: {' "$PAGE")"
 has "$ma" 'root.pressedKey = row.modelData' || bad "O5: a pressed row must hold the order (pressedKey)"

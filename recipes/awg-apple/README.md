@@ -1,6 +1,6 @@
 # awg-apple (Tribe recipe)
 
-Official `amneziawg-apple` v3.1.4 plus reviewable Tribe patches. The package ships the Go
+Official `amneziawg-apple` (v3.1.5 from tribe.21, v3.1.4 for tribe.3-tribe.20) plus reviewable Tribe patches. The package ships the Go
 c-archive (`libwg-go.a`) and the exact patched Swift sources (`AWG_APPLE_SOURCE_DIR`) that the iOS
 and macOS Network Extension targets compile.
 
@@ -8,7 +8,10 @@ and macOS Network Extension targets compile.
 
 | Version | Patches | Notes |
 |---|---|---|
-| `3.1.4-tribe.18` | the patches of tribe.17 | current (iOS 142, not released); tribe.17 after the second review (section "tribe.18 behaviour"): a handshake only by its time moving, RandomTrailers as the engine reads it, service TX settled over the handshake window. TribeRoaming.swift + the gate `tests/check_engine_spellings.sh` |
+| `3.1.5-tribe.21` | the patches of tribe.20 + 0018 | current (iOS 143); upstream bug-fix bump: amneziawg-apple v3.1.5 (HTTP/2 request body buffer capped at 32 KiB) + amneziawg-go v3.1.20261116 (section "tribe.21 behaviour"); 0018 = test only (the awg_mini prime-echo test for a core that no longer loses the first packet). Swift sources, Xray core and Go toolchain those of tribe.20 |
+| `3.1.4-tribe.20` | the patches of tribe.19 | built into 5.1.112 / 142 (release commit `f24ffe819`); tribe.19 after its review (section "tribe.20 behaviour"). TribeRoaming.swift only |
+| `3.1.4-tribe.19` | the patches of tribe.18 | superseded by tribe.20, not released; tribe.18 after device round air-D (section "tribe.19 behaviour"): a fresh-port roam is another network, a stale session is proved at once on the new path. TribeRoaming.swift only |
+| `3.1.4-tribe.18` | the patches of tribe.17 | superseded by tribe.19, not released; tribe.17 after the second review (section "tribe.18 behaviour"): a handshake only by its time moving, RandomTrailers as the engine reads it, service TX settled over the handshake window. TribeRoaming.swift + the gate `tests/check_engine_spellings.sh` |
 | `3.1.4-tribe.17` | the patches of tribe.16 (0017 included) | superseded by tribe.18, not released; tribe.16 after its review (section "tribe.17 behaviour"): service traffic from the session's configuration, idle end of an episode, sampling gaps, the stall verdict `data_stall_s` for the app. TribeRoaming.swift only |
 | `3.1.4-tribe.16` | the patches of tribe.15 + 0017 | built into 142 dev builds of 24-25.11, not released, superseded by tribe.17 (rebuilt from this recipe it gets tribe.17's TribeRoaming.swift); one definition of "data is flowing" for the stall ladder, its budget and the app's failover (`TribeDataFlow` in `TribeRoaming.swift`, section "tribe.16 behaviour"); 0017 = the adapter's `roamingCounters()` also reads `dataQuietSeconds`, the provider replies it as `data_quiet_s`. tribe.14 and tribe.15 were never released: no `TribeRoaming.swift` snapshot is frozen for them (rebuilt from this recipe they get tribe.16's ladder) |
 | `3.1.4-tribe.15` | the patches of tribe.14 (+ engine patch 0014, host limits) | built into 5.1.111 / 142 dev builds before tribe.16, not released |
@@ -48,6 +51,12 @@ Rules:
   first and add the version to `_roaming_snapshots`.
 - The recipe revision changes with every edit of `conanfile.py`, `conandata.yml`, `patches/`,
   `tribe/` or `tests/`; `README.md` is not exported.
+- An upstream wrapper bump changes the version's prefix to the wrapper's version (`3.1.5-tribe.21`);
+  N goes on, so one number never names two packages. `_upstream_pins` in `conanfile.py` maps the prefix
+  to the archive's SHA-256, its tag commit and the amneziawg-go version `build()` requires; a released
+  version rebuilt from the recipe therefore gets its own upstream pair again. Every patch must apply to the
+  new upstream at its recorded lines (the recipe's patch tool takes no offset or fuzz); a patch whose code
+  upstream changed is redone as a new patch file, never edited.
 
 ## tribe.7 behaviour (patch 0005 + TribeRoaming.swift)
 
@@ -665,9 +674,10 @@ session: handshake + 1 echo + 1 KiB + 64 KiB HTTPS, held open; a fresh process p
 MB with 1 session, +6.9-7.2 MB with 2, +10.2-10.3 MB with 4 (Go heap +2.3-2.8 / +3.7-3.8 / +5.8-5.9 MB;
 82 goroutines per session: amneziawg-go runs 3 workers per CPU, an iPhone has 6). Loopback: handshake
 5-6 ms, a whole probe 11-12 ms; S4=4 without a prime echo: ttfb1 ~2 s (the first packets after the
-handshake are lost), with one echo 1-2 ms. Archive: `libwg-go.a` (iOS arm64, `-ldflags=-w`) 45,358,704
+handshake are lost), with one echo 1-2 ms (amneziawg-go v3.1.20260828; from tribe.21 no packet is lost, section
+"tribe.21 behaviour"). Archive: `libwg-go.a` (iOS arm64, `-ldflags=-w`) 45,358,704
 -> 45,592,392 bytes (+233,688; gVisor was already linked by 0009, netstack adds its own package and
-gVisor's ICMP transport). Gate: `go test -tags tribescan_testkit ./tribeawg` (not `-race`:
+gVisor's ICMP transport). Gate: `go test -tags tribescan_testkit ./tribeawg` (from tribe.21 also under `-race`; before, not `-race`:
 amneziawg-go's peer timer writes `duration` outside its lock, `device/timers.go:41`, and the detector
 reports it under load - an upstream data race that can drop a timer re-armed while it fires).
 
@@ -1020,6 +1030,129 @@ Second review (`~/avpn-build/phone-diag/reviews/round45-wifi2-out.md`): four rar
   late); against 2e641743d: G2 fresh port at 4 s and restart at 14 s, G3 fresh port at 100 s, G4 fresh port
   at 4 s; here none.
 
+## tribe.19 behaviour: device round air-D (TribeRoaming.swift only)
+
+Device round air-D (iPhone, build 4039020f9 = tribe.17; `~/avpn-build/phone-diag/air-D/RESULTS.txt` W1, U1): Германия 1
+(AWG) on Wi-Fi, Wi-Fi off -> LTE, on which AmneziaWG passed no data and completed no handshake that night, Wi-Fi back after
+46-61 s. The old tunnel never recovered in place on the Wi-Fi (roam_fresh_ports +1, soft_restarts +0) and the app failed
+over at +15.6 / +22.0 / +28.4 s, marking Германия 1 "в этой сети не отвечает" on the Wi-Fi where it connects in 2 s.
+
+- **K1, a roam is another network.** A fresh-port roam (a path back after a real loss, or another interface) ends the
+  episode, restarts the stall clock and the demand counts (`TribeStallTracker.noteNewNetwork`), re-arms the budget episode
+  and restarts the exported verdict (`observedSince`): silence observed on the old network is not evidence here. A
+  same-port bump (path event without a loss) is unchanged. (tribe.9-18 kept the stall clock across a roam.)
+- **K2, prove a stale session at once.** If the session had no confirmed data path at that roam - stalled, a repair
+  episode open, or no inbound data since the previous fresh-port roam - the arbiter asks for ONE soft restart on the next
+  tick (`roamRestartSince`): `wgTurnOff` + `wgTurnOn` on the same TUN (the existing in-place restart): a new device with a
+  new socket, whose first packet starts a new handshake on the new path at once: uapi.go:568-573 (`if peer.device.isUp()
+  { peer.Start(); if peer.pkaOn { peer.SendKeepalive() }; peer.SendStagedPackets() }` - a new device's peer with
+  PersistentKeepalive set), then send.go:438-439 (`if keypair == nil ... { peer.SendHandshakeInitiation(false) }`). The fresh port alone keeps the old keypair (send.go: a keepalive starts a handshake only for
+  an expiring key). Through the shared budget (rolling cap 4 / 120 s, same-kind cooldown 8-10 s); given up once data
+  comes in, after 30 s or at the next roam; never more than one per roam.
+- Timelines after a roam: (a) a server that works on the new network: the fresh port at once, the soft restart on the
+  next tick when the session was stale (<= 1 s; <= 5 s when the watchdog idled), the handshake one round trip later, data
+  within ~1-3 s (replay: data at +1 s); no failover, no mark. (b) A server dead on the new network: the ladder goes on
+  (stage-3 fresh port +30 s, soft restart +90 s), the exported verdict counts from the roam and reaches 45 s at +45 s
+  (fleet bundle: its own unanswered initiations are the demand), the app fails over at ~+48 s and marks the node on that
+  network - correctly. (c) Flapping every 20-30 s on a dead path: one soft restart per roam at most, never more than 4 in
+  any 120 s (replay: 19 in 10 min); the app's evidence restarts at most until 120 s after the first change of the series.
+- App side (outside the package, iOS): the path engine's network key is a network change for the verdicts
+  (`ServiceEngine::observeNetwork`; the system's own notification sees our tunnel, not the Wi-Fi return, and did not fire
+  in air-D): grace window, probe count, and the evidence restart (`HealthLoop::noteEvidenceRestart`): the handshake age,
+  the stall verdict and the byte rule count from the change; a failed probe that started before it is not counted.
+- Not changed: during an app failover (a server switch) iOS sends traffic outside the VPN for the ~2-6 s between the old
+  tunnel's stop and the new one's start (air-D W1 r3-r5: a page from a Russian exit); with K2 a roam onto a network where
+  the server works no longer needs a switch at all.
+
+## tribe.20 behaviour: the review of tribe.19 (TribeRoaming.swift only)
+
+`~/avpn-build/phone-diag/reviews/round49-roam-out.md`.
+
+- **L1, series bound on the roam reset.** Fresh-port roams without path-proving data in between form a series; a roam
+  restarts the stall clock, the demand counts, the episode and the exported verdict only until 120 s after the first
+  roam of the series (`roamSeriesBoundSeconds`, the app's evidence bound is the same); later roams keep the anchor and
+  are the episode's fresh port only. Roams every 20 s under 1500 B/s without data: the verdict reaches 45 s 165 s after
+  the first roam (tribe.19: never).
+- **L2, the roam proof restart (K2).** Condition at a fresh-port roam: a repair is open, or the ladder sees a stall, or
+  there is unanswered demand (>= 1 KB since the last inbound data, service traffic not counted), or the session has NOT
+  proved itself recently: neither a completed handshake nor path-proving data after the previous roam within 60 s
+  (`roamProvenSeconds`). Accounting (`TribeRecoveryBudget.requestRoamProof`): at most one per 60 s; never counted in
+  the rolling cap of 4 repairs per 120 s and never refused by it; not part of the episode (the ladder's fresh port /
+  soft restart keep their own times on the new network); it shares the same-kind cooldown with the ladder's soft
+  restarts. Upper bound: 4 ladder repairs + 2 proof restarts per 120 s. An idle phone roaming every 20 s: one proof
+  restart per 60 s (tribe.19: every roam, using up the cap); a real stall then is repaired 10 s after it starts.
+- The device round's case (dead or unproven before the roam, then home Wi-Fi) still restarts at +0 s, data at +1 s.
+
+## tribe.21 behaviour: upstream bug-fix bump (amneziawg-apple v3.1.5, amneziawg-go v3.1.20261116)
+
+Audit `~/avpn-build/phone-diag/awg-audit/REPORT.txt` (findings 3, 4). No Tribe behaviour, protocol or setting changes:
+tribe.20's 16 patches byte for byte + 0018 (test only, below), the same `TribeRoaming.swift` / `TribeDataWatch.swift`
+and tests, Xray core v1.261101.0, Go 1.27.4 and gates (+ the HTTP/2 check and the awg_mini tests under `-race`).
+Neither tag has a GitHub release entry; the ranges below are the tags' commits.
+
+- **amneziawg-apple v3.1.4 (`811f5c821`) .. v3.1.5 (`3bca528ac`), 4 commits**: `9d5ee60ed` version bump (#45),
+  `8d49194c0` + `3bca528ac` the HTTP/2 request body scratch cap, `332935b63` version bump. Files:
+  `Sources/WireGuardApp/Config/Version.xcconfig` (the app's version, not in the extension) and the new
+  `Sources/WireGuardKitGo/goruntime-http2-request-body-scratch-32k.diff`. No file a Tribe patch touches changed: all 16
+  apply at their recorded lines (zero offset, zero fuzz); no patch was redone.
+- **The HTTP/2 cap.** The Makefile copies GOROOT and applies every `goruntime-*.diff` to the copy
+  (`patch -p1 -f -N`) before `go build -buildmode c-archive`; the new diff changes
+  `net/http/internal/http2/transport.go` `frameScratchBufferLen`: `const max = 512 << 10` -> `const max = 32 << 10`.
+  Upstream wrote it against an earlier Go 1.27: on our Go 1.27.4 it applies at line 1633 (offset 26 lines, no fuzz).
+  The buffer is held for the life of every streaming request body without a Content-Length (XHTTP stream-one /
+  stream-up), so each XHTTP connection held 512 KiB inside the 50 MB extension. It reaches Xray's XHTTP client:
+  `splithttp/dialer.go` builds an `x/net/http2.Transport`, and the vendored `golang.org/x/net` v0.61.0 on go1.27
+  compiles `transport_wrap.go` (that type wraps `net/http.Transport`, i.e. the patched code), not its own
+  `transport.go` (build tag `!(go1.27 && !http2legacy)`; nothing sets `http2legacy`). Build gate (new in `build()`,
+  only when the diff exists): the prepared GOROOT has the 32 KiB constant and `go list` of `golang.org/x/net/http2`
+  lists `transport_wrap.go` and not `transport.go`.
+- **amneziawg-go v3.1.20260828 (`b5928efb6`) .. v3.1.20261116 (`08fe3d33b`), 11 commits**, `go.mod` / `go.sum`
+  identical (no new dependency, `go 1.25.0`):
+  - `4696a459d` timers: the expiry cleared `duration` after releasing `modifyingLock`; a `Mod` in between (a
+    keepalive, a retransmit, "new handshake" or "zero key material" timer re-armed while it fired) lost its
+    duration, and the re-armed timer then fired into `duration == 0` and did nothing. The data race the
+    `tribeawg` gate avoided `-race` for (`device/timers.go:41`): measured, `go test -race ./tribeawg` fails with a
+    DATA RACE at timers.go:41 with v3.1.20260828's `timers.go` and passes with v3.1.20261116 (33 s). tribe.21 runs it
+    as a gate (`awg_race_gate`).
+  - `7a9b2d263` S4 changed while packets wait in the encryption queue: the payload is moved to the new offset (or
+    dropped when it no longer fits), and a packet whose encryption failed is no longer handed to the socket as nil.
+    **It also ends a lost first packet.** `NewDevice` starts the TUN reader, which takes the S4 offset and blocks in
+    its first `Read` before the UAPI set (`wgTurnOn`: `NewDevice` -> `IpcSet` -> `Up`, `api-apple.go`; the awg_mini
+    runner the same). With v3.1.20260828 the first packet read after a start went out framed for S4 = 0 and the node
+    dropped it; it now moves to the configured S4. Measured with the awg_mini harness (S4 = 4, gVisor client, local
+    userspace node): warm-up first byte 3-4 ms without a prime echo; with that hunk removed from the vendored core
+    2005-2009 ms (the client's first SYN retransmit), 6-7 ms with one echo. From the code the extension's own tunnel
+    had the same loss after every start and soft restart (the first DNS query or SYN of the session retried after
+    ~1 s); not measured on a device.
+  - Patch **0018** (test only): 0014's `TestTribeAwgPrimeEcho` asserted that loss (no echo >= 500 ms slower than one
+    echo) and failed on the new core. 0014 is released and unchanged; 0018 turns the assertion around: the median
+    first byte is below 500 ms with and without the echo. The Scanner still sends the echo (`awg_prime_echoes` is the
+    app's limit, unchanged); with this core it is no longer needed and costs ~150 ms per AmneziaWG probe.
+  - `735cffbcb` I1-I5 are atomic pointers: replacing them while initiations are sent is no longer a data race.
+  - `08fe3d33b` jc / jmin / jmax are applied with H1-H4 and S1-S4 at the end of the device section of a UAPI set
+    (`mergeWithDevice`), and jmin > jmax is refused (before: an unsigned underflow in the junk size).
+  - `a6a8ba9c7` a negative length in `<r>` / `<rc>` / `<rd>` / `<dz>` is refused (before: a panic).
+  - `ad79e6e34` the header protection error names S1-S4 correctly; `9b7cb670c` a test fix; `876c2437e` README
+    (RandomTrailers, DisableCookies); `5a5db0581`, `62c975269`, `a3aa5cca6` the `outline/` package, which nothing of
+    ours imports.
+- **No wire, UAPI or default change.** `uapi.go` parses and prints the same key names (every `case "..."` and
+  `sendf("...=` of both tags compared); `device.go` changes only the type of `ipackets`;
+  `receive.go`, `peer.go`, `noise-protocol.go`, `noise-types.go`, `cookie.go`, `keypair.go`, `constants.go` are byte
+  identical; in `send.go` the initiation still sends I1-I5 (the same `ObfuscatedLen(0)`), Jc junk packets, S1 + 148,
+  and a transport packet is still S4 + 16 + payload + padding + 16, tx counted in `peer.go` `SendBuffers`, rx in
+  `receive.go` as before. So `TribeServiceTraffic` (handshake / keepalive bytes) and `TribeDataFlow.handshakeRxBytes`
+  (148) are unchanged and `TribeRoaming.swift` keeps its text (its comments name v3.1.20260828; the sizes are the same
+  in v3.1.20261116). Our values pass the new checks: the backend refuses Jmax < Jmin (`bootstrap.py`), the fleet sends
+  Jmin 10 / Jmax 50, `specialJunkLength` never counted a negative length; the app writes jc / jmin / jmax in one set
+  (iOS generator, macOS daemon `wireguardutilsmacos.cpp`).
+- What the user may notice: nothing on the wire. The first request after connecting, an engine soft restart or a
+  roam proof restart no longer waits for a retransmit (above). The timer fix removes a rare "a timer silently stopped
+  firing" (a keepalive or the dead-session handshake not sent until the next packet). The I1-I5 fix and the S4 move
+  of queued packets otherwise matter only when a running device's parameters change (our in-place switch restarts the
+  backend, patch 0016).
+- `TribeRoaming.swift` and `TribeDataWatch.swift` are tribe.20's files. A later version that changes either must first
+  freeze the released versions' copies (rule above).
+
 ## Rebuilding the package (isolated Conan home, nothing in the global cache changes)
 
 ```sh
@@ -1087,9 +1220,11 @@ v4-only VPN (sum.golang.org writes fail), point Go at an already verified module
 `GOPROXY=file://<GOPATH>/pkg/mod/cache/download GOSUMDB=off GOTOOLCHAIN=local`.
 
 The app build picks the package up through the root `conanfile.py`
-(`self.requires("awg-apple/3.1.4-tribe.18")`); CMake configure exports all `recipes/` itself
-(`client/cmake/recipes_bootstrap.cmake`), so use the same `CONAN_HOME` for configure. Rollback =
-pin the root requirement back to `awg-apple/3.1.4-tribe.12` (then drop `TribeDataWatch.swift` and the
+(`self.requires("awg-apple/3.1.5-tribe.21")`); CMake configure exports all `recipes/` itself
+(`client/cmake/recipes_bootstrap.cmake`), so use the same `CONAN_HOME` for configure. Rollback of the
+upstream bump = pin the root requirement back to `awg-apple/3.1.4-tribe.20` (amneziawg-apple v3.1.4 and
+amneziawg-go v3.1.20260828 with the same patches and Swift sources; nothing else changes). Older rollbacks:
+pin it back to `awg-apple/3.1.4-tribe.12` (then drop `TribeDataWatch.swift` and the
 three data-watch provider files from the two `networkextension/CMakeLists.txt` and their calls from
 `PacketTunnelProvider*.swift`), `awg-apple/3.1.4-tribe.11` (then also drop the `LibXrayTribeHTTP`
 calls; the extension keeps working on core v1.260728.0), `awg-apple/3.1.4-tribe.10` (then also drop the `wgSetDirectSplit` /

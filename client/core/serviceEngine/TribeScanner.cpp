@@ -159,6 +159,15 @@ QString scanCacheStoreKey(const QString &fingerprint)
     return QLatin1String(kScanCacheStorePrefix) + QString::fromLatin1(h.toHex().left(16));
 }
 
+QString scanPoolOwnerTag(const QString &deviceToken)
+{
+    if (deviceToken.isEmpty())
+        return QString();
+    const QByteArray h = QCryptographicHash::hash((QStringLiteral("tribe-scan-pool-owner-v1|") + deviceToken).toUtf8(),
+                                                  QCryptographicHash::Sha256);
+    return QString::fromLatin1(h.toHex().left(16));
+}
+
 TribeScanner::TribeScanner(const Deps &d, QObject *parent)
     : QObject(parent), m_engine(d.engine), m_host(d.host), m_m(d.host ? d.host->knownCaps() : ScanHostCaps())
 {
@@ -197,6 +206,7 @@ TribeScanner::TribeScanner(const Deps &d, QObject *parent)
             self->timerFired();
     };
     m_m.restoreBudget(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetStoreKey))).array());
+    // the pool's last answer is restored in configureApi: it is shown only for the account it was fetched for
     m_enabled = scannerSwitchOn(TuningStore::flag(QLatin1String(kScannerFlag), false), kScanHostOnThisBuild);
     m_doctorLegacy = TuningStore::flag(QLatin1String(kDoctorLegacyFlag), false);
     m_connectOnOpen = scanConnectOnOpenFlag();
@@ -247,9 +257,27 @@ void TribeScanner::configureApi(QNetworkAccessManager *nam, std::function<QStrin
         m_http = m_ownHttp.get();
         m_api->setHttp(m_http);
     }
+    const bool first = !m_deviceToken;
+    m_deviceToken = deviceToken;
     m_api->configure(std::move(apiBase), std::move(pubKeyHex), std::move(deviceToken));
     if (nam)
         m_api->setNetworkManager(nam);
+    if (!first)
+        return;
+    // The pool's last answer: the counts of the scope choice before (or without) a fresh fetch - for the account it was
+    // fetched for only (review R50 4: after another account's code and a relaunch whose fetch failed the Scanner
+    // offered the old account's countries). A pool of another account is dropped.
+    const QJsonObject stored = QJsonDocument::fromJson(m_store->read(QLatin1String(kScanPoolStoreKey))).object();
+    if (stored.isEmpty())
+        return;
+    const QString owner = scanPoolOwnerTag(m_deviceToken());
+    ScanPoolView storedPool;
+    if (!owner.isEmpty() && stored.value(QLatin1String("owner")).toString() == owner && scanPoolFromJson(stored, storedPool)) {
+        m_poolOwner = owner;
+        m_m.poolReady(storedPool, now());
+    } else {
+        m_store->remove(QLatin1String(kScanPoolStoreKey));
+    }
 }
 
 qint64 TribeScanner::now() { return m_clock->nowMs(); }
@@ -1982,6 +2010,14 @@ void TribeScanner::fetchPoolIfStale()
     if (!m_fetchPoolOnOpen || m_poolUnsupported || m_serverOff || !m_api || !m_api->configured())
         return;
     const qint64 t = now();
+    // R50 4: the pool in force belongs to the account now - else it is not shown and is asked for again at once
+    const QString owner = scanPoolOwnerTag(m_deviceToken ? m_deviceToken() : QString());
+    if (!m_poolOwner.isEmpty() && m_poolOwner != owner) {
+        m_poolOwner.clear();
+        m_poolAt = -1;
+        m_store->remove(QLatin1String(kScanPoolStoreKey));
+        dispatch(m_m.poolReady(ScanPoolView(), t));
+    }
     if (m_poolAt >= 0 && t - m_poolAt < 10 * 60 * 1000)
         return;
     bool cellular = false;
@@ -1990,10 +2026,16 @@ void TribeScanner::fetchPoolIfStale()
         return;
     m_poolAt = t;
     QPointer<TribeScanner> self(this);
-    m_api->fetchPool(cost, [self, cellular](const ScanApiClient::Pool &p) {
+    m_api->fetchPool(cost, [self, cellular, owner](const ScanApiClient::Pool &p) {
         if (!self)
             return;
         self->chargeOutsideScan(p.bytes, cellular);
+        // R50 4: an answer for the account the request left with only (the token changed in flight: dropped, asked
+        // again at the next open)
+        if (p.ok && (owner.isEmpty() || owner != scanPoolOwnerTag(self->m_deviceToken()))) {
+            self->m_poolAt = -1;
+            return;
+        }
         if (p.ok) {
             int own = 0, provider = 0;
             QStringList per;
@@ -2005,6 +2047,10 @@ void TribeScanner::fetchPoolIfStale()
             self->emitLog(QStringLiteral("pool fetched countries=%1 total=%2 own=%3 provider=%4 whitelist=%5 by_country=%6")
                               .arg(p.view.countries.size()).arg(own + provider).arg(own).arg(provider).arg(p.view.whitelist)
                               .arg(per.join(QLatin1Char(','))));
+            QJsonObject record = scanPoolToJson(p.view);
+            record.insert(QStringLiteral("owner"), owner);
+            self->m_store->write(QLatin1String(kScanPoolStoreKey), QJsonDocument(record).toJson(QJsonDocument::Compact));
+            self->m_poolOwner = owner;
             self->dispatch(self->m_m.poolReady(p.view, self->now()));
         }
         else if (p.status == 404)
@@ -2363,6 +2409,11 @@ void TribeScanner::connectRefused(const QString &nodeId)
         emitLog(QStringLiteral("connect_refused node=%1").arg(nodeId));
         dispatch(m_m.connectRefused(nodeId, now()));
     }, Qt::QueuedConnection);
+}
+void TribeScanner::rowRequestDropped(const QString &nodeId)
+{
+    emitLog(QStringLiteral("row_request_dropped node=%1").arg(nodeId));
+    dispatch(m_m.rowRequestDropped(nodeId, now()));
 }
 void TribeScanner::reportQueueChanged() { dispatch(m_m.reportQueueState(m_engine->reportQueueFull(), now())); }
 

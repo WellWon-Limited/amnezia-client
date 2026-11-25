@@ -252,7 +252,7 @@ private final class SystemCompletions: @unchecked Sendable {
     }
 }
 
-private enum FakeStartError: Error { case superseded, hevBusy }
+private enum FakeStartError: Error { case superseded, hevBusy, leaseTerminal }
 
 private final class ModelHev: XrayHevControl, @unchecked Sendable {
     enum Native { case scoped, unsynchronized }
@@ -265,6 +265,7 @@ private final class ModelHev: XrayHevControl, @unchecked Sendable {
     private var event = false              // the quit event written
     var storeBuffering = false             // unsynchronized: the next handshake loses (both read old values)
     var initMs = 20
+    var outlivesStopUntil: Date?           // a session keeps the run alive past its stop until then (nil: never)
     private(set) var runs = 0
     private(set) var stoppedRuns = 0       // runs that ended on a quit event
     init(native: Native) { self.native = native }
@@ -292,8 +293,8 @@ private final class ModelHev: XrayHevControl, @unchecked Sendable {
         }
         let end = Date().addingTimeInterval(Double(runMs) / 1000)
         while Date() < end {
-            mutex.lock(); let e = event; mutex.unlock()
-            if e { mutex.lock(); stoppedRuns += 1; mutex.unlock(); break }
+            mutex.lock(); let e = event; let keep = outlivesStopUntil; mutex.unlock()
+            if e && (keep == nil || Date() >= keep!) { mutex.lock(); stoppedRuns += 1; mutex.unlock(); break }
             usleep(1_000)
         }
         mutex.lock()
@@ -353,6 +354,15 @@ private final class ProviderModel: @unchecked Sendable {
     var generation: UInt64 = 0
     var hevStop: XrayHevStop?
     var runMs = 60_000
+    var stopLimit = XrayHevStop.exitLimitSeconds   // XrayHevStop's hard limit
+    var enterWait = XrayHevStop.exitLimitSeconds   // the worker's wait for the run slot
+    var idleWait = XrayHevStop.exitLimitSeconds    // the roam retry's wait for the earlier run
+    private let stateLock = NSLock()
+    private var reassertingStorage = false
+    private(set) var clearedWithoutHev = false     // reasserting cleared while no hev of this session runs
+    private(set) var cancels: [String] = []
+    private(set) var coreStarts = 0
+    var reasserting: Bool { stateLock.lock(); defer { stateLock.unlock() }; return reassertingStorage }
 
     init(hev: ModelHev, runs: XrayHevRuns = XrayHevRuns()) {
         self.hev = hev
@@ -370,7 +380,9 @@ private final class ProviderModel: @unchecked Sendable {
     }
 
     // setupAndRunTun2socks + its worker
-    func queueHevWorker(beforeEnter: (() -> Void)? = nil, afterReturn: (() -> Void)? = nil) {
+    func queueHevWorker(beforeEnter: (() -> Void)? = nil, afterReturn: (() -> Void)? = nil,
+                        answer: ((Error?) -> Void)? = nil) {
+        let startAnswer = answer ?? self.startAnswer
         let gen = generation
         let queued: Bool = gate.withExclusive {
             guard session.isCurrent(generation: gen), session.transition(to: .running, generation: gen),
@@ -382,7 +394,7 @@ private final class ProviderModel: @unchecked Sendable {
         DispatchQueue.global().async { [self] in
             defer { workers.leave() }
             beforeEnter?()
-            guard let run = runs.enter(waitSeconds: XrayHevStop.exitLimitSeconds) else {
+            guard let run = runs.enter(waitSeconds: enterWait) else {
                 session.exitHev(generation: gen)
                 startAnswer(FakeStartError.hevBusy)
                 return
@@ -405,7 +417,7 @@ private final class ProviderModel: @unchecked Sendable {
     func nativeStop() {
         gate.withExclusive {
             let stopping = session.beginStopReportingHev()
-            hevStop = XrayHevStop.execute(run: stopping.hevRun, runs: runs, hev: hev)
+            hevStop = XrayHevStop.execute(run: stopping.hevRun, runs: runs, hev: hev, limitSeconds: stopLimit)
         }
     }
 
@@ -427,6 +439,38 @@ private final class ProviderModel: @unchecked Sendable {
     }
 
     func hevRunning() -> Bool { session.hevPhaseNow == .running }
+
+    // handle(networkChange:) through the provider's XrayRoamDriver
+    let roamQueue = DispatchQueue(label: "test.roam")
+    var leaseStopped = false                       // tribeUpstream.coreStoppedByLease (upstreamLeaseTerminal)
+    var duringRestartStop: (() -> Void)?           // something that lands between the restart's stop and its start
+    func roam(completion: @escaping (Error?) -> Void) {
+        let driver = XrayRoamDriver(
+            stopCore: { [self] in nativeStop(); duringRestartStop?() },
+            startCore: { [self] done in
+                stateLock.lock(); coreStarts += 1; stateLock.unlock()
+                // startXray's guard (PacketTunnelProvider+Xray.swift): a core the lease stopped is never started
+                guard !leaseStopped else { done(FakeStartError.leaseTerminal); return }
+                generation = session.beginSession(protocolName: "xray", preservingCounters: true)
+                queueHevWorker(answer: done)
+            },
+            classify: { [self] error in
+                (superseded: (error as? FakeStartError) == .superseded,
+                 leaseEnded: (error as? FakeStartError) == .leaseTerminal || leaseStopped)
+            },
+            sessionStopping: { [self] in slot.sessionStopping },
+            waitEarlierRun: { [self] in _ = runs.waitIdle(until: Date().addingTimeInterval(idleWait)) },
+            setReasserting: { [self] on in
+                stateLock.lock()
+                if !on && session.hevPhaseNow != .running { clearedWithoutHev = true }
+                reassertingStorage = on
+                stateLock.unlock()
+            },
+            endTunnel: { [self] error in stateLock.lock(); cancels.append("\(error)"); stateLock.unlock() },
+            log: { _ in },
+            queue: roamQueue)
+        roamQueue.async { driver.run(completion: completion) }
+    }
 }
 
 private func waitUntil(_ seconds: TimeInterval, _ cond: () -> Bool) -> Bool {
@@ -502,6 +546,107 @@ private func testStopDuringXrayStart() {
         expect(m.workers.wait(timeout: .now() + 2) == .success, "hev ended on its own")
         let ms = m.stop()
         expect(ms != nil && m.hevStop == .notRunning, "a stop after hev exited: \(String(describing: m.hevStop))")
+    }
+}
+
+// (R47 H1b) a failed in-place restart on a network change never ends as "Connected" without hev: it is tried once more
+// after the earlier run returned, and a second failure ends the tunnel with its error.
+private func testRoamRestartFailure() {
+    // 1. the earlier run outlives its stop (a session kept alive past the stop) and returns at 1.0 s: the first start
+    //    finds the run slot taken and fails, the retry after the earlier run returned connects
+    do {
+        let hev = ModelHev(native: .scoped)
+        let m = ProviderModel(hev: hev)
+        m.stopLimit = 0.3; m.enterWait = 0.3; m.idleWait = 2
+        m.queueHevWorker()
+        expect(waitUntil(2) { m.hevRunning() }, "A runs")
+        usleep(30_000)
+        hev.outlivesStopUntil = Date().addingTimeInterval(1.0)
+        let done = DispatchSemaphore(value: 0)
+        var result: Error?? = .none
+        m.roam { result = .some($0); done.signal() }
+        expect(done.wait(timeout: .now() + 5) == .success, "the restart ended")
+        expect(result.map { $0 == nil } == true && m.coreStarts == 2, "the retry connects: \(String(describing: result)), starts \(m.coreStarts)")
+        expect(!m.reasserting && m.hevRunning() && !m.clearedWithoutHev && m.cancels.isEmpty,
+               "connected with hev running (reasserting \(m.reasserting), hev \(m.hevRunning()), cancels \(m.cancels))")
+        _ = m.stop()
+        _ = m.workers.wait(timeout: .now() + 3)
+    }
+    // 2. the earlier run never returns: both starts fail, the tunnel ends with the error - reasserting is never cleared
+    do {
+        let hev = ModelHev(native: .scoped)
+        let m = ProviderModel(hev: hev)
+        m.stopLimit = 0.2; m.enterWait = 0.2; m.idleWait = 0.3
+        m.queueHevWorker()
+        expect(waitUntil(2) { m.hevRunning() }, "A runs")
+        usleep(30_000)
+        hev.outlivesStopUntil = Date().addingTimeInterval(30)
+        let done = DispatchSemaphore(value: 0)
+        var failed = false
+        m.roam { failed = $0 != nil; done.signal() }
+        expect(done.wait(timeout: .now() + 5) == .success, "the restart ended")
+        expect(failed && m.coreStarts == 2 && m.cancels.count == 1 && m.reasserting && !m.clearedWithoutHev,
+               "two failures end the tunnel (cancels \(m.cancels), reasserting \(m.reasserting), cleared without hev \(m.clearedWithoutHev))")
+        hev.outlivesStopUntil = nil
+        _ = m.stop(bound: 5)
+        _ = m.workers.wait(timeout: .now() + 3)
+    }
+    // 3. the ordinary roam: the earlier run returns at once, one start, connected
+    do {
+        let m = ProviderModel(hev: ModelHev(native: .scoped))
+        m.queueHevWorker()
+        expect(waitUntil(2) { m.hevRunning() }, "A runs")
+        usleep(30_000)
+        let done = DispatchSemaphore(value: 0)
+        var ok = false
+        let began = Date()
+        m.roam { ok = $0 == nil; done.signal() }
+        expect(done.wait(timeout: .now() + 3) == .success && ok && m.coreStarts == 1, "the ordinary roam connects")
+        expect(Date().timeIntervalSince(began) < 0.3 && !m.reasserting && m.hevRunning() && m.hev.runs == 2,
+               "one restart, hev running (\(Date().timeIntervalSince(began)) s)")
+        _ = m.stop()
+        _ = m.workers.wait(timeout: .now() + 3)
+    }
+    // 4. the session's stop comes during a failing restart: no retry, no tunnel error, reasserting untouched
+    do {
+        let hev = ModelHev(native: .scoped)
+        let m = ProviderModel(hev: hev)
+        m.stopLimit = 0.2; m.enterWait = 0.2; m.idleWait = 1
+        m.queueHevWorker()
+        expect(waitUntil(2) { m.hevRunning() }, "A runs")
+        usleep(30_000)
+        hev.outlivesStopUntil = Date().addingTimeInterval(0.6)
+        let done = DispatchSemaphore(value: 0)
+        m.roam { _ in done.signal() }
+        usleep(100_000)
+        _ = m.slot.stopBegan()
+        expect(done.wait(timeout: .now() + 5) == .success, "the restart ended")
+        expect(m.cancels.isEmpty && !m.clearedWithoutHev && m.reasserting,
+               "a stopping session got no retry, no tunnel error, reasserting untouched (reasserting \(m.reasserting))")
+        _ = m.workers.wait(timeout: .now() + 3)
+    }
+    // 5. (review R50 1) the seat ends during the restart (a terminal renewal answer between its stop and its start):
+    //    the start is refused, nothing is retried and the tunnel is not cancelled, and `reasserting` is cleared - the
+    //    tunnel is back in the state of an ordinary terminal answer (Connected, core stopped by the lease), where the
+    //    app's status poll (Connected only) reads `upstream.state = terminal` and leaves the node (onUpstreamLeave).
+    do {
+        let m = ProviderModel(hev: ModelHev(native: .scoped))
+        m.queueHevWorker()
+        expect(waitUntil(2) { m.hevRunning() }, "A runs")
+        usleep(30_000)
+        m.duringRestartStop = { [m] in m.leaseStopped = true }
+        let done = DispatchSemaphore(value: 0)
+        var result: Error?? = .none
+        m.roam { result = .some($0); done.signal() }
+        expect(done.wait(timeout: .now() + 3) == .success, "the restart ended")
+        let refused = result.flatMap { $0 }.map { ($0 as? FakeStartError) == .leaseTerminal } ?? false
+        expect(refused && m.coreStarts == 1 && m.cancels.isEmpty,
+               "the lease's refusal is final: no retry, no tunnel error (result \(String(describing: result)), starts \(m.coreStarts), cancels \(m.cancels))")
+        expect(!m.reasserting,
+               "a lease that ended during the restart must not leave the tunnel reasserting (the app never polls a reasserting tunnel)")
+        expect(!m.hevRunning(), "no hev was started for a core the lease stopped")
+        _ = m.stop()
+        _ = m.workers.wait(timeout: .now() + 3)
     }
 }
 
@@ -674,6 +819,7 @@ private struct XraySocketCallbackLifecycleTests {
     static func main() throws {
         testStopDuringXrayStart()
         testRestartDoesNotInheritTheStop()
+        testRoamRestartFailure()
         testStopAfterReturnLeavesNothing()
         testHandshakeOrders()
         testHevThatNeverReturns()

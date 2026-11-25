@@ -996,6 +996,7 @@ struct World {
     int crossEvents = 0;                // machine events a host answer caused for ANOTHER scan than its own (must stay 0)
     bool poolOnOpen = false;
     QStringList hostEvents;             // "event scan" of every machine event caused by a host answer / held message
+    QString token = QString::fromLatin1(kDeviceToken); // the device token now (another account's: the server says 401)
 
     explicit World(const ScanHostCaps &caps = capsMac(), ScanNetKind kind = ScanNetKind::Wifi, int ownNodes = 8)
     {
@@ -1072,7 +1073,7 @@ struct World {
         };
         s->api()->log = [this](const QString &l) { logs << QStringLiteral("api ") + l; };
         s->configureApi(nullptr, []() { return QString::fromLatin1(kApiBase); }, [this]() { return server.key.pubHex(); },
-                        []() { return QString::fromLatin1(kDeviceToken); });
+                        [this]() { return token; });
         s->api()->setProbeRunner([this](const UpstreamLeaseClient::ProbeRequest &r, std::function<void(const UpstreamProbeFacts &)> done) {
             liveProbes << r;
             int delay = 120;
@@ -4339,6 +4340,59 @@ static void caseShowSlotAfterFailedRescan()
     w.s->close();
 }
 
+// Review R50 (finding 4): the stored pool belongs to the account it was fetched for. Account A's pool was kept across
+// launches; the person entered account B's code (the device token changed, the subscription cache was cleared) and
+// relaunched while the pool request failed - the Scanner offered A's countries and counts.
+static void caseStoredPoolOwner()
+{
+    g_case = QStringLiteral("stored_pool_owner");
+    const auto countries = [](World &w) {
+        return w.s->viewJson().value(QStringLiteral("bar")).toObject().value(QStringLiteral("scope_countries")).toArray().size();
+    };
+    {
+        World w;
+        w.server.scopeApi = true;
+        w.poolOnOpen = true;
+        w.start();
+        w.s->show();
+        w.run(5000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), 1);
+        CHECK(countries(w) > 0);                                   // account A's pool, kept for the next launch
+        CHECK(!w.store.read(QLatin1String(kScanPoolStoreKey)).isEmpty());
+        w.s->close();
+        w.s.reset();
+        w.token = QStringLiteral("ANOTHER-ACCOUNT-TOKEN");         // account B; its pool request fails (401 here)
+        w.start();
+        w.s->show();
+        w.run(5000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), 2);
+        CHECK_EQ(countries(w), 0);                                 // was A's countries and counts
+        CHECK(w.store.read(QLatin1String(kScanPoolStoreKey)).isEmpty()); // A's pool is not kept for B
+        w.s->close();
+        w.s.reset();
+        w.token = QString::fromLatin1(kDeviceToken);               // back to A, the pool request answers again
+        w.start();
+        w.s->show();
+        w.run(5000);
+        CHECK(countries(w) > 0);
+        w.s->close();
+    }
+    {
+        // the token changes while the pool request is in flight: its answer is A's - neither shown for B nor kept
+        World w;
+        w.server.scopeApi = true;
+        w.poolOnOpen = true;
+        w.start();
+        w.s->show(); // the request leaves with A's token
+        w.token = QStringLiteral("ANOTHER-ACCOUNT-TOKEN");
+        w.run(5000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), 1);
+        CHECK_EQ(countries(w), 0);
+        CHECK(w.store.read(QLatin1String(kScanPoolStoreKey)).isEmpty());
+        w.s->close();
+    }
+}
+
 static void caseServerScope()
 {
     g_case = QStringLiteral("server_scope");
@@ -4364,6 +4418,19 @@ static void caseServerScope()
         for (const QString &l : w.logs)
             logged = logged || l.startsWith(QLatin1String("pool fetched countries="));
         CHECK(logged);
+        w.s->close();
+        // Device round air-D, E1: a later launch whose pool fetch does not come (through the tunnel our API did not
+        // answer) still counts the pool - the last answer is kept - never the manifest's first screen («8 серверов»)
+        const QJsonObject before = bar;
+        w.s.reset();
+        w.poolOnOpen = false;
+        w.start();
+        w.s->show();
+        w.run(5000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), 1); // no second fetch
+        const QJsonObject again = w.s->viewJson().value(QStringLiteral("bar")).toObject();
+        CHECK(again.value("scope_whitelist").toInt() == before.value("scope_whitelist").toInt() && again.value("scope_whitelist").toInt() >= 0);
+        CHECK(again.value("scope_countries").toArray().size() == before.value("scope_countries").toArray().size());
         w.s->close();
     }
     {
@@ -4479,6 +4546,7 @@ int main(int argc, char **argv)
     caseFullScan();
     caseFullProbeProfileRule();
     caseServerScope();
+    caseStoredPoolOwner();
     caseChoiceSlotsAndStop();
     caseShowSlotAfterFailedRescan();
     caseLiveDigest();

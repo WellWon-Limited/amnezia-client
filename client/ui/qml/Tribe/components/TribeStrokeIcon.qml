@@ -54,7 +54,9 @@ Item {
         // the Scanner's network chip on a mobile network (Lucide «signal»), owner 18.11 - app only, like the keys above
         "cellular": "M2 20h.01 M7 20v-4 M12 20v-8 M17 20V8 M22 4v16",
         // Support's «Проверить подключение и отправить отчёт» (variant B, 18.11): the former Doctor button's glyph
-        "activity": "M22 12h-4l-3 9L9 3l-3 9H2"
+        "activity": "M22 12h-4l-3 9L9 3l-3 9H2",
+        // the Scanner's count badge «228» (owner 25.11: a server icon and the number; Lucide «server») - app only
+        "server": "M4 2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z M4 14h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z M6 6h.01 M6 18h.01"
     })
     readonly property string pathD: paths[icon] || ""
 

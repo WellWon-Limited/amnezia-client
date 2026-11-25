@@ -1060,8 +1060,13 @@ void VpnConnectionTunnelControl::adoptUpstreamSession()
     const UpstreamLeaseRecord rec = UpstreamLeaseRecord::fromJson(raw);
     if (!upstreamHandedOverRecordMatches(rec, liveNode, upstreamSessionOrderOf(meta), QDateTime::currentMSecsSinceEpoch())) {
         // Another start, a session started before this rule, or a broken record: not this app's seat to give back. The record
-        // stays - a later live session can never carry its order, and the next start replaces it.
-        qInfo() << "avpn upstream: the adopted session of" << liveNode << "is not the one the seat record names - its seat stays the extension's";
+        // stays - a later live session can never carry its order, and the next start replaces it. Written once per live session
+        // (the facade asks again on every tick while an adopted identity is unknown).
+        const QString told = liveNode + QLatin1Char('#') + QString::number(upstreamSessionOrderOf(meta));
+        if (told != m_adoptMismatchTold) {
+            m_adoptMismatchTold = told;
+            qInfo() << "avpn upstream: the adopted session of" << liveNode << "is not the one the seat record names - its seat stays the extension's";
+        }
         return;
     }
     m_upStub = SubscriptionNode{};

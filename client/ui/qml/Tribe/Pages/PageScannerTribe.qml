@@ -8,15 +8,16 @@ import "../components"
 import "../../Controls2" // PageType
 
 // AVPN: the Scanner («Сканер») - ONE screen (owner 24.11, the same on every platform):
-//  - header: back arrow left, the title at the right edge («Сканер» on the choice, the scope's name on its result);
-//    under it two badges of one kind (TribePill): the servers of the selected scope left («69 серверов»), the network
-//    right («Wi‑Fi» / «LTE»);
+//  - header (owner 25.11): back arrow, the title right after it («Сканер» on the choice, the scope's name on its
+//    result), the caption «Подбор серверов» at the right edge; under it two badges of one kind (TribePill): the servers
+//    of the selected scope left (the server icon and «69»; the screen reader says «69 серверов»), the network right
+//    («Wi‑Fi» / «LTE»);
 //  - the rings: the scrolling list's FIRST item in every state, never removed (a long list scrolls them away, no
-//    band stays). Before a scan (the choice) they are drawn small and still with the radar glyph (Theme.scan.heroIdle:
-//    the rings and four countries fit above the button on a phone); a scan grows them to Theme.scan.hero and they
-//    move; a result keeps them there, still, with the number of available servers in the core (0 too) and the check's
-//    age under them; «Остановить» keeps what was found (the same count, «Скан остановлен»); a refused scan («Скан
-//    сейчас невозможен») greys them with the reason's icon in the core;
+//    band stays), ONE size in one place in every state (owner 25.11: Theme.scan.hero, no animation between the choice
+//    and a result; the status line under them only with a scan or its result). The choice: still, with the radar
+//    glyph; a scan: they move; a result: still, with the number of available servers in the core (0 too) and the
+//    check's age under them; «Остановить» keeps what was found (the same count, «Скан остановлен»); a refused scan
+//    («Скан сейчас невозможен») greys them with the reason's icon in the core;
 //  - under the rings EITHER the choice: the live connection's row first (when there is one), then «ВЫБЕРИТЕ СТРАНУ»:
 //    «Все страны» (selected when the page opens), «Белые списки» when the pool has them, every country of the pool;
 //    a tap only SELECTS (the kit's selection: chipSelected + accent border + the «Авто» card's check circle), a scope
@@ -199,12 +200,14 @@ PageType {
         list.contentY = 0
         pane = "result"
     }
-    // back to the choice; a running scan is stopped (it keeps what it found: that scope's fresh result)
+    // back to the choice; a running scan is stopped (it keeps what it found: that scope's fresh result); the selected
+    // row is brought into view (device round air-C, D7)
     function showChoice() {
         stopPending = false
         if (scanning && hasScanner) TribeScanner.stop()
         list.contentY = 0
         pane = "choose"
+        revealSelected()
     }
     // «Остановить»: the machine keeps what the scan found (Done, its count in the rings, view.partial); stopped before
     // anything was found it is idle again - nothing to show, the page goes back to the choice
@@ -229,8 +232,14 @@ PageType {
     // the result shows nothing of its scope (a scan the machine refused at once, a network change): its summary
     // (the live connection's row, when there is one, is always above it and does not count)
     readonly property bool scopeStart: !choosing && !scanning && !blocked && !emptyResult && otherCount === 0
+    // the pool's answer is known (fetched now or kept from an earlier launch): scope_whitelist stays -1 until then; the
+    // countries before it are the manifest's first screen, never the pool's size (device round air-D, E1: «8 серверов»
+    // instead of 228 when the fetch failed through the tunnel) - no total is shown then
+    readonly property bool poolKnown: Number(barView.scope_whitelist ?? -1) >= 0
     // the servers of a scope: «Все страны» scans every row of the pool - the countries AND the white lists (review F3)
     function scopeCount(cc) {
+        if (!poolKnown)
+            return 0
         if (cc === "whitelist")
             return Math.max(0, poolWhitelist)
         let n = cc === "" ? Math.max(0, poolWhitelist) : 0
@@ -307,8 +316,6 @@ PageType {
         // owner 24.11: the page opens on the choice with «Все страны» selected; only a scan that already runs (Support's
         // check started it with the page closed) is shown as it goes
         pane = scanning ? "result" : "choose"
-        heroFrac = choosing ? 0 : 1
-        heroReady = true
     }
     // leaving the screen = closed(): a running scan stops, a pending connect the scan started is cancelled (S19)
     Component.onDestruction: if (hasScanner) TribeScanner.close()
@@ -401,29 +408,11 @@ PageType {
         anyCrowd = crowd
     }
 
-    // ── the rings' size: small on the choice, full on a result (one rule, every screen) ──
-    // heroFrac 0 = Theme.scan.heroIdle (the choice), 1 = Theme.scan.hero + the status line (a scan and its result). It
-    // changes only with the view (a scan starts from the choice / back to the choice): the list is at its top then, so
-    // only the content under the rings moves, once, smoothly. A scan that ends keeps the size - nothing collapses.
-    property real heroFrac: 0
-    property bool heroReady: false
-    onChoosingChanged: {
-        if (!heroReady) return
-        heroAnim.to = choosing ? 0 : 1
-        heroAnim.restart()
-    }
-    NumberAnimation {
-        id: heroAnim
-        target: root; property: "heroFrac"
-        duration: Theme.motion.reduceMotion ? 0 : Theme.motion.slow
-        // in-out: the list under the block starts moving gently (OutCubic moved it 35 px in the first frame)
-        easing.type: Easing.InOutCubic
-        // back on the choice, the rings small again: the selected row in view (device round air-C, D7)
-        onStopped: if (root.choosing) root.revealSelected()
-    }
     // the choice's selected row brought into the list's view (Back from a result of a country far down the list left it
-    // off screen); nothing moves when it is already in view
+    // off screen); nothing moves when it is already in view. The choice was hidden until now: its rows are placed first.
     function revealSelected() {
+        chooseCol.forceLayout()
+        content.forceLayout()
         let row = null
         for (let i = 0; i < chooseCol.children.length && !row; ++i)
             if (chooseCol.children[i].objectName === "scannerScope_" + (selected === "" ? "all" : selected))
@@ -440,7 +429,7 @@ PageType {
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
     TribeEdgeBack { onTriggered: root.navBack() }
 
-    // ── header: back left, the title at the right edge (owner 24.11) ──
+    // ── header (owner 25.11): back, the title right after it, «Подбор серверов» at the right edge ──
     TribeHeader {
         id: header
         anchors.top: parent.top
@@ -448,13 +437,15 @@ PageType {
         anchors.left: parent.left
         anchors.right: parent.right
         title: root.choosing ? ScanTexts.title : bar.countryName(root.scope)
-        titleAlignment: Qt.AlignRight
+        titleAlignment: Qt.AlignLeft
+        caption: ScanTexts.titleCaption
         showBack: true
         onBackClicked: root.navBack()
     }
 
     // ── the two badges under the header, one component (TribePill): the servers of the selected scope left (owner
-    // 24.11: «как бейдж Wi‑Fi»), the network right. The row is fixed under the header in every state.
+    // 24.11: «как бейдж Wi‑Fi»; 25.11: the server icon and the number only), the network right. The row is fixed under
+    // the header in every state.
     Item {
         id: badgesRow
         anchors.top: header.bottom
@@ -472,8 +463,10 @@ PageType {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             visible: badgesRow.count > 0
-            icon: "globe"
-            text: ScanTexts.servers(badgesRow.count)
+            icon: "server"
+            text: String(badgesRow.count)
+            // the whole phrase for the screen reader and the UI driver: «228 серверов»
+            Accessible.name: ScanTexts.servers(badgesRow.count)
         }
         TribePill {
             objectName: "scannerNetBadge"
@@ -507,27 +500,27 @@ PageType {
             contentWidth: width
             contentHeight: content.y + content.height + padBottom
 
-            // ── the rings + one status line + a thin bar: ONE block, the list's first item ──
+            // ── the rings + one status line + a thin bar: ONE block, the list's first item. The rings are one size in one
+            // place in every state (owner 25.11, no animation); the status line is there while a scan or its result is
+            // shown - the choice has nothing to say under the rings, so no blank line ──
             Item {
                 id: ringsBox
                 objectName: "scannerRings"
                 y: list.padTop
                 width: list.width
-                readonly property real band: Theme.scan.heroIdle + (Theme.scan.hero - Theme.scan.heroIdle) * root.heroFrac
                 // + the gap to the first item under it
-                height: band + status.implicitHeight * root.heroFrac + Theme.space.md
+                height: Theme.scan.hero + (status.visible ? status.implicitHeight : 0) + Theme.space.md
                 Accessible.role: Accessible.Graphic
                 Accessible.name: root.ringMode === "scan" ? root.stageText
                                  : root.ringMode === "count" ? ScanTexts.ringName.arg(root.foundCount)
                                  : root.ringMode === "alert" ? (root.block.title || "")
                                  : ScanTexts.title
-                // the rings at their own 250, scaled to the band (the found number and the icon scale with them)
+                // the rings at their own 250, centred on the band
                 Item {
                     width: 250
                     height: 250
                     x: (parent.width - width) / 2
-                    y: (ringsBox.band - height) / 2
-                    scale: ringsBox.band / Theme.scan.hero
+                    y: (Theme.scan.hero - height) / 2
                     SignalRing {
                         anchors.centerIn: parent
                         ringState: root.ringMode === "alert" ? "off" : "scanning"
@@ -569,10 +562,9 @@ PageType {
                 }
                 ColumnLayout {
                     id: status
-                    y: ringsBox.band
+                    y: Theme.scan.hero
                     width: parent.width
-                    opacity: root.heroFrac
-                    visible: opacity > 0
+                    visible: !root.choosing
                     spacing: Theme.space.sm
                     Text {
                         Layout.fillWidth: true
@@ -1173,7 +1165,7 @@ PageType {
         height: Theme.scan.rowHeight
         selected: chosen
         title: name
-        subtitle: count > 0 ? ScanTexts.servers(count) : ""
+        subtitle: count > 0 && root.poolKnown ? ScanTexts.servers(count) : ""
         monoSubtitle: false
         leftItem: Item {
             width: Theme.scan.flag

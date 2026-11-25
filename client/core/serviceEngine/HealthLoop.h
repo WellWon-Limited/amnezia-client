@@ -63,7 +63,9 @@ public:
         // Снапшот порогов ОДИН раз на вызов (= один тик ServiceEngine::tick() для этой ноды),
         // не дёргать TuningStore на каждое внутреннее сравнение.
         const HealthThresholds th = HealthThresholds::fromTuning();
-        if (m_hasPrev && badCycle(m_prev, cur, nowEpoch, th.maxAgeSec))
+        TunnelStats judged = cur; // K1 (air-D): a handshake is never older than what was observed on this network
+        judged.latestHandshakeEpoch = handshakeForVerdict(cur.latestHandshakeEpoch);
+        if (m_hasPrev && badCycle(m_prev, judged, nowEpoch, th.maxAgeSec))
             ++m_bad;
         else
             m_bad = 0;
@@ -155,8 +157,33 @@ public:
             return false;
         return nowMs < startedMs || nowMs - startedMs > timeoutBudgetMs + kProbeSuspensionSlackMs;
     }
-    // The newest handshake time the loop has seen (0 = none since the last reset).
-    qint64 latestHandshakeEpoch() const { return m_hasPrev ? m_prev.latestHandshakeEpoch : 0; }
+    // Device round air-D (K1): the "how long without a handshake / without data" inputs of a verdict count only what was
+    // observed on the CURRENT network. A network change restarts them (evidenceSinceEpoch) - but never later than
+    // kEvidenceDeferralMaxSec after the first change of a series of changes less than that apart, so a flapping network
+    // cannot mute the verdict forever. 0 = never noted: every platform that does not opt in (the rule of 141).
+    static constexpr qint64 kEvidenceDeferralMaxSec = 120;
+    void noteEvidenceRestart(qint64 nowEpoch)
+    {
+        noteChangeSeries(nowEpoch);
+        moveEvidence(nowEpoch);
+    }
+    // Review of tribe.19 (L3): one series of changes for every input. noteChangeSeries notes a change (any source) and
+    // returns whether it is still inside the bound (at most kEvidenceDeferralMaxSec after the first change of the
+    // series): only then may it reset the failed-probe count; moveEvidence moves the evidence anchor (a real network
+    // change only), never past the bound.
+    bool noteChangeSeries(qint64 nowEpoch)
+    {
+        if (m_lastEvidenceChange <= 0 || nowEpoch - m_lastEvidenceChange >= kEvidenceDeferralMaxSec)
+            m_evidenceSeriesStart = nowEpoch;
+        m_lastEvidenceChange = nowEpoch;
+        return nowEpoch <= m_evidenceSeriesStart + kEvidenceDeferralMaxSec;
+    }
+    void moveEvidence(qint64 nowEpoch) { m_evidenceSinceEpoch = qMin(nowEpoch, m_evidenceSeriesStart + kEvidenceDeferralMaxSec); }
+    qint64 evidenceSinceEpoch() const { return m_evidenceSinceEpoch; }
+    // A known handshake as the verdicts read it: not older than the start of the evidence (0 = unknown stays 0).
+    qint64 handshakeForVerdict(qint64 hs) const { return (hs > 0 && m_evidenceSinceEpoch > hs) ? m_evidenceSinceEpoch : hs; }
+    // The newest handshake time the loop has seen (0 = none since the last reset), as the verdicts read it.
+    qint64 latestHandshakeEpoch() const { return m_hasPrev ? handshakeForVerdict(m_prev.latestHandshakeEpoch) : 0; }
 
 private:
     void resetSampling()
@@ -174,6 +201,9 @@ private:
     qint64 m_graceUntilEpoch = 0;  // B8: до этого момента (epoch сек) DEAD не выносим
     qint64 m_graceSeriesStart = 0; // REV-5: первая смена текущей серии
     bool m_hasGraceSeries = false;
+    qint64 m_evidenceSinceEpoch = 0;  // K1 (air-D): what the verdicts count from (0 = not opted in)
+    qint64 m_evidenceSeriesStart = 0;
+    qint64 m_lastEvidenceChange = 0;
 };
 
 } // namespace avpn

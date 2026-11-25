@@ -276,6 +276,10 @@ inline constexpr int kScanCacheMaxNetworks = 8;
 // reporting key: that key is refined on the same network (scanNetIdentity) and the result must stay found. The
 // "-v2" store forgets the results an earlier build keyed by (reporting key, fingerprint) - they age out of the index.
 QString scanCacheStoreKey(const QString &fingerprint);
+// Review R50 (finding 4): whose stored pool it is - 16 hex of a domain-separated SHA-256 of the device token the pool
+// was fetched with (the identity the subscription cache is bound to, Enrollment::saveToken); never the token itself.
+// "" = no token.
+QString scanPoolOwnerTag(const QString &deviceToken);
 
 class TribeScanner : public QObject
 {
@@ -370,6 +374,9 @@ public:
     // The engine refused a ConnectRow before touching the tunnel (the pin failed, the row's node is gone): the row
     // returns to its normal state and the list takes taps again. Safe to call from inside connectRow (queued).
     void connectRefused(const QString &nodeId);
+    // The engine dropped a row's request before the row's own attempt began (DebugSnapshot.h scanRowAttemptObserve,
+    // dropped): no verdict for the row, the person is told the connect did not start.
+    void rowRequestDropped(const QString &nodeId);
     void reportQueueChanged();
     void refreshSwitches();
     void noteUpstreamRevision(qint64 revision);
@@ -624,6 +631,8 @@ private:
 
     ScanNetwork m_lastNet;
     qint64 m_poolAt = -1;            // when /v1/scan/pool last answered (or was asked); the server allows 60 per hour
+    QString m_poolOwner;             // R50 4: scanPoolOwnerTag of the account the pool in force was fetched for
+    std::function<QString()> m_deviceToken; // configureApi: the device token now (whose pool is shown and kept)
     bool m_poolUnsupported = false;  // an older server: no pool endpoint
     // The stub node of every /v1/scan/candidates provider row seen in this run (node id -> SubscriptionNode JSON, no
     // config): the engine keeps only its newest offered stubs (ServiceEngine::kMaxScanOffered), so a row of an early

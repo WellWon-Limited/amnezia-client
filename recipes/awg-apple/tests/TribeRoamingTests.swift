@@ -358,14 +358,17 @@ do {
 do {
     var arbiter = TribeRecoveryArbiter()
     var performed: [(Double, TribeStallAction)] = []
-    for tick in 1...40 {
+    for tick in -3...40 {
         let at = Double(tick)
-        let sample = s(UInt64(at * 5000), 5000, 100, at)
+        // tribe.20: data until 1 s - the session proved itself right before the roam (no K2 proof restart)
+        let sample = s(UInt64(max(0, at) * 5000), 5000 + UInt64(min(tick, 1) + 3) * 1000, 100, at)
         if tick == 2 { arbiter.noteRoamRebind(sample, freshPort: true); continue }
         if case .perform(let action) = arbiter.tick(sample, pathSatisfied: true, policy: seamless) { performed.append((at, action)) }
     }
     check(performed.map { $0.1 } == [.softRestart], "roam fresh port, then the soft restart: \(performed)")
-    check(performed.first?.0 == 15, "soft restart 14 s after the last inbound progress (tick 1): \(performed)")
+    // tribe.19 (K1): the roam (another network) restarts the stall clock: 14 s from the roam at 2 s (tribe.9-18:
+    // from the last inbound progress at 1 s, i.e. 15 s). The session had data at the roam: no K2 restart.
+    check(performed.first?.0 == 16, "soft restart 14 s after the roam: \(performed)")
 }
 
 // tribe.9: path events WITHOUT a loss (same-port bumps) every 4 s do not starve the ladder
@@ -399,26 +402,35 @@ do {
         }
         if case .perform(let action) = arbiter.tick(sample, pathSatisfied: satisfied, policy: seamless) { performed.append((at, action)) }
     }
-    check(performed.map { $0.1 } == [.rebindPort, .softRestart], "fresh port before the outage, soft restart after the roam fresh port: \(performed)")
-    check(performed.first?.0 == 5 && performed.last?.0 == 33, "soft restart 10 s after the roam fresh port (23 s), not 3 s: \(performed)")
+    // tribe.19 (K2): the session came back with a repair still open (the fresh port at 5 s, no data since):
+    // its path is proved at once by the roam's soft restart (tribe.10-18: 10 s later, at 33 s).
+    // tribe.20 (L2): that proof restart is not a ladder step: on the new network the ladder keeps its own times
+    // (the roam's fresh port, then its soft restart 14 s after the roam: 37 s).
+    check(performed.map { $0.1 } == [.rebindPort, .softRestart, .softRestart], "fresh port before the outage, the proof restart at the roam, the ladder's: \(performed)")
+    check(performed.map { $0.0 } == [5, 23, 37], "the roam's proof restart at 23 s, the ladder's soft restart at 37 s: \(performed)")
 }
 
-// tribe.10: a roam fresh port every 4 s (flapping cellular path) does not starve the ladder: the
-// soft restart follows 10 s after the first fresh port; at stage 3 the next roam fresh port counts
-// as the due fresh-port step (no second new port for a socket that just got one), and the next
-// soft restart comes after its 60 s backoff.
+// tribe.10: a roam fresh port every 4 s (flapping cellular path) does not starve the repair.
+// tribe.19 (K1/K2): every such roam is another network, so the ladder's clock starts again each time; the
+// repair comes from the roams themselves: a roam with no data since the previous one asks for one soft
+// restart, through the shared budget - at most the rolling cap (4) in any 120 s, the same-kind cooldown
+// between two (8 s here).
 do {
     var arbiter = TribeRecoveryArbiter()
     var performed: [(Double, TribeStallAction)] = []
-    for tick in 1...80 {
+    for tick in 1...300 {
         let at = Double(tick)
         let sample = s(UInt64(at * 5000), 5000, 100, at)
         if tick % 4 == 0 { arbiter.noteRoamRebind(sample, freshPort: true) }
         if case .perform(let action) = arbiter.tick(sample, pathSatisfied: true, policy: seamless) { performed.append((at, action)) }
     }
-    check(performed.map { $0.1 } == [.softRestart, .softRestart], "roam fresh ports, soft restart, roam fresh port as the stage-3 step, soft restart: \(performed)")
-    check(performed.map { $0.0 } == [15, 76], "soft restart 10 s after the first roam fresh port (4 s), next soft restart 60 s after the roam step at 16 s: \(performed)")
-    check(arbiter.tracker?.persistentSteps == 4, "roam fresh ports took the stage-3 fresh-port steps (16 s and 80 s): \(String(describing: arbiter.tracker?.persistentSteps))")
+    // tribe.20: inside the series bound (120 s after the first roam at 4 s) only the roams' proof restarts act,
+    // one per 60 s; after the bound the roams no longer restart the clock and the ladder repairs again.
+    let inside = performed.filter { $0.0 < 124 }
+    check(inside.allSatisfy { $0.1 == .softRestart } && inside.map { $0.0 } == [4, 64], "proof restarts one per 60 s inside the series bound: \(performed)")
+    check(performed.contains { $0.0 > 124 && $0.0 < 160 }, "after the bound the ladder repairs again: \(performed)")
+    let window = performed.map { first in performed.filter { $0.0 >= first.0 && $0.0 < first.0 + 120 }.count }.max() ?? 0
+    check(window <= TribeRecoveryBudget.rollingCap + 2, "within the rolling cap plus two proof restarts: \(window)")
 }
 
 // tribe.10: an `.episode` refusal below stage 3 re-syncs the tracker with the budget (counters
@@ -911,6 +923,134 @@ do {
 }
 // END REVIEW 2 REPLAYS
 
+// BEGIN AIR-D REPLAYS (device round air-D, 24-25.11; only the API of tribe.18 / 2a705d9c7: run against both files)
+// The round's numbers: Германия 1 (AWG, fleet bundle) on Wi-Fi; Wi-Fi off -> LTE, on which AmneziaWG passed NO data and
+// completed no handshake that night; Wi-Fi back after 46 / 48 / 61 s (runs 3-5). Field facts the model keeps: on the dead
+// LTE the ladder soft-restarted (the new device then has no keypair: only its unanswered initiations go out, 556 B every
+// 5 s); after the Wi-Fi return a device started BEFORE it never recovered in place (3 of 3 runs: roam_fresh_ports +1,
+// soft_restarts +0, no data), while a device started on the Wi-Fi handshakes within ~1 s and carries data (every prep:
+// connected in 2 s). User/app demand 1500 B/s while a keypair can send.
+struct AirDRun { var steps: [(at: Int, action: TribeStallAction)] = []; var dataAt: Int?; var reported: [Int: Int64] = [:] }
+func airDReplay(backAt: Int, wifiWorks: Bool = true, horizon: Int = 130) -> AirDRun {
+    let fleet = TribeServiceTraffic.fromConfig(jc: "6", jmax: "50", s1: "64", s4: "64", specialJunk: ["<r 44>", nil, nil, nil, nil],
+                                               contentPaddingAddition: "10-100", randomTrailers: "0", mtu: "1280", persistentKeepalive: "25")
+    let policy = sessionPolicy(fleet)
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var hs: Int64 = 1_800_000_000
+    var keypair = true          // the current device can send (its handshake is done)
+    var deviceOnWifi = false    // the current device was started after the Wi-Fi return
+    var handshakeDue: Int?      // a device started on a working network completes its handshake then
+    var run = AirDRun()
+    for t in -20...horizon {
+        let pathWorks = t < 0 || (t >= backAt && wifiWorks && deviceOnWifi)
+        if let due = handshakeDue, t >= due {
+            handshakeDue = nil; keypair = true; tx += fleet.handshakeTxBytes; rx += 92; hs = 1_800_000_000 + Int64(t + 20)
+        }
+        if keypair { tx += 1500 } else if t % 5 == 0 { tx += 556 }
+        if pathWorks && keypair { rx += 20_000; if t >= backAt && run.dataAt == nil { run.dataAt = t } }
+        let sample = s(tx, rx, hs, Double(t))
+        if t == 0 || t == backAt { arbiter.noteRoamRebind(sample, freshPort: true) }
+        if case .perform(let a) = arbiter.tick(sample, pathSatisfied: true, policy: policy) {
+            if t >= 0 { run.steps.append((t, a)) }
+            if a == .softRestart {
+                tx = 0; rx = 0; hs = 0; keypair = false
+                deviceOnWifi = t >= backAt
+                arbiter.rebaseAfterBackendRestart(s(0, 0, 0, Double(t)))
+                if deviceOnWifi && wifiWorks { handshakeDue = t + 1 }
+            }
+        }
+        run.reported[t] = arbiter.dataQuietSeconds(at: Double(t))
+    }
+    return run
+}
+do {
+    for back in [46, 48, 61] {
+        let r = airDReplay(backAt: back)
+        let after = r.steps.filter { $0.at >= back }
+        let reported = stride(from: back + 4, through: back + 40, by: 4).map { r.reported[$0] ?? -9 }
+        print("  air-D Wi-Fi back at \(back) s: on LTE \(r.steps.filter { $0.at < back }.map { "\($0.action.logName)@\($0.at)s" }), after it \(after.map { "\($0.action.logName)@+\($0.at - back)s" }) data at \(r.dataAt.map { "+\($0 - back)s" } ?? "never") data_stall_s at +4..+40 s: \(reported)")
+        check(after.first.map { $0.action == .softRestart && $0.at - back <= 2 } ?? false, "air-D back at \(back): the roam of a session without a data path proves it at once: \(after)")
+        check(r.dataAt.map { $0 - back <= 5 } ?? false, "air-D back at \(back): data within 5 s of the Wi-Fi return: \(String(describing: r.dataAt))")
+        check(reported.allSatisfy { $0 < 45 }, "air-D back at \(back): the extension never reports 45 s of stall on the Wi-Fi: \(reported)")
+    }
+    // The server really dead on the new network: the ladder goes on, the verdict counts from the roam (not from LTE).
+    let dead = airDReplay(backAt: 46, wifiWorks: false, horizon: 160)
+    let firstReach = (46...160).first { (dead.reported[$0] ?? 0) >= 45 }
+    print("  air-D dead on the Wi-Fi too: steps after the return \(dead.steps.filter { $0.at >= 46 }.map { "\($0.action.logName)@+\($0.at - 46)s" }) data_stall_s >= 45 from \(firstReach.map { "+\($0 - 46)s" } ?? "never")")
+    check(firstReach.map { $0 - 46 >= 45 && $0 - 46 <= 60 } ?? false, "air-D dead: the verdict reaches 45 s 45-60 s after the return (counted on the Wi-Fi): \(String(describing: firstReach))")
+}
+do {
+    // (c) Wi-Fi <-> LTE flapping every 20 / 25 / 30 s on a path that passes nothing: every roam may ask for its one soft
+    // restart, never more than the rolling cap (4) in any 120 s, never two from one roam.
+    for period in [20, 25, 30] {
+        var arbiter = TribeRecoveryArbiter(jitter: 2)
+        var restarts: [Int] = []
+        var roams: [Int] = []
+        for t in 1...600 {
+            let sample = s(UInt64(t * 1500), 5000, 100, Double(t))
+            if t % period == 0 { arbiter.noteRoamRebind(sample, freshPort: true); roams.append(t) }
+            if case .perform(.softRestart) = arbiter.tick(sample, pathSatisfied: true, policy: seamless) { restarts.append(t) }
+        }
+        let window = restarts.map { first in restarts.filter { $0 >= first && $0 < first + 120 }.count }.max() ?? 0
+        let perRoam = roams.map { r in restarts.filter { $0 >= r && $0 < r + period }.count }.max() ?? 0
+        print("  (c) flapping every \(period) s, dead path, 10 min: \(restarts.count) soft restarts, max \(window) in 120 s, max \(perRoam) per roam interval")
+        // tribe.20: the ladder's 4 per 120 s plus the roams' proof restarts, one per 60 s (2 per 120 s).
+        check(window <= TribeRecoveryBudget.rollingCap + 2 && perRoam <= 2, "(c) flapping every \(period) s stays inside the cap: \(restarts)")
+    }
+}
+// END AIR-D REPLAYS
+
+// BEGIN REVIEW 3 REPLAYS (review of tribe.19; only the API of tribe.19 / 28cd57c32: run against both files)
+/// Roams every `every` s for `horizon` s with the fleet session: `demand` B/s of user traffic, handshakes complete every
+/// 15 s (a new device's 1 s after it starts), `data(t)` = inbound data bytes in second t.
+struct RoamSeries { var steps: [(at: Int, action: TribeStallAction)] = []; var reported: [Int: Int64] = [:] }
+func roamSeries(every: Int, horizon: Int, demand: (Int) -> UInt64, data: (Int) -> UInt64, rekeyEvery: Int = 15) -> RoamSeries {
+    let fleet = TribeServiceTraffic.fromConfig(jc: "6", jmax: "50", s1: "64", s4: "64", specialJunk: ["<r 44>", nil, nil, nil, nil],
+                                               contentPaddingAddition: "10-100", randomTrailers: "0", mtu: "1280", persistentKeepalive: "25")
+    let policy = sessionPolicy(fleet)
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var hs: Int64 = 1_800_000_000
+    var nextHandshake = 1
+    var out = RoamSeries()
+    for t in -10...horizon {
+        tx += demand(t)
+        if t % 25 == 0 { tx += fleet.keepaliveTxBytes }
+        if t >= nextHandshake { tx += fleet.handshakeTxBytes; rx += 92; hs = 1_800_000_000 + Int64(t + 10); nextHandshake = t + rekeyEvery }
+        rx += t < 0 ? 5000 : data(t)
+        let sample = s(tx, rx, hs, Double(t))
+        if t > 0 && t % every == 0 { arbiter.noteRoamRebind(sample, freshPort: true) }
+        if case .perform(let a) = arbiter.tick(sample, pathSatisfied: true, policy: policy) {
+            out.steps.append((t, a))
+            if a == .softRestart { tx = 0; rx = 0; hs = 0; arbiter.rebaseAfterBackendRestart(s(0, 0, 0, Double(t))); nextHandshake = t + 1 }
+        }
+        out.reported[t] = arbiter.dataQuietSeconds(at: Double(t))
+    }
+    return out
+}
+do {
+    // L1: roams every 20 s, 1500 B/s of user traffic, only handshakes come back: the verdict must reach 45 s
+    // (the app fails over at its next failed probe) - no later than ~165 s.
+    let l1 = roamSeries(every: 20, horizon: 600, demand: { _ in 1500 }, data: { _ in 0 })
+    let reach = (1...600).first { (l1.reported[$0] ?? 0) >= 45 }
+    // the first roam is at 20 s: the series bound is 140 s, the verdict counts from there
+    print("  L1 roams every 20 s under demand, no data: verdict >= 45 s first at \(reach.map { "\($0) s (\($0 - 20) s after the first roam)" } ?? "never")")
+    check(reach.map { $0 - 20 <= 168 } ?? false, "L1: the verdict reaches 45 s by ~165 s after the first roam: \(String(describing: reach))")
+    // L2: an idle healthy phone roaming every 20 s (keepalives, re-keys every 120 s, no user traffic): at most one
+    // proof restart per 60 s; a real stall at 300 s (1500 B/s unanswered) is repaired on the ladder's times.
+    let idle = roamSeries(every: 20, horizon: 290, demand: { _ in 0 }, data: { _ in 0 }, rekeyEvery: 120)
+    let restarts = idle.steps.filter { $0.action == .softRestart }.map { $0.at }
+    let spacing = zip(restarts.dropFirst(), restarts).map { $0 - $1 }.min() ?? 999
+    print("  L2 idle roams every 20 s, 290 s: soft restarts at \(restarts), min spacing \(spacing) s")
+    check(spacing >= 60, "L2: at most one proof restart per 60 s on an idle healthy session: \(restarts)")
+    let stall = roamSeries(every: 20, horizon: 400, demand: { t in t >= 300 ? 1500 : 0 }, data: { _ in 0 }, rekeyEvery: 120)
+    let repair = stall.steps.filter { $0.at >= 300 }
+    print("  L2 then a real stall at 300 s: steps \(repair.map { "\($0.action.logName)@\($0.at)" })")
+    check(repair.first.map { $0.at <= 320 } ?? false, "L2: the real stall is repaired within ~20 s: \(repair)")
+}
+// END REVIEW 3 REPLAYS
+
 // tribe.17: B1 with the fleet's and the heavy-junk sessions (their handshakes and keepalives in the
 // world, their service traffic in the policy): still the engine restart about 15 s after the roam.
 do {
@@ -963,8 +1103,9 @@ do {
     check(quiet[10] == 0, "data flowing: 0 s: \(String(describing: quiet[10]))")
     // tribe.17: reported only while stalled now - 0 while the echo arrives (12 s), and once stalled again
     // counted from the last PROOF (10 s), not from the echo.
-    check(quiet[12] == 0 && quiet[20] == 10, "the echo at 12 s does not refresh it: \(String(describing: quiet[12])) \(String(describing: quiet[20]))")
-    check(quiet[39] == 29 && quiet[40] == 0, "data 29 s after the roam proves the path again: \(String(describing: quiet[39])) \(String(describing: quiet[40]))")
+    // tribe.19 (K1): counted from the roam at 11 s (another network), not from the last proof at 10 s.
+    check(quiet[12] == 0 && quiet[20] == 9, "the echo at 12 s does not refresh it: \(String(describing: quiet[12])) \(String(describing: quiet[20]))")
+    check(quiet[39] == 28 && quiet[40] == 0, "data 29 s after the roam proves the path again: \(String(describing: quiet[39])) \(String(describing: quiet[40]))")
     check(arbiter.dataQuietSeconds(at: 60 + TribeRecoveryArbiter.quietSampleMaxAgeSeconds + 1) == -1, "stale samples: unknown")
     var counters = TribeRoamingCounters()
     counters.dataQuietSeconds = 7

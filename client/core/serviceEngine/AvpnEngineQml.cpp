@@ -733,8 +733,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
 #endif
     connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamSessionAdopted, this,
             [this](const QString &nodeId) {
-                // macOS: the daemon's live Xray session is this upstream node (its record) - identify it.
+                // macOS: the daemon's live Xray session is this upstream node (its record) - identify it (air-D S2: by the
+                // record's stub when the node is not in the pool now, a Scanner row's profile).
                 syncIntent(); // I7: an adopted session is stamped with the value in force
+                restoreAdoptedUpstreamNode();
                 m_engine.adoptTunnelConnected(nodeId, QStringLiteral("xray"), QString());
                 reliabilityEvent(QStringLiteral("upstream_adopt node=%1").arg(nodeId));
                 emit changed();
@@ -1026,6 +1028,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // Эндпоинты по приоритету: свой бэкенд-пинг (тот же путь, что и control plane) → публичный фолбэк.
     // Поток RTT → m_signal (EWMA+гистерезис) → liveBars 0..5. Запуск — из onTick(), когда Connected.
     m_probe = new QualityProbe(m_nam, this);
+#ifdef Q_OS_IOS
+    // Device round air-D (K1): on iOS every network change restarts what the AmneziaWG verdicts count (ServiceEngine).
+    m_engine.setRestartEvidenceOnNetworkChange(true);
+#endif
     m_probe->setEndpoints({livePingUrl(),
                            QStringLiteral("https://connectivitycheck.gstatic.com/generate_204")});
     connect(m_probe, &QualityProbe::result, this, [this](int rttMs, bool reachable) {
@@ -1037,8 +1043,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // from the app to a CGNAT address raised the system "Local Network" permission prompt.
         m_liveRtt = m_signal.smoothedRtt();
         m_liveReachable = reachable;
-        if (reachable)
-            m_liveProven = true;     // 5.1.108: ONLINE without node_scan (dataFlowingNow)
+        m_liveProof = avpn::liveProofAfterProbe(m_liveProof, reachable); // 5.1.108: ONLINE without node_scan (dataFlowingNow)
         // AVPN (красные палочки): различаем «ещё мерю» (m_liveDead=false → плейсхолдер 1 зелёная)
         // и «связь подтверждённо мертва» (m_liveDead=true → 0 зелёных + все красные). Один таймаут
         // в «мертво» НЕ роняем — ждём kLiveDeadStreak неудач подряд (анти-фликер на транзиентном дропе).
@@ -1069,7 +1074,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                                                                    m_probe->timeoutBudgetMs()))
             return;
 #endif
-        if (m_engine.feedProbeResult(reachable)) { // a dead live session: the failover attempt of the owner
+        if (m_engine.feedProbeResult(reachable, m_probe->startedWallMs())) { // a dead live session: the failover attempt of the owner
             syncAttempt();
             emit changed();
         }
@@ -4334,6 +4339,10 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
     m_latch.needStatusBeforeStart = false;
     m_statusRequestAttempts = 0;
     m_statusRetryTimer.stop();
+    // C3 of 24.11 + air-D S2 of 25.11 (iOS): the seat of an adopted provider session is this app's again, and its record's stub joins
+    // the candidates BEFORE the engine adopts by node id - so the session is named even when its node is not in the pool now.
+    m_tunnel.adoptUpstreamSession();
+    restoreAdoptedUpstreamNode();
     const QString nodeId = metadata.value(QStringLiteral("node_id")).toString();
     const QString proto = metadata.value(QStringLiteral("proto")).toString();
     const QString endpoint = metadata.value(QStringLiteral("endpoint")).toString();
@@ -4346,7 +4355,6 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why, bool ourStopPending)
         reliabilityEvent(QStringLiteral("adopt_identity_pending"));
     }
     identifyAdoptedSession();
-    m_tunnel.adoptUpstreamSession(); // C3 of 24.11 (iOS): the seat of an adopted provider session is this app's again
     reliabilityEvent(QStringLiteral("adopt_%1 verdict=%2 node=%3")
                          .arg(QLatin1String(why)).arg(int(verdict)).arg(m_engine.currentNodeId()));
     syncAttempt();
@@ -4409,14 +4417,15 @@ void AvpnEngineQml::identifyAdoptedSession()
         return;
     const QString proto = metadata.value(QStringLiteral("proto")).toString();
     const QString endpoint = metadata.value(QStringLiteral("endpoint")).toString();
+    // C3 of 24.11 + air-D S2: the metadata came after the adoption - the seat and the record's stub first, then the identity.
+    m_tunnel.adoptUpstreamSession();
+    restoreAdoptedUpstreamNode();
     // В фазе Connected adoptTunnelConnected только уточняет identity (возвращает false).
     m_engine.adoptTunnelConnected(metadata.value(QStringLiteral("node_id")).toString(), proto, endpoint);
     if (!m_engine.currentIdentityKnown())
         m_engine.tryIdentifyCurrentNode(); // по endpoint-подсказке сессии (K5/B3)
-    if (m_engine.currentIdentityKnown()) {
+    if (m_engine.currentIdentityKnown())
         reliabilityEvent(QStringLiteral("adopt_identity_resolved node=%1").arg(m_engine.currentNodeId()));
-        m_tunnel.adoptUpstreamSession(); // C3 of 24.11: the metadata came after the adoption
-    }
 #endif
 }
 
@@ -6226,12 +6235,13 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // AVPN (реальные палочки): туннель не в Connected → гасим живые палочки (кэш RTT не должен
     // маскировать обрыв). При следующем Connected проба пере-сидирует SignalQuality с нуля.
     if (state() != QLatin1String("connected")
-        && (m_liveBars != 0 || m_liveReachable || m_liveProven || m_liveRtt >= 0 || m_liveDead || m_liveFailStreak)) {
+        && (m_liveBars != 0 || m_liveReachable || m_liveProof != avpn::LiveProof::None || m_liveRtt >= 0 || m_liveDead
+            || m_liveFailStreak)) {
         m_signal.reset();
         m_liveBars = 0;
         m_liveRtt = -1;
         m_liveReachable = false;
-        m_liveProven = false;      // 5.1.108: a new Connected session proves data again
+        m_liveProof = avpn::LiveProof::None; // 5.1.108: a new Connected session proves data again
         m_liveDead = false;        // обрыв/смена ноды → «мертво» снимаем, при новом Connected мерим заново
         m_liveFailStreak = 0;
         emit liveQualityChanged();
@@ -7541,10 +7551,14 @@ void AvpnEngineQml::guardedStop(const char *why)
     if (m_probe) m_probe->cancel();
     if (!m_wantConnected)
         cancelSeatFirst(); // a stop that does not reconnect: a seat taken for a switch goes back
+    // One native stop at a time (device round air-D 25.11, DebugSnapshot.h facadeStopAction): read before requestStop
+    // below, which makes the owner's stop the facade's.
+    const avpn::FacadeStop how = avpn::facadeStopAction(observedTunnelOf(m_lastTunnelState), m_engine.ownerHoldsNativeLeg(),
+                                                        m_engine.ownerStopInFlight());
     // B1 (race measurement 18.11): a stop while nothing native runs - the race prelude, an attempt that ended before
     // any leg - has no Disconnected to wait for: the stop is confirmed at once and the operation settles through the
     // one function (the orb stayed dead until a relaunch).
-    if (avpn::stopFindsNothingNative(observedTunnelOf(m_lastTunnelState), m_engine.ownerHoldsNativeLeg())) {
+    if (how == avpn::FacadeStop::ConfirmedAtOnce) {
         m_engine.requestStop();
         m_latch.awaitingStopConfirm = false;
         settleOperation("stop_nothing_native");
@@ -7580,7 +7594,10 @@ void AvpnEngineQml::guardedStop(const char *why)
     // AVPN (разбор 2026-09-23): стоп с намерением ON — часть перезапуска; фоновое время iOS берём ДО
     // стопа, чтобы свёрнутое приложение дожило до Disconnected и отправило старт.
     syncRestartGuard();
-    m_tunnel.down();
+    if (how == avpn::FacadeStop::IssueStop)
+        m_tunnel.down();
+    else // the owner's native stop of its leg is in flight: its one Disconnected confirms this stop too
+        reliabilityEvent(QStringLiteral("stop_joined_owner_stop why=%1 leg=%2").arg(QLatin1String(why)).arg(m_engine.attemptLeg()));
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (BUG-6): туннель был адоптирован без протокола этой GUI-сессии — down() демона не
     // достигнет (null-протокол), гасим напрямую. Терминальный Disconnected приедет ретрансляцией
@@ -8263,8 +8280,9 @@ void AvpnEngineQml::scanNotifyNetwork()
 // (UplinkMonitor.h physicalUplinkKnownDown). Read on every network notice (scanNotifyNetwork: the uplink monitor's
 // events; the iOS app path monitor's while the Scanner hooks it) and on every tick (iOS without that hook) - no timer
 // or probe of its own. A move voids the live verdict: what the probe said before (red bars, «трафик не проходит») is
-// not about the network now - measured again from scratch, as after a tunnel change. The session's data proof
-// (m_liveProven) and the chips stay.
+// not about the network now - measured again from scratch, as after a tunnel change. Review R50 2: so is what proved
+// data before (a live pass, the connect's "works"): ONLINE waits for a live probe that passes again (LiveProof::Voided,
+// DebugSnapshot.h::dataFlowingNow). The connect's verdict (m_pathCheck), the path memory and the chips stay.
 void AvpnEngineQml::noteUplinkFact()
 {
     const avpn::UplinkMonitor *uplink = avpn::UplinkMonitor::instance();
@@ -8286,6 +8304,7 @@ void AvpnEngineQml::noteUplinkFact()
     m_liveReachable = false;
     m_liveDead = false;
     m_liveFailStreak = 0;
+    m_liveProof = avpn::liveProofAfterUplinkMove(m_liveProof);
     emit liveQualityChanged();
     emit changed();
 }
@@ -8311,6 +8330,14 @@ void AvpnEngineQml::scanSyncState()
                         {{QStringLiteral("event"), QStringLiteral("row_superseded")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                          {QStringLiteral("node"), st.supersededNode}});
             m_scanner->connectRefused(QString());
+        }
+        if (st.dropped) {
+            // E2 (device round air-D): the engine turned the intent off before the row's own attempt began - no
+            // verdict for the row; the Scanner says the connect did not start (never a silent "off" after a tap)
+            scanJournal(QStringLiteral("scan_row_dropped reason=scan_row node=%1 why=intent_off_before_start").arg(st.droppedNode),
+                        {{QStringLiteral("event"), QStringLiteral("row_dropped")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
+                         {QStringLiteral("node"), st.droppedNode}});
+            m_scanner->rowRequestDropped(st.droppedNode);
         }
         for (const QString &n : st.failed) {
             scanJournal(QStringLiteral("scan_row_failed reason=scan_row node=%1").arg(n),
@@ -8728,7 +8755,7 @@ void AvpnEngineQml::refreshDataFlowing()
 {
     const bool now = avpn::dataFlowingNow(!m_paused && m_engine.state() == EngineState::Connected
                                               && m_lastTunnelState == Vpn::Connected,
-                                          m_liveDead, m_pathCheck, m_liveProven);
+                                          m_liveDead, m_pathCheck, m_liveProof);
     if (now == m_dataFlowing)
         return;
     m_dataFlowing = now;
@@ -8966,6 +8993,37 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok, const QString &failReason)
 
 // The one data check of every raised path (the path engine's RunDataCheck puts every transport into Verifying):
 // an upstream node - its sized /v1/probe; our node - ONE GET /v1/whoami (generate_204 only as its tiebreak).
+// air-D S2 (25.11): a provider session adopted after a relaunch is NAMED by its node even when the node is not in the pool now - a
+// Scanner row's profile lives only in memory (ServiceEngine::offerScanNodes), a standby-pack candidate only once the pack is loaded.
+// The adopted record's stub (VpnConnectionTunnelControl::adoptedUpstreamStub) joins the candidates through the subscription's own
+// parser before the engine adopts by node id. Nothing when the node is known or no adopted session has a stub.
+void AvpnEngineQml::restoreAdoptedUpstreamNode()
+{
+    const QJsonObject stub = m_tunnel.adoptedUpstreamStub();
+    const QString nodeId = stub.value(QStringLiteral("node_id")).toString();
+    if (nodeId.isEmpty() || m_engine.nodeById(nodeId))
+        return;
+    m_engine.offerScanNodes(QJsonArray{stub});
+    syncStandbyCandidates();
+    if (m_engine.nodeById(nodeId)) // refused (switch off, another upstream revision): asked again on the next identification, silently
+        reliabilityEvent(QStringLiteral("adopt_stub_restored node=%1").arg(nodeId));
+}
+
+// The live tunnel is a provider session although the engine cannot name its node: this app owns its seat (an adopted record) or,
+// on iOS / macOS NE, the session's own metadata says so. Such a session is never judged by whoami.
+bool AvpnEngineQml::unnamedProviderSession() const
+{
+    if (m_engine.currentIdentityKnown())
+        return false;
+    if (m_tunnel.upstreamActive() && !m_tunnel.upstreamPreparing())
+        return true;
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    return IosController::Instance()->sessionMetadata().value(QStringLiteral("upstream")).toInt() == 1;
+#else
+    return false;
+#endif
+}
+
 void AvpnEngineQml::startDataPathVerification()
 {
     // AVPN (24.11.2026, cause F): a raised path is not checked while the system is not fully awake (24.11: a check
@@ -8982,8 +9040,10 @@ void AvpnEngineQml::startDataPathVerification()
         const avpn::TunnelStats st = m_tunnel.readStats();
         m_verifyRxStart = st.valid ? st.rxBytes : -1;
     }
-    // Upstream nodes: their own check (sized /v1/probe through the provider); whoami never applies.
-    if (m_engine.currentNodeIsUpstream()) {
+    // Upstream nodes: their own check (sized /v1/probe through the provider); whoami never applies - also to a provider session the
+    // engine cannot name (air-D S2 of 25.11: an adopted Scanner-row session with no identity was judged by whoami, which calls every
+    // exit that is not ours "bypass", and a working provider tunnel was replaced).
+    if (m_engine.currentNodeIsUpstream() || unnamedProviderSession()) {
         startUpstreamVerification();
         return;
     }

@@ -118,6 +118,13 @@ public:
     // the record names (node and start order, UpstreamEngine.h::upstreamHandedOverRecordMatches), the seat's owner is restored
     // handed over (the extension renews; the app releases after the confirmed stop). No-op elsewhere and when nothing matches.
     void adoptUpstreamSession();
+    // The stub of the ADOPTED provider session (its record's, in the /v1/subscription node form; empty when no adopted session or
+    // the record had none): the facade gives it to the engine so the adoption names the node even when the node is not in the
+    // pool after the relaunch (a Scanner row, a standby-pack candidate - device round air-D 25.11, S2).
+    QJsonObject adoptedUpstreamStub() const
+    {
+        return (m_upOwner.active() && m_upOwner.adopted()) ? m_upOwner.stubWire() : QJsonObject();
+    }
     // Seat first (owner's iPhone 16.11, D4): the user picked provider node `node` while another node's tunnel works.
     // The seat is acquired now, through that live tunnel, and the profile checked by the connect's own rule; the
     // answer comes back as upstreamPrepared(nodeId, ok, code) and the facade switches only on ok. The next up() of
@@ -197,6 +204,7 @@ private:
     void failUpstreamStart(const QString &code, const QString &detail = QString());
     void noteSeatDebts();
     int m_seatDebtsTold = 0; // seats owed by nonce as last written to the journal (noteSeatDebts; decides nothing)
+    QString m_adoptMismatchTold; // the live session whose record mismatch was last written (adoptUpstreamSession; decides nothing)
 #if AVPN_UPSTREAM_GUI_OWNER // macOS desktop; Windows since release C (UpstreamEngine.h)
     // AVPN awg31-xray-v1 (этап D2): статистика xray-пути демона — async QtRO-вызов xrayRuntimeStatus
     // по таймеру, пока поднят xray (кумулятивы rx/tx с подъёма сессии, §17.1). Без nested QEventLoop.
