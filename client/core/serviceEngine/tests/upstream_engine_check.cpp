@@ -1599,6 +1599,32 @@ static void quitEndsUpstreamSession()
         CHECK(r.io.last("release") && r.t.downs == 1 && !r.disconnected);
         CHECK(r.clock == kUpstreamQuitStopBoundMs && r.pumps == kUpstreamQuitStopBoundMs / 50);
     }
+    {
+        // Review of 2af7b3a52 (finding 3): the person stopped the provider session a moment ago - the tunnel is already
+        // down (no session to end) but the seat's release has no answer yet: the quit waits for it, no second stop.
+        Rig r;
+        upstreamRig(r);
+        r.disconnected = true;
+        r.releaseAnsweredAt = 500;
+        CHECK(runUpstreamQuit(AppExitKind::Quit, true, /*upstreamSession=*/false, r.hooks(true)));
+        CHECK(r.clock >= 500 && r.clock < 500 + 50 && r.t.downs == 0);
+        CHECK(r.journal == QStringList{QStringLiteral("upstream quit waits for a seat release")});
+        Rig n; // ... never answered: the exit goes on at the bound
+        upstreamRig(n);
+        n.disconnected = true;
+        n.releaseAnsweredAt = kUpstreamQuitStopBoundMs * 10;
+        CHECK(runUpstreamQuit(AppExitKind::Quit, true, false, n.hooks(true)));
+        CHECK(n.clock == kUpstreamQuitStopBoundMs);
+        Rig s; // ... settled already (an own-node quit, a release answered before): no wait at all
+        upstreamRig(s);
+        s.releaseAnsweredAt = 0;
+        CHECK(!runUpstreamQuit(AppExitKind::Quit, true, false, s.hooks(true)));
+        CHECK(s.pumps == 0 && s.journal.isEmpty() && s.clock == 0);
+        Rig h; // a hidden window never exits: nothing waits
+        upstreamRig(h);
+        h.releaseAnsweredAt = 500;
+        CHECK(!runUpstreamQuit(AppExitKind::Hide, true, false, h.hooks(true)) && h.pumps == 0);
+    }
     for (AppExitKind k : {AppExitKind::Restart, AppExitKind::Hide}) {
         Rig r;
         upstreamRig(r);

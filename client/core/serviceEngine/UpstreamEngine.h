@@ -292,11 +292,31 @@ struct UpstreamQuitHooks {
 // when the stop is confirmed, so a wait for the stop alone ended as the release went out and the exit cut it off: the
 // seat stayed paid until its lease TTL (device round D2, macOS). Not applicable: nothing is called at all (the quit
 // is byte-for-byte the one before).
+// Review of 2af7b3a52 (finding 3, round mac-D3): no session left to end, but a seat's release not settled yet (the
+// person stopped a provider session a moment before the quit; the release waits for its answer or its retry). The exit
+// waits for it within the same bound, whatever the tunnel state; nothing pending - no wait (an own-node quit is the one
+// before). Hide never exits the process.
+inline bool upstreamQuitWaitsForRelease(AppExitKind kind, bool upstreamNodesOn, const UpstreamQuitHooks &h)
+{
+    return kind != AppExitKind::Hide && upstreamNodesOn && h.releaseSettled && !h.releaseSettled();
+}
+
 inline bool runUpstreamQuit(AppExitKind kind, bool upstreamNodesOn, bool upstreamSession, const UpstreamQuitHooks &h,
                             int boundMs = kUpstreamQuitStopBoundMs)
 {
-    if (!upstreamQuitEndsSession(kind, upstreamNodesOn, upstreamSession))
-        return false;
+    if (!upstreamQuitEndsSession(kind, upstreamNodesOn, upstreamSession)) {
+        if (!upstreamQuitWaitsForRelease(kind, upstreamNodesOn, h))
+            return false;
+        h.journal(QStringLiteral("upstream quit waits for a seat release"));
+        const qint64 until = h.nowMs() + qMax(0, boundMs);
+        while (!h.releaseSettled()) {
+            const qint64 left = until - h.nowMs();
+            if (left <= 0)
+                break;
+            h.pump(int(qMin<qint64>(50, left)));
+        }
+        return true;
+    }
     h.journal(QStringLiteral("upstream session ended on app quit"));
     h.userStop();
     const qint64 until = h.nowMs() + qMax(0, boundMs);
