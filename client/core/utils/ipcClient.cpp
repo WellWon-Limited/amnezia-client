@@ -32,6 +32,15 @@ QSharedPointer<IpcInterfaceReplica> IpcClient::Interface()
     return rep;
 }
 
+// AVPN (round mac-B review M1): see ipcClient.h - validity first, no waitForSource.
+QSharedPointer<IpcInterfaceReplica> IpcClient::InterfaceIfReady()
+{
+    QSharedPointer<IpcInterfaceReplica> rep = Instance().m_interface;
+    if (rep.isNull() || !rep->isReplicaValid())
+        return nullptr;
+    return rep;
+}
+
 QSharedPointer<IpcProcessInterfaceReplica> IpcClient::CreatePrivilegedProcess()
 {
     return withInterface([](QSharedPointer<IpcInterfaceReplica> &iface) -> QSharedPointer<IpcProcessInterfaceReplica> {

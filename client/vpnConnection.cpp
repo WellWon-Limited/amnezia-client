@@ -74,15 +74,15 @@ void logIpcResult(QObject *ctx, QRemoteObjectPendingReply<bool> reply, const cha
 #endif
 }
 
-// The service's interface for the protocol callbacks. macOS: as it is now, never waited for (waitForSource spins an
-// event loop while the service restarts - the same door); a service that is not up gets nothing, as after upstream's
-// 1 s wait. Other desktops: upstream's IpcClient::withInterface.
+// The service's interface for the protocol callbacks. macOS: as it is now, never waited for - IpcClient::Interface()
+// calls waitForSource, which spins an event loop while the service restarts (review M1: the same door); a service that
+// is not up gets nothing, as after upstream's 1 s wait. Other desktops: upstream's IpcClient::withInterface.
 template <typename Func>
 void withInterfaceNow(Func func)
 {
 #ifdef Q_OS_MACOS
-    const QSharedPointer<IpcInterfaceReplica> iface = IpcClient::Interface();
-    if (iface.isNull() || !iface->isReplicaValid()) {
+    const QSharedPointer<IpcInterfaceReplica> iface = IpcClient::InterfaceIfReady();
+    if (iface.isNull()) {
         qWarning() << "VpnConnection::onConnectionStateChanged: the service is not running - nothing sent";
         return;
     }

@@ -10,7 +10,8 @@
 #   L1  onConnectionStateChanged makes no wait of its own (waitForFinished, waitForSource, QEventLoop, exec,
 #       processEvents) and reaches the service only through withInterfaceNow / logIpcResult;
 #   L2  on macOS logIpcResult only watches the reply (QRemoteObjectPendingCallWatcher) and withInterfaceNow takes the
-#       replica as it is (Interface + isReplicaValid, no waitForSource); other desktops keep upstream's waits;
+#       replica as it is through IpcClient::InterfaceIfReady (validity first; review M1: IpcClient::Interface() calls
+#       waitForSource - a nested loop - and is never reached from a callback); other desktops keep upstream's waits;
 #   L3  the protocol is released only in connectToVpn and disconnectFromVpn (and the Android restore path);
 #   L4  the daemon socket's own handlers (readData, parseCommand, errorOccurred, disconnectInternal) wait for nothing;
 #   D1  the service side of the same socket (six service crashes in the same round: SIGSEGV in QIODevice::readAll under
@@ -49,8 +50,15 @@ has "$mac" 'new QRemoteObjectPendingCallWatcher(reply, ctx);' || bad "L2: macOS 
 printf '%s\n' "$mac" | grep -qE "$WAITS" && bad "L2: macOS logIpcResult waits"
 wn="$(code "$VC" | awk '/^void withInterfaceNow\(Func func\)/ { on = 1 } on { print } on && /^}$/ { exit }')"
 wmac="$(printf '%s\n' "$wn" | awk '/^#ifdef Q_OS_MACOS/ { on = 1; next } /^#else/ { exit } on { print }')"
-has "$wmac" 'IpcClient::Interface();' && has "$wmac" '!iface->isReplicaValid()' || bad "L2: macOS does not take the replica as it is"
+# review M1: IpcClient::Interface() itself waits (waitForSource) - the callbacks take the non-waiting getter only
+has "$wmac" 'IpcClient::InterfaceIfReady();' || bad "L2: macOS does not take the replica through the non-waiting getter"
+has "$wmac" 'IpcClient::Interface()' && bad "L2: macOS calls IpcClient::Interface(), which waits for the source (review M1)"
 printf '%s\n' "$wmac" | grep -qE "$WAITS" && bad "L2: macOS withInterfaceNow waits for the service"
+IPC="$CLIENT/core/utils/ipcClient.cpp"
+ready="$(body "$IPC" 'QSharedPointer<IpcInterfaceReplica> IpcClient::InterfaceIfReady()')"
+[ -n "$ready" ] || bad "L2: IpcClient::InterfaceIfReady() not found"
+has "$ready" 'isReplicaValid()' || bad "L2: InterfaceIfReady does not check validity"
+printf '%s\n' "$ready" | grep -qE "$WAITS|Interface\(\)" && bad "L2: InterfaceIfReady waits (or calls the waiting getter)"
 
 # ---- L3 ----
 for f in 'void VpnConnection::connectToVpn(' 'void VpnConnection::disconnectFromVpn()'; do

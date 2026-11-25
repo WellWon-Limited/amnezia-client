@@ -16,6 +16,10 @@ public:
     static IpcClient& Instance();
 
     static QSharedPointer<IpcInterfaceReplica> Interface();
+    // AVPN (round mac-B review M1): this thread's replica only when it is valid right now - never waits. Interface()
+    // calls waitForSource(), a nested event loop: a protocol's or a replica's callback must not run one (queued calls
+    // of other threads run inside it and may destroy the caller's own objects).
+    static QSharedPointer<IpcInterfaceReplica> InterfaceIfReady();
     static QSharedPointer<IpcProcessInterfaceReplica> CreatePrivilegedProcess();
 
     template <typename Func>
