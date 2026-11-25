@@ -241,8 +241,8 @@ PageType {
     readonly property real sceneCaptionSqueeze: Math.min(sceneDeficit - sceneOrbSqueeze, 30 - 16)
 
     // «Заменить сервер» (refreshBtn): a live connection -> the next live node (rotateNext, CONNECT-INVARIANTS §11);
-    // off or an ended attempt -> the server choice; busy -> nothing. One function, so the development builds' test
-    // channel (DevControlApp `replace`) presses exactly this button. Returns what it did.
+    // off or an ended attempt -> the server choice; busy -> nothing. One function, so a test harness presses exactly
+    // this button. Returns what it did.
     function onReplaceServerClicked() {
         if (!root.hasEngine) return "no_engine"
         if (TribeEngine.busy) return "busy"

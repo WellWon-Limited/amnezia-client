@@ -4,7 +4,9 @@
 # Rule: the button replaces the server of a live connection (rotateNext, CONNECT-INVARIANTS §11); with nothing to
 # replace (off, an attempt that ended) it opens the server choice; busy - nothing; it never starts a connection by
 # itself (the orb does). Checked at source level (the offscreen harness drives the same rule with a real touch):
-#   R1 the button's press: busy -> nothing; !isOn -> requestServerPicker(); connected -> rotateNext(); no start;
+#   R1 the button's press: busy -> nothing; !isOn -> requestServerPicker(); connected -> rotateNext(); no start
+#      (round mac-D2: the MouseArea calls the page function onReplaceServerClicked, which holds the decisions - the
+#      development builds' test channel presses the same function);
 #   R2 the host routes requestServerPicker to the server choice page (PageServersTribe).
 # Run by the check sweep (every check_*.sh of this directory).
 set -u
@@ -25,9 +27,15 @@ has() { printf '%s\n' "$1" | grep -F -- "$2" > /dev/null; }
 ma="$(mouse_area refreshMa "$PAGE")"
 [ -n "$ma" ] || bad "R1: the «Заменить сервер» MouseArea (id: refreshMa) not found"
 has "$(code "$PAGE")" 'text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Заменить сервер")' || bad "R1: refreshMa must be the «Заменить сервер» button"
+has "$ma" 'onClicked: root.onReplaceServerClicked()' || bad "R1: refreshMa must press the page's onReplaceServerClicked()"
+# the page function the press runs: from its line to the brace that closes it
+fn="$(code "$PAGE" | awk 'index($0, "function onReplaceServerClicked() {") && !on { on = 1; depth = 1; print; next }
+        on { print; n = gsub(/\{/, "{"); m = gsub(/\}/, "}"); depth += n - m; if (depth <= 0) exit }')"
+[ -n "$fn" ] || bad "R1: function onReplaceServerClicked() not found"
 for call in 'TribeEngine.start(' 'connectButtonClicked' 'orbTap' 'pinAndReconnect' 'switchToNode' 'reconcile'; do
-    has "$ma" "$call" && bad "R1: «Заменить сервер» must never start a connection itself ($call)"
+    has "$ma$fn" "$call" && bad "R1: «Заменить сервер» must never start a connection itself ($call)"
 done
+ma="$fn" # the decisions below are the function's
 # the order of the decisions: busy first, then off -> the server choice, then the rotation
 busy="$(printf '%s\n' "$ma" | grep -nF 'if (TribeEngine.busy) return' | head -1 | cut -d: -f1)"
 off="$(printf '%s\n' "$ma" | grep -nF 'if (!root.isOn) {' | head -1 | cut -d: -f1)"
