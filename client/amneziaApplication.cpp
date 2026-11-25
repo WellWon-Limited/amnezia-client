@@ -109,6 +109,7 @@ AmneziaApplication::~AmneziaApplication()
                 connection,
                 [connection]() {
                     const QSharedPointer<VpnProtocol> protocol = connection->vpnProtocol();
+#ifdef AVPN_ENGINE_ENABLED
                     auto *wg = qobject_cast<WireguardProtocol *>(protocol.data());
                     switch (avpn::quitSessionAction(!protocol.isNull(), wg != nullptr,
                                                     connection->connectionState() == Vpn::ConnectionState::Connected)) {
@@ -121,6 +122,10 @@ AmneziaApplication::~AmneziaApplication()
                     case avpn::QuitSessionAction::Nothing:
                         break;
                     }
+#else
+                    if (protocol) // the engine-off build is upstream: quit ends the session
+                        connection->disconnectFromVpn();
+#endif
                 },
                 Qt::BlockingQueuedConnection);
 #endif
