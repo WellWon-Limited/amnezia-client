@@ -16,7 +16,9 @@
 #   L4  the daemon socket's own handlers (readData, parseCommand, errorOccurred, disconnectInternal) wait for nothing;
 #   D1  the service side of the same socket (six service crashes in the same round: SIGSEGV in QIODevice::readAll under
 #       DaemonLocalServerConnection::readData): the macOS daemon's waits inside a client's command (the UAPI reply,
-#       the tunnel's name) dispatch no events - a client that leaves meanwhile is deleted only after its command.
+#       the tunnel's name) dispatch no events - a client that leaves meanwhile is deleted only after its command;
+#   D2  (review M3) those blocking waits hold the daemon's only thread: the name <= 2 s and a UAPI command <= 1 s (measured
+#       105-109 ms / <= 1 ms on the test Mac), each journalled ("[tunnel wait]").
 # The lifetime itself is not host-testable: VpnConnection needs the app's IPC replica, repositories and protocols. It
 # is proven on the test Mac (round mac-B: 30 rapid AmneziaWG connect/stop cycles and the leg loop, no crash).
 # Run by the check sweep (every check_*.sh of this directory).
@@ -86,6 +88,11 @@ has "$uapi" 'socket.waitForReadyRead(' && has "$uapi" 'uapiDeadline.hasExpired()
 name="$(body "$WGM" 'QString WireguardUtilsMacos::waitForTunnelName(const QString& filename) {')"
 has "$name" 'm_tunnel.waitForFinished(100)' && has "$name" 'deadline.hasExpired()' || bad "D1: the tunnel name wait is not a blocking wait against a deadline"
 printf '%s\n' "$(code "$DLSC")" | grep -qE 'processEvents|QEventLoop|waitForFinished\(\)' && bad "D1: the daemon's client connection waits"
+# review M3: the blocking waits hold the daemon's only thread (IPC, the Scanner's host) - bounded by what was measured
+has "$name" 'QDeadlineTimer deadline(WG_TUN_NAME_TIMEOUT);' || bad "D2: the tunnel name wait is not bounded by WG_TUN_NAME_TIMEOUT"
+grep -qE '^constexpr const int WG_TUN_NAME_TIMEOUT = ([0-9]{1,3}|1[0-9]{3}|2000);' "$WGM" || bad "D2: the tunnel name wait may hold the daemon over 2 s"
+grep -qE '^constexpr const int WG_UAPI_TIMEOUT = ([0-9]{1,3}|1000);' "$WGM" || bad "D2: a UAPI command may hold the daemon over 1 s"
+[ "$(grep -c '\[tunnel wait\]' "$WGM")" -ge 3 ] || bad "D2: the waits' lengths are not journalled"
 
 [ "$fail" = 0 ] && echo "check_vpn_connection_callback_loop: OK"
 exit "$fail"

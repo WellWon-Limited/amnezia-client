@@ -25,7 +25,14 @@
 constexpr const int WG_TUN_PROC_TIMEOUT = 15000; // AVPN: было 5000 — мало для первого старта amneziawg-go под демоном (создание utun + проверка подписи) → таймаут → демон убивал процесс
 // AVPN (волна-3): 15 с нужны только старту процесса/ожиданию имени utun; UAPI и остановка — свои
 // короткие бюджеты (раньше 15 с на UAPI + 15+15 с terminate/kill = глухая блокировка потока демона до 30 с).
-constexpr const int WG_UAPI_TIMEOUT = 2000;
+// AVPN (round mac-B review M3): every wait below blocks the daemon's only thread, which also serves the app's IPC and
+// the Scanner's host. Measured on the test Mac (MacBook Air M2, macOS 26.6, 30 activations, the first one right after
+// the service was reinstalled): amneziawg-go started in 4-6 ms, its interface named 105-109 ms after the start, UAPI
+// set answered in <= 1 ms, no UAPI get >= 200 ms. Bounds: the name 2 s (~18x the worst seen), a UAPI command 1 s; the
+// process start keeps 15 s for the cold first exec seen before (comment above) - the only long wait left, once per
+// install. The waits journal "[tunnel wait] ..." lines (wireguardutilsmacos.cpp addInterface / uapiCommand / deleteInterface).
+constexpr const int WG_TUN_NAME_TIMEOUT = 2000;
+constexpr const int WG_UAPI_TIMEOUT = 1000;
 constexpr const int WG_TUN_STOP_TIMEOUT = 3000;
 constexpr const int WG_TUN_KILL_TIMEOUT = 2000;
 constexpr const char* WG_RUNTIME_DIR = "/var/run/amneziawg"; // AVPN: ДОЛЖЕН совпадать с зашитым в amneziawg-go каталогом UAPI-сокета (/var/run/amneziawg), иначе waitForTunnelName не находит <ifname>.sock → таймаут. Изоляция от upstream сохраняется: у официальной Amnezia wireguard-go = /var/run/wireguard
@@ -237,11 +244,14 @@ bool WireguardUtilsMacos::deleteInterface() {
   }
 
   // Attempt to terminate gracefully.
+  QElapsedTimer stopTimer; // AVPN (round mac-B review M3)
+  stopTimer.start();
   m_tunnel.terminate();
   if (!m_tunnel.waitForFinished(WG_TUN_STOP_TIMEOUT)) {
     m_tunnel.kill();
     m_tunnel.waitForFinished(WG_TUN_KILL_TIMEOUT);
   }
+  logger.info() << "[tunnel wait] process ended" << stopTimer.elapsed() << "ms";
 
   // Garbage collect.
   QDir wgRuntimeDir(WG_RUNTIME_DIR);
@@ -471,7 +481,7 @@ bool WireguardUtilsMacos::excludeLocalNetworks(const QList<IPAddress>& routes) {
 // gone) had its connection deleted inside that loop (deleteLater on the socket's disconnected), and readData went on
 // with freed memory. The waits block on the UAPI socket / the tunnel process instead (waitForReadyRead,
 // waitForFinished) against a deadline - no event is dispatched inside a client's command, so a connection is
-// destroyed only after its command returned. Bounded as before (WG_UAPI_TIMEOUT, WG_TUN_PROC_TIMEOUT).
+// destroyed only after its command returned. Bounded by WG_UAPI_TIMEOUT and WG_TUN_NAME_TIMEOUT (measured, see above).
 QString WireguardUtilsMacos::uapiCommand(const QString& command) {
   QLocalSocket socket;
   QDeadlineTimer uapiDeadline(WG_UAPI_TIMEOUT);
@@ -531,7 +541,7 @@ int WireguardUtilsMacos::uapiErrno(const QString& reply) {
 // AVPN (round mac-B): waits on the tunnel process (waitForFinished: returns at once when it exits), never in the event
 // loop - see uapiCommand.
 QString WireguardUtilsMacos::waitForTunnelName(const QString& filename) {
-  QDeadlineTimer deadline(WG_TUN_PROC_TIMEOUT);
+  QDeadlineTimer deadline(WG_TUN_NAME_TIMEOUT);
 
   QFile file(filename);
   while ((m_tunnel.state() == QProcess::Running) && !deadline.hasExpired()) {
