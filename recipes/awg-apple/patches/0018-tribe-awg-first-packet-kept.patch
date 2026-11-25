@@ -1,0 +1,30 @@
+diff --git a/Sources/WireGuardKitGo/tribeawg/session_test.go b/Sources/WireGuardKitGo/tribeawg/session_test.go
+--- a/Sources/WireGuardKitGo/tribeawg/session_test.go
++++ b/Sources/WireGuardKitGo/tribeawg/session_test.go
+@@ -515,8 +515,13 @@
+ 	t.Logf("goroutines %d -> %d, fds %d -> %d", goBefore, runtime.NumGoroutine(), fdBefore, tribescan.OpenFDs())
+ }
+ 
+-// S4 obfuscation loses the first packet after the handshake; one prime echo absorbs it, so the
+-// first byte of the warm-up comes about a second earlier (gVisor's first SYN retransmit).
++// awg-apple tribe.21 (amneziawg-go v3.1.20261116, commit 7a9b2d263): no first packet is lost any more.
++// The device's TUN reader takes the S4 offset before it blocks in its first Read, i.e. before the UAPI
++// set (NewDevice -> IpcSet -> Up, as wgTurnOn does too). v3.1.20260828 sent that packet with the old S4
++// (0), the node dropped it, and the warm-up's first byte came about a second later (gVisor's first SYN
++// retransmit) unless one prime echo absorbed the loss (this test without that commit's hunk: no echo
++// 2005-2009 ms, one echo 6-7 ms). RoutineEncryption now moves such a packet to the current S4: both ways
++// the first byte comes at once (3-4 ms), and the echo stays harmless.
+ func TestTribeAwgPrimeEcho(t *testing.T) {
+ 	if raceOn {
+ 		t.Skip("timing: not under the race detector")
+@@ -550,8 +555,8 @@
+ 		return s[len(s)/2]
+ 	}
+ 	t.Logf("S4=4 ttfb1_ms: no prime echo %v, one prime echo %v", unprimed, primed)
+-	if med(unprimed)-med(primed) < 500 {
+-		t.Fatalf("the prime echo did not absorb the lost first packet: %v vs %v", unprimed, primed)
++	if med(unprimed) >= 500 || med(primed) >= 500 {
++		t.Fatalf("a first packet after the handshake was lost (an engine before v3.1.20261116?): %v vs %v", unprimed, primed)
+ 	}
+ }
+ 
