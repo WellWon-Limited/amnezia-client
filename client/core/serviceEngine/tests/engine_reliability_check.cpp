@@ -630,9 +630,42 @@ int main(int argc, char **argv)
         const AirD after = run(true, newVerdict, fromT2, 46, 70);
         fprintf(stderr, "air-D tribe.19: failover=%d, Германия 1 on the Wi-Fi: %s\n", int(after.failedOver), qPrintable(after.stateOnWifi));
         CHECK(!after.failedOver && after.stateOnWifi == QLatin1String("working"));
-        // An extension before tribe.19 (its verdict still counts the LTE) with this app: the verdict is clamped to what
-        // was observed on the Wi-Fi, the probes answer once data is back: no failover either.
-        CHECK(!run(true, oldVerdict, fromT2, 46, 70).failedOver);
+        // An extension before tribe.19 (its verdict still counts the LTE; no K2: data back only at +24 s by its ladder)
+        // with this app: the path key's change resets the probe count, the verdict is clamped to what was observed on the
+        // Wi-Fi: no failover (the old rule: +4 s).
+        const auto from24 = [](qint64 t) { return t >= 24; };
+        CHECK(!run(true, oldVerdict, from24, 46, 70).failedOver);
+        CHECK(run(false, oldVerdict, from24, 46, 70).failedOver);
+        // Probes that STARTED on the old network and fail after the change are not counted; the same failures of probes
+        // started on the new network are (with a corroborating verdict 50 s after the change).
+        {
+            const auto probesAfter = [&](qint64 startedOffsetMs) {
+                ServiceEngine eng;
+                FakeTunnel tun;
+                qint64 clockMs = 1'800'000'000'000LL;
+                eng.setNowMsForTest([&clockMs] { return clockMs; });
+                eng.setTunnel(&tun);
+                eng.setRestartEvidenceOnNetworkChange(true);
+                eng.observeNetwork(wifi);
+                QString err;
+                CHECK(eng.loadSubscription(subJson({ EE, US }, 7), err));
+                CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+                CHECK(eng.connect(err));
+                CHECK(upConnected(eng));
+                eng.observeNetwork(lte);
+                const qint64 changeMs = clockMs;
+                clockMs += 50'000;
+                tun.st = mkStats(clockMs / 1000 - 5, 1000, 9000);
+                tun.st.dataStallSec = 50;
+                tun.st.dataStallAtMs = clockMs - 300;
+                bool failedOver = false;
+                for (int i = 0; i < 4; ++i)
+                    failedOver = eng.feedProbeResult(false, changeMs + startedOffsetMs) || failedOver;
+                return failedOver;
+            };
+            CHECK(!probesAfter(-1'000)); // started 1 s before the change
+            CHECK(probesAfter(+1'000));  // started 1 s after it
+        }
         // The server really dead on the Wi-Fi: the extension's verdict counts from the roam (t), the probes keep failing:
         // the failover comes ~45-50 s after the return and marks the node on the Wi-Fi - correctly.
         const AirD dead = run(true, [](qint64 t) { return t; }, failing, 46, 70);
