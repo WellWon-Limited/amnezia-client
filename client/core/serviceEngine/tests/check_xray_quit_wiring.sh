@@ -88,7 +88,8 @@ has "$endb" 'const bool tearDown = std::exchange(m_sessionOpen, false);' || bad 
 has "$endb" 'if (tearDown) {' || bad "Q4: the teardown is not gated by the session"
 has "$endb" 'm_tun2socksReader->stop();' || bad "Q4: endSession() does not stop the reader"
 [ "$(cnt "$endb" 'waitForFinished(1000)')" = "0" ] || bad "Q4: endSession() waits on the tun2socks replica again (30 s on quit)"
-has "$endb" 'if (QThread::currentThread() == process->thread()) {' || bad "Q4: endSession() uses the replica from another thread"
+has "$endb" 'if (QThread::currentThread() == process->thread() && process->isReplicaValid()) {' \
+  || bad "Q4: endSession() uses the replica from another thread (or one without a source - round mac-D2)"
 has "$endb" 'delivered.waitForFinished(tun2socksStopReplyMs);' || bad "Q4: the one round trip of endSession() is not bounded"
 grep -qF 'static constexpr int tun2socksStopReplyMs = 1000;' "$XH" || bad "Q4: the bound of stop()'s round trip changed"
 has "$endb" 'std::exchange(m_tun2socksProcess, {});' || bad "Q4: the replica is not taken out before the waits"

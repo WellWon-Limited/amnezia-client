@@ -217,7 +217,8 @@ bool XrayProtocol::endSession(bool reportDisconnected)
         // passed, and the kill() after it never left this process - tun2socks stayed as an orphan of the
         // service. A replica of another thread cannot send at all, so it is not used: the service ends the
         // child itself when this process's connection to it closes (IpcServer::onProcessControllerLost).
-        if (QThread::currentThread() == process->thread()) {
+        // AVPN (round mac-D2): a replica that lost its source (the service is gone) has no one to send to.
+        if (QThread::currentThread() == process->thread() && process->isReplicaValid()) {
             process->terminate();
             process->close();
             auto delivered = process->waitForFinished(0);
@@ -328,6 +329,9 @@ void XrayProtocol::onTun2SocksReplicaState(quint64 session, QRemoteObjectReplica
     if (!(oldState == QRemoteObjectReplica::Valid && state == QRemoteObjectReplica::Suspect))
         return;
     qWarning() << "XrayProtocol: the service holding this session is gone (tun2socks replica lost its source) - the session ends";
+    // Its core, tun2socks and kill switch went with it, and a new service holds nothing of this session: no teardown
+    // calls (the first of them waited the 30 s default on the dead connection while Connected stayed on screen).
+    m_sessionOpen = false;
     failSession(ErrorCode::AmneziaServiceConnectionFailed);
 }
 

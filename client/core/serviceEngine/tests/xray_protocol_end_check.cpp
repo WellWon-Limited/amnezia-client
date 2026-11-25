@@ -12,7 +12,8 @@
 //   E5     the destructor ends a connected session (teardown, tun2socks ended) without emitting a signal;
 //   E6     (round mac-D2) the service gone under a connected session (killed or crashed): the tun2socks replica loses its
 //          source - the session ends with an error (the engine reconnects), it never stays Connected. Before the fix the
-//          state stayed Connected (device: traffic left the Mac directly for 40+ s, a provider seat was kept).
+//          state stayed Connected (device: traffic left the Mac directly for 40+ s, a provider seat was kept); the ended
+//          session sends no teardown to a service (the first call waited 30 s on the dead connection).
 // The previous code (stop(); setLastError(...) at the three call sites, stop() from the destructor) fails E1-E3
 // under ASan and E5. Run by build_xray_protocol_end.sh.
 #include "xrayProtocol.h"
@@ -282,10 +283,17 @@ static void serviceGone(FakeService &svc)
         return;
     tun->writeErr(kStackLine);
     CHECK(waitFor([&]() { return proto->connectionState() == Vpn::ConnectionState::Connected; }));
+    const int teardownsBefore = svc.count(QStringLiteral("disableKillSwitch")) + svc.count(QStringLiteral("xrayStop"));
+    QElapsedTimer endClock;
+    endClock.start();
     svc.hosts.back().reset(); // the host of the session's process object goes away, as with the service
     const bool ended = waitFor([&]() { return proto->connectionState() == Vpn::ConnectionState::Error; }, 5000);
     CHECK(ended);
+    CHECK(endClock.elapsed() < 2000); // at once - no wait on the dead connection
     CHECK(proto->lastError() == ErrorCode::AmneziaServiceConnectionFailed);
+    // the gone service's session is not torn down in another service (it holds nothing of it; on the device the first
+    // teardown call waited 30 s on the dead connection while Connected stayed on screen)
+    CHECK(svc.count(QStringLiteral("disableKillSwitch")) + svc.count(QStringLiteral("xrayStop")) == teardownsBefore);
     std::fprintf(stderr, "E6 service gone: session ended=%d state=%d error=%d\n", int(ended), int(proto->connectionState()),
                  int(proto->lastError()));
 }
