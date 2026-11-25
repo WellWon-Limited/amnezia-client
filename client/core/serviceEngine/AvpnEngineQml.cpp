@@ -5961,11 +5961,17 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // clear runs only with AVPN_ENGINE=OFF). Nothing here waits for Qt's HTTP thread: later requests start on a new
     // generation of the shared manager, the ones in flight are aborted on the next turn and re-issued by their owners
     // (DebugSnapshot.h newApiGeneration, NetAwait.h TribeNetworkAccessManager).
+    // Device round air-I (25.11): and Qt's cached host names are dropped (iOS) - a name resolved inside the tunnel that is
+    // gone says nothing about the next one. Off this thread: the drop waits for a lookup already running
+    // (NetAwait.h dropCachedHostNamesSoon); its line "host_cache_cleared ms=" follows when it is done.
     if (m_nam && newApiGeneration(observedTunnelOf(m_lastTunnelState), observedTunnelOf(s))) {
         avpn::resetApiConnections(m_nam);
         const auto *api = avpn::TribeNetworkAccessManager::of(m_nam);
         reliabilityEvent(QStringLiteral("api_reset generation=%1 retiring=%2")
                              .arg(api ? api->generation() : 0).arg(api ? api->retiringGenerations() : -1));
+        avpn::dropCachedHostNamesSoon(avpn::kQtHostCacheClear, this, [this](qint64 ms) {
+            reliabilityEvent(QStringLiteral("host_cache_cleared ms=%1").arg(ms));
+        });
     }
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).

@@ -11,7 +11,10 @@
 #       generation is destroyed only after a move to the retirement thread;
 #   N3  one owner: the app's manager is the facade; only the native-state handler resets, on newApiGeneration; upstream's
 #       Connected does nothing with the engine; the foreground handlers run no synchronous network wait;
-#   N4  AVPN_ENGINE=OFF is upstream: a plain QNetworkAccessManager and upstream's clear on Connected, no avpn:: symbol.
+#   N4  AVPN_ENGINE=OFF is upstream: a plain QNetworkAccessManager and upstream's clear on Connected, no avpn:: symbol;
+#   N5  device round air-I (25.11): with each reset the owner drops Qt's cached host names - off the GUI thread (the drop
+#       waits for running lookups), on iOS by Qt's qt_qhostinfo_clear_cache (the static Qt links it), elsewhere nothing
+#       (a shared Qt does not export it); the reset itself is untouched and no other place drops the names.
 # Needs unifdef (macOS: /usr/bin/unifdef). Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -84,6 +87,36 @@ has "$app_off" 'm_nam = new QNetworkAccessManager(this);' || bad "N4: OFF must c
 ui_off="$(view -UAVPN_ENGINE_ENABLED "$UI")"
 has "$ui_off" 'amnApp->networkManager()->clearConnectionCache();' || bad "N4: OFF must keep upstream's clear on Connected"
 printf '%s\n%s\n' "$app_off" "$ui_off" | grep -qE 'avpn::|NetAwait\.h' && bad "N4: OFF must not name the overlay"
+
+# ---- N5 ----
+reset="$(body "$NET" 'inline void resetApiConnections(QNetworkAccessManager *nam)')"
+[ -n "$reset" ] || bad "N5: the reset step must stay as it was (no host-name step, no wait)"
+printf '%s\n' "$reset" | grep -qE 'clearHostCache|qt_qhostinfo|dropCachedHostNames' && bad "N5: the reset must not touch host names"
+soon="$(body "$NET" 'inline bool dropCachedHostNamesSoon(void (*clearHostCache)(), QObject *context, std::function<void(qint64)> done)')"
+posted="$(printf '%s\n' "$soon" | grep -nF 'QMetaObject::invokeMethod(apiHostNamesWorker(), [clearHostCache, ctx, done = std::move(done)]() {' | head -1 | cut -d: -f1)"
+called="$(printf '%s\n' "$soon" | grep -nF 'clearHostCache();' | head -1 | cut -d: -f1)"
+[ -n "$posted" ] && [ -n "$called" ] && [ "$called" -gt "$posted" ] \
+    || bad "N5: the drop must run on its own thread, never on the caller's"
+[ "$(printf '%s\n' "$soon" | grep -cF 'clearHostCache();')" = "1" ] || bad "N5: the drop must be called exactly once, on its thread"
+worker="$(body "$NET" 'inline QObject *apiHostNamesWorker()')"
+has "$worker" 'w->moveToThread(t);' && has "$worker" 't->start();' || bad "N5: the drop thread must be a thread of its own"
+net_ios="$(view -DQ_OS_IOS "$NET")"
+has "$net_ios" 'void qt_qhostinfo_clear_cache();' \
+    && has "$net_ios" 'inline constexpr void (*kQtHostCacheClear)() = &QT_PREPEND_NAMESPACE(qt_qhostinfo_clear_cache);' \
+    || bad "N5: on iOS the drop must be Qt's qt_qhostinfo_clear_cache"
+net_other="$(view -UQ_OS_IOS "$NET")"
+has "$net_other" 'inline constexpr void (*kQtHostCacheClear)() = nullptr;' || bad "N5: elsewhere the drop must be nothing"
+printf '%s\n' "$net_other" | grep -qF 'qt_qhostinfo_clear_cache' && bad "N5: a shared Qt does not export qt_qhostinfo_clear_cache"
+code "$NET" | grep -qF 'qt_qhostinfo_enable_cache' && bad "N5: qt_qhostinfo_enable_cache exists only in a QT_BUILD_INTERNAL Qt"
+owner="$(code "$FACADE" | awk '/if \(m_nam && newApiGeneration\(observedTunnelOf\(m_lastTunnelState\), observedTunnelOf\(s\)\)\) \{/{f=1} f{print} f&&/^    }$/{exit}')"
+has "$owner" 'avpn::resetApiConnections(m_nam);' \
+    && has "$owner" 'avpn::dropCachedHostNamesSoon(avpn::kQtHostCacheClear, this, [this](qint64 ms) {' \
+    && has "$owner" 'host_cache_cleared ms=%1' \
+    || bad "N5: the owner's reset block must drop the host names with the platform's means and journal it"
+others="$(grep -rlE --include=*.cpp --include=*.h --include=*.mm 'qt_qhostinfo_clear_cache|dropCachedHostNamesSoon\(' "$CLIENT" \
+            | grep -v '/tests/' | grep -v '/3rd' | grep -vxF "$NET" | grep -vxF "$FACADE" || true)"
+[ -z "$others" ] || bad "N5: only the owner may drop Qt's host names (found: $others)"
+[ "$(code "$FACADE" | grep -cF 'dropCachedHostNamesSoon(')" = "1" ] || bad "N5: the owner drops the host names in one place"
 
 [ "$fail" = "0" ] && echo "check_net_reset_wiring: OK"
 exit "$fail"
