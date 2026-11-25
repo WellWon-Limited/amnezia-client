@@ -1451,7 +1451,10 @@ void TribeScanHost::sample(const TribeScanUplink &up, bool loss)
     bool moved = false;
     {
         QMutexLocker l(&m_mutex);
-        loss = loss || std::exchange(m_lossPending, false);
+        // Taken whatever this sample says (review of fdc9209d3, round mac-D4): a sample with its own loss consumes the
+        // pending one too - a short-circuit left it set and moved the generation a second time one sample later.
+        const bool pending = std::exchange(m_lossPending, false);
+        loss = loss || pending;
         moved = m_gen.observe(fp, loss);
         m_lastUplinkIndex = tribeScanUplinkUsable(up) ? up.index : 0;
         g = m_gen.now();

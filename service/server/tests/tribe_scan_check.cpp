@@ -772,6 +772,16 @@ static void generation()
         CHECK_EQ(moves, 1);           // the deferred loss is applied
         hl.host->notePathEvent(false);
         CHECK_EQ(moves, 1);           // once
+        // Round mac-D4: the readable sample right after carries its own loss - one move for both, the pending one is
+        // consumed with it (it used to survive the short-circuit and move the generation again one sample later).
+        hl.setUplink(unreadable);
+        hl.host->notePathEvent(true);
+        CHECK_EQ(moves, 1);
+        hl.setUplink(phys());
+        hl.host->notePathEvent(true);
+        CHECK_EQ(moves, 2);
+        hl.host->notePathEvent(false); // the same fingerprint, no loss: nothing
+        CHECK_EQ(moves, 2);
     }
 
     fake::engine().reply = [](const QByteArray &, const QByteArray &) { return QByteArray(R"({"type":"scan_ack","scan_id":"g","accepted":0,"mem_mb":null})"); };
