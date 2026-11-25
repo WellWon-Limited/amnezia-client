@@ -181,9 +181,11 @@ enum XraySocketCallbackTeardown {
 // The rule (R46 R1):
 //  - hev not entered (no worker, or one still queued - TunnelRuntimeSession.enterHev refuses it after the generation
 //    move): nothing to stop, no wait;
-//  - hev entered (initialising or running): the request is driven for THAT run (its epoch, XrayHevRuns) - again every
-//    retry interval, since one taken before the run reached the library is not kept - until that run has returned;
-//    the stop completes only then, bounded by exitLimitSeconds (a loud log line if hev never returns);
+//  - hev entered (initialising or running): the request is driven for THAT run (its epoch, XrayHevRuns) - repeated
+//    every retry interval whatever it answered (one made before the run reached the library is not kept; a repeat to a
+//    run that has it already is harmless) - until that run has returned; the stop completes only then, bounded by
+//    exitLimitSeconds (a loud log line if hev never returns). A running hev returns after the first request (patch
+//    0003: a session's cancel is sticky, a handshake answered at the stop no longer keeps it alive - review R47 H1a);
 //  - no worker enters a new run while an earlier run of the process has not returned (XrayHevRuns.enter).
 // The blocking quit is never called from a stop. Everything after it (the core stop, the callback teardown) is reached
 // on every path. Measured on the real library (recipes/hev-socks5-tunnel/test): a running hev returns 0.08 ms after
@@ -231,6 +233,14 @@ final class XrayHevRuns {
         return epoch != 0 && running == epoch
     }
 
+    /// Waits until no run of the process is in progress, at most until `deadline`. true = none is.
+    func waitIdle(until deadline: Date) -> Bool {
+        cond.lock()
+        defer { cond.unlock() }
+        while running != 0 && cond.wait(until: deadline) {}
+        return running == 0
+    }
+
     /// Waits until run `epoch` is no longer in progress, at most until `deadline`. true = it returned.
     func waitReturn(_ epoch: UInt64, until deadline: Date) -> Bool {
         cond.lock()
@@ -265,5 +275,77 @@ enum XrayHevStop: Equatable {
             if Date() >= deadline { return .exitTimedOut(lastRc: lastRc, requests: requests) }
         }
         return .returned(requests: requests)
+    }
+}
+
+// AVPN (review R47 H1b): the in-place restart of the Xray core on a network change (PacketTunnelProvider
+// handle(networkChange:): reasserting, stopXray, startXray(preservingCounters: true)). iOS shows the tunnel Connected
+// again when `reasserting` is cleared (NETunnelProvider.h), so it is cleared only by a restart that carries traffic
+// again - never after a failed start (the error used to be dropped: "Connected" with no hev running). A failed
+// restart is tried once more after any earlier hev run of the process has returned (bounded); a second failure ends
+// the tunnel with that error (cancelTunnelWithError), so the app sees it end. A restart superseded by a newer one or
+// by the session's stop touches nothing; a lease that ended (decision E) leaves the tunnel to the app's dead-session
+// path, still reasserting.
+enum XrayRoamRestart: Equatable {
+    case connected
+    case superseded
+    case leaseEnded
+    case retry
+    case endTunnel
+
+    static func next(failed: Bool, superseded: Bool, leaseEnded: Bool, sessionStopping: Bool,
+                     attempt: Int) -> XrayRoamRestart {
+        guard failed else { return .connected }
+        if superseded || sessionStopping { return .superseded }
+        if leaseEnded { return .leaseEnded }
+        return attempt < 2 ? .retry : .endTunnel
+    }
+}
+
+/// The restart itself, with the provider's operations injected (the provider and the host test run the same code).
+struct XrayRoamDriver {
+    let stopCore: () -> Void                                  // stopXray { }
+    let startCore: (@escaping (Error?) -> Void) -> Void       // startXray(preservingCounters: true)
+    let classify: (Error) -> (superseded: Bool, leaseEnded: Bool)
+    let sessionStopping: () -> Bool                           // the session's stopTunnel began
+    let waitEarlierRun: () -> Void                            // XrayHevRuns.waitIdle, bounded
+    let setReasserting: (Bool) -> Void
+    let endTunnel: (Error) -> Void                            // cancelTunnelWithError
+    let log: (String) -> Void
+    let queue: DispatchQueue                                  // where a retry runs (never the main queue)
+
+    func run(completion: @escaping (Error?) -> Void) {
+        setReasserting(true)
+        stopCore()
+        startCore { finish($0, attempt: 1, completion: completion) }
+    }
+
+    private func finish(_ error: Error?, attempt: Int, completion: @escaping (Error?) -> Void) {
+        let kind = error.map(classify) ?? (superseded: false, leaseEnded: false)
+        let next = XrayRoamRestart.next(failed: error != nil, superseded: kind.superseded, leaseEnded: kind.leaseEnded,
+                                        sessionStopping: sessionStopping(), attempt: attempt)
+        switch next {
+        case .connected:
+            setReasserting(false)
+            completion(nil)
+        case .superseded, .leaseEnded:
+            log("Tribe roaming (xray): restart \(next) (\(String(describing: error)))")
+            completion(error)
+        case .retry:
+            log("Tribe roaming (xray): in-place restart failed (\(String(describing: error))); once more after the earlier hev returned")
+            queue.async {
+                waitEarlierRun()
+                guard !sessionStopping() else {
+                    completion(error)
+                    return
+                }
+                stopCore()
+                startCore { finish($0, attempt: attempt + 1, completion: completion) }
+            }
+        case .endTunnel:
+            log("Tribe roaming (xray): in-place restart failed twice (\(String(describing: error))); ending the tunnel")
+            completion(error)
+            if let error { endTunnel(error) }
+        }
     }
 }

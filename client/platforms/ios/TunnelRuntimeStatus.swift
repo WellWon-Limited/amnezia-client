@@ -381,6 +381,10 @@ final class TunnelStartAnswer {
         state.lock()
         let stopNow = stopping
         state.unlock()
+        // Residual (review R47, PATHOLOGICAL, left as is): a thread preempted between this read and the call below for
+        // longer than both bounds of the stop (2 x deliveryWaitSeconds) delivers the success it read before the stop
+        // began, after the stop's own answer. No bounded wait can exclude it; an unbounded one would turn a stuck
+        // system completion into a stuck stop.
         pending(stopNow ? (error ?? TunnelStartAbort.stoppedDuringStart) : error)
         return true
     }
@@ -421,6 +425,7 @@ final class TunnelStartAnswer {
 final class TunnelStartSlot {
     private let lock = NSLock()
     private var current: TunnelStartAnswer?
+    private var stopRequested = false
     /// Tests only: handed to every start begun after it is set (TunnelStartAnswer.testHookBeforeDecision).
     var testHookBeforeDecision: (() -> Void)?
 
@@ -440,6 +445,7 @@ final class TunnelStartSlot {
         lock.lock()
         let previous = current
         current = start
+        stopRequested = false
         lock.unlock()
         previous?.answer(TunnelStartAbort.supersededByNewStart)
         return { error in start.answer(error) }
@@ -449,8 +455,16 @@ final class TunnelStartSlot {
     func stopBegan() -> Bool {
         lock.lock()
         let start = current
+        stopRequested = true
         lock.unlock()
         return start?.stopBegan() ?? false
+    }
+
+    /// The session's stopTunnel began (until the next startTunnel): a network-change restart does not start again.
+    var sessionStopping: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopRequested
     }
 
     /// The native stop is done: a start still unanswered is answered (stoppedDuringStart), one being delivered is

@@ -89,7 +89,7 @@ fi
 
 # AVPN (upstream nodes): --ne-typecheck = every Swift source of the NE target (list as in
 # client/ios/networkextension/CMakeLists.txt) typechecked for iphoneos against the conan packages
-# awg-apple 3.1.4-tribe.14 (wireguard.h with LibXrayTribeHTTP), hev-socks5-tunnel 2.15.0-tribe.1 and
+# awg-apple 3.1.4-tribe.14 (wireguard.h with LibXrayTribeHTTP), hev-socks5-tunnel 2.15.0-tribe.2 and
 # openvpnadapter 1.0.0 from the local cache. No Xcode project, no build, no signing.
 if [[ "${1:-}" == "--ne-typecheck" ]]; then
     echo "== 1c typecheck цели NE (iphoneos, пакеты conan) =="
@@ -114,7 +114,7 @@ for rr in d.values():
     # newest revision (re-exporting an older recipe makes it the newest again).
     AWG="${AWG_APPLE_PACKAGE_DIR:-$(python3 -I "$SCRIPT_DIR/find_awg_apple_package.py" "$REPO_ROOT" iOS || true)}"
     [[ -n "$AWG" ]] || AWG="$(pkg awg-apple/3.1.4-tribe.14 "s.get('os') == 'iOS'")"
-    HEVP="${HEV_PACKAGE_DIR:-$(pkg hev-socks5-tunnel/2.15.0-tribe.1 "s.get('os') == 'iOS' and o.get('as_framework') == 'True'")}"
+    HEVP="${HEV_PACKAGE_DIR:-$(pkg hev-socks5-tunnel/2.15.0-tribe.2 "s.get('os') == 'iOS' and o.get('as_framework') == 'True'")}"
     OVPN="${OPENVPNADAPTER_PACKAGE_DIR:-$(pkg openvpnadapter/1.0.0 "s.get('os') == 'iOS'")}"
     WGS="$AWG/src/Sources"
     grep -q LibXrayTribeHTTP "$AWG/include/wireguard.h" || { echo "СТОП: $AWG без LibXrayTribeHTTP" >&2; exit 1; }
