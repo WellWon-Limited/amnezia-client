@@ -1730,14 +1730,30 @@ struct MacServicePlan {
     bool act = false;
     bool needInstall = false;
     bool outdatedOnly = false;
+    bool required = false; // round mac-E2: the running service cannot work with this app - no connect without the update
 };
-inline MacServicePlan macServicePlan(bool installed, bool running, bool outdated, bool upgradeDeclined)
+// Round mac-E2: the service is a part of the app. A service that is merely older but compatible keeps the wave-3 rule
+// (offered once per session, a decline connects through it). An INCOMPATIBLE one - the IPC replica's own fact,
+// QRemoteObjectReplica::SignatureMismatch (IpcClient::interfaceIncompatible), never a version string - cannot carry a
+// connect at all: its replacement is required, a decline is never remembered (the next Connect asks again).
+inline MacServicePlan macServicePlan(bool installed, bool running, bool outdated, bool upgradeDeclined, bool incompatible = false)
 {
     MacServicePlan p;
-    p.outdatedOnly = installed && running && outdated;
-    p.needInstall = !installed || (outdated && !(p.outdatedOnly && upgradeDeclined));
+    p.required = installed && running && incompatible;
+    p.outdatedOnly = installed && running && outdated && !p.required;
+    p.needInstall = !installed || p.required || (outdated && !(p.outdatedOnly && upgradeDeclined));
     p.act = !running || p.needInstall;
     return p;
+}
+// What the start does after the confirmation the plan asked for: Install (accepted - the existing install path, the
+// connect goes on by itself after it), ConnectWithOld (a compatible older service declined - wave 3), StayOff (no
+// service, or an incompatible one, declined - the app stays off with one honest line).
+enum class MacServiceStep { Install, ConnectWithOld, StayOff };
+inline MacServiceStep macServiceStepAfterConfirm(const MacServicePlan &p, bool accepted)
+{
+    if (accepted)
+        return MacServiceStep::Install;
+    return p.outdatedOnly ? MacServiceStep::ConnectWithOld : MacServiceStep::StayOff;
 }
 // The Scanner's tap must never cost the user the tunnel (§32): the installer replaces and restarts the root
 // service (tribe-svc-install.sh bootstraps it again), which ends a live tunnel - so an install / update runs from the

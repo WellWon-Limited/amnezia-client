@@ -106,23 +106,30 @@ QString macForeignVpnName()
     return QString();
 }
 
-bool macInstallServiceConfirm(QString *errOut)
+bool macInstallServiceConfirm(QString *errOut, bool required)
 {
     @autoreleasepool {
         // ГЛАВНЫЙ поток. NSAppleScript IN-PROCESS → диалог идёт от «Tribe VPN» (а не «osascript»);
         // display dialog крутит СВОЙ модальный цикл и качает события — окно приложения живое.
         // Пароль здесь НЕ спрашиваем — привилегированная часть ушла в macInstallServiceRun (фон).
-        NSString *src =
-            @"button returned of (display dialog \"«Tribe VPN» установит системную службу VPN, "
-             "необходимую для подключения. Сейчас потребуется пароль администратора Mac.\" "
-             "with title \"Установка службы Tribe VPN\" buttons {\"Отмена\", \"Продолжить\"} "
-             "default button \"Продолжить\" with icon note)";
+        // Round mac-E2: an incompatible running service - the same dialog, worded as required (no "connect anyway").
+        NSString *src = required
+            ? @"button returned of (display dialog \"Эта версия «Tribe VPN» работает только с обновлённой системной "
+               "службой VPN — без обновления подключиться нельзя. Сейчас потребуется пароль администратора Mac.\" "
+               "with title \"Обновление службы Tribe VPN\" buttons {\"Отмена\", \"Продолжить\"} "
+               "default button \"Продолжить\" with icon note)"
+            : @"button returned of (display dialog \"«Tribe VPN» установит системную службу VPN, "
+               "необходимую для подключения. Сейчас потребуется пароль администратора Mac.\" "
+               "with title \"Установка службы Tribe VPN\" buttons {\"Отмена\", \"Продолжить\"} "
+               "default button \"Продолжить\" with icon note)";
         NSDictionary *asErr = nil;
         NSAppleScript *as = [[NSAppleScript alloc] initWithSource:src];
         NSAppleEventDescriptor *res = [as executeAndReturnError:&asErr];
         // -128 = отмена; любой другой исход без «Продолжить» трактуем так же.
         if (asErr != nil || res == nil || ![[res stringValue] isEqualToString:@"Продолжить"]) {
-            if (errOut) *errOut = QStringLiteral("Установка службы VPN отменена");
+            if (errOut)
+                *errOut = required ? QStringLiteral("Без обновления службы VPN подключиться нельзя")
+                                   : QStringLiteral("Установка службы VPN отменена");
             return false;
         }
         return true;

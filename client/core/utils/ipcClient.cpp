@@ -1,5 +1,6 @@
 #include "ipcClient.h"
 #include "ipc.h"
+#include <QDateTime>
 #include <QRemoteObjectNode>
 #include <QtNetwork/qlocalsocket.h>
 
@@ -15,8 +16,28 @@ IpcClient& IpcClient::Instance()
     return ipcClient;
 }
 
+bool IpcClient::interfaceIncompatible()
+{
+    const QSharedPointer<IpcInterfaceReplica> rep = Instance().m_interface;
+    return rep && rep->state() == QRemoteObjectReplica::SignatureMismatch;
+}
+
+void IpcClient::refreshIfMismatched(qint64 minIntervalMs)
+{
+    IpcClient &c = Instance();
+    if (!c.m_interface || c.m_interface->state() != QRemoteObjectReplica::SignatureMismatch)
+        return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (c.m_lastRefreshMs > 0 && now - c.m_lastRefreshMs < minIntervalMs)
+        return;
+    c.m_lastRefreshMs = now;
+    qInfo() << "IpcClient: the service's IPC contract differs from this app's - the replica is acquired again";
+    c.m_interface.reset(c.m_node.acquire<IpcInterfaceReplica>());
+}
+
 QSharedPointer<IpcInterfaceReplica> IpcClient::Interface()
 {
+    refreshIfMismatched(3000); // AVPN (round mac-E2)
     QSharedPointer<IpcInterfaceReplica> rep = Instance().m_interface;
     if (rep.isNull()) {
         qCritical() << "IpcClient::Interface(): Failed to acquire replica";
@@ -35,6 +56,7 @@ QSharedPointer<IpcInterfaceReplica> IpcClient::Interface()
 // AVPN (round mac-B review M1): see ipcClient.h - validity first, no waitForSource.
 QSharedPointer<IpcInterfaceReplica> IpcClient::InterfaceIfReady()
 {
+    refreshIfMismatched(3000); // AVPN (round mac-E2)
     QSharedPointer<IpcInterfaceReplica> rep = Instance().m_interface;
     if (rep.isNull() || !rep->isReplicaValid())
         return nullptr;

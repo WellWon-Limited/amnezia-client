@@ -3455,6 +3455,17 @@ void AvpnEngineQml::syncKillSwitchHold()
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     if (!m_conn)
         return;
+    if (IpcClient::interfaceIncompatible()) {
+        // Round mac-E2: the lease can only fail over an incompatible service - not sent; the replica is asked again
+        // now and then (a service replaced from outside is met); one line, not one per tick.
+        if (!m_svcIncompatibleLogged) {
+            m_svcIncompatibleLogged = true;
+            qInfo() << "[killswitch] the running service's IPC contract differs from this app's - no lease until it is updated";
+            reliabilityEvent(QStringLiteral("svc_incompatible lease_paused"));
+        }
+        IpcClient::refreshIfMismatched(10000);
+        return;
+    }
     QStringList controlPlane;
     for (const QHostAddress &ip : std::as_const(m_apiHostIps)) {
         if (ip.protocol() == QAbstractSocket::IPv4Protocol && controlPlane.size() < 16)
@@ -7008,15 +7019,20 @@ void AvpnEngineQml::guardedStart()
     // про обновление один раз за сессию; отказ = подключаемся со старой службой (раньше отказ снимал
     // намерение, и VPN не поднимался вовсе). Неустановленную/неживую службу ставить всё равно надо.
     // DebugSnapshot.h::macServicePlan (AVPN Scanner, item 6: the same decision for the Scanner's explicit tap).
+    // Round mac-E2: an incompatible service (the replica's SignatureMismatch) must be replaced before any connect -
+    // no attempt, no leg, no seat request is started over it (DebugSnapshot.h::macServicePlan).
     const avpn::MacServicePlan plan = avpn::macServicePlan(avpn::macServiceInstalled(), avpn::macServiceRunning(),
-                                                           avpn::macServiceOutdated(), m_svcUpgradeDeclined);
+                                                           avpn::macServiceOutdated(), m_svcUpgradeDeclined,
+                                                           IpcClient::interfaceIncompatible());
     const bool outdatedOnly = plan.outdatedOnly;
     const bool needInstall = plan.needInstall;
     if (plan.act) {
         if (needInstall) {
             QString cerr;
-            if (!avpn::macInstallServiceConfirm(&cerr)) {
-                if (outdatedOnly) {
+            const bool accepted = avpn::macInstallServiceConfirm(&cerr, plan.required);
+            const avpn::MacServiceStep step = avpn::macServiceStepAfterConfirm(plan, accepted);
+            if (step != avpn::MacServiceStep::Install) {
+                if (step == avpn::MacServiceStep::ConnectWithOld) {
                     m_svcUpgradeDeclined = true;
                     reliabilityEvent(QStringLiteral("svc_upgrade_declined old_daemon_kept"));
                     // продолжаем старт со старой службой — ниже по функции
@@ -7027,7 +7043,8 @@ void AvpnEngineQml::guardedStart()
                     // The flag used to stay set on this return: the next Connect skipped its own
                     // preparation, and until then the facade never looked idle (no mode admission).
                     m_startPrepared = false;
-                    reliabilityEvent(QStringLiteral("intent_off why=svc_install_declined"));
+                    reliabilityEvent(plan.required ? QStringLiteral("intent_off why=svc_update_required_declined")
+                                                   : QStringLiteral("intent_off why=svc_install_declined"));
                     emit error(cerr.isEmpty() ? tr("Установка службы VPN отменена") : cerr);
                     emit changed();
                     return;
@@ -7165,6 +7182,16 @@ void AvpnEngineQml::startSvcWorker(bool needInstall, std::function<void(bool, co
 // AVPN (beachball-фикс): финиш фоновой установки root-демона. Главный поток (queued из worker).
 void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)
 {
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (ok) {
+        // Round mac-E2: a replica that met the old (incompatible) service never recovers by itself - both threads'
+        // replicas are acquired again now, so the connect that goes on meets the service just installed.
+        IpcClient::refreshIfMismatched(0);
+        if (m_conn)
+            QMetaObject::invokeMethod(m_conn, []() { IpcClient::refreshIfMismatched(0); }, Qt::QueuedConnection);
+        m_svcIncompatibleLogged = false;
+    }
+#endif
     m_svcInstallInFlight = false;
     m_svcInstalling = false;
     m_busy = false;              // guardedStart сам вернёт busy, если старт продолжится
@@ -8262,7 +8289,8 @@ void AvpnEngineQml::scannerEnsureService()
     }
     const bool installed = avpn::macServiceInstalled(), running = avpn::macServiceRunning(), outdated = avpn::macServiceOutdated();
     // The explicit tap asks again even when the update was declined on Connect in this session.
-    const MacServicePlan plan = macServicePlan(installed, running, outdated, /*upgradeDeclined=*/false);
+    const MacServicePlan plan = macServicePlan(installed, running, outdated, /*upgradeDeclined=*/false,
+                                               IpcClient::interfaceIncompatible()); // round mac-E2
     reliabilityEvent(QStringLiteral("scan_service action=%1").arg(QLatin1String(macServiceActionName(installed, running, outdated))));
     if (!plan.act) {
         scanServiceDone(QStringLiteral("ok"), QString());

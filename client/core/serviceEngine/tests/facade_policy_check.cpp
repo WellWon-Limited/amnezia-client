@@ -1794,6 +1794,27 @@ static void scannerServicePlan()
     // Running and current: nothing.
     CHECK(!macServicePlan(true, true, false, false).act);
     CHECK(QLatin1String(macServiceActionName(true, true, false)) == QLatin1String("none"));
+
+    // Round mac-E2: an INCOMPATIBLE running service (the replica's SignatureMismatch) - its replacement is required for a
+    // connect: asked even after a decline in this session, never "connect through it".
+    for (bool declined : {false, true}) {
+        const MacServicePlan inc = macServicePlan(true, true, /*outdated=*/true, declined, /*incompatible=*/true);
+        CHECK(inc.required && inc.act && inc.needInstall && !inc.outdatedOnly);
+        CHECK(macServiceStepAfterConfirm(inc, /*accepted=*/true) == MacServiceStep::Install);   // the install path
+        CHECK(macServiceStepAfterConfirm(inc, /*accepted=*/false) == MacServiceStep::StayOff);  // off, one honest line
+    }
+    CHECK(macServicePlan(true, true, /*outdated=*/false, false, /*incompatible=*/true).required); // the fact, not a version
+    // ... a failed install is the existing StayOff of finishSvcInstall; the next Connect asks again: nothing remembered
+    CHECK(macServicePlan(true, true, true, /*declined=*/true, true).act);
+    // A compatible older service keeps the wave-3 rule: a decline connects through it, a declined session is not asked again.
+    const MacServicePlan older = macServicePlan(true, true, true, false, /*incompatible=*/false);
+    CHECK(!older.required && older.outdatedOnly);
+    CHECK(macServiceStepAfterConfirm(older, false) == MacServiceStep::ConnectWithOld);
+    CHECK(!macServicePlan(true, true, true, true, false).act);
+    // No service at all: a decline stays off (as before).
+    CHECK(macServiceStepAfterConfirm(macServicePlan(false, false, true, false, false), false) == MacServiceStep::StayOff);
+    // An incompatible service that is not running is not "running and incompatible": the existing install / start rules.
+    CHECK(!macServicePlan(true, false, false, false, true).required);
 }
 
 // Owner's iPhone 16.11 (build 140), D4: a provider start refused before the core ever started (lease transport

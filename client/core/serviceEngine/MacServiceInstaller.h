@@ -48,7 +48,9 @@ bool macServiceOutdated();
 //
 // Фаза 1 — ТОЛЬКО главный поток: пояснительный диалог «установим службу, потребуется пароль».
 // display dialog качает события в своём модальном цикле — окно живое. false = пользователь отменил.
-bool macInstallServiceConfirm(QString *errOut);
+// required (round mac-E2): the running service cannot work with this app (its IPC contract differs) - the same
+// dialog, worded as required; a decline answers the honest line in errOut.
+bool macInstallServiceConfirm(QString *errOut, bool required = false);
 // Фаза 2 — МОЖНО (и нужно) с ФОНОВОГО потока: привилегированный запуск вшитого установщика
 // (NSAppleScript `do shell script … with administrator privileges`; системный промпт пароля рисует
 // SecurityAgent — отдельный процесс, поток вызова ему не важен, атрибуция остаётся «Tribe VPN»).

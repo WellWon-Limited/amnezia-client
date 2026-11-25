@@ -21,6 +21,14 @@ public:
     // of other threads run inside it and may destroy the caller's own objects).
     static QSharedPointer<IpcInterfaceReplica> InterfaceIfReady();
     static QSharedPointer<IpcProcessInterfaceReplica> CreatePrivilegedProcess();
+    // AVPN (round mac-E2): the replica's own fact - the service's IPC contract differs from this app's
+    // (QRemoteObjectReplica::SignatureMismatch: a service of another build). Non-blocking; this thread's replica.
+    static bool interfaceIncompatible();
+    // A replica that met a mismatched service never becomes valid by itself, not even once that service is replaced
+    // (round mac-E device: 40 s after the swap every call still failed) - it is acquired again, at most once per
+    // minIntervalMs, so its next handshake meets the service that runs now. Non-blocking (the state follows on the
+    // node's events); Interface() / InterfaceIfReady() do it themselves (every 3 s at most).
+    static void refreshIfMismatched(qint64 minIntervalMs);
 
     template <typename Func>
     static auto withInterface(Func func)
@@ -55,6 +63,7 @@ signals:
 private:
     QRemoteObjectNode m_node;
     QSharedPointer<IpcInterfaceReplica> m_interface;
+    qint64 m_lastRefreshMs = 0; // AVPN (round mac-E2): refreshIfMismatched
 };
 
 #endif // IPCCLIENT_H
