@@ -6,7 +6,9 @@
 #   A1  the daemon's status names its peer's endpoint (macOS only);
 #   A2  the startup probe takes the daemon's words (daemonAdoptHintFromStatus) before the adoption runs;
 #   A3  the macOS adoption gives the engine the hint {awg, endpoint}, names the node by it, and forgets the hint;
-#   A4  the mode decision reads the live session's transport with the daemon's (liveSessionTransport).
+#   A4  the mode decision reads the live session's transport with the daemon's (liveSessionTransport);
+#   A5  (review N4) the home card names only a pool row of that identity (transport + full endpoint) and otherwise
+#       shows the session itself with its transport.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -50,6 +52,13 @@ live=$(at "$mode" 'liveProto = avpn::liveSessionTransport(liveProto, m_adoptedNo
 dec=$(at "$mode" 'avpn::isTunnelUpStateName(st), liveProto);')
 [ "${live:-0}" -gt 0 ] && [ "${dec:-0}" -gt "${live:-0}" ] \
   || bad "A4: the mode decision does not read the daemon-adopted session's transport"
+
+# ---- A5 (review N4) ------------------------------------------------------------------------------------------------
+card="$(code "$FACADE" | awk '/QString hintOnlyProto;/ { on = 1 } on { print } on && /node\["proto"\]/ { exit }')"
+has "$card" 'hintProto = hint.proto.isEmpty() ? QStringLiteral("awg") : hint.proto;' \
+  && has "$card" 'hintedPoolRow(s.pool, hint.nodeId, hint.endpoint, hintProto);' \
+  || bad "A5: the card guesses the adopted session's row without its transport"
+has "$card" 'node["proto"]        = pick ? pick->proto : hintOnlyProto;' || bad "A5: the card hides the session's own transport"
 
 [ "$fail" = "0" ] && echo "check_mac_daemon_adopt_wiring: ok"
 exit "$fail"

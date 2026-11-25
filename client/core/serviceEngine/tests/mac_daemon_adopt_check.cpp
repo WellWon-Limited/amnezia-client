@@ -9,7 +9,9 @@
 //      session for Xray - as for a session the GUI started;
 //   3. the adoption without a hint (what the facade did before, and still does with an older daemon): no node - the
 //      decision on the engine's transport alone keeps the session (the defect), the daemon's transport restarts it;
-//   4. an Xray session the GUI started is never taken for AmneziaWG (the fallback reads only daemon-adopted sessions).
+//   4. an Xray session the GUI started is never taken for AmneziaWG (the fallback reads only daemon-adopted sessions);
+//   5. the home card names only a pool row of the adopted session's identity (transport + full endpoint), never
+//      another listener of the same host (review N4).
 // Wiring of the facade and the daemon: tests/check_mac_daemon_adopt_wiring.sh. Run by build_mac_daemon_adopt.sh.
 #include "../DaemonAdoptHint.h"
 #include "../DebugSnapshot.h"
@@ -173,6 +175,28 @@ int main(int argc, char **argv)
         CHECK(liveSessionTransport(eng.currentNodeProto(), false) == QLatin1String("xray"));
         CHECK(modeTap(QStringLiteral("awg"), eng, liveSessionTransport(eng.currentNodeProto(), false)).restartTunnel);
         CHECK(!modeTap(QStringLiteral("xray"), eng, liveSessionTransport(eng.currentNodeProto(), false)).restartTunnel);
+    }
+
+    // --- 5. the card names only a row of the adopted session's identity (review N4) ---
+    // The GUI was closed, AmneziaWG ran on A:51820, that listener left the pool while an Xray listener on A:443 stayed,
+    // the GUI started: the engine (rightly) did not name the node, and the card's host-only guess showed the Xray row.
+    {
+        QList<NodeDebugRow> pool;
+        NodeDebugRow ax; ax.nodeId = QStringLiteral("11:xray"); ax.proto = QStringLiteral("xray"); ax.endpoint = QStringLiteral("203.0.113.11:443");
+        NodeDebugRow de; de.nodeId = QStringLiteral("12"); de.proto = QStringLiteral("awg"); de.endpoint = QStringLiteral("203.0.113.12:585");
+        pool << ax << de;
+        const QString gone = QStringLiteral("203.0.113.11:51820"); // the live session's listener, no longer in the pool
+        CHECK(hintedPoolRow(pool, QString(), gone) == 0);            // the old host-only guess: the Xray row (the defect)
+        CHECK(hintedPoolRow(pool, QString(), gone, QStringLiteral("awg")) == -1); // with the transport: no guess
+        CHECK(hintedPoolRow(pool, QString(), QStringLiteral("203.0.113.12:585"), QStringLiteral("awg")) == 1); // its row
+        CHECK(hintedPoolRow(pool, QString(), QStringLiteral("203.0.113.11:443"), QStringLiteral("awg")) == -1); // another transport
+        CHECK(hintedPoolRow(pool, QStringLiteral("11:xray"), gone, QStringLiteral("awg")) == -1); // an id of another transport
+        NodeDebugRow twin = de; twin.nodeId = QStringLiteral("12b"); // two rows of one endpoint and transport
+        pool << twin;
+        CHECK(hintedPoolRow(pool, QString(), QStringLiteral("203.0.113.12:585"), QStringLiteral("awg")) == -1);
+        NodeDebugRow legacy = de; legacy.nodeId = QStringLiteral("9"); legacy.proto.clear(); legacy.endpoint = QStringLiteral("198.51.100.9:585");
+        pool << legacy; // a row without a proto is AmneziaWG
+        CHECK(hintedPoolRow(pool, QString(), QStringLiteral("198.51.100.9:585"), QStringLiteral("awg")) == int(pool.size()) - 1);
     }
 
     if (g_failed) {

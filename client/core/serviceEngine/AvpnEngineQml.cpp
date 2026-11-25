@@ -2973,13 +2973,23 @@ QVariantMap AvpnEngineQml::currentNode() const
     // сервера» при работающем VPN. Показываем честный факт из подсказки сессии: ноду пула с тем же
     // id или хостом, иначе сам адрес. Identity движка (health/failover) это не меняет.
     QString hintOnlyEndpoint;
+    QString hintOnlyProto; // the session's own transport when no row of its identity is in the pool (macOS daemon)
     if (source == CardNodeSource::Unknown) {
         const ServiceEngine::SessionHint hint = m_engine.sessionHint();
-        const int row = hintedPoolRow(s.pool, hint.nodeId, hint.endpoint);
+        QString hintProto;
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+        // Round mac-C (review N4): a session adopted from the daemon has a known transport (AmneziaWG) and full
+        // endpoint - the card names only a row of that identity, never another listener of the same host.
+        if (m_adoptedNoProto)
+            hintProto = hint.proto.isEmpty() ? QStringLiteral("awg") : hint.proto;
+#endif
+        const int row = hintedPoolRow(s.pool, hint.nodeId, hint.endpoint, hintProto);
         if (row >= 0)
             pick = &s.pool.at(row);
-        else
+        else {
             hintOnlyEndpoint = hint.endpoint;
+            hintOnlyProto = hintProto;
+        }
     }
     // android2 P7: with a pin and no hint at all the card still says «Текущий сервер», not «Умный выбор сервера» (that
     // names Auto, which the person did not choose); in Auto the old look stays.
@@ -3011,7 +3021,7 @@ QVariantMap AvpnEngineQml::currentNode() const
     // AVPN awg31-xray-v1: транспорт показанного узла — бейдж «Amnezia v3.1»/«Xray» на карточке
     // Connect. Даём из currentNode (а не сканом nodePool в QML): nodePool пересобирает и ранжирует
     // весь снапшот на КАЖДЫЙ changed() (тик ~4с) — биндинг главного экрана этого не стоит.
-    node["proto"]        = pick ? pick->proto : QString();
+    node["proto"]        = pick ? pick->proto : hintOnlyProto;
     // AVPN upstream nodes (point 16): the shown node is a provider profile (its own badge, no provider name).
     node["upstream"]     = pick ? pick->upstream : false;
     node["upstreamTier"] = pick ? pick->upstreamTier : 0;

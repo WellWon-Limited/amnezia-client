@@ -1767,9 +1767,30 @@ inline QString endpointHost(const QString &endpoint)
 // нода удалена/пересоздана или сменился порт/протокол): нода с id подсказки, иначе первая нода
 // того же хоста (тот же сервер — та же страна). -1 — такого сервера в пуле нет, карточка
 // показывает адрес сессии. Только показ: identity движка (health/failover) это НЕ меняет.
+// hintProto (round mac-C, review N4; the macOS daemon's adoption passes it): the session's transport is KNOWN, and the
+// card names only a row of that very identity - the same id and transport, or the same full endpoint and transport.
+// A host-only guess named another listener over a live tunnel (an AmneziaWG session on A:51820 whose row left the pool
+// while an Xray row on A:443 stayed showed «Xray»); without a row of its identity the card shows the session itself
+// («Текущий сервер» with the session's transport). Empty = the old rule (id, then host) - other platforms.
 inline int hintedPoolRow(const QList<NodeDebugRow> &pool, const QString &hintNodeId,
-                         const QString &hintEndpoint)
+                         const QString &hintEndpoint, const QString &hintProto = QString())
 {
+    const auto protoOfRow = [](const NodeDebugRow &r) { return r.proto.isEmpty() ? QStringLiteral("awg") : r.proto; };
+    if (!hintProto.isEmpty()) {
+        int hit = -1;
+        int hits = 0;
+        for (int i = 0; i < pool.size(); ++i) {
+            if (protoOfRow(pool.at(i)) != hintProto)
+                continue;
+            if (!hintNodeId.isEmpty() && pool.at(i).nodeId == hintNodeId)
+                return i;
+            if (!hintEndpoint.isEmpty() && pool.at(i).endpoint == hintEndpoint) {
+                hit = i;
+                ++hits;
+            }
+        }
+        return hits == 1 ? hit : -1; // two rows of one endpoint and transport: no guess either
+    }
     if (!hintNodeId.isEmpty())
         for (int i = 0; i < pool.size(); ++i)
             if (pool.at(i).nodeId == hintNodeId)
