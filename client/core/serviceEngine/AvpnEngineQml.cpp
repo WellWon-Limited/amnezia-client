@@ -1039,8 +1039,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // from the app to a CGNAT address raised the system "Local Network" permission prompt.
         m_liveRtt = m_signal.smoothedRtt();
         m_liveReachable = reachable;
-        if (reachable)
-            m_liveProven = true;     // 5.1.108: ONLINE without node_scan (dataFlowingNow)
+        m_liveProof = avpn::liveProofAfterProbe(m_liveProof, reachable); // 5.1.108: ONLINE without node_scan (dataFlowingNow)
         // AVPN (красные палочки): различаем «ещё мерю» (m_liveDead=false → плейсхолдер 1 зелёная)
         // и «связь подтверждённо мертва» (m_liveDead=true → 0 зелёных + все красные). Один таймаут
         // в «мертво» НЕ роняем — ждём kLiveDeadStreak неудач подряд (анти-фликер на транзиентном дропе).
@@ -6186,12 +6185,13 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // AVPN (реальные палочки): туннель не в Connected → гасим живые палочки (кэш RTT не должен
     // маскировать обрыв). При следующем Connected проба пере-сидирует SignalQuality с нуля.
     if (state() != QLatin1String("connected")
-        && (m_liveBars != 0 || m_liveReachable || m_liveProven || m_liveRtt >= 0 || m_liveDead || m_liveFailStreak)) {
+        && (m_liveBars != 0 || m_liveReachable || m_liveProof != avpn::LiveProof::None || m_liveRtt >= 0 || m_liveDead
+            || m_liveFailStreak)) {
         m_signal.reset();
         m_liveBars = 0;
         m_liveRtt = -1;
         m_liveReachable = false;
-        m_liveProven = false;      // 5.1.108: a new Connected session proves data again
+        m_liveProof = avpn::LiveProof::None; // 5.1.108: a new Connected session proves data again
         m_liveDead = false;        // обрыв/смена ноды → «мертво» снимаем, при новом Connected мерим заново
         m_liveFailStreak = 0;
         emit liveQualityChanged();
@@ -8080,8 +8080,9 @@ void AvpnEngineQml::scanNotifyNetwork()
 // (UplinkMonitor.h physicalUplinkKnownDown). Read on every network notice (scanNotifyNetwork: the uplink monitor's
 // events; the iOS app path monitor's while the Scanner hooks it) and on every tick (iOS without that hook) - no timer
 // or probe of its own. A move voids the live verdict: what the probe said before (red bars, «трафик не проходит») is
-// not about the network now - measured again from scratch, as after a tunnel change. The session's data proof
-// (m_liveProven) and the chips stay.
+// not about the network now - measured again from scratch, as after a tunnel change. Review R50 2: so is what proved
+// data before (a live pass, the connect's "works"): ONLINE waits for a live probe that passes again (LiveProof::Voided,
+// DebugSnapshot.h::dataFlowingNow). The connect's verdict (m_pathCheck), the path memory and the chips stay.
 void AvpnEngineQml::noteUplinkFact()
 {
     const avpn::UplinkMonitor *uplink = avpn::UplinkMonitor::instance();
@@ -8103,6 +8104,7 @@ void AvpnEngineQml::noteUplinkFact()
     m_liveReachable = false;
     m_liveDead = false;
     m_liveFailStreak = 0;
+    m_liveProof = avpn::liveProofAfterUplinkMove(m_liveProof);
     emit liveQualityChanged();
     emit changed();
 }
@@ -8548,7 +8550,7 @@ void AvpnEngineQml::refreshDataFlowing()
 {
     const bool now = avpn::dataFlowingNow(!m_paused && m_engine.state() == EngineState::Connected
                                               && m_lastTunnelState == Vpn::Connected,
-                                          m_liveDead, m_pathCheck, m_liveProven);
+                                          m_liveDead, m_pathCheck, m_liveProof);
     if (now == m_dataFlowing)
         return;
     m_dataFlowing = now;

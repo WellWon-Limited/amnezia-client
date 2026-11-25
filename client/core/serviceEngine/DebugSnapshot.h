@@ -897,14 +897,32 @@ inline bool reissueAfterOwnAbort(bool canceled, bool timedOut)
 // 06.11.2026) - so no build ever showed ONLINE. Now the live in-tunnel probe (QualityProbe:
 // /v1/ping, then generate_204, every tick while connected) proves it as well; whoami only
 // accelerates (works) or forbids (no_data / bypass). A confirmed dead live probe (liveDead) always
-// forbids. liveProven = at least one live probe succeeded in this Connected session.
-inline bool dataFlowingNow(bool tunnelConnected, bool liveDead, const QString &pathCheck, bool liveProven)
+// forbids. liveProof = what the live probe knows about data in this Connected session:
+//  None   - nothing measured yet (a new session): the connect's check "works" may show ONLINE first;
+//  Proven - a live probe passed;
+//  Voided - review R50 2: the device's physical network went or came back since (AvpnEngineQml::noteUplinkFact, the
+//           transport staying Connected). Every earlier claim - a live pass, the connect's "works", a dead verdict -
+//           was about the network before, so ONLINE waits for a live probe that passes again. The page shows what it
+//           shows after a new connect before its first probe (the caption without amber, no ONLINE). The connect's
+//           verdict itself (pathCheck) and the path memory are not touched.
+enum class LiveProof { None, Proven, Voided };
+inline LiveProof liveProofAfterProbe(LiveProof was, bool reachable)
+{
+    return reachable ? LiveProof::Proven : was; // a failure speaks through the dead streak, not here
+}
+inline LiveProof liveProofAfterUplinkMove(LiveProof)
+{
+    return LiveProof::Voided;
+}
+inline bool dataFlowingNow(bool tunnelConnected, bool liveDead, const QString &pathCheck, LiveProof liveProof)
 {
     if (!tunnelConnected || liveDead)
         return false;
     if (pathCheck == QLatin1String("no_data") || pathCheck == QLatin1String("bypass"))
         return false;
-    return pathCheck == QLatin1String("works") || liveProven;
+    if (liveProof == LiveProof::Voided)
+        return false;
+    return pathCheck == QLatin1String("works") || liveProof == LiveProof::Proven;
 }
 
 // Decision 2026-11-05: an edge can pass small answers and still never deliver /v1/subscription (the
