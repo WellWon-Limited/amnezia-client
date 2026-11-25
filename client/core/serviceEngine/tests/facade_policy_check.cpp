@@ -1531,9 +1531,28 @@ static void scannerRowOutcomeBelongsToItsAttempt()
         st = scanRowAttemptObserve(row, 2, B, false, false, false, 21);
         st = scanRowAttemptObserve(row, 2, QString(), false, false, /*attemptOver=*/true, /*attemptEpoch=*/22);
         CHECK(st.ended && st.failed == QStringList{B});
+        // an intent off after the row's own attempt began is the row's outcome
         scanRowAttemptBegin(row, B, 3, 23);
-        st = scanRowAttemptObserve(row, 3, QString(), false, /*intentOff=*/true, false, 17);
-        CHECK(st.ended && st.failed == QStringList{B}); // the person's intent off is this chain's, whatever ran before
+        st = scanRowAttemptObserve(row, 3, B, false, false, false, 23);
+        st = scanRowAttemptObserve(row, 3, QString(), false, /*intentOff=*/true, false, 23);
+        CHECK(st.ended && st.failed == QStringList{B});
+    }
+    // (4) Device round air-D, E2 (journal 00:11:10-00:11:16): A = up:3ab948.. tapped (intent epoch 28, attempt 18 starts),
+    // B = up:7a2869.. tapped 0.7 s later (epoch 30, "exact_row_request_dropped row=A"); A's seat request hangs,
+    // "upstream_start_failed node=A code=transport", attempt 18 "superseded", then "intent_off why=external_loss" - and
+    // B was marked "scan_row_failed" with no attempt_start of its own. B's own attempt never began (the newest attempt is
+    // A's, epoch 28 < 30): the request is dropped, no verdict for B.
+    {
+        ScanRowAttempt row;
+        scanRowAttemptBegin(row, B, /*serial=*/7, /*epoch=*/30);
+        ScanRowStep st = scanRowAttemptObserve(row, 7, A, false, false, false, /*attemptEpoch=*/28); // A still raised
+        CHECK(st.failed.isEmpty() && !st.ended && !st.dropped);
+        st = scanRowAttemptObserve(row, 7, QString(), false, /*intentOff=*/true, /*attemptOver=*/false, /*attemptEpoch=*/28);
+        CHECK(st.failed.isEmpty() && !st.ended && st.dropped && st.droppedNode == B && !row.active);
+        // a person's action (the serial moves) is still "superseded", never "dropped"
+        scanRowAttemptBegin(row, B, 8, 31);
+        st = scanRowAttemptObserve(row, 9, QString(), false, true, false, 28);
+        CHECK(st.superseded && !st.dropped && st.failed.isEmpty());
     }
 }
 

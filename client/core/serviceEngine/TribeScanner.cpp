@@ -2369,6 +2369,11 @@ void TribeScanner::connectRefused(const QString &nodeId)
         dispatch(m_m.connectRefused(nodeId, now()));
     }, Qt::QueuedConnection);
 }
+void TribeScanner::rowRequestDropped(const QString &nodeId)
+{
+    emitLog(QStringLiteral("row_request_dropped node=%1").arg(nodeId));
+    dispatch(m_m.rowRequestDropped(nodeId, now()));
+}
 void TribeScanner::reportQueueChanged() { dispatch(m_m.reportQueueState(m_engine->reportQueueFull(), now())); }
 
 void TribeScanner::refreshSwitches()

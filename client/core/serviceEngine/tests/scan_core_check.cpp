@@ -4991,6 +4991,39 @@ static void connectedRowIsCounted()
     CHECK(rowsInState(v, "connected") == 1 && v.value(QLatin1String("available")).toInt() == shown);
 }
 
+// E2 (device round air-D): the engine dropped the tapped row's request before its own attempt began ("intent_off
+// why=external_loss" after the older row's seat request hung): the row is not «Не удалось», no outcome is sent, the chain
+// is over and the person is told the connect did not start ("connect_not_started") - the row can be tapped again.
+static void droppedRequestIsNoVerdict()
+{
+    World w = baseWorld("dropped", hostMac(), ScanNetKind::Wifi);
+    w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+    w.runMs = 9000;
+    Driver d(w);
+    d.run();
+    QStringList ids;
+    for (const QJsonValue &x : lastView(d).value(QLatin1String("rows")).toArray())
+        if (x.toObject().value(QLatin1String("state")).toString() == QLatin1String("works"))
+            ids << x.toObject().value(QLatin1String("id")).toString();
+    CHECK(ids.size() >= 2);
+    if (ids.size() < 2)
+        return;
+    const QString a = ids.at(0), b = ids.at(1);
+    const qint64 t = d.now + 1000;
+    d.m.rowTapped(a, t);
+    d.m.rowTapped(b, t + 700);
+    const ScanStep s = d.m.rowRequestDropped(b, t + 6500);
+    const QJsonObject v = viewJson(d.m, t + 6500);
+    CHECK(rowOf(v, b).value(QLatin1String("state")).toString() == QLatin1String("works"));
+    CHECK(rowOf(v, a).value(QLatin1String("state")).toString() == QLatin1String("works"));
+    CHECK(d.m.connectingId().isEmpty() && !s.has(ScanActionKind::SendOutcomes));
+    bool told = false;
+    for (const ScanAction &x : s.actions)
+        told = told || (x.kind == ScanActionKind::ShowShade && x.shade.textKey == QLatin1String("connect_not_started"));
+    CHECK(told);
+    CHECK(d.m.rowTapped(b, t + 7000).has(ScanActionKind::ConnectRow)); // tappable again
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -5532,6 +5565,7 @@ int main(int argc, char **argv)
     failedCandidatesAreNoResult();
     progressCountsWhatIsChecked();
     connectedRowIsCounted();
+    droppedRequestIsNoVerdict();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();

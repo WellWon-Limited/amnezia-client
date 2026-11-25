@@ -2024,12 +2024,12 @@ You can attach a photo or video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+57"/>
+        <location line="+58"/>
         <source>Сканер</source>
         <translation>Scanner</translation>
     </message>
     <message>
-        <location line="-56"/>
+        <location line="-57"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2145,12 +2145,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+83"/>
+        <location line="+84"/>
         <source>Отправляем отчёт…</source>
         <translation>Sending the report…</translation>
     </message>
     <message>
-        <location line="-80"/>
+        <location line="-81"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>All seats are taken right now — connecting the next server</translation>
     </message>
@@ -2163,6 +2163,11 @@ You can attach a photo or video.</translation>
         <location line="+1"/>
         <source>Не удалось подключиться — проверьте снова через минуту</source>
         <translation>Could not connect — check again in a minute</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Подключение не началось — нажмите сервер ещё раз</source>
+        <translation>The connection did not start — tap the server again</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2251,13 +2256,13 @@ You can attach a photo or video.</translation>
         <translation>Scan stopped · %1</translation>
     </message>
     <message>
-        <location line="+90"/>
+        <location line="+92"/>
         <source>ru</source>
         <comment>plural rule of this translation: ru (one/few/many) or en (one/other)</comment>
         <translation>en</translation>
     </message>
     <message>
-        <location line="-161"/>
+        <location line="-163"/>
         <source>Подключаться к VPN можно как обычно, а Сканеру нужна обновлённая служба.</source>
         <translation>You can connect to the VPN as usual, but the Scanner needs the updated service.</translation>
     </message>
@@ -2492,7 +2497,7 @@ You can attach a photo or video.</translation>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-84"/>
+        <location line="-85"/>
         <source>только что</source>
         <translation>just now</translation>
     </message>
@@ -2567,7 +2572,7 @@ You can attach a photo or video.</translation>
         <translation>Connect to Wi‑Fi — VPN usually works through it. Then open the Scanner and tap “Scan”.</translation>
     </message>
     <message>
-        <location line="+35"/>
+        <location line="+36"/>
         <source>Службу Tribe VPN нужно обновить</source>
         <translation>The Tribe VPN service needs an update</translation>
     </message>
@@ -3605,7 +3610,7 @@ You can attach a photo or video.</translation>
         <translation>Not enough live servers to switch</translation>
     </message>
     <message>
-        <location line="+674"/>
+        <location line="+682"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray is not available in this app version</translation>
     </message>

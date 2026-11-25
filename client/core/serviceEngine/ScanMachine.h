@@ -1741,6 +1741,26 @@ public:
         return !m_connectingId.isEmpty() && (nodeId.isEmpty() || nodeId == m_connectingId || m_chainOrder.contains(nodeId));
     }
 
+    // The engine dropped the tapped row's request before the row's own attempt began (device round air-D, E2: two taps,
+    // the older row's seat request hung, its attempt was torn down for the new tap and the engine turned the intent off -
+    // "intent_off why=external_loss" - before the new row's attempt ever started; the new row was marked «Не удалось»
+    // and the VPN ended off). No verdict and no outcome for the row: it reads as before. A warning shade says the
+    // connect did not start, so two taps never end silently "off" - the row can be tapped again.
+    ScanStep rowRequestDropped(const QString &nodeId, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        if (!m_connectingId.isEmpty() && (nodeId.isEmpty() || nodeId == m_connectingId)) {
+            m_connectingId.clear();
+            m_chainOrder.clear();
+            m_chainLaterShown = false;
+            m_chain.begin(m_net.key);
+            s.actions << shade(ShadeTone::Warning, QStringLiteral("connect_not_started"));
+        }
+        finishStep(s, now);
+        return s;
+    }
+
     // The engine's attempt ended in an error (engine Error) while a tap's chain ran.
     ScanStep attemptEnded(qint64 now)
     {

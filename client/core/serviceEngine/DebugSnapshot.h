@@ -1293,6 +1293,10 @@ struct ScanRowStep {
     bool ended = false;
     bool superseded = false; // another action took the tunnel: the request is over without a failure (told once)
     QString supersededNode;
+    // the engine turned the intent off by itself (no action of the person: the same intent serial) before the row's own
+    // attempt began - the request is over without a verdict for the row (device round air-D, E2)
+    bool dropped = false;
+    QString droppedNode;
 };
 inline void scanRowAttemptBegin(ScanRowAttempt &a, const QString &nodeId, quint64 intentSerial, quint64 intentEpoch)
 {
@@ -1303,23 +1307,33 @@ inline void scanRowAttemptBegin(ScanRowAttempt &a, const QString &nodeId, quint6
     a.intentSerial = intentSerial;
     a.intentEpoch = intentEpoch;
 }
-// engineNode = the node the engine raises or carries now ("" = none); intentOff = the person's intent is off (the
-// chain cannot go on); attemptOver = the engine sits in its terminal Error with no attempt running; attemptEpoch = the
-// intent epoch the engine's newest attempt began under (ServiceEngine::lastAttemptIntentEpoch, 0 = none yet). An
-// attempt that ended is this chain's only when it began under the chain's epoch or later: the Error an older attempt
-// left (the row failed just before, a connect still running at the tap) ends no newer row and reports no outcome
-// for it - that attempt's own result already went to its own row.
+// engineNode = the node the engine raises or carries now ("" = none); intentOff = the intent is off (the chain cannot go
+// on); attemptOver = the engine sits in its terminal Error with no attempt running; attemptEpoch = the intent epoch the
+// engine's newest attempt began under (ServiceEngine::lastAttemptIntentEpoch, 0 = none yet).
+// A row's verdict comes only from ITS OWN attempt - one begun under the row's epoch or later. The Error an older attempt
+// left (the row failed just before, a connect still running at the tap) ends no newer row and reports no outcome for
+// it. An intent off with no action of the person (the same serial: the engine's own drop - device round air-D, E2,
+// "intent_off why=external_loss" while the older row's attempt was torn down for this tap) before the row's own attempt
+// began is no verdict either: the request is dropped (st.dropped), the row reads as before. A person's action always
+// moves the serial (superseded).
 inline ScanRowStep scanRowAttemptObserve(ScanRowAttempt &a, quint64 intentSerial, const QString &engineNode,
                                          bool dataFlowing, bool intentOff, bool attemptOver, quint64 attemptEpoch)
 {
     ScanRowStep st;
     if (!a.active)
         return st;
-    const bool gaveUp = intentOff || (attemptOver && attemptEpoch >= a.intentEpoch);
+    const bool ownAttempt = attemptEpoch >= a.intentEpoch;
+    const bool gaveUp = ownAttempt && (intentOff || attemptOver);
     if (intentSerial != a.intentSerial) { // another action took the tunnel: not this chain any more
         a.active = false;
         st.superseded = true;
         st.supersededNode = a.tapped;
+        return st;
+    }
+    if (intentOff && !ownAttempt) {
+        a.active = false;
+        st.dropped = true;
+        st.droppedNode = a.tapped;
         return st;
     }
     auto fail = [&a, &st](const QString &n) {

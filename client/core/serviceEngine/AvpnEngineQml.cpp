@@ -8033,6 +8033,14 @@ void AvpnEngineQml::scanSyncState()
                          {QStringLiteral("node"), st.supersededNode}});
             m_scanner->connectRefused(QString());
         }
+        if (st.dropped) {
+            // E2 (device round air-D): the engine turned the intent off before the row's own attempt began - no
+            // verdict for the row; the Scanner says the connect did not start (never a silent "off" after a tap)
+            scanJournal(QStringLiteral("scan_row_dropped reason=scan_row node=%1 why=intent_off_before_start").arg(st.droppedNode),
+                        {{QStringLiteral("event"), QStringLiteral("row_dropped")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
+                         {QStringLiteral("node"), st.droppedNode}});
+            m_scanner->rowRequestDropped(st.droppedNode);
+        }
         for (const QString &n : st.failed) {
             scanJournal(QStringLiteral("scan_row_failed reason=scan_row node=%1").arg(n),
                         {{QStringLiteral("event"), QStringLiteral("row_failed")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
