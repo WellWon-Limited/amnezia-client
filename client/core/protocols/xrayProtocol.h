@@ -32,6 +32,8 @@ private:
     void onTun2SocksLines(quint64 session, const QList<QByteArray> &lines);
     void onTun2SocksFinished(quint64 session, int exitCode, QProcess::ExitStatus exitStatus);
     void onTun2SocksExit(quint64 session, bool resourceBusy, int exitCode, QProcess::ExitStatus exitStatus);
+    // AVPN (round mac-D2): the service holding the session is gone - its tun2socks replica lost its source.
+    void onTun2SocksReplicaState(quint64 session, QRemoteObjectReplica::State state, QRemoteObjectReplica::State oldState);
     // AVPN (review F1): stop()'s work. False: this object was destroyed during the teardown's waits - the caller
     // must not touch it. reportDisconnected=false from the destructor (no signal from a half-destroyed object).
     bool endSession(bool reportDisconnected);

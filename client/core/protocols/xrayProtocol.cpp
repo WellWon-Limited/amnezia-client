@@ -272,6 +272,16 @@ ErrorCode XrayProtocol::startTun2Socks(quint64 session)
                 onTun2SocksFinished(session, exitCode, exitStatus);
             },
             Qt::QueuedConnection);
+    // AVPN (round mac-D2): the service itself gone (killed or crashed; launchd starts a new one that holds no session).
+    // tun2socks ends with it, but its `finished` can no longer reach this app: the replica losing its source is that
+    // end. Before, the app kept showing Connected while traffic left the Mac directly (device round D2: kill -9 of
+    // Tribe-service under own Xray and a provider session - egress RU for 40+ s, a provider seat kept).
+    connect(
+            m_tun2socksProcess.data(), &QRemoteObjectReplica::stateChanged, this,
+            [this, session](QRemoteObjectReplica::State state, QRemoteObjectReplica::State oldState) {
+                onTun2SocksReplicaState(session, state, oldState);
+            },
+            Qt::QueuedConnection);
 
     m_tun2socksProcess->start();
     return ErrorCode::NoError;
@@ -306,6 +316,19 @@ void XrayProtocol::onTun2SocksLines(quint64 session, const QList<QByteArray> &li
     } else {
         setConnectionState(Vpn::ConnectionState::Connected);
     }
+}
+
+void XrayProtocol::onTun2SocksReplicaState(quint64 session, QRemoteObjectReplica::State state,
+                                           QRemoteObjectReplica::State oldState)
+{
+    if (m_session != session || !m_tun2socksProcess)
+        return;
+    // Valid -> Suspect: the connection to the source (the service's process object) is lost. Every other move (the
+    // first Valid, a SignatureMismatch at start) is not the end of a running session.
+    if (!(oldState == QRemoteObjectReplica::Valid && state == QRemoteObjectReplica::Suspect))
+        return;
+    qWarning() << "XrayProtocol: the service holding this session is gone (tun2socks replica lost its source) - the session ends";
+    failSession(ErrorCode::AmneziaServiceConnectionFailed);
 }
 
 void XrayProtocol::onTun2SocksFinished(quint64 session, int exitCode, QProcess::ExitStatus exitStatus)

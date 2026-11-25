@@ -9,7 +9,10 @@
 //          run on a use after free);
 //   E4     the same failure with the protocol alive: the teardown runs once, tun2socks is ended, the error
 //          is reported (Error state, the error code);
-//   E5     the destructor ends a connected session (teardown, tun2socks ended) without emitting a signal.
+//   E5     the destructor ends a connected session (teardown, tun2socks ended) without emitting a signal;
+//   E6     (round mac-D2) the service gone under a connected session (killed or crashed): the tun2socks replica loses its
+//          source - the session ends with an error (the engine reconnects), it never stays Connected. Before the fix the
+//          state stayed Connected (device: traffic left the Mac directly for 40+ s, a provider seat was kept).
 // The previous code (stop(); setLastError(...) at the three call sites, stop() from the destructor) fails E1-E3
 // under ASan and E5. Run by build_xray_protocol_end.sh.
 #include "xrayProtocol.h"
@@ -268,6 +271,25 @@ static void destructorQuiet(FakeService &svc)
                  svc.count(QStringLiteral("xrayStop")) - stopsBefore, tun->terminates, tun->closes);
 }
 
+static void serviceGone(FakeService &svc)
+{
+    svc.createTunOk = true;
+    svc.failCreateProcess = false;
+    auto proto = std::make_unique<XrayProtocol>(protocolConfig());
+    FakeProcess *tun = startTun(svc, proto.get());
+    CHECK(tun != nullptr);
+    if (!tun)
+        return;
+    tun->writeErr(kStackLine);
+    CHECK(waitFor([&]() { return proto->connectionState() == Vpn::ConnectionState::Connected; }));
+    svc.hosts.back().reset(); // the host of the session's process object goes away, as with the service
+    const bool ended = waitFor([&]() { return proto->connectionState() == Vpn::ConnectionState::Error; }, 5000);
+    CHECK(ended);
+    CHECK(proto->lastError() == ErrorCode::AmneziaServiceConnectionFailed);
+    std::fprintf(stderr, "E6 service gone: session ended=%d state=%d error=%d\n", int(ended), int(proto->connectionState()),
+                 int(proto->lastError()));
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -286,6 +308,7 @@ int main(int argc, char **argv)
     destroyedInFailurePath(svc, "E3 tun2socks exited", [](FakeProcess *tun) { tun->exit(1, QProcess::NormalExit); });
     failureAlive(svc);
     destructorQuiet(svc);
+    serviceGone(svc);
 
     if (g_failed) {
         std::fprintf(stderr, "xray_protocol_end_check: %d of %d checks FAILED\n", g_failed, g_checks);
