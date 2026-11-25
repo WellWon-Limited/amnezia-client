@@ -163,7 +163,13 @@ PageType {
             list.contentY = list.originY - list.topMargin + Math.min(offset, end)
         }
     }
-    onListTouchedChanged: if (!listTouched && orderPending) rebuildCountries(false)
+    // Review R50 5: the waiting order follows once the release has been delivered - Qt emits pressedChanged before
+    // clicked, and a new model array destroys the delegate whose onClicked was about to run (the tap was lost).
+    function followWaitingOrder() {
+        if (!root.listTouched && root.orderPending)
+            root.rebuildCountries(false)
+    }
+    onListTouchedChanged: if (!listTouched && orderPending) Qt.callLater(root.followWaitingOrder)
 
     // AVPN awg31-xray-v1: ключ строки — движковый `location` (host_id, фолбэк country_code+region);
     // старый бинарь поля не отдаёт ⇒ фолбэк на страну, поведение как раньше.
