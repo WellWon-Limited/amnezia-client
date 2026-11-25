@@ -5065,6 +5065,54 @@ static void ownTunnelNoticeKeepsTheList()
     CHECK(viewJson(d.m, t + 900).value(QLatin1String("list_build")).toDouble() != build);
 }
 
+// Review R50 (finding 3): a REAL change Wi-Fi A -> no network -> Wi-Fi B during a row connect, B with A's weak fingerprint
+// (iOS: the Wi-Fi identity is the subnet - two home routers on 192.168.1.0/24) showed A's results as checked in B. Our
+// own tunnel's moment without a network is short (device logs: 0.15 s, 1.4 s into a row connect; every other gap 30 s
+// and more): an Unknown notice during a row connect is ignored for ScanMachine::kOwnTunnelGapMs only. The known network
+// back within it is our own transition (the list and its results stay); a longer gap is a network change like any
+// other - nothing measured in A is carried into B's generation as current.
+static void ownTunnelGapIsBounded()
+{
+    for (const qint64 gap : {qint64(0), ScanMachine::kOwnTunnelGapMs, ScanMachine::kOwnTunnelGapMs + 1, qint64(20000)}) {
+        World w = baseWorld("own_tunnel_gap", hostMac(), ScanNetKind::Wifi);
+        w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
+        w.runMs = 9000;
+        Driver d(w);
+        d.run();
+        const QJsonObject v0 = lastView(d);
+        const QStringList ids0 = rowIds(v0);
+        QString a;
+        for (const QJsonValue &x : v0.value(QLatin1String("rows")).toArray())
+            if (a.isEmpty() && x.toObject().value(QLatin1String("state")).toString() == QLatin1String("works"))
+                a = x.toObject().value(QLatin1String("id")).toString();
+        CHECK(ids0.size() >= 3 && !a.isEmpty());
+        const qint64 t = d.now + 1000;
+        d.m.rowTapped(a, t);
+        const double build = viewJson(d.m, t).value(QLatin1String("list_build")).toDouble();
+        d.m.networkChanged(scanNet(ScanNetKind::Unknown, QStringLiteral("unknown"), 7), ScanCachedResult(), t + 400);
+        CHECK(viewJson(d.m, t + 400).value(QLatin1String("list_build")).toDouble() == build); // the moment itself: kept
+        // the same kind and fingerprint, a new generation: our own tunnel (same Wi-Fi) or Wi-Fi B on the same subnet
+        ScanNetwork back = w.net;
+        back.sources = {ScanNetSource{QStringLiteral("app"), kAppEpoch, 9}};
+        const qint64 t1 = t + 400 + gap;
+        d.m.networkChanged(back, ScanCachedResult(), t1);
+        const QJsonObject v1 = viewJson(d.m, t1);
+        int fresh = 0; // rows measured in A shown as current (no cache flag)
+        for (const QJsonValue &x : v1.value(QLatin1String("rows")).toArray()) {
+            const QJsonObject r = x.toObject();
+            if (r.value(QLatin1String("state")).toString() == QLatin1String("works")
+                && !r.value(QLatin1String("flags")).toArray().contains(QStringLiteral("cache")))
+                ++fresh;
+        }
+        if (gap <= ScanMachine::kOwnTunnelGapMs) {
+            CHECK(v1.value(QLatin1String("list_build")).toDouble() == build && rowIds(v1) == ids0 && fresh > 0);
+        } else {
+            CHECK(v1.value(QLatin1String("list_build")).toDouble() != build); // a network change like any other
+            CHECK(fresh == 0);                                                 // was: A's results checked in B
+        }
+    }
+}
+
 static void refusedEndsScope()
 {
     // Device round air9 (19.11): under «Германия» one profile's probe config could not be built; it stayed «Не
@@ -5608,6 +5656,7 @@ int main(int argc, char **argv)
     connectedRowIsCounted();
     droppedRequestIsNoVerdict();
     ownTunnelNoticeKeepsTheList();
+    ownTunnelGapIsBounded();
     slotCountsOnlyItsScope();
     slotChosenLeavesTheError();
     refusedEndsScope();

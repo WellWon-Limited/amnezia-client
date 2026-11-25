@@ -666,6 +666,10 @@ inline bool scanRowInScope(const QString &countryCode, const QString &scope)
 class ScanMachine
 {
 public:
+    // Review R50 (finding 3): how long a moment without a network during a row connect is our own tunnel's transition
+    // (device logs: 0.15 s, 1.4 s into a row connect; every other gap 30 s and more). A known network back later is a
+    // network change like any other (ownTunnelNotice).
+    static constexpr qint64 kOwnTunnelGapMs = 3000;
     explicit ScanMachine(const ScanHostCaps &caps, const ScanTunables &t = ScanTunables()) : m_caps(caps), m_t(t) {}
 
     void restoreBudget(const QJsonArray &ledger) { m_ledger = ScanBudgetLedger::fromJson(ledger); }
@@ -922,15 +926,19 @@ public:
     {
         now = clock(now);
         ScanStep s;
-        if (ownTunnelNotice(n)) {
+        if (ownTunnelNotice(n, now)) {
             // the person's own row connect is raising a tunnel: nothing of the network the list belongs to changed
             if (n.kind != ScanNetKind::Unknown)
                 adoptOwnTunnelGeneration(n);
+            else if (m_ownGapSince < 0)
+                m_ownGapSince = now;
         } else if (!n.sameNetwork(m_net)) {
             applyNetworkChange(n, cached, now, s);
         } else {
             refineKey(n.key);
         }
+        if (n.kind != ScanNetKind::Unknown)
+            m_ownGapSince = -1; // a known network: the moment without one is over
         m_net.radio = n.radio;
         finishStep(s, now);
         return s;
@@ -979,9 +987,15 @@ private:
     // a row's connect runs (m_connectingId), such a notice is our own tunnel: a moment without a network says nothing,
     // and the same kind and fingerprint (the physical network) keep the list, its rows and their order; only a notice
     // of another network (kind or fingerprint) rebuilds it - the one exception to "rows never move under the finger".
-    bool ownTunnelNotice(const ScanNetwork &n) const
+    // Review R50 3: the moment without a network is ours for kOwnTunnelGapMs from its first notice only - a real change
+    // Wi-Fi A -> no network -> Wi-Fi B with A's weak fingerprint (iOS: the subnet) showed A's results as checked in B.
+    // Past it the Unknown notice, and the known network back after it, are a network change like any other.
+    bool ownTunnelNotice(const ScanNetwork &n, qint64 now) const
     {
         if (m_connectingId.isEmpty() || scanPhaseScanning(m_phase))
+            return false;
+        const bool gapOver = m_ownGapSince >= 0 && now - m_ownGapSince > kOwnTunnelGapMs;
+        if (gapOver)
             return false;
         return n.kind == ScanNetKind::Unknown || (n.kind == m_net.kind && n.fingerprint == m_net.fingerprint);
     }
@@ -4774,6 +4788,7 @@ private:
     ScanOutcomeCollector m_outcomes;
     ScanOutcomeCollector m_chain;
     QString m_connectingId;
+    qint64 m_ownGapSince = -1; // R50 3: the first Unknown notice of a row connect's moment without a network (-1 = none)
     QStringList m_chainOrder;
     bool m_chainLaterShown = false;
     // the support check (supportCheckTapped / reportCheck*)

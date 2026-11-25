@@ -8,8 +8,9 @@
 #   N2  noteUplinkFact reads the fact from the facts the engine already has: the uplink monitor (authoritative / up)
 #       and, on iOS, the app's own path monitor (a path seen; a physical interface on it) - no timer, no probe;
 #   N3  it is read on every network notice (scanNotifyNetwork) and first thing on every tick (onTick);
-#   N4  a move of the fact voids the live verdict of the old network (liveDead, the streak, bars, RTT) and tells QML
-#       (liveQualityChanged, changed) - the session's data proof (m_liveProven) is kept;
+#   N4  a move of the fact voids the live verdict of the old network (liveDead, the streak, bars, RTT) and the live
+#       proof (review R50 2: m_liveProof = Voided - neither a live pass nor the connect's "works" shows ONLINE until a
+#       live probe passes again) and tells QML (liveQualityChanged, changed); the connect's verdict (m_pathCheck) is kept;
 #   N5  the Connect caption: in the connected branch, before «трафик не проходит», the neutral colour; ONLINE waits
 #       (Connect card and the server list);
 #   N6  the string has finished en and es translations.
@@ -52,7 +53,9 @@ for v in 'm_liveDead = false;' 'm_liveFailStreak = 0;' 'm_liveBars = 0;' 'm_live
          'emit liveQualityChanged();' 'emit changed();'; do
     has "$note" "$v" || bad "N4: a move must void the live verdict and tell QML ($v)"
 done
-has "$note" 'm_liveProven' && bad "N4: the session's data proof (m_liveProven) is not the network's verdict - keep it"
+has "$note" 'm_liveProof = avpn::liveProofAfterUplinkMove(m_liveProof);' \
+    || bad "N4: a move must void the live proof (an old pass or the connect's works showed ONLINE with no data - review R50 2)"
+has "$note" 'm_pathCheck' && bad "N4: the connect's verdict (m_pathCheck) is not the network's verdict - keep it"
 
 # ---- N3 ----
 has "$(body "$FACADE" 'void AvpnEngineQml::scanNotifyNetwork()')" 'noteUplinkFact();' || bad "N3: scanNotifyNetwork must read the fact"

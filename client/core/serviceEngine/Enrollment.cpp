@@ -9,11 +9,13 @@
 #include "DeviceModel.h" // AVPN (приватность): нативная маркетинговая модель (iPhone 15 Pro / MacBook Pro) вместо hostname
 #include "IdentityAnchor.h" // AVPN (анти-фрод): освежение Keychain-якоря при ротации токена
 #include "NetAwait.h" // AVPN: awaitReply() — синхронное ожидание с таймаутом (анти-фриз)
+#include "ScanTypes.h" // AVPN Scanner (review R50 4): kScanPoolStoreKey - the stored pool belongs to the token's account
 #include "SubscriptionRequest.h"
 #include <QCoreApplication> // AVPN (i18n): translate() — пользовательские ошибки (класс не-QObject)
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSettings>
 #include <QUrl>
 
 namespace avpn {
@@ -27,8 +29,10 @@ void Enrollment::saveToken(const QString &token)
     // ре-фетч сразу после активации сорвётся (сеть/kill), холодный старт НЕ покажет пул/лимиты
     // ЧУЖОГО (старого) аккаунта. Первый enroll (стор пуст) и ре-энролл (clearToken уже вычистил)
     // проходят без лишней записи.
-    if (s.value(kTokenKey).toString() != token)
+    if (s.value(kTokenKey).toString() != token) {
         s.setValue(kLkgSubscriptionKey, QByteArray());
+        QSettings().remove(QLatin1String(kScanPoolStoreKey)); // R50 4: the Scanner's pool of the old account goes too
+    }
     s.setValue(kTokenKey, token);
     // AVPN (анти-фрод): каждая ротация токена (enroll/redeem/transfer) освежает Keychain-якорь —
     // иначе после переустановки восстановился бы отозванный токен (self-heal спас бы, но лишний раунд).
@@ -47,6 +51,7 @@ void Enrollment::clearToken()
     s.setValue(kTokenKey, QString());
     // AVPN (LKG): подписка привязана к токену — с мёртвым токеном кэш невалиден/чужой.
     s.setValue(kLkgSubscriptionKey, QByteArray());
+    QSettings().remove(QLatin1String(kScanPoolStoreKey)); // R50 4: so is the Scanner's stored pool (ScanSettingsStore)
 }
 
 // AVPN (LKG, C-7): кэш последнего удачного тела /v1/subscription — тот же зашифрованный стор.

@@ -102,7 +102,8 @@ class AvpnEngineQml : public QObject {
     // 5.1.108: the ONLINE badge (Connect card and the current country in the server list) - data
     // flows through the tunnel: tunnel Connected, live probe not confirmed dead, the whoami verdict
     // (if any) not no_data/bypass, and either whoami said "works" or the live in-tunnel probe
-    // succeeded in this session. Independent of features.node_scan (DebugSnapshot.h::dataFlowingNow).
+    // succeeded in this session; after a move of the physical network only a live probe that passed since (review
+    // R50 2). Independent of features.node_scan (DebugSnapshot.h::dataFlowingNow).
     Q_PROPERTY(bool dataFlowing READ dataFlowing NOTIFY dataFlowingChanged)
     // AVPN: статус подписки для бейджа Connect (читается из загруженной Subscription через движок).
     Q_PROPERTY(int daysLeft READ daysLeft NOTIFY changed)
@@ -1398,7 +1399,7 @@ private:
     int                          m_liveBars = 0;      // 0..5
     bool                         m_liveReachable = false;
     bool                         m_liveDead = false;     // проба подтверждённо не доходит → 0 зелёных + все красные
-    bool                         m_liveProven = false;   // 5.1.108: a live probe succeeded in this Connected session
+    avpn::LiveProof              m_liveProof = avpn::LiveProof::None; // 5.1.108 / R50 2: DebugSnapshot.h::dataFlowingNow
     bool                         m_dataFlowing = false;  // 5.1.108: cached dataFlowing (refreshDataFlowing)
     int                          m_liveFailStreak = 0;   // неуспешных проб подряд (анти-фликер до «мертво»)
     static constexpr int         kLiveDeadStreak = 2;    // фолбэк; серверный оверрайд numbers.live_dead_streak (TuningStore)
