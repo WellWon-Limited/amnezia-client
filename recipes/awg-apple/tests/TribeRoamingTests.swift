@@ -358,9 +358,10 @@ do {
 do {
     var arbiter = TribeRecoveryArbiter()
     var performed: [(Double, TribeStallAction)] = []
-    for tick in 1...40 {
+    for tick in -3...40 {
         let at = Double(tick)
-        let sample = s(UInt64(at * 5000), 5000, 100, at)
+        // tribe.20: data until 1 s - the session proved itself right before the roam (no K2 proof restart)
+        let sample = s(UInt64(max(0, at) * 5000), 5000 + UInt64(min(tick, 1) + 3) * 1000, 100, at)
         if tick == 2 { arbiter.noteRoamRebind(sample, freshPort: true); continue }
         if case .perform(let action) = arbiter.tick(sample, pathSatisfied: true, policy: seamless) { performed.append((at, action)) }
     }
@@ -402,10 +403,11 @@ do {
         if case .perform(let action) = arbiter.tick(sample, pathSatisfied: satisfied, policy: seamless) { performed.append((at, action)) }
     }
     // tribe.19 (K2): the session came back with a repair still open (the fresh port at 5 s, no data since):
-    // its path is proved at once by the roam's soft restart (tribe.10-18: 10 s later, at 33 s); the ladder
-    // then goes on in stage 3 (fresh port 30 s later).
-    check(performed.map { $0.1 } == [.rebindPort, .softRestart, .rebindPort], "fresh port before the outage, soft restart at the roam: \(performed)")
-    check(performed.map { $0.0 } == [5, 23, 53], "the roam's soft restart at 23 s, the stage-3 fresh port at 53 s: \(performed)")
+    // its path is proved at once by the roam's soft restart (tribe.10-18: 10 s later, at 33 s).
+    // tribe.20 (L2): that proof restart is not a ladder step: on the new network the ladder keeps its own times
+    // (the roam's fresh port, then its soft restart 14 s after the roam: 37 s).
+    check(performed.map { $0.1 } == [.rebindPort, .softRestart, .softRestart], "fresh port before the outage, the proof restart at the roam, the ladder's: \(performed)")
+    check(performed.map { $0.0 } == [5, 23, 37], "the roam's proof restart at 23 s, the ladder's soft restart at 37 s: \(performed)")
 }
 
 // tribe.10: a roam fresh port every 4 s (flapping cellular path) does not starve the repair.
@@ -416,16 +418,19 @@ do {
 do {
     var arbiter = TribeRecoveryArbiter()
     var performed: [(Double, TribeStallAction)] = []
-    for tick in 1...80 {
+    for tick in 1...300 {
         let at = Double(tick)
         let sample = s(UInt64(at * 5000), 5000, 100, at)
         if tick % 4 == 0 { arbiter.noteRoamRebind(sample, freshPort: true) }
         if case .perform(let action) = arbiter.tick(sample, pathSatisfied: true, policy: seamless) { performed.append((at, action)) }
     }
-    check(performed.allSatisfy { $0.1 == .softRestart } && performed.map { $0.0 } == [8, 16, 24, 32],
-          "the roams' soft restarts, from the second roam on, until the cap: \(performed)")
+    // tribe.20: inside the series bound (120 s after the first roam at 4 s) only the roams' proof restarts act,
+    // one per 60 s; after the bound the roams no longer restart the clock and the ladder repairs again.
+    let inside = performed.filter { $0.0 < 124 }
+    check(inside.allSatisfy { $0.1 == .softRestart } && inside.map { $0.0 } == [4, 64], "proof restarts one per 60 s inside the series bound: \(performed)")
+    check(performed.contains { $0.0 > 124 && $0.0 < 160 }, "after the bound the ladder repairs again: \(performed)")
     let window = performed.map { first in performed.filter { $0.0 >= first.0 && $0.0 < first.0 + 120 }.count }.max() ?? 0
-    check(window <= TribeRecoveryBudget.rollingCap, "within the rolling cap: \(window)")
+    check(window <= TribeRecoveryBudget.rollingCap + 2, "within the rolling cap plus two proof restarts: \(window)")
 }
 
 // tribe.10: an `.episode` refusal below stage 3 re-syncs the tracker with the budget (counters
@@ -990,10 +995,61 @@ do {
         let window = restarts.map { first in restarts.filter { $0 >= first && $0 < first + 120 }.count }.max() ?? 0
         let perRoam = roams.map { r in restarts.filter { $0 >= r && $0 < r + period }.count }.max() ?? 0
         print("  (c) flapping every \(period) s, dead path, 10 min: \(restarts.count) soft restarts, max \(window) in 120 s, max \(perRoam) per roam interval")
-        check(window <= TribeRecoveryBudget.rollingCap && perRoam <= 2, "(c) flapping every \(period) s stays inside the cap: \(restarts)")
+        // tribe.20: the ladder's 4 per 120 s plus the roams' proof restarts, one per 60 s (2 per 120 s).
+        check(window <= TribeRecoveryBudget.rollingCap + 2 && perRoam <= 2, "(c) flapping every \(period) s stays inside the cap: \(restarts)")
     }
 }
 // END AIR-D REPLAYS
+
+// BEGIN REVIEW 3 REPLAYS (review of tribe.19; only the API of tribe.19 / 28cd57c32: run against both files)
+/// Roams every `every` s for `horizon` s with the fleet session: `demand` B/s of user traffic, handshakes complete every
+/// 15 s (a new device's 1 s after it starts), `data(t)` = inbound data bytes in second t.
+struct RoamSeries { var steps: [(at: Int, action: TribeStallAction)] = []; var reported: [Int: Int64] = [:] }
+func roamSeries(every: Int, horizon: Int, demand: (Int) -> UInt64, data: (Int) -> UInt64, rekeyEvery: Int = 15) -> RoamSeries {
+    let fleet = TribeServiceTraffic.fromConfig(jc: "6", jmax: "50", s1: "64", s4: "64", specialJunk: ["<r 44>", nil, nil, nil, nil],
+                                               contentPaddingAddition: "10-100", randomTrailers: "0", mtu: "1280", persistentKeepalive: "25")
+    let policy = sessionPolicy(fleet)
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var hs: Int64 = 1_800_000_000
+    var nextHandshake = 1
+    var out = RoamSeries()
+    for t in -10...horizon {
+        tx += demand(t)
+        if t % 25 == 0 { tx += fleet.keepaliveTxBytes }
+        if t >= nextHandshake { tx += fleet.handshakeTxBytes; rx += 92; hs = 1_800_000_000 + Int64(t + 10); nextHandshake = t + rekeyEvery }
+        rx += t < 0 ? 5000 : data(t)
+        let sample = s(tx, rx, hs, Double(t))
+        if t > 0 && t % every == 0 { arbiter.noteRoamRebind(sample, freshPort: true) }
+        if case .perform(let a) = arbiter.tick(sample, pathSatisfied: true, policy: policy) {
+            out.steps.append((t, a))
+            if a == .softRestart { tx = 0; rx = 0; hs = 0; arbiter.rebaseAfterBackendRestart(s(0, 0, 0, Double(t))); nextHandshake = t + 1 }
+        }
+        out.reported[t] = arbiter.dataQuietSeconds(at: Double(t))
+    }
+    return out
+}
+do {
+    // L1: roams every 20 s, 1500 B/s of user traffic, only handshakes come back: the verdict must reach 45 s
+    // (the app fails over at its next failed probe) - no later than ~165 s.
+    let l1 = roamSeries(every: 20, horizon: 600, demand: { _ in 1500 }, data: { _ in 0 })
+    let reach = (1...600).first { (l1.reported[$0] ?? 0) >= 45 }
+    // the first roam is at 20 s: the series bound is 140 s, the verdict counts from there
+    print("  L1 roams every 20 s under demand, no data: verdict >= 45 s first at \(reach.map { "\($0) s (\($0 - 20) s after the first roam)" } ?? "never")")
+    check(reach.map { $0 - 20 <= 168 } ?? false, "L1: the verdict reaches 45 s by ~165 s after the first roam: \(String(describing: reach))")
+    // L2: an idle healthy phone roaming every 20 s (keepalives, re-keys every 120 s, no user traffic): at most one
+    // proof restart per 60 s; a real stall at 300 s (1500 B/s unanswered) is repaired on the ladder's times.
+    let idle = roamSeries(every: 20, horizon: 290, demand: { _ in 0 }, data: { _ in 0 }, rekeyEvery: 120)
+    let restarts = idle.steps.filter { $0.action == .softRestart }.map { $0.at }
+    let spacing = zip(restarts.dropFirst(), restarts).map { $0 - $1 }.min() ?? 999
+    print("  L2 idle roams every 20 s, 290 s: soft restarts at \(restarts), min spacing \(spacing) s")
+    check(spacing >= 60, "L2: at most one proof restart per 60 s on an idle healthy session: \(restarts)")
+    let stall = roamSeries(every: 20, horizon: 400, demand: { t in t >= 300 ? 1500 : 0 }, data: { _ in 0 }, rekeyEvery: 120)
+    let repair = stall.steps.filter { $0.at >= 300 }
+    print("  L2 then a real stall at 300 s: steps \(repair.map { "\($0.action.logName)@\($0.at)" })")
+    check(repair.first.map { $0.at <= 320 } ?? false, "L2: the real stall is repaired within ~20 s: \(repair)")
+}
+// END REVIEW 3 REPLAYS
 
 // tribe.17: B1 with the fleet's and the heavy-junk sessions (their handshakes and keepalives in the
 // world, their service traffic in the policy): still the engine restart about 15 s after the roam.
