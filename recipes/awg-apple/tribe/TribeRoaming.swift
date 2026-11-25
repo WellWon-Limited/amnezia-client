@@ -860,15 +860,18 @@ public enum TribeRebindResult: Equatable {
     case notStarted
     case offline
     case budget(TribeRecoveryDenial)
+    /// tribe.22: the fresh port is a new device; its backend did not start (the adapter is paused and retries).
+    case failed
 
     /// Reply body for the provider message: {"rebind":"performed"} |
-    /// {"rebind":"denied","reason":"budget"|"not_started"|"offline"}.
+    /// {"rebind":"denied","reason":"budget"|"not_started"|"offline"|"failed"}.
     public var responsePayload: [String: String] {
         switch self {
         case .performed: return ["rebind": "performed"]
         case .notStarted: return ["rebind": "denied", "reason": "not_started"]
         case .offline: return ["rebind": "denied", "reason": "offline"]
         case .budget: return ["rebind": "denied", "reason": "budget"]
+        case .failed: return ["rebind": "denied", "reason": "failed"]
         }
     }
 
@@ -878,6 +881,7 @@ public enum TribeRebindResult: Equatable {
         case .notStarted: return "denied (adapter not started)"
         case .offline: return "denied (path unsatisfied)"
         case .budget(let reason): return "denied by recovery budget (\(reason.rawValue))"
+        case .failed: return "denied (backend restart failed)"
         }
     }
 }
@@ -1213,6 +1217,80 @@ public enum TribeRoaming {
             }
         }
         return TribeStallSample(txBytes: tx, rxBytes: rx, lastHandshakeSec: handshake, at: at)
+    }
+}
+
+// MARK: - In-place restart of the backend (tribe.8; its failure reaches the app from tribe.22)
+
+/// The in-place restart of the backend with its retries, the adapter's operations injected (the adapter and the host
+/// test run the same code). tribe.8: wgTurnOff + wgTurnOn on the same TUN; a start that fails leaves the adapter
+/// paused and is tried again `retries` times, `retrySeconds` apart.
+/// tribe.22 (review R53 2): every step that changes the 5-tuple is this restart now, so a start that keeps failing
+/// must not be silent. When the retries are spent, "no backend runs" is the engine-down fact of the owner that
+/// already exists for it (the data watch's: the status reply says `engine_down`, the app restarts the tunnel; that
+/// owner keeps retrying on the tick and takes the fact back when a backend is up again). tribe.8-21 told nobody:
+/// the adapter stayed paused with its watchdog stopped until the next path event.
+public struct TribeRestartDriver {
+    public static let retries = 3
+    public static let retrySeconds: TimeInterval = 2
+
+    /// wgTurnOff of the running device (through the backend hook).
+    public var stopBackend: () -> Void
+    /// Start a device with the session's configuration; true = it runs (the adapter is started).
+    public var startBackend: () -> Bool
+    /// A device runs - at once (`afterRetry` false: the arbiter is rebased on its zero counters) or after a retry (a
+    /// resumed backend: a fresh tracker, the watchdog on). Exactly once per restart that ends with a device.
+    public var started: (_ afterRetry: Bool) -> Void
+    /// No device for now: the adapter is paused, its watchdog off.
+    public var paused: () -> Void
+    /// The adapter is still paused by THIS restart (a path event may have resumed it, a stop may have ended it, a
+    /// later restart may have taken over).
+    public var stillPaused: () -> Bool
+    /// The retries are spent and no device runs.
+    public var engineDown: () -> Void
+    /// workQueue.asyncAfter.
+    public var later: (_ seconds: TimeInterval, _ work: @escaping () -> Void) -> Void
+
+    public init(stopBackend: @escaping () -> Void, startBackend: @escaping () -> Bool,
+                started: @escaping (_ afterRetry: Bool) -> Void, paused: @escaping () -> Void,
+                stillPaused: @escaping () -> Bool, engineDown: @escaping () -> Void,
+                later: @escaping (_ seconds: TimeInterval, _ work: @escaping () -> Void) -> Void) {
+        self.stopBackend = stopBackend
+        self.startBackend = startBackend
+        self.started = started
+        self.paused = paused
+        self.stillPaused = stillPaused
+        self.engineDown = engineDown
+        self.later = later
+    }
+
+    /// true = a device runs now. false = none does: the retries are scheduled and `engineDown` follows when they
+    /// are spent - the caller must not report its step as performed.
+    @discardableResult
+    public func run() -> Bool {
+        stopBackend()
+        if startBackend() {
+            started(false)
+            return true
+        }
+        paused()
+        retry(left: TribeRestartDriver.retries)
+        return false
+    }
+
+    private func retry(left: Int) {
+        guard left > 0 else {
+            if stillPaused() { engineDown() }
+            return
+        }
+        later(TribeRestartDriver.retrySeconds) {
+            guard self.stillPaused() else { return }
+            if self.startBackend() {
+                self.started(true)
+            } else {
+                self.retry(left: left - 1)
+            }
+        }
     }
 }
 

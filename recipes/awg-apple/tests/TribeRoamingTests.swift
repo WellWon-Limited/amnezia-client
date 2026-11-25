@@ -1325,6 +1325,61 @@ do {
     }
 }
 
+// Item 1: the in-place restart with its retries (TribeRestartDriver, the code the adapter runs). A start that keeps
+// failing ends in the engine-down fact; a start that succeeds on a retry never raises it and tells `started` once.
+final class RestartWorld {
+    var startResults: [Bool]
+    var stops = 0, starts = 0, pausedCalls = 0, engineDownCalls = 0
+    var startedCalls: [Bool] = []
+    var delays: [Double] = []
+    var paused = false
+    var queue: [() -> Void] = []
+    init(_ results: [Bool]) { startResults = results }
+    func driver() -> TribeRestartDriver {
+        TribeRestartDriver(
+            stopBackend: { self.stops += 1 },
+            startBackend: { self.starts += 1; let ok = self.startResults.isEmpty ? false : self.startResults.removeFirst(); if ok { self.paused = false }; return ok },
+            started: { self.startedCalls.append($0) },
+            paused: { self.pausedCalls += 1; self.paused = true },
+            stillPaused: { self.paused },
+            engineDown: { self.engineDownCalls += 1 },
+            later: { seconds, work in self.delays.append(seconds); self.queue.append(work) })
+    }
+    func drain() { while !queue.isEmpty { queue.removeFirst()() } }
+}
+do {
+    // the start fails and the 3 retries fail: no backend, and the engine-down owner is told, once
+    let dead = RestartWorld([false, false, false, false])
+    let ran = dead.driver().run()
+    check(!ran && dead.engineDownCalls == 0 && dead.pausedCalls == 1, "a failed start: paused, nothing said during the retries")
+    dead.drain()
+    check(dead.starts == 1 + TribeRestartDriver.retries && dead.delays == [2, 2, 2], "three retries, 2 s apart: \(dead.starts) \(dead.delays)")
+    check(dead.engineDownCalls == 1 && dead.startedCalls.isEmpty, "retries spent: engine down told once, never 'started': \(dead.engineDownCalls) \(dead.startedCalls)")
+    // the start fails once, the first retry succeeds: no engine-down, the new device is told once (one rebase)
+    let healed = RestartWorld([false, true])
+    check(!healed.driver().run(), "the step itself did not leave a backend")
+    healed.drain()
+    check(healed.engineDownCalls == 0 && healed.startedCalls == [true] && healed.starts == 2 && healed.delays == [2],
+          "a retry that starts the backend: no engine-down, 'started' once: \(healed.engineDownCalls) \(healed.startedCalls) \(healed.starts)")
+    // the ordinary case: one stop, one start, the arbiter rebased once, no pause
+    let ok = RestartWorld([true])
+    check(ok.driver().run() && ok.stops == 1 && ok.starts == 1 && ok.startedCalls == [false] && ok.pausedCalls == 0 && ok.queue.isEmpty,
+          "a restart that starts at once: \(ok.startedCalls)")
+    // a path event resumed the adapter (or a stop ended it) while a retry was waiting: the retry does nothing
+    let resumed = RestartWorld([false, false])
+    _ = resumed.driver().run()
+    resumed.paused = false
+    resumed.drain()
+    check(resumed.starts == 1 && resumed.engineDownCalls == 0 && resumed.startedCalls.isEmpty, "a resumed adapter is left alone: \(resumed.starts)")
+    // ... also when that happens before the last retry's verdict
+    let late = RestartWorld([false, false, false, false])
+    _ = late.driver().run()
+    late.queue.removeFirst()(); late.queue.removeFirst()()
+    late.paused = false
+    late.drain()
+    check(late.engineDownCalls == 0, "no engine-down for an adapter that is no longer paused by this restart")
+    check(TribeRebindResult.failed.responsePayload == ["rebind": "denied", "reason": "failed"], "a fresh port whose new device did not start is not 'performed'")
+}
 // END REVIEW R53 REPLAYS
 
 // patch 0015: the backend hook runs the callback first, then the operation; nil changes nothing.

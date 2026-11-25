@@ -6,6 +6,8 @@ patches:
     # TribeRoaming.swift is the other half (socketOps, no separate roam proof restart, no data without a
     # handshake, the verdict for the app counts from lasting data). 0019 is last: it is recorded on the adapter
     # as 0003-0017 leave it.
+    # 0019 also holds the review of round 53: the in-place restart runs through TribeRestartDriver and a restart
+    # whose retries are spent raises the engine-down fact (the app is told); no caller drops the restart's result.
     - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
     - patch_file: "patches/0002-xray-socket-protection-result.patch"
     - patch_file: "patches/0003-tribe-seamless-roaming.patch"

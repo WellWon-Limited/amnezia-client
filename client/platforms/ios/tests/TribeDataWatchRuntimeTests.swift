@@ -831,6 +831,24 @@ enum TribeDataWatchRuntimeTests {
             b.adapter.dataWatchEngineHandler?(false)
             check(!b.runtime.engineIsDown && b.lastState["engine"] as? String == "up" && b.logs.contains("Tribe watch: engine=up node=16"), "and taken back when an engine runs again")
         }
+        run("engine_down_after_a_restart_is_told_with_the_watch_off_too") {
+            // awg-apple tribe.22 (review R53 2): an in-place restart of a roam or of the stall ladder whose retries
+            // are spent raises the same fact; no plan is needed for it, and the shared file does not claim a watch.
+            let b = Bench()
+            b.startSession()
+            check(!b.runtime.engineIsDown, "an engine runs")
+            b.adapter.dataWatchEngineHandler?(true)
+            check(b.runtime.engineIsDown, "no plan, no watch: the status reply still says the engine is down")
+            check(b.lastState["engine"] as? String == "down" && b.lastState["enabled"] as? Bool == false, "the shared file: engine down, watch off: \(b.lastState)")
+            check(b.records.contains { $0.event == "watch_engine" && $0.fields["state"] as? String == "down" }, "and the journal")
+            b.adapter.dataWatchEngineHandler?(false)
+            check(!b.runtime.engineIsDown && b.lastState["engine"] as? String == "up", "taken back when a backend is up again")
+            let on = Bench()
+            on.writePlan(switchOn: true, candidates: [12])
+            on.startSession()
+            on.adapter.dataWatchEngineHandler?(true)
+            check(on.lastState["enabled"] as? Bool == true, "with the watch on the file says so: \(on.lastState)")
+        }
         run("network_change_moves_an_unproven_node_to_the_choice_for_that_network") {
             // Review finding R4: a round dropped at a change of network left the tunnel on whatever
             // candidate it stood on.

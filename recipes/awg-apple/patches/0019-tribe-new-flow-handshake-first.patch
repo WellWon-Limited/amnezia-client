@@ -1,6 +1,17 @@
 diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
 --- a/Sources/WireGuardKit/WireGuardAdapter.swift
 +++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -72,8 +72,8 @@
+     private var recovery = TribeRecoveryArbiter(jitter: Double.random(in: 0...2))
+     private var previousWatchdogSample: TribeStallSample?
+     private var lastLoggedDenial: TribeRecoveryDenial?
+-    // tribe.8: attempts left to bring the backend back after a failed in-place restart.
+-    private var softRestartRetriesLeft = 0
++    // tribe.22: the in-place restart whose retries may still be waiting (TribeRestartDriver.stillPaused).
++    private var inPlaceRestartSeq: UInt64 = 0
+     // tribe.9: interface of the last satisfied path (Wi-Fi <-> cellular = fresh port on return) and
+     // whether the pending coalesced roam step is a fresh port (path returned after a real loss).
+     private var lastPathInterface: String?
 @@ -356,11 +356,11 @@
          }
      }
@@ -18,16 +29,23 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
      /// - Parameter completionHandler: completion handler; nil error on success.
      public func rebindListenPort(completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
          rebindListenPortResult { result in
-@@ -385,7 +385,7 @@
+@@ -384,8 +384,13 @@
+                 completionHandler(result)
                  return
              }
-             self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator)
+-            self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator)
 -            self.logHandler(.verbose, "rebindListenPort: socket rebound to a new ephemeral port, keepalive sent")
++            guard self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator) else {
++                // tribe.22 (review R53 2): the new device did not start: the step left no backend.
++                self.logHandler(.verbose, "rebindListenPort: \(TribeRebindResult.failed.logDescription)")
++                completionHandler(.failed)
++                return
++            }
 +            self.logHandler(.verbose, "rebindListenPort: new socket on a new ephemeral port, handshake first")
              completionHandler(.performed)
          }
      }
-@@ -634,11 +634,11 @@
+@@ -634,11 +639,11 @@
                      self.pathLostAt = nil
                      self.roamCounters.pathRestored += 1
                      let outage = Int((Date().timeIntervalSince(lostAt) * 1000).rounded())
@@ -41,7 +59,7 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
                  if TribeRoaming.roamRebindAction(realLoss: realLoss, interfaceChanged: interfaceChanged) == .rebindPort {
                      self.roamWantsFreshPort = true
                  }
-@@ -743,22 +743,28 @@
+@@ -743,22 +748,28 @@
              let freshPort = self.roamWantsFreshPort
              self.roamWantsFreshPort = false // tribe.10: cleared even when not .started (no stale flag)
              guard case .started(let handle, let settingsGenerator) = self.state else { return }
@@ -81,7 +99,7 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
          }
      }
  
-@@ -832,23 +838,15 @@
+@@ -832,28 +843,22 @@
          self.recovery.noteRoamRebind(sample, freshPort: freshPort)
      }
  
@@ -90,11 +108,14 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
 -    /// traffic (a VoIP call) keeps going to the old address until our next data packet.
 -    /// tribe.8: after `listen_port=0` only a keepalive goes out (`wgSendKeepalives`, no second
 -    /// BindUpdate of the new socket); `restartBackend` ends the old handle.
+-    private func performSocketOps(_ ops: [TribeSocketOp], handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) {
 +    /// Socket operations for a stall or roam step (TribeRoaming.socketOps).
 +    /// tribe.22: a step that changes the 5-tuple is `restartBackend` (a new device: its first packet is
 +    /// the handshake); `listen_port=0` + a keepalive on the live device (tribe.8-21) are gone.
-+    /// `restartBackend` ends the old handle.
-     private func performSocketOps(_ ops: [TribeSocketOp], handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) {
++    /// `restartBackend` ends the old handle. false = the step left no backend (review R53 2: its
++    /// start failed; the adapter is paused and retries, `restartBackendInPlace`).
++    @discardableResult
++    private func performSocketOps(_ ops: [TribeSocketOp], handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) -> Bool {
          for op in ops {
              switch op {
 -            case .freshListenPort:
@@ -107,9 +128,136 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
 -            case .sendKeepalive:
 -                wgSendKeepalives(handle)
              case .restartBackend:
-                 _ = self.restartBackendInPlace(handle: handle, settingsGenerator: settingsGenerator)
-                 return
-@@ -950,7 +948,7 @@
+-                _ = self.restartBackendInPlace(handle: handle, settingsGenerator: settingsGenerator)
+-                return
++                return self.restartBackendInPlace(handle: handle, settingsGenerator: settingsGenerator)
+             }
+         }
++        return true
+     }
+ 
+     /// Same TUN fd, same configuration (endpoints re-resolved for DNS64 like every UAPI refresh),
+@@ -861,54 +866,74 @@
+     /// mechanism as upstream pause/resume, minus the network settings). The recovery arbiter is
+     /// rebased on the new device's zero counters (not progress). On failure the adapter is left in
+     /// temporaryShutdown (the upstream resume path restores it on the next satisfied path event)
+-    /// and up to 3 in-place retries run 2 s apart.
++    /// and up to 3 in-place retries run 2 s apart (TribeRestartDriver).
++    /// tribe.22 (review R53 2): when the retries are spent, "no backend runs" is told through the
++    /// engine-down owner (`noteNoBackendAfterRestart`); tribe.8-21 said nothing.
+     private func restartBackendInPlace(handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) -> Bool {
+-        let (wgConfig, resolutionResults) = settingsGenerator.uapiConfiguration()
+-        self.logEndpointResolutionResults(resolutionResults)
+-        TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { wgTurnOff(handle) }
+-        do {
+-            let newHandle = try self.startWireGuardBackend(wgConfig: wgConfig)
+-            self.state = .started(newHandle, settingsGenerator)
+-            self.roamCounters.softRestarts += 1
+-            self.previousWatchdogSample = nil
+-            // tribe.14: the new device's counters start from zero and it has no session yet.
+-            if self.dataWatchPolicy.enabled {
+-                self.dataWatch.noteBackendRestarted(at: ProcessInfo.processInfo.systemUptime, policy: self.dataWatchPolicy)
+-            }
+-            if let sample = self.currentStallSample(handle: newHandle) {
+-                self.recovery.rebaseAfterBackendRestart(sample)
+-            }
+-            self.logHandler(.verbose, "Tribe roaming: backend soft-restarted in place (same TUN, no network settings change) (\(self.roamCounters.summary))")
+-            return true
+-        } catch {
+-            self.state = .temporaryShutdown(settingsGenerator)
+-            self.stopStallWatchdog()
+-            self.softRestartRetriesLeft = 3
+-            self.logHandler(.error, "Tribe roaming: soft restart failed (\(error)), backend left paused; retrying in place")
+-            self.scheduleSoftRestartRetry()
+-            return false
+-        }
++        self.inPlaceRestartSeq &+= 1
++        let seq = self.inPlaceRestartSeq
++        let driver = TribeRestartDriver(
++            stopBackend: { [weak self] in
++                guard let self = self else { return }
++                TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { wgTurnOff(handle) }
++            },
++            startBackend: { [weak self] in
++                guard let self = self else { return false }
++                let (wgConfig, resolutionResults) = settingsGenerator.uapiConfiguration()
++                self.logEndpointResolutionResults(resolutionResults)
++                do {
++                    self.state = .started(try self.startWireGuardBackend(wgConfig: wgConfig), settingsGenerator)
++                    return true
++                } catch {
++                    self.logHandler(.error, "Tribe roaming: soft restart failed (\(error)), backend left paused; retrying in place")
++                    return false
++                }
++            },
++            started: { [weak self] afterRetry in
++                guard let self = self, case .started(let newHandle, _) = self.state else { return }
++                self.roamCounters.softRestarts += 1
++                self.previousWatchdogSample = nil
++                if afterRetry {
++                    self.recovery.noteBackendResumed()
++                    self.startStallWatchdog()
++                    self.logHandler(.verbose, "Tribe roaming: backend soft-restarted in place after a retry (\(self.roamCounters.summary))")
++                    return
++                }
++                // tribe.14: the new device's counters start from zero and it has no session yet.
++                if self.dataWatchPolicy.enabled {
++                    self.dataWatch.noteBackendRestarted(at: ProcessInfo.processInfo.systemUptime, policy: self.dataWatchPolicy)
++                }
++                if let sample = self.currentStallSample(handle: newHandle) {
++                    self.recovery.rebaseAfterBackendRestart(sample)
++                }
++                self.logHandler(.verbose, "Tribe roaming: backend soft-restarted in place (same TUN, no network settings change) (\(self.roamCounters.summary))")
++            },
++            paused: { [weak self] in
++                guard let self = self else { return }
++                self.state = .temporaryShutdown(settingsGenerator)
++                self.stopStallWatchdog()
++            },
++            stillPaused: { [weak self] in
++                guard let self = self, seq == self.inPlaceRestartSeq, case .temporaryShutdown = self.state else { return false }
++                return true
++            },
++            engineDown: { [weak self] in self?.noteNoBackendAfterRestart(settingsGenerator) },
++            later: { [weak self] seconds, work in self?.workQueue.asyncAfter(deadline: .now() + seconds, execute: work) })
++        return driver.run()
+     }
+ 
+-    private func scheduleSoftRestartRetry() {
+-        guard self.softRestartRetriesLeft > 0 else { return }
+-        self.softRestartRetriesLeft -= 1
+-        self.workQueue.asyncAfter(deadline: .now() + 2) { [weak self] in
+-            guard let self = self, case .temporaryShutdown(let settingsGenerator) = self.state else { return }
+-            let (wgConfig, resolutionResults) = settingsGenerator.uapiConfiguration()
+-            self.logEndpointResolutionResults(resolutionResults)
+-            do {
+-                self.state = .started(try self.startWireGuardBackend(wgConfig: wgConfig), settingsGenerator)
+-                self.softRestartRetriesLeft = 0
+-                self.roamCounters.softRestarts += 1
+-                self.recovery.noteBackendResumed()
+-                self.startStallWatchdog()
+-                self.logHandler(.verbose, "Tribe roaming: backend soft-restarted in place after a retry (\(self.roamCounters.summary))")
+-            } catch {
+-                self.logHandler(.error, "Tribe roaming: soft restart retry failed (\(error)), \(self.softRestartRetriesLeft) left")
+-                self.scheduleSoftRestartRetry()
+-            }
+-        }
++    /// tribe.22 (review R53 2): an in-place restart and its retries left no backend. That is the
++    /// engine-down fact of the owner that exists for it (tribe.14: `dataWatchEngineDown`): the
++    /// provider's status reply says `engine_down` and the app restarts the tunnel; the tick keeps
++    /// trying the same configuration (dataWatchRetryEngine: 2, 4, 8 ... 60 s apart) and takes the
++    /// fact back when a backend is up again, also when a path event resumed the adapter. The
++    /// network settings were never touched by the in-place restart: they are in force.
++    private func noteNoBackendAfterRestart(_ settingsGenerator: PacketTunnelSettingsGenerator) {
++        guard self.dataWatchEngineDown == nil, case .temporaryShutdown = self.state else { return }
++        self.dataWatchEngineDown = (settingsGenerator, true, TribeEngineRetry(at: ProcessInfo.processInfo.systemUptime))
++        self.logHandler(.error, "Tribe roaming: soft restart failed for good (no backend after \(TribeRestartDriver.retries) retries); the app is told, retrying on the tick")
++        self.dataWatchEngineHandler?(true)
++        self.startStallWatchdog() // the tick that retries; nothing else runs on it while no backend does
+     }
+ 
+     private func stallTick() {
+@@ -950,7 +975,7 @@
                  break
              case .rebindPort where steps == 0:
                  self.roamCounters.stallRebinds += 1
@@ -118,3 +266,13 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
              case .softRestart where steps <= 1:
                  self.logHandler(.verbose, "Tribe roaming: still stalled after the fresh port, soft restart of the backend (\(self.roamCounters.summary))")
              default:
+@@ -1001,8 +1026,7 @@
+         switch command {
+         case .heal(.freshPort):
+             guard self.recovery.requestFreshPort(sample, pathSatisfied: self.lastPathSatisfiable) == .performed else { return .denied }
+-            self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator)
+-            return .performed
++            return self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator) ? .performed : .failed
+         case .heal(.softRestart):
+             guard self.recovery.requestSoftRestart(sample, pathSatisfied: self.lastPathSatisfiable) == .performed else { return .denied }
+             return self.restartBackendInPlace(handle: handle, settingsGenerator: settingsGenerator) ? .performed : .failed

@@ -1194,6 +1194,16 @@ of its addresses, read-only; `~/avpn-build/phone-diag/air-G/RESULTS.txt`):
   over after every step and never reached the app's 45 s (runs 2 and 4 of air-F: no failover until the tester's
   Stop). The ladder's own proof (`provesFlow`, a second stage after a step) is unchanged: it only decides which
   step is next.
+- **A restart that leaves no backend is told (review R53 2).** Every step that changes the 5-tuple can now fail to
+  start its new device. `TribeRestartDriver` (TribeRoaming.swift, the code `restartBackendInPlace` runs) keeps
+  tribe.8's 3 retries 2 s apart; when they are spent it calls `noteNoBackendAfterRestart`: the adapter enters the
+  engine-down state of tribe.14 (`dataWatchEngineDown`, settings in force), tells its owner
+  (`dataWatchEngineHandler(true)` -> the provider's status reply `engine_down` -> the app restarts the tunnel), and
+  the tick keeps trying (2, 4, 8 ... 60 s) and takes the fact back when a backend runs again or a path event resumed
+  the adapter. This works with the watch off too (the provider's state file then says `enabled: false`). No caller
+  drops the restart's result: the app's rebind answers `{"rebind":"denied","reason":"failed"}`
+  (`TribeRebindResult.failed`), the data watch's fresh-port heal `.failed`. tribe.8-21 left the adapter paused with
+  its watchdog stopped and told nobody; the soft restart was rare then. Gate: `tests/check_backend_hook.sh`.
 - **A roam series under a dead server (review R53 1), tested, no change.** Roams every 15-40 s for 300 s, the server
   dead on both paths, 1500 B/s of demand: `data_stall_s` reaches 45 s at 165 s (the 120 s series bound + 45 s) and
   stays reported between the roams, whether the new devices' handshakes complete or not (section R53 REPLAYS of the

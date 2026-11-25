@@ -130,8 +130,9 @@ extension PacketTunnelProvider {
     }
 
     /// The status reply of a tunnel that has NO engine (a switch failed and neither node's engine
-    /// could be started; the adapter keeps retrying). The app that sees `engine_down` restarts the
-    /// tunnel itself. nil = an engine runs, or the watch knows nothing: the reply is as before.
+    /// could be started, or - awg-apple tribe.22 - an in-place restart of a roam or of the stall ladder
+    /// and its retries left none; the adapter keeps retrying). The app that sees `engine_down` restarts
+    /// the tunnel itself. nil = an engine runs, or the watch knows nothing: the reply is as before.
     func tribeEngineDownReply() -> Data? {
         guard tribeDataWatch.engineIsDown else { return nil }
         var metadata = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
