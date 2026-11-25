@@ -5299,6 +5299,52 @@ static void exitAbandonsStart()
         CHECK(count(io, "release") == 1);
     }
     {
+        // Review of f810803d3 (3): the quit waits for an acquire the exit abandoned - its grant arrives inside the wait (+300 ms),
+        // is given back, the release is answered (+500 ms), then the exit goes on. The hook is the owner half of the production
+        // predicate (VpnConnectionTunnelControl::upstreamRequestsSettled: requestsOutstanding() == 0 && the client's releases).
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.setOptions(op);
+        o.begin(a, 1, std::nullopt, T, 1000);
+        const quint64 acq = io.last("acquire")->id;
+        o.abandonForExit(T + 10);
+        CHECK(o.requestsOutstanding() > 0); // the cancelled acquire is still out
+        qint64 clock = 0;
+        int pumps = 0;
+        quint64 rel = 0;
+        bool answered = false;
+        UpstreamQuitHooks h;
+        h.userStop = []() {};
+        h.stopped = []() { return true; };
+        h.releaseSettled = [&o]() { return o.requestsOutstanding() == 0; };
+        h.pump = [&](int ms) {
+            clock += ms;
+            ++pumps;
+            if (clock >= 300 && rel == 0) {
+                o.onAcquireReply(acq, granted(profile, sha, 3), T + clock);
+                if (const FakeIo::Call *r = io.last("release"))
+                    rel = r->id;
+            }
+            if (rel != 0 && clock >= 500 && !answered) {
+                answered = true;
+                o.onReleaseDone(rel, T + clock);
+            }
+        };
+        h.nowMs = [&clock]() { return clock; };
+        h.journal = [](const QString &) {};
+        CHECK(runUpstreamQuit(AppExitKind::Quit, true, /*upstreamSession=*/false, h));
+        CHECK(rel != 0 && answered && clock >= 500 && clock < 550 && o.requestsOutstanding() == 0);
+        // nothing pending (an own-node quit): no wait at all
+        FakeIo io2;
+        UpstreamLeaseOwner o2(&io2);
+        o2.setOptions(op);
+        UpstreamQuitHooks h2 = h;
+        h2.releaseSettled = [&o2]() { return o2.requestsOutstanding() == 0; };
+        clock = 0;
+        pumps = 0;
+        CHECK(!runUpstreamQuit(AppExitKind::Quit, true, false, h2) && pumps == 0);
+    }
+    {
         // a provider session that is UP is not touched here (the quit's userStop ends it): no release, still active
         FakeIo io;
         UpstreamLeaseOwner o(&io);

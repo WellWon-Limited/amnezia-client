@@ -12588,6 +12588,7 @@ void AvpnEngineQml::beginExit()
         return;
     m_exiting = true;
     m_engine.setExiting();
+    cancelSeatFirst(); // review of f810803d3 (2): the pending seat-first switch goes with its prepare - a late Prepared is ignored
     m_tunnel.abandonUpstreamStartsForExit(); // round mac-D5: the provider start's asynchronous half (grant, re-acquire, prepare)
     m_killSwitchHoldTimer.stop();
     reliabilityEvent(QStringLiteral("app_exit_begun"));
@@ -12604,10 +12605,9 @@ void AvpnEngineQml::endUpstreamSessionOnQuit()
     avpn::UpstreamQuitHooks h;
     h.userStop = [this]() { stop(); };
     h.stopped = [this]() { return m_lastTunnelState == Vpn::Disconnected; };
-    h.releaseSettled = [this]() { // round mac-D2: the seat's release answered (or given up), not only sent
-        const avpn::UpstreamLeaseClient *c = m_tunnel.upstreamClient();
-        return !c || c->releasesSettled();
-    };
+    // round mac-D2: the seat's release answered (or given up), not only sent; review of f810803d3 (3): and no acquire the
+    // exit abandoned is still waiting for its answer (its grant is given back when it comes) - VpnConnectionTunnelControl.
+    h.releaseSettled = [this]() { return m_tunnel.upstreamRequestsSettled(); };
     h.pump = [](int ms) {
         QEventLoop loop;
         QTimer::singleShot(ms, &loop, &QEventLoop::quit);
@@ -12618,7 +12618,7 @@ void AvpnEngineQml::endUpstreamSessionOnQuit()
     if (avpn::runUpstreamQuit(m_appExitKind, avpn::upstreamNodesEnabled(), upstreamSession, h))
         reliabilityEvent(QStringLiteral("upstream_quit_stop stopped=%1 release_settled=%2 ms=%3")
                              .arg(int(m_lastTunnelState == Vpn::Disconnected))
-                             .arg(int(!m_tunnel.upstreamClient() || m_tunnel.upstreamClient()->releasesSettled()))
+                             .arg(int(m_tunnel.upstreamRequestsSettled()))
                              .arg(clock.elapsed()));
 #endif
 }

@@ -1121,6 +1121,11 @@ void VpnConnectionTunnelControl::abandonUpstreamStartsForExit()
     applyUpstreamEvents(m_upOwner.abandonForExit(upstreamClockMs()));
 }
 
+bool VpnConnectionTunnelControl::upstreamRequestsSettled() const
+{
+    return m_upOwner.requestsOutstanding() == 0 && (!m_leaseClient || m_leaseClient->releasesSettled());
+}
+
 void VpnConnectionTunnelControl::upstreamTunnelUp()
 {
     if (m_upOwner.active())

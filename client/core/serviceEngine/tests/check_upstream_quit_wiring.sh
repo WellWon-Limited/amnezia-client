@@ -14,8 +14,11 @@ bad() { echo "FAIL: $*"; fail=1; }
 body() { awk -v sig="$2" 'index($0, sig) == 1 { on = 1 } on { print } on && /^}$/ { exit }' "$1"; }
 q="$(body "$ENG" 'void AvpnEngineQml::endUpstreamSessionOnQuit()')"
 [ -n "$q" ] || bad "Q1: endUpstreamSessionOnQuit not found"
-printf '%s\n' "$q" | grep -qF 'h.releaseSettled = [this]()' || bad "Q1: the quit does not set the releaseSettled hook"
-printf '%s\n' "$q" | grep -qF 'c->releasesSettled()' || bad "Q1: the releaseSettled hook does not read the lease client's releasesSettled()"
+printf '%s\n' "$q" | grep -qF 'h.releaseSettled = [this]() { return m_tunnel.upstreamRequestsSettled(); };' || bad "Q1: the quit does not wait through the adapter's settled predicate"
+VTC0="$ROOT/client/core/serviceEngine/VpnConnectionTunnelControl.cpp"
+rs="$(body "$VTC0" 'bool VpnConnectionTunnelControl::upstreamRequestsSettled() const')"
+printf '%s\n' "$rs" | grep -qF 'm_upOwner.requestsOutstanding() == 0' && printf '%s\n' "$rs" | grep -qF 'm_leaseClient->releasesSettled()' \
+  || bad "Q1: settled must mean no cancelled acquire pending (the owner) and no release open (the client) - review of f810803d3 (3)"
 printf '%s\n' "$q" | grep -qE 'avpn::runUpstreamQuit\(m_appExitKind, avpn::upstreamNodesEnabled\(\), upstreamSession, h\)' \
   || bad "Q2: the quit does not hand these hooks to runUpstreamQuit"
 r="$(body "$UE" 'inline bool runUpstreamQuit(')"
@@ -42,6 +45,10 @@ awk '/case path::EffectType::StartPath: \{/ { on = 1; n = 0 } on { n++; if ($0 ~
 # owner when the exit begins: beginExit tells the adapter once, the adapter hands it to the shipped owner's abandonForExit, and
 # no seat is taken for a switch after it.
 printf '%s\n' "$be" | grep -qF 'm_tunnel.abandonUpstreamStartsForExit();' || bad "Q5: beginExit does not abandon the provider start that is not up"
+c1=$(printf '%s\n' "$be" | grep -nE '^[[:space:]]*cancelSeatFirst\(\);' | head -1 | cut -d: -f1)
+c2=$(printf '%s\n' "$be" | grep -nE '^[[:space:]]*m_tunnel\.abandonUpstreamStartsForExit\(\);' | head -1 | cut -d: -f1)
+[ -n "$c1" ] && [ -n "$c2" ] && [ "$c1" -lt "$c2" ] || bad "Q6: the exit keeps the facade's pending seat-first switch - a late Prepared would stop a tunnel the quit leaves (review of f810803d3 (2))"
+printf '%s\n' "$(body "$ENG" 'void AvpnEngineQml::cancelSeatFirst()')" | grep -qF 'm_seatFirst = avpn::UpstreamSeatFirst();' || bad "Q6: cancelSeatFirst does not clear the pending pick"
 VTC="$ROOT/client/core/serviceEngine/VpnConnectionTunnelControl.cpp"
 printf '%s\n' "$(body "$VTC" 'void VpnConnectionTunnelControl::abandonUpstreamStartsForExit()')" | grep -qF 'applyUpstreamEvents(m_upOwner.abandonForExit(upstreamClockMs()));' \
   || bad "Q5: the adapter does not hand the exit to the lease owner"

@@ -136,6 +136,9 @@ public:
     void cancelUpstreamPrepare();
     // Round mac-D5: the app's exit has begun - the provider start that is not up is abandoned (UpstreamLeaseOwner::abandonForExit).
     void abandonUpstreamStartsForExit();
+    // Review of f810803d3 (3): nothing of the provider seat is in flight - no release held or unanswered (the client) and
+    // no cancelled acquire waiting for its answer (the owner). What the quit waits for (UpstreamQuitHooks::releaseSettled).
+    bool upstreamRequestsSettled() const;
     bool upstreamRequestSent() const override { return m_upOwner.requestSent(); }
     void startRefused() override; // ITunnelControl: the native start never happened (Android permission refused)
     bool upstreamPreparing() const { return m_upOwner.preparing(); }
