@@ -164,11 +164,21 @@ public:
     static constexpr qint64 kEvidenceDeferralMaxSec = 120;
     void noteEvidenceRestart(qint64 nowEpoch)
     {
+        noteChangeSeries(nowEpoch);
+        moveEvidence(nowEpoch);
+    }
+    // Review of tribe.19 (L3): one series of changes for every input. noteChangeSeries notes a change (any source) and
+    // returns whether it is still inside the bound (at most kEvidenceDeferralMaxSec after the first change of the
+    // series): only then may it reset the failed-probe count; moveEvidence moves the evidence anchor (a real network
+    // change only), never past the bound.
+    bool noteChangeSeries(qint64 nowEpoch)
+    {
         if (m_lastEvidenceChange <= 0 || nowEpoch - m_lastEvidenceChange >= kEvidenceDeferralMaxSec)
             m_evidenceSeriesStart = nowEpoch;
         m_lastEvidenceChange = nowEpoch;
-        m_evidenceSinceEpoch = qMin(nowEpoch, m_evidenceSeriesStart + kEvidenceDeferralMaxSec);
+        return nowEpoch <= m_evidenceSeriesStart + kEvidenceDeferralMaxSec;
     }
+    void moveEvidence(qint64 nowEpoch) { m_evidenceSinceEpoch = qMin(nowEpoch, m_evidenceSeriesStart + kEvidenceDeferralMaxSec); }
     qint64 evidenceSinceEpoch() const { return m_evidenceSinceEpoch; }
     // A known handshake as the verdicts read it: not older than the start of the evidence (0 = unknown stays 0).
     qint64 handshakeForVerdict(qint64 hs) const { return (hs > 0 && m_evidenceSinceEpoch > hs) ? m_evidenceSinceEpoch : hs; }

@@ -527,10 +527,33 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
     }
 }
 
+// Review of tribe.19 (Q3): the same network observed better (a subnet that appears or changes behind the same gateway,
+// the radio of the same carrier) is not another network for the verdicts.
+static bool sameNetworkIdentity(const path::NetworkObservation &a, const path::NetworkObservation &b)
+{
+    if (a.medium != b.medium)
+        return false;
+    switch (a.medium) {
+    case path::NetMedium::Wifi:
+    case path::NetMedium::Ethernet: {
+        const QString ga = a.gateway.trimmed().toLower(), gb = b.gateway.trimmed().toLower();
+        if (!ga.isEmpty() || !gb.isEmpty())
+            return ga == gb;
+        return !a.subnet.trimmed().isEmpty() && a.subnet.trimmed() == b.subnet.trimmed();
+    }
+    case path::NetMedium::Cellular:
+        return !a.carrier.trimmed().isEmpty() && a.carrier.trimmed() == b.carrier.trimmed();
+    default:
+        return false;
+    }
+}
+
 void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
 {
-    if (!m_net.observe(o))
+    if (!m_net.observe(o)) {
+        if (o.medium != path::NetMedium::Unknown) { m_lastObservation = o; m_hasLastObservation = true; }
         return;
+    }
     attemptJournal(QStringLiteral("network key=%1 coarse=%2 net_gen=%3")
                        .arg(m_net.current().local.isEmpty() ? QStringLiteral("-") : m_net.current().local,
                             m_net.current().coarse.isEmpty() ? QStringLiteral("-") : m_net.current().coarse)
@@ -542,8 +565,11 @@ void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
     prepareProber(); // the host warms up for the new network (caps, probe session)
     // K1 (air-D): the path engine's network key is the change the verdicts must see (on iOS the system's own network
     // notification sees our tunnel, not the Wi-Fi return): the grace window, the probe count and the evidence restart.
-    if (m_restartEvidence && m_state == EngineState::Connected)
-        noteNetworkChange();
+    const bool refined = m_hasLastObservation && sameNetworkIdentity(m_lastObservation, o);
+    m_lastObservation = o;
+    m_hasLastObservation = true;
+    if (m_restartEvidence && m_state == EngineState::Connected && !refined)
+        notePathChange(-1, /*realNetworkChange=*/true);
     feedOwner(path::AttemptEvent::networkChanged(nowMs(), m_net.current()));
 }
 
@@ -1435,11 +1461,27 @@ void ServiceEngine::noteHealthyTick(const TunnelStats &stats, qint64 nowEpoch)
 
 void ServiceEngine::noteNetworkChange(qint64 nowEpoch)
 {
-    m_probeFailStreak = 0; // failures of the old path say nothing about the new one (fourth review of 141, H2)
+    notePathChange(nowEpoch, /*realNetworkChange=*/false);
+}
+
+// A network change as the verdicts see it. The system's notifications (noteNetworkChange: reachability, medium - also
+// our own tunnel going up or down) open the grace window and reset the failed-probe count, as in 141. With the evidence
+// restart on (iOS, review of tribe.19): that reset only inside the series bound (L3: a key changing every minute on a dead
+// tunnel cannot hold the count at 1 forever), and only a real change of the path engine's network (observeNetwork, not a
+// refinement of the same one) moves the evidence anchor.
+void ServiceEngine::notePathChange(qint64 nowEpoch, bool realNetworkChange)
+{
     const qint64 now = nowEpoch >= 0 ? nowEpoch : nowMs() / 1000; // nowMs(): the wall clock (a test sets its own)
     m_health.noteNetworkChange(now);
-    if (m_restartEvidence) { // K1 (air-D): silence observed on the old network is no evidence on this one
-        m_health.noteEvidenceRestart(now);
+    if (!m_restartEvidence) {
+        m_probeFailStreak = 0; // failures of the old path say nothing about the new one (fourth review of 141, H2)
+        return;
+    }
+    const bool inBound = m_health.noteChangeSeries(now);
+    if (inBound)
+        m_probeFailStreak = 0;
+    if (realNetworkChange && inBound) { // K1 (air-D): silence observed on the old network is no evidence on this one
+        m_health.moveEvidence(now);
         m_evidenceSinceMs = nowEpoch >= 0 ? nowEpoch * 1000 : nowMs();
     }
 }

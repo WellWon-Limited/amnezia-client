@@ -378,6 +378,9 @@ public:
     // the one that sees a Wi-Fi return (the system's default network is our own tunnel) - restarts what the verdicts
     // count: the handshake age, the extension's stall verdict, the failed-probe count. Off = the rule of 141.
     void setRestartEvidenceOnNetworkChange(bool on) { m_restartEvidence = on; }
+    // notePathChange: one network change as the verdicts see it (noteNetworkChange = a system notification; the path
+    // engine's real network change passes realNetworkChange).
+    void notePathChange(qint64 nowEpoch, bool realNetworkChange);
 
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
@@ -722,6 +725,8 @@ private:
     void rebuildCandidates();
     int           m_probeFailStreak = 0; // xray: провалы живой пробы подряд (feedProbeResult)
     bool          m_restartEvidence = false; // K1 (air-D): see setRestartEvidenceOnNetworkChange
+    path::NetworkObservation m_lastObservation; // Q3 (review of tribe.19): what the last network change was judged against
+    bool          m_hasLastObservation = false;
     qint64        m_evidenceSinceMs = 0;     // K1: the last network change (wall clock, ms)
     qint64        m_upStartedMs = 0;     // момент последнего up()
     std::optional<Subscription> m_pendingReseed; // отложенное тело reseed (применить в терминале)
