@@ -690,6 +690,8 @@ inline bool scanPoolFromJson(const QJsonObject &o, ScanPoolView &out)
     return true;
 }
 
+inline constexpr char kScanPoolStoreKey[] = "avpn/scanPool"; // the last GET /v1/scan/pool answer (scanPoolToJson + owner)
+
 // The pool answer as the server sends it (scanPoolFromJson reads it back): what TribeScanner keeps across launches. The
 // pool belongs to the device (its entitlement), not to a network: the last answer stays true until the next one, also
 // when a fetch fails (device round air-D, E1: a launch whose fetch failed through the tunnel showed «8 серверов» - the
