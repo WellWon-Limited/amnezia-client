@@ -155,10 +155,7 @@ QtObject {
 
     // ─── Scanner screen (artboard vpn-scanner.card.html kit specs) ─────────────────
     readonly property QtObject scan: QtObject {
-        readonly property int hero: 248           // rings band under the header (a scan, its result)
-        // the rings band on the country choice (no scan yet): the same rings drawn at heroIdle / hero, so the rings and
-        // four countries fit above the button on a phone (owner 24.11, one screen)
-        readonly property int heroIdle: 144
+        readonly property int hero: 248           // rings band under the header: the choice, a scan, its result (owner 25.11: one size)
         readonly property int rowHeight: 66       // TribeScanRow (= server-list row)
         readonly property int flag: 38
         readonly property int barHeight: 46       // country button and «Повторить» (TribeButton height)
