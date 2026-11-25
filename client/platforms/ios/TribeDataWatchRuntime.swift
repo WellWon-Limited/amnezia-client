@@ -490,6 +490,7 @@ final class TribeDataWatchRuntime {
     }
 
     /// Stage 2: the adapter lost its engine after a failed switch, or got one back.
+    /// awg-apple tribe.22: also after an in-place restart (a roam, a ladder step) whose retries are spent.
     private func noteEngine(down: Bool) {
         guard let deps = currentDeps else { return }
         lock.lock()
@@ -497,11 +498,14 @@ final class TribeDataWatchRuntime {
         engineDown = down
         let labels = (nodeId, generation)
         let verdict = lastVerdict
+        // awg-apple tribe.22 (review R53 2): the adapter also says this when an in-place restart and its retries
+        // left no backend - with the watch off as well, so the file says whether the watch is on, never "true".
+        let watchOn = policy.enabled
         lock.unlock()
         guard changed else { return }
         deps.log(TribeDataWatchJournal.engineLine(down: down, nodeId: labels.0))
         deps.record("watch_engine", ["state": down ? "down" : "up", "node_id": labels.0, "generation": labels.1])
-        writeState(["enabled": true, "verdict": verdict.rawValue], net: deps.uplinkKind(), deps: deps)
+        writeState(["enabled": watchOn, "verdict": verdict.rawValue], net: deps.uplinkKind(), deps: deps)
     }
 
     /// For the status reply: no engine runs (the adapter cannot answer with counters). The app

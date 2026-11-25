@@ -232,21 +232,22 @@ do {
     check(!budget.permit(at: 10, freshPort: true), "one shared fresh port per episode")
     check(budget.lastDenial == .episode, "second fresh port refused as already spent")
     check(!budget.permit(at: 100, freshPort: true), "elapsed time alone does not rearm dead peer")
-    budget.observe(s(100, 0, 0, 110))
+    budget.observe(s(100, 0, 100, 110))
     check(!budget.permit(at: 110, freshPort: false), "tx/reset alone does not rearm recovery")
     check(budget.denied == 1, "one denial streak counted once: \(budget.denied)")
-    budget.observe(s(100, 1, 0, 120))
+    budget.observe(s(100, 1, 100, 120)) // tribe.22: a session (a completed handshake) - bytes without one are not data
     check(budget.permit(at: 120, freshPort: true), "real inbound progress rearms")
     check(!budget.permit(at: 140, freshPort: false), "GUI fresh-port repair consumes whole episode")
     check(budget.episodeUsed == 2, "fresh port closes the episode")
 }
 do {
     var budget = TribeRecoveryBudget()
+    budget.observe(s(0, 0, 100, 0))
     for n in 0..<4 {
-        budget.observe(s(100, UInt64(n + 1), 0, Double(n * 10)))
+        budget.observe(s(100, UInt64(n + 1), 100, Double(n * 10)))
         check(budget.permit(at: Double(n * 10), freshPort: true), "progress grants episode within rolling cap")
     }
-    budget.observe(s(100, 10, 0, 40))
+    budget.observe(s(100, 10, 100, 40))
     check(!budget.permit(at: 40, freshPort: true), "progress cannot bypass rolling energy cap")
     check(budget.lastDenial == .rollingCap, "cap reason")
     check(budget.permit(at: 120, freshPort: true), "rolling cap expires")
@@ -254,8 +255,9 @@ do {
 do {
     // same-kind cooldown survives an episode reset
     var budget = TribeRecoveryBudget(jitter: 0)
+    budget.observe(s(0, 0, 100, 0))
     check(budget.request(at: 0, kind: .freshPort) == nil, "fresh port")
-    budget.observe(s(100, 1, 0, 2))
+    budget.observe(s(100, 1, 100, 2))
     check(budget.request(at: 5, kind: .freshPort) == .cooldown, "second fresh port 5 s later refused by cooldown")
     check(budget.request(at: 8, kind: .freshPort) == nil, "fresh port after cooldown")
 }
@@ -402,12 +404,11 @@ do {
         }
         if case .perform(let action) = arbiter.tick(sample, pathSatisfied: satisfied, policy: seamless) { performed.append((at, action)) }
     }
-    // tribe.19 (K2): the session came back with a repair still open (the fresh port at 5 s, no data since):
-    // its path is proved at once by the roam's soft restart (tribe.10-18: 10 s later, at 33 s).
-    // tribe.20 (L2): that proof restart is not a ladder step: on the new network the ladder keeps its own times
-    // (the roam's fresh port, then its soft restart 14 s after the roam: 37 s).
-    check(performed.map { $0.1 } == [.rebindPort, .softRestart, .softRestart], "fresh port before the outage, the proof restart at the roam, the ladder's: \(performed)")
-    check(performed.map { $0.0 } == [5, 23, 37], "the roam's proof restart at 23 s, the ladder's soft restart at 37 s: \(performed)")
+    // tribe.22: the roam at 23 s is itself a new device with a new handshake (the adapter restarts the backend), so
+    // the arbiter asks for no proof restart of its own (tribe.19/20 K2: one at 23 s); on the new network the ladder
+    // keeps its own times: the roam's step, then its soft restart 14 s after the roam (37 s).
+    check(performed.map { $0.1 } == [.rebindPort, .softRestart], "fresh port before the outage, the ladder's soft restart after the roam: \(performed)")
+    check(performed.map { $0.0 } == [5, 37], "no proof restart at the roam, the ladder's soft restart at 37 s: \(performed)")
 }
 
 // tribe.10: a roam fresh port every 4 s (flapping cellular path) does not starve the repair.
@@ -424,13 +425,14 @@ do {
         if tick % 4 == 0 { arbiter.noteRoamRebind(sample, freshPort: true) }
         if case .perform(let action) = arbiter.tick(sample, pathSatisfied: true, policy: seamless) { performed.append((at, action)) }
     }
-    // tribe.20: inside the series bound (120 s after the first roam at 4 s) only the roams' proof restarts act,
-    // one per 60 s; after the bound the roams no longer restart the clock and the ladder repairs again.
+    // tribe.22: every such roam is a new device already (the adapter's restart), so inside the series bound (120 s
+    // after the first roam at 4 s) the arbiter adds nothing; after the bound the roams no longer restart the clock and
+    // the ladder repairs again.
     let inside = performed.filter { $0.0 < 124 }
-    check(inside.allSatisfy { $0.1 == .softRestart } && inside.map { $0.0 } == [4, 64], "proof restarts one per 60 s inside the series bound: \(performed)")
+    check(inside.isEmpty, "no step of the arbiter's own inside the series bound: \(performed)")
     check(performed.contains { $0.0 > 124 && $0.0 < 160 }, "after the bound the ladder repairs again: \(performed)")
     let window = performed.map { first in performed.filter { $0.0 >= first.0 && $0.0 < first.0 + 120 }.count }.max() ?? 0
-    check(window <= TribeRecoveryBudget.rollingCap + 2, "within the rolling cap plus two proof restarts: \(window)")
+    check(window <= TribeRecoveryBudget.rollingCap, "within the rolling cap: \(window)")
 }
 
 // tribe.10: an `.episode` refusal below stage 3 re-syncs the tracker with the budget (counters
@@ -465,8 +467,9 @@ do {
 
 // --- D7: every recovery step ends with a keepalive (server learns the new endpoint at once) ---
 check(TribeRoaming.socketOps(for: .bumpSockets) == [.bumpWithKeepalive], "bump = BindUpdate + keepalive")
-// tribe.8 (REV-3): keepalive only after the fresh port, no second BindUpdate of the new socket.
-check(TribeRoaming.socketOps(for: .rebindPort) == [.freshListenPort, .sendKeepalive], "fresh port followed by keepalive only")
+// tribe.22 (device round air-G): a new 5-tuple begins with the handshake - the fresh port is a new device, never
+// listen_port=0 + a keepalive under the old keys on the live one (tribe.8-21).
+check(TribeRoaming.socketOps(for: .rebindPort) == [.restartBackend], "a fresh port is a new device: its first packet is the handshake")
 check(TribeRoaming.socketOps(for: .softRestart) == [.restartBackend], "soft restart = backend restart on the same TUN")
 check(TribeRoaming.socketOps(for: .none).isEmpty, "no-op")
 
@@ -498,7 +501,10 @@ func runPersistent(rate: UInt64, horizon: Int, progressAt: Set<Int> = [], idle: 
     for tick in 1...horizon {
         let at = Double(tick)
         if !(idle?.contains(tick) ?? false) { tx += rate }
-        if progressAt.contains(tick) { rx += 1000 }
+        if progressAt.contains(tick) {
+            if hs == 0 { hs = 100 + Int64(tick); rx += 92 } // data comes only after the new device's handshake
+            rx += 1000
+        }
         let sample = s(tx, rx, hs, at)
         let outcome = arbiter.tick(sample, pathSatisfied: !(offline?.contains(tick) ?? false), policy: seamless)
         if outcome != .none { outcomes.append((at, outcome)) }
@@ -650,7 +656,9 @@ do {
     budget.observe(s(10, 0, 0, 2))
     check(budget.episodeUsed == 2, "counter drop alone does not re-arm")
     budget.observe(s(20, 5, 0, 3))
-    check(budget.episodeUsed == 0, "first inbound bytes of the new device re-arm the episode")
+    check(budget.episodeUsed == 2, "tribe.22: bytes on a device without a completed handshake are not data")
+    budget.observe(s(400, 300, 103, 4))
+    check(budget.episodeUsed == 0, "the first data of the new device (after its handshake) re-arms the episode")
     check(budget.request(at: 20, kind: .freshPort) == nil, "fresh port after re-arm (cooldown elapsed)")
     budget.resetEpisode()
     check(budget.request(at: 40, kind: .freshPort) == nil, "resume re-arms the episode: fresh port permitted again (cooldown elapsed)")
@@ -949,16 +957,20 @@ func airDReplay(backAt: Int, wifiWorks: Bool = true, horizon: Int = 130) -> AirD
         }
         if keypair { tx += 1500 } else if t % 5 == 0 { tx += 556 }
         if pathWorks && keypair { rx += 20_000; if t >= backAt && run.dataAt == nil { run.dataAt = t } }
-        let sample = s(tx, rx, hs, Double(t))
-        if t == 0 || t == backAt { arbiter.noteRoamRebind(sample, freshPort: true) }
+        var sample = s(tx, rx, hs, Double(t))
+        // A new device, as the adapter makes one (restartBackendInPlace: counters from zero, no keypair yet).
+        func newDevice() {
+            tx = 0; rx = 0; hs = 0; keypair = false
+            deviceOnWifi = t >= backAt
+            arbiter.rebaseAfterBackendRestart(s(0, 0, 0, Double(t)))
+            if deviceOnWifi && wifiWorks { handshakeDue = t + 1 }
+            sample = s(0, 0, 0, Double(t))
+        }
+        // tribe.22: the roam's step is that new device (tribe.19-21: a fresh port on the old one, then K2's restart).
+        if t == 0 || t == backAt { newDevice(); arbiter.noteRoamRebind(sample, freshPort: true) }
         if case .perform(let a) = arbiter.tick(sample, pathSatisfied: true, policy: policy) {
             if t >= 0 { run.steps.append((t, a)) }
-            if a == .softRestart {
-                tx = 0; rx = 0; hs = 0; keypair = false
-                deviceOnWifi = t >= backAt
-                arbiter.rebaseAfterBackendRestart(s(0, 0, 0, Double(t)))
-                if deviceOnWifi && wifiWorks { handshakeDue = t + 1 }
-            }
+            if TribeRoaming.socketOps(for: a) == [.restartBackend] { newDevice() }
         }
         run.reported[t] = arbiter.dataQuietSeconds(at: Double(t))
     }
@@ -970,8 +982,8 @@ do {
         let after = r.steps.filter { $0.at >= back }
         let reported = stride(from: back + 4, through: back + 40, by: 4).map { r.reported[$0] ?? -9 }
         print("  air-D Wi-Fi back at \(back) s: on LTE \(r.steps.filter { $0.at < back }.map { "\($0.action.logName)@\($0.at)s" }), after it \(after.map { "\($0.action.logName)@+\($0.at - back)s" }) data at \(r.dataAt.map { "+\($0 - back)s" } ?? "never") data_stall_s at +4..+40 s: \(reported)")
-        check(after.first.map { $0.action == .softRestart && $0.at - back <= 2 } ?? false, "air-D back at \(back): the roam of a session without a data path proves it at once: \(after)")
-        check(r.dataAt.map { $0 - back <= 5 } ?? false, "air-D back at \(back): data within 5 s of the Wi-Fi return: \(String(describing: r.dataAt))")
+        check(after.isEmpty, "air-D back at \(back): the roam is the new device, no further step: \(after)")
+        check(r.dataAt.map { $0 - back <= 2 } ?? false, "air-D back at \(back): data within 2 s of the Wi-Fi return: \(String(describing: r.dataAt))")
         check(reported.allSatisfy { $0 < 45 }, "air-D back at \(back): the extension never reports 45 s of stall on the Wi-Fi: \(reported)")
     }
     // The server really dead on the new network: the ladder goes on, the verdict counts from the roam (not from LTE).
@@ -995,8 +1007,8 @@ do {
         let window = restarts.map { first in restarts.filter { $0 >= first && $0 < first + 120 }.count }.max() ?? 0
         let perRoam = roams.map { r in restarts.filter { $0 >= r && $0 < r + period }.count }.max() ?? 0
         print("  (c) flapping every \(period) s, dead path, 10 min: \(restarts.count) soft restarts, max \(window) in 120 s, max \(perRoam) per roam interval")
-        // tribe.20: the ladder's 4 per 120 s plus the roams' proof restarts, one per 60 s (2 per 120 s).
-        check(window <= TribeRecoveryBudget.rollingCap + 2 && perRoam <= 2, "(c) flapping every \(period) s stays inside the cap: \(restarts)")
+        // tribe.22: the roams are new devices themselves; the arbiter's own restarts stay inside the ladder's cap.
+        check(window <= TribeRecoveryBudget.rollingCap && perRoam <= 2, "(c) flapping every \(period) s stays inside the cap: \(restarts)")
     }
 }
 // END AIR-D REPLAYS
@@ -1043,7 +1055,7 @@ do {
     let restarts = idle.steps.filter { $0.action == .softRestart }.map { $0.at }
     let spacing = zip(restarts.dropFirst(), restarts).map { $0 - $1 }.min() ?? 999
     print("  L2 idle roams every 20 s, 290 s: soft restarts at \(restarts), min spacing \(spacing) s")
-    check(spacing >= 60, "L2: at most one proof restart per 60 s on an idle healthy session: \(restarts)")
+    check(restarts.isEmpty && spacing >= 60, "L2 (tribe.22): no restart of the arbiter's own on an idle healthy session: \(restarts)")
     let stall = roamSeries(every: 20, horizon: 400, demand: { t in t >= 300 ? 1500 : 0 }, data: { _ in 0 }, rekeyEvery: 120)
     let repair = stall.steps.filter { $0.at >= 300 }
     print("  L2 then a real stall at 300 s: steps \(repair.map { "\($0.action.logName)@\($0.at)" })")
@@ -1131,6 +1143,244 @@ do {
     check(acts.prefix(3).map { $0.0 } == [4, 64, 104] && acts.dropFirst(2).first?.1 == .rebindPort,
           "the stage-3 fresh port due at 94 s waits for a stall (104 s), not during the echo: \(acts)")
 }
+
+// BEGIN AIR-G REPLAYS (device round air-G, 25.11; the API of tribe.21 / dea025cda only: run against both files)
+// What the node saw of the phone's peer (tools/nodewatch.sh, logs/nw-A1.txt) and the extension's own log of round
+// air-F (run 2): after the Wi-Fi return every flow that began with a transport packet (the fresh port + keepalive
+// of tribe.9-21) carried 25 packets up and then none, while the node kept sending down: the echo of the step (about
+// 28 KB within a second or two), then the server's handshake initiations (148 B, about every 5 s, its handshake time
+// never moving) and retransmissions (a few hundred bytes every 1-4 s for about half a minute, then fading).
+// A flow that began with a handshake (a new device) was not limited.
+struct AirGRun { var steps: [(at: Int, action: TribeStallAction)] = []; var dataAt: Int?; var reported: [Int: Int64] = [:] }
+/// 20 s of healthy Wi-Fi, the roam at 0 s, `horizon` seconds after it under 3.7 KB/s of demand (the field rate).
+/// `handshakeFirstWorks`: a new device's flow is unlimited (the field); false = it also dies after its echo (a path
+/// that lets no flow live: the verdict must still reach the app). The world applies what the package's own
+/// `TribeRoaming.socketOps` says for an action: a new device, or (the old package) a new port on the live one.
+func airGReplay(horizon: Int, handshakeFirstWorks: Bool = true, roamIsNewDevice: Bool) -> AirGRun {
+    let fleet = TribeServiceTraffic.fromConfig(jc: "5", jmax: "50", s1: "37", s4: "37", specialJunk: ["<r 44>", nil, nil, nil, nil],
+                                               contentPaddingAddition: "10-100", randomTrailers: "0", mtu: "1280", persistentKeepalive: "25")
+    var policy = seamless
+    policy.serviceTraffic = fleet
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var hs: Int64 = 1_800_000_000
+    var flowStart = -100        // when the current 5-tuple began
+    var handshakeFirst = true   // the current 5-tuple began with a handshake
+    var keypair = true
+    var handshakeDue: Int?
+    var run = AirGRun()
+    for t in -20...horizon {
+        var sample = s(tx, rx, hs, Double(t))
+        func newDevice() {
+            tx = 0; rx = 0; hs = 0; keypair = false
+            flowStart = t; handshakeFirst = true; handshakeDue = t + 1
+            arbiter.rebaseAfterBackendRestart(s(0, 0, 0, Double(t)))
+            sample = s(0, 0, 0, Double(t))
+        }
+        func newPortOnLiveDevice() { flowStart = t; handshakeFirst = false }
+        func apply(_ action: TribeStallAction) {
+            if TribeRoaming.socketOps(for: action) == [.restartBackend] { newDevice() } else { newPortOnLiveDevice() }
+        }
+        if t == 0 {
+            if roamIsNewDevice { newDevice() } else { newPortOnLiveDevice() }
+            arbiter.noteRoamRebind(sample, freshPort: true)
+        }
+        let alive = t < 0 || (handshakeFirst && handshakeFirstWorks)
+        let age = t - flowStart
+        if let due = handshakeDue, t >= due, alive || age <= 1 {
+            handshakeDue = nil; keypair = true; tx += fleet.handshakeTxBytes; rx += 92; hs = 1_800_000_000 + Int64(t + 20)
+        }
+        if keypair { tx += 3700 } else if t % 5 == 0 { tx += 556 }
+        if keypair {
+            if alive { rx += 20_000; if t >= 0 && run.dataAt == nil && age >= 3 { run.dataAt = t } }
+            else if age <= 1 { rx += 14_000 }                     // the echo of the step: 25 packets up, their answers
+            else {
+                if age % 5 == 2 { rx += 148 }                     // the server's own handshake initiations
+                if age < 35 && age % 3 == 0 { rx += 400 }         // its retransmissions, fading after half a minute
+            }
+        }
+        sample = s(tx, rx, hs, Double(t))
+        if t != 0, case .perform(let a) = arbiter.tick(sample, pathSatisfied: true, policy: policy) {
+            run.steps.append((t, a))
+            apply(a)
+        }
+        run.reported[t] = arbiter.dataQuietSeconds(at: Double(t))
+    }
+    return run
+}
+do {
+    let newPackage = TribeRoaming.socketOps(for: .rebindPort) == [.restartBackend]
+    // 1. The field case as the package under test handles it: the roam's step, then whatever its ladder does.
+    let field = airGReplay(horizon: 240, roamIsNewDevice: newPackage)
+    let reach = (1...240).first { (field.reported[$0] ?? 0) >= 45 }
+    print("  air-G Wi-Fi return: steps \(field.steps.map { "\($0.action.logName)@+\($0.at)s" }) lasting data from \(field.dataAt.map { "+\($0)s" } ?? "never") data_stall_s >= 45 from \(reach.map { "+\($0)s" } ?? "never")")
+    check(field.dataAt.map { $0 <= 5 } ?? false, "air-G: lasting data on the same server within 5 s of the Wi-Fi return: \(String(describing: field.dataAt)) steps \(field.steps)")
+    check(field.steps.isEmpty, "air-G: the roam's new device needs no further step: \(field.steps)")
+    // 2. A path on which every flow dies after its echo, also one that began with a handshake: the stray data
+    // (echoes, the server's handshakes and retransmissions) must not start the verdict over - it reaches the app's
+    // 45 s within 90 s of the return, and the ladder goes on to its backoff instead of opening a new episode each time.
+    let dead = airGReplay(horizon: 240, handshakeFirstWorks: false, roamIsNewDevice: newPackage)
+    let deadReach = (1...240).first { (dead.reported[$0] ?? 0) >= 45 }
+    let firstMinute = dead.steps.filter { $0.at <= 60 }.count
+    print("  air-G no flow lives: steps \(dead.steps.map { "\($0.action.logName)@+\($0.at)s" }) data_stall_s >= 45 from \(deadReach.map { "+\($0)s" } ?? "never")")
+    check(deadReach.map { $0 <= 90 } ?? false, "air-G: stray data does not start the verdict over: 45 s reached within 90 s: \(String(describing: deadReach))")
+    check(firstMinute <= 3, "air-G: no loop of first steps (field: 5 fresh ports in 2 min): \(dead.steps)")
+    // 3. Bytes on a device that has not completed a handshake are never data.
+    check(TribeDataFlow.dataBytes(rxDelta: 148, handshakeChanged: false, hasSession: false) == 0
+          && TribeDataFlow.dataBytes(rxDelta: 148, handshakeChanged: false, hasSession: true) == 148, "no session, no data")
+    var bare = TribeRecoveryArbiter(jitter: 2)
+    var bareTx: UInt64 = 0, bareRx: UInt64 = 0
+    var bareSteps: [Int] = []
+    _ = bare.tick(s(0, 0, 0, 0), pathSatisfied: true, policy: policy(seamless))
+    for t in 1...45 {
+        bareTx += 600; if t % 5 == 0 { bareRx += 148 }            // only the server's initiations come in
+        if case .perform = bare.tick(s(bareTx, bareRx, 0, Double(t)), pathSatisfied: true, policy: policy(seamless)) { bareSteps.append(t) }
+    }
+    check(!bareSteps.isEmpty && (bare.dataQuietSeconds(at: 45) >= 30), "a device without a handshake is stalled whatever its rx shows: steps \(bareSteps) quiet \(bare.dataQuietSeconds(at: 45))")
+    // 4. The verdict counts from the last LASTING data: one sample of data between two stalls does not start it over
+    // (tribe.16-21: it did, 10 s after a step), a minute of data without a step and without a stall does.
+    var arb = TribeRecoveryArbiter(jitter: 2)
+    var vtx: UInt64 = 0, vrx: UInt64 = 50_000
+    var quiet: [Int: Int64] = [:]
+    for t in 0...200 {
+        vtx += 3700
+        if t == 30 || t == 31 || (120...200).contains(t) { vrx += 2000 } // stray data 26 s after the first step; lasting from 120 s
+        _ = arb.tick(s(vtx, vrx, 100, Double(t)), pathSatisfied: true, policy: seamless)
+        quiet[t] = arb.dataQuietSeconds(at: Double(t))
+    }
+    check((quiet[29] ?? 0) >= 25 && quiet[31] == 0 && (quiet[40] ?? 0) >= 36, "stray data at 30-31 s does not start the verdict over: \([29, 31, 40].map { quiet[$0] ?? -9 })")
+    check((quiet[119] ?? 0) >= 100 && quiet[150] == 0, "counted until data comes back: \([119, 150].map { quiet[$0] ?? -9 })")
+    var after = arb
+    var stalledAgain: [Int: Int64] = [:]
+    for t in 201...215 { vtx += 3700; _ = after.tick(s(vtx, vrx, 100, Double(t)), pathSatisfied: true, policy: seamless); stalledAgain[t] = after.dataQuietSeconds(at: Double(t)) }
+    check((stalledAgain[215] ?? 99) <= 16, "after a minute of lasting data a new stall counts from its own start: \(String(describing: stalledAgain[215]))")
+}
+func policy(_ p: TribeRoamingPolicy) -> TribeRoamingPolicy { p }
+// END AIR-G REPLAYS
+
+// BEGIN REVIEW R53 REPLAYS (review of tribe.22, round 53)
+// Item 2: a phone at the edge of Wi-Fi alternating Wi-Fi <-> LTE every `period` s for 300 s; the server is dead on both
+// paths (a handshake completes on every new device, or never; no application data), 1500 B/s of demand while a keypair
+// can send; every roam is a new device (rebaseAfterBackendRestart, then noteRoamRebind), as the adapter does it.
+// The claim under test: the rebase of every restart zeroes the demand counts, so the verdict would start from zero
+// on every roam for ever. It does not: inside the series (120 s from the first roam without lasting data) a roam
+// restarts the verdict by design (K1/L1, the app's own bound is the same); after it `observedSince` and the stall
+// clock no longer move, the demand of the new device reaches the ladder's threshold again within seconds of each
+// roam, and the verdict passes the app's 45 s at 120 + 45 s and stays there.
+struct EdgeRun { var reported: [Int: Int64] = [:]; var steps: [(Int, TribeStallAction)] = [] }
+func edgeReplay(period: Int, handshakeCompletes: Bool, traffic: TribeServiceTraffic, horizon: Int = 300) -> EdgeRun {
+    var policy = seamless
+    policy.serviceTraffic = traffic
+    var arbiter = TribeRecoveryArbiter(jitter: 2)
+    var tx: UInt64 = 0, rx: UInt64 = 0
+    var hs: Int64 = 1_800_000_000
+    var keypair = true
+    var deviceStart = -100
+    var run = EdgeRun()
+    let initiation = traffic.handshakeTxBytes - traffic.keepaliveTxBytes
+    for t in -20...horizon {
+        var sample = s(tx, rx, hs, Double(t))
+        func newDevice() {
+            tx = 0; rx = 0; hs = 0; keypair = false; deviceStart = t
+            arbiter.rebaseAfterBackendRestart(s(0, 0, 0, Double(t)))
+            sample = s(0, 0, 0, Double(t))
+        }
+        if t >= 0 && t % period == 0 { newDevice(); arbiter.noteRoamRebind(sample, freshPort: true) }
+        let age = t - deviceStart
+        if !keypair {
+            if handshakeCompletes && age == 1 { keypair = true; tx += traffic.handshakeTxBytes; rx += 92; hs = 1_800_000_000 + Int64(t + 20) }
+            else if age % 5 == 0 { tx += initiation }            // the engine's own retries of an unanswered initiation
+        }
+        if keypair { tx += 1500 }
+        if t < 0 { rx += 20_000 }
+        sample = s(tx, rx, hs, Double(t))
+        if !(t >= 0 && t % period == 0), case .perform(let a) = arbiter.tick(sample, pathSatisfied: true, policy: policy) {
+            run.steps.append((t, a))
+            if TribeRoaming.socketOps(for: a) == [.restartBackend] { newDevice() }
+        }
+        run.reported[t] = arbiter.dataQuietSeconds(at: Double(t))
+    }
+    return run
+}
+do {
+    let fleet = TribeServiceTraffic.fromConfig(jc: "6", jmax: "50", s1: "64", s4: "64", specialJunk: ["<r 44>", nil, nil, nil, nil],
+                                               contentPaddingAddition: "10-100", randomTrailers: "0", mtu: "1280", persistentKeepalive: "25")
+    for period in [15, 20, 30, 40] {
+        for completes in [true, false] {
+            let r = edgeReplay(period: period, handshakeCompletes: completes, traffic: fleet)
+            let reach = (0...300).first { (r.reported[$0] ?? 0) >= 45 }
+            let late = (200...300).filter { (r.reported[$0] ?? 0) >= 45 }.count
+            let inside = (0...119).map { r.reported[$0] ?? 0 }.max() ?? 0
+            print("  R53 edge of Wi-Fi, a roam every \(period) s, handshake \(completes ? "completes" : "never"): data_stall_s >= 45 first at \(reach.map { "\($0) s" } ?? "never"), seconds >= 45 in 200..300: \(late), max inside the series \(inside)")
+            check(reach.map { $0 <= 120 + 45 + 3 } ?? false, "R53 edge \(period) s / \(completes): the verdict reaches the app's 45 s at the series bound + 45 s: \(String(describing: reach))")
+            check(late >= 60, "R53 edge \(period) s / \(completes): and stays reported between the roams, it does not start over: \(late) of 101 s")
+            check(inside < 45, "R53 edge \(period) s / \(completes): inside the series a roam is another network: \(inside)")
+        }
+    }
+    // The lead's exact case with a plain WireGuard session as well (roams at 0, 20, ..., 300).
+    for completes in [true, false] {
+        let r = edgeReplay(period: 20, handshakeCompletes: completes, traffic: .plain)
+        let reach = (0...300).first { (r.reported[$0] ?? 0) >= 45 }
+        check(reach.map { $0 <= 180 } ?? false, "R53 edge 20 s, plain session / \(completes): reached by 180 s: \(String(describing: reach))")
+    }
+}
+
+// Item 1: the in-place restart with its retries (TribeRestartDriver, the code the adapter runs). A start that keeps
+// failing ends in the engine-down fact; a start that succeeds on a retry never raises it and tells `started` once.
+final class RestartWorld {
+    var startResults: [Bool]
+    var stops = 0, starts = 0, pausedCalls = 0, engineDownCalls = 0
+    var startedCalls: [Bool] = []
+    var delays: [Double] = []
+    var paused = false
+    var queue: [() -> Void] = []
+    init(_ results: [Bool]) { startResults = results }
+    func driver() -> TribeRestartDriver {
+        TribeRestartDriver(
+            stopBackend: { self.stops += 1 },
+            startBackend: { self.starts += 1; let ok = self.startResults.isEmpty ? false : self.startResults.removeFirst(); if ok { self.paused = false }; return ok },
+            started: { self.startedCalls.append($0) },
+            paused: { self.pausedCalls += 1; self.paused = true },
+            stillPaused: { self.paused },
+            engineDown: { self.engineDownCalls += 1 },
+            later: { seconds, work in self.delays.append(seconds); self.queue.append(work) })
+    }
+    func drain() { while !queue.isEmpty { queue.removeFirst()() } }
+}
+do {
+    // the start fails and the 3 retries fail: no backend, and the engine-down owner is told, once
+    let dead = RestartWorld([false, false, false, false])
+    let ran = dead.driver().run()
+    check(!ran && dead.engineDownCalls == 0 && dead.pausedCalls == 1, "a failed start: paused, nothing said during the retries")
+    dead.drain()
+    check(dead.starts == 1 + TribeRestartDriver.retries && dead.delays == [2, 2, 2], "three retries, 2 s apart: \(dead.starts) \(dead.delays)")
+    check(dead.engineDownCalls == 1 && dead.startedCalls.isEmpty, "retries spent: engine down told once, never 'started': \(dead.engineDownCalls) \(dead.startedCalls)")
+    // the start fails once, the first retry succeeds: no engine-down, the new device is told once (one rebase)
+    let healed = RestartWorld([false, true])
+    check(!healed.driver().run(), "the step itself did not leave a backend")
+    healed.drain()
+    check(healed.engineDownCalls == 0 && healed.startedCalls == [true] && healed.starts == 2 && healed.delays == [2],
+          "a retry that starts the backend: no engine-down, 'started' once: \(healed.engineDownCalls) \(healed.startedCalls) \(healed.starts)")
+    // the ordinary case: one stop, one start, the arbiter rebased once, no pause
+    let ok = RestartWorld([true])
+    check(ok.driver().run() && ok.stops == 1 && ok.starts == 1 && ok.startedCalls == [false] && ok.pausedCalls == 0 && ok.queue.isEmpty,
+          "a restart that starts at once: \(ok.startedCalls)")
+    // a path event resumed the adapter (or a stop ended it) while a retry was waiting: the retry does nothing
+    let resumed = RestartWorld([false, false])
+    _ = resumed.driver().run()
+    resumed.paused = false
+    resumed.drain()
+    check(resumed.starts == 1 && resumed.engineDownCalls == 0 && resumed.startedCalls.isEmpty, "a resumed adapter is left alone: \(resumed.starts)")
+    // ... also when that happens before the last retry's verdict
+    let late = RestartWorld([false, false, false, false])
+    _ = late.driver().run()
+    late.queue.removeFirst()(); late.queue.removeFirst()()
+    late.paused = false
+    late.drain()
+    check(late.engineDownCalls == 0, "no engine-down for an adapter that is no longer paused by this restart")
+    check(TribeRebindResult.failed.responsePayload == ["rebind": "denied", "reason": "failed"], "a fresh port whose new device did not start is not 'performed'")
+}
+// END REVIEW R53 REPLAYS
 
 // patch 0015: the backend hook runs the callback first, then the operation; nil changes nothing.
 do {

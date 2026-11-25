@@ -1016,6 +1016,13 @@ private struct XraySocketCallbackLifecycleTests {
         expect(counters.snapshot() == XrayProtectCounters.Snapshot(bound: 0, unbound: 0, rejected: 0),
                "reset clears the session counters")
 
+        // AVPN (case W4): the tunnel's network settings are applied by the session's first start only; the in-place
+        // restart of the core on an uplink change keeps them (applying them again opened a window outside the tunnel).
+        expect(XrayNetworkSettingsStep.forStart(inSessionRestart: false, appliedInSession: false) == .apply, "a fresh start applies the settings")
+        expect(XrayNetworkSettingsStep.forStart(inSessionRestart: false, appliedInSession: true) == .apply, "a fresh start applies them whatever was there")
+        expect(XrayNetworkSettingsStep.forStart(inSessionRestart: true, appliedInSession: true) == .keep, "an in-session core restart keeps the settings")
+        expect(XrayNetworkSettingsStep.forStart(inSessionRestart: true, appliedInSession: false) == .apply, "a restart of a session whose settings never applied applies them")
+
         print("Apple Xray runtime status + callback lifecycle tests passed (128 sessions)")
     }
 }

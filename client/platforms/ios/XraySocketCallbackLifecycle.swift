@@ -304,6 +304,22 @@ enum XrayRoamRestart: Equatable {
     }
 }
 
+// AVPN (device rounds air-F and air-G, case W4): what a start of the Xray leg does with the tunnel's network settings.
+// The first start of a session applies them. The in-place restart of the core on an uplink change used to apply the
+// same settings again (startXray is one function for both; upstream does the same): the system takes the tunnel's
+// routes down and puts 10.8 thousand of them back, about 2 s on the iPhone Air, and in that window connections left
+// outside the tunnel (pages loaded with the direct exit while the app showed Connected) and then stayed there for as
+// long as the browser reused them. Nothing in the settings depends on the uplink, so the restart keeps them: only
+// the core and hev restart, packets wait in the utun (the AmneziaWG roam never re-applied settings either).
+enum XrayNetworkSettingsStep: Equatable {
+    case apply   // setTunnelNetworkSettings
+    case keep    // the session's settings stay as they are
+
+    static func forStart(inSessionRestart: Bool, appliedInSession: Bool) -> XrayNetworkSettingsStep {
+        inSessionRestart && appliedInSession ? .keep : .apply
+    }
+}
+
 /// The restart itself, with the provider's operations injected (the provider and the host test run the same code).
 struct XrayRoamDriver {
     let stopCore: () -> Void                                  // stopXray { }
