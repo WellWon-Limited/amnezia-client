@@ -438,8 +438,10 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
             if (m_facadeStop)
                 break; // the facade takes the tunnel down itself (its stop protocol) - the phase is its own
             m_state = EngineState::Switching;
-            if (m_tunnel)
+            if (m_tunnel) {
+                m_ownerNativeStop = e.stamp; // ownerStopInFlight: this leg's native stop is the engine's own
                 m_tunnel->down();
+            }
             break;
         case path::EffectType::Report: {
             // S3: evidence about a path is only for something really sent to it. A provider leg whose own bookkeeping

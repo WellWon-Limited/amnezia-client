@@ -244,6 +244,14 @@ public:
     // engine's terminal state speaks for (DebugSnapshot.h scanRowAttemptObserve).
     quint64 lastAttemptIntentEpoch() const { return m_lastAttemptEpoch; }
     bool ownerHoldsNativeLeg() const { return m_owner.phase() != path::AttemptPhase::Idle; }
+    // Device round air-D 25.11 (N4 pair 2): the owner is stopping a leg and the native stop of that leg is the one the
+    // engine sent itself (its StopPath down()), whoever marked the stop the facade's since (requestStop). A stop the
+    // facade asks for meanwhile joins it: one native stop, one answer (DebugSnapshot.h facadeStopAction).
+    bool ownerStopInFlight() const
+    {
+        return m_owner.phase() == path::AttemptPhase::Stopping && m_ownerNativeStop.isValid()
+            && m_ownerNativeStop == m_owner.stoppingLeg();
+    }
 
     // ---- Stage 2: the probe race in front of the owner (path/PathRace.h) ----
     // The platform's probe host (nullptr = none: stage-1 behaviour exactly). Server switch features.path_race
@@ -714,6 +722,7 @@ private:
     int m_legStartFailures = 0;
     bool m_checkRerun = false;
     bool m_facadeStop = false;                 // the facade itself takes the tunnel down (user stop / restart)
+    path::PathStamp m_ownerNativeStop;         // the leg whose native stop the engine sent itself (ownerStopInFlight)
     bool m_stopGivenUp = false;                // takeStopGivenUp
     quint64 m_legBuildBegun = 0;               // the leg whose own "building" was reported (onLocalBuild)
     std::optional<path::AttemptTimings> m_timingsForTest;
