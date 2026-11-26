@@ -12505,7 +12505,16 @@ void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, quint64 prepareId,
             m_exactReq.clear();
             syncIntent();
         }
-        endScanRowRequest(nodeId, "seat_first_failed");
+        // Review C3 (owner road 26.11): the seat was refused before anything was dialled - the way of the other
+        // pre-attempt refusals (connectToNode): the row reads «Не удалось», no outcome goes to the server
+        if (m_scanRow.active) {
+            m_scanRow.active = false;
+            scanJournal(QStringLiteral("scan_connect_ignored reason=scan_row why=seat_first_failed node=%1").arg(nodeId),
+                        {{QStringLiteral("event"), QStringLiteral("connect_ignored")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
+                         {QStringLiteral("why"), QStringLiteral("seat_first_failed")}, {QStringLiteral("node"), nodeId}});
+            if (m_scanner)
+                m_scanner->connectRefused(nodeId);
+        }
         emit changed();
         return;
     }

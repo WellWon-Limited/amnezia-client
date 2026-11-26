@@ -1379,6 +1379,15 @@ static void machineRules()
         const ScanRowView after = rowOf(m->view(kT0 + 120000), row);
         CHECK(after.state == before.state && after.verified == before.verified && after.tappable && !after.dimmed);
         CHECK(m->rowTapped(row, kT0 + 120100).has(ScanActionKind::ConnectRow)); // tappable again
+        // review C3: a row refused before anything was dialled (a provider row whose seat request failed, the facade's
+        // seat-first Stay): connectRefused(row) - «Не удалось» until the list is rebuilt, and no outcome at all
+        auto rf = scanned();
+        rf->rowTapped(row, kT0 + 700);
+        int refusedOutcomes = outcomesFor(rf->connectRefused(row, kT0 + 720), row);
+        for (qint64 t = kT0 + 1000; t < kT0 + 60000; t += 5000)
+            refusedOutcomes += outcomesFor(rf->tick(t), row);
+        const ScanRowView refusedRow = rowOf(rf->view(kT0 + 60000), row);
+        CHECK(refusedOutcomes == 0 && !refusedRow.tappable && rf->connectingId().isEmpty());
         // the contrast: a failure of a dialled exact row (exactRowFailed) is a verdict - outcome and «Не удалось»
         auto f = scanned();
         f->rowTapped(row, kT0 + 700);
