@@ -671,22 +671,24 @@ PageType {
                 // engine's background RU check (RuSplitSentinel) says the sites do not open, the banner says so.
                 // WAITS FOR THE ENGINE: TribeEngine.ruSitesState "ok" | "bad" | "unknown" (not sent yet).
                 // Sites not direct here (Android 13+ at a route budget of 0, owner 26.11): the same secondary line says what
-                // the mode does on this phone, wrapped into the rest of the card's 68 px (46 under the 22 px title) and
-                // shrunk to 9 px at most on the narrowest screens (measured: 3-4 lines at 162-252 px, never cut).
+                // the mode does on this phone, wrapped into the rest of the card's 68 px (46 under the 22 px title).
+                // Measured (27.11): 11 px in 2-3 lines from a 162 px text column (360 dp screens) for EN/ES and from 195 px
+                // for RU; RU on 360-390 dp screens shrinks to 10 px in 3 lines - the only case the shrink is still needed.
                 Text {
                     readonly property bool sitesBad: root.ruAccessOn && root.hasEngine && root.ruSitesDirect
                                                      && TribeEngine.ruSitesState === "bad"
                     width: parent.width
                     text: !root.ruSitesDirect
-                          ? qsTr("На Android 13 и новее напрямую работают российские приложения. Сайты РФ в браузере идут через VPN.")
+                          ? qsTr("На Android 13+ напрямую идут российские приложения, сайты РФ — через VPN.")
                           : sitesBad ? qsTr("Сайты РФ сейчас не открываются")
                           : root.ruAccessOn ? qsTr("Теперь VPN выключать не нужно.")
                                                : qsTr("Ozon, WB, Госуслуги, Банки, Kinopoisk")
                     color: sitesBad ? Theme.color.warning : root.slate500; elide: Text.ElideRight
                     height: root.ruSitesDirect ? implicitHeight : 46
                     wrapMode: root.ruSitesDirect ? Text.NoWrap : Text.WordWrap
-                    maximumLineCount: root.ruSitesDirect ? 1 : 4
-                    fontSizeMode: root.ruSitesDirect ? Text.HorizontalFit : Text.Fit; minimumPixelSize: 9
+                    maximumLineCount: root.ruSitesDirect ? 1 : 3
+                    fontSizeMode: root.ruSitesDirect ? Text.HorizontalFit : Text.Fit
+                    minimumPixelSize: root.ruSitesDirect ? 9 : 10
                     font.family: Theme.font.body; font.pixelSize: 11
                 }
             }

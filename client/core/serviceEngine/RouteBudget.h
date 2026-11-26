@@ -37,15 +37,17 @@
 
 namespace avpn {
 
-// THE N on Android 13 (API 33) and newer, compiled. 0 = no split routes there (apps layer only) until the data check is
-// fixed and measured (the owner's decision, 26.11).
+// THE N on Android 13 (API 33) and newer, compiled. 0 = no split routes there, the apps layer only (owner 27.11: the
+// largest-first cut keeps mostly operators' subscriber pools, not the networks sites live in - 500 routes would cost every
+// connect ~1.5 s for little real effect; routes become worth it with a priority order).
 inline constexpr int kAndroidBypassRouteBudget = 0;
 
 // THE platform's ceiling of split routes in one Android 13+ build - the same value as the service's guard
 // (client/android/protocolApi/src/main/kotlin/ProtocolConfig.kt ANDROID_SPLIT_ROUTE_CEILING; the two are held equal by
-// check_android_bypass_apps_wiring.sh A6). 1000 = the largest count measured clean for binder (phone, 26.11) - a
-// placeholder the owner sets.
-inline constexpr int kAndroidSplitRouteCeiling = 1000;
+// check_android_bypass_apps_wiring.sh A6). 500 (owner 27.11) = the largest count measured on the phone where the data
+// check's wait for the usable VPN network ends on the system's own signal (0.54-0.84 s); at 1000 it hit its 1.2 s bound
+// every time.
+inline constexpr int kAndroidSplitRouteCeiling = 500;
 
 inline constexpr int kRouteBudgetUnlimited = -1;
 inline const QString kRouteBudgetNumberKey = QStringLiteral("android_bypass_route_budget");

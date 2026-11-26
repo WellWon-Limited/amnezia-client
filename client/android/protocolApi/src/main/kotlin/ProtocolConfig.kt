@@ -11,12 +11,12 @@ import org.amnezia.vpn.util.net.IpRangeSet
 
 // AVPN «Доступ к сайтам РФ» (owner 26.11.2026): the hard ceiling of split routes the service hands Android 13+ in one
 // build - the platform's limit (above it the build's LinkProperties overran the system's binder: 10,841 routes = 0 of 3
-// connects; 1000 = the largest count measured clean for binder on the phone of 26.11, a placeholder the owner sets). The
+// connects; 500 = the largest count measured where the data check's wait ends on the system's signal, owner 27.11). The
 // engine's route budget is clamped to the same number: RouteBudget.h kAndroidSplitRouteCeiling (two constants, one value -
 // check_android_bypass_apps_wiring.sh A6). A config over it (a saved config of an older build, started without the app:
 // Always-on, the tile, the notification, a redelivered start) gets none of its split routes: that start runs as with the
 // mode off for sites - a subset is the safe direction; the selection itself is the engine's (RouteReduce.h), not repeated here.
-const val ANDROID_SPLIT_ROUTE_CEILING = 1000
+const val ANDROID_SPLIT_ROUTE_CEILING = 500
 
 private const val CONFIG_TAG = "ProtocolConfig"
 

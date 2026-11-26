@@ -34,8 +34,9 @@ static void budget()
     // Android 13+: the compiled N, overridden by the server number, overridden by the developer file
     for (const int sdk : {33, 36}) {
         CHECK(bypassRouteBudget(true, sdk, none, noDev) == kAndroidBypassRouteBudget);
-        CHECK(bypassRouteBudget(true, sdk, 500.0, noDev) == 500);
-        CHECK(bypassRouteBudget(true, sdk, 500.0, 700) == 700);
+        CHECK(bypassRouteBudget(true, sdk, 300.0, noDev) == 300);
+        CHECK(bypassRouteBudget(true, sdk, 300.0, 400) == 400);
+        CHECK(bypassRouteBudget(true, sdk, 300.0, 700) == kAndroidSplitRouteCeiling); // a developer value is clamped too
         CHECK(bypassRouteBudget(true, sdk, none, 0) == 0);
         // the ceiling (the service's own guard): a larger server or developer value is the ceiling, never more
         CHECK(bypassRouteBudget(true, sdk, 1500.0, noDev) == kAndroidSplitRouteCeiling);
@@ -47,7 +48,7 @@ static void budget()
         CHECK(bypassRouteBudget(true, sdk, std::nan(""), noDev) == kAndroidBypassRouteBudget);
         CHECK(bypassRouteBudget(true, sdk, INFINITY, noDev) == kAndroidBypassRouteBudget);
         CHECK(bypassRouteBudget(true, sdk, none, -1) == kAndroidBypassRouteBudget);
-        CHECK(bypassRouteBudget(true, sdk, 500.7, noDev) == 500);
+        CHECK(bypassRouteBudget(true, sdk, 300.7, noDev) == 300);
     }
     CHECK(kRouteBudgetNumberKey == QStringLiteral("android_bypass_route_budget"));
     CHECK(kAndroidBypassRouteBudget >= 0 && kAndroidBypassRouteBudget <= kAndroidSplitRouteCeiling);

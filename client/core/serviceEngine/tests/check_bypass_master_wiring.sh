@@ -94,7 +94,7 @@ has "$page" 'readonly property bool ruSitesDirect: hasEngine ? TribeEngine.bypas
     || bad "B7: the main screen must read it from the engine"
 tog="$(printf '%s\n' "$page" | awk '/id: avCardToggle/ { on = 1 } on { print } on && /onToggled/ { exit }')"
 printf '%s\n' "$tog" | grep -q 'enabled:' && bad "B7: the switch must be an ordinary one (no disabled state)"
-cap='На Android 13 и новее напрямую работают российские приложения. Сайты РФ в браузере идут через VPN.'
+cap='На Android 13+ напрямую идут российские приложения, сайты РФ — через VPN.'
 has "$page" "text: !root.ruSitesDirect" && has "$page" "? qsTr(\"$cap\")" \
     || bad "B7: the card's secondary line must say what the mode does where the sites do not go directly"
 TR="$CLIENT/translations/tribe"

@@ -1134,7 +1134,7 @@
         <translation>Tired of turning the VPN off?</translation>
     </message>
     <message>
-        <location line="+17"/>
+        <location line="+18"/>
         <source>Сайты РФ сейчас не открываются</source>
         <translation>Russian sites are not opening right now</translation>
     </message>
@@ -1149,7 +1149,7 @@
         <translation>Ozon, WB, Gosuslugi (gov services), Banks, Kinopoisk</translation>
     </message>
     <message>
-        <location line="+206"/>
+        <location line="+207"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>No network — we will connect when it is back</translation>
     </message>
@@ -1201,7 +1201,7 @@
         <translation>Connected, but traffic is not getting through</translation>
     </message>
     <message>
-        <location line="-714"/>
+        <location line="-716"/>
         <source>Нет связи</source>
         <translation>No connection</translation>
     </message>
@@ -1211,12 +1211,12 @@
         <translation>Loading…</translation>
     </message>
     <message>
-        <location line="+491"/>
-        <source>На Android 13 и новее напрямую работают российские приложения. Сайты РФ в браузере идут через VPN.</source>
-        <translation>On Android 13 and later, Russian apps connect directly. Russian sites in a browser go through the VPN.</translation>
+        <location line="+492"/>
+        <source>На Android 13+ напрямую идут российские приложения, сайты РФ — через VPN.</source>
+        <translation>On Android 13+, Russian apps connect directly; Russian sites go through the VPN.</translation>
     </message>
     <message>
-        <location line="+219"/>
+        <location line="+220"/>
         <source>Ищем рабочий сервер — пробуем %1 из %2</source>
         <translation>Looking for a working server — trying %1 of %2</translation>
     </message>
@@ -3641,7 +3641,7 @@ You can attach a photo or video.</translation>
         <translation>Xray is not available in this app version</translation>
     </message>
     <message>
-        <location line="+696"/>
+        <location line="+735"/>
         <source>Введите код доступа</source>
         <translation>Enter your access code</translation>
     </message>

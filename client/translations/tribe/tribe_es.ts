@@ -1134,7 +1134,7 @@
         <translation>¿Cansado de apagar la VPN?</translation>
     </message>
     <message>
-        <location line="+17"/>
+        <location line="+18"/>
         <source>Сайты РФ сейчас не открываются</source>
         <translation>Los sitios rusos no se abren ahora</translation>
     </message>
@@ -1149,7 +1149,7 @@
         <translation>Ozon, WB, Gosuslugi (servicios públicos), Bancos, Kinopoisk</translation>
     </message>
     <message>
-        <location line="+206"/>
+        <location line="+207"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>
@@ -1201,7 +1201,7 @@
         <translation>Conectado, pero el tráfico no pasa</translation>
     </message>
     <message>
-        <location line="-714"/>
+        <location line="-716"/>
         <source>Нет связи</source>
         <translation>Sin conexión</translation>
     </message>
@@ -1211,12 +1211,12 @@
         <translation>Cargando…</translation>
     </message>
     <message>
-        <location line="+491"/>
-        <source>На Android 13 и новее напрямую работают российские приложения. Сайты РФ в браузере идут через VPN.</source>
-        <translation>En Android 13 y posteriores, las apps rusas se conectan directamente. Los sitios rusos en el navegador van por la VPN.</translation>
+        <location line="+492"/>
+        <source>На Android 13+ напрямую идут российские приложения, сайты РФ — через VPN.</source>
+        <translation>En Android 13+, las apps rusas se conectan directamente; los sitios rusos van por la VPN.</translation>
     </message>
     <message>
-        <location line="+219"/>
+        <location line="+220"/>
         <source>Ищем рабочий сервер — пробуем %1 из %2</source>
         <translation>Buscando un servidor que funcione: probando %1 de %2</translation>
     </message>
@@ -3641,7 +3641,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>
     <message>
-        <location line="+696"/>
+        <location line="+735"/>
         <source>Введите код доступа</source>
         <translation>Introduce tu código de acceso</translation>
     </message>
