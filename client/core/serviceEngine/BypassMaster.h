@@ -14,6 +14,8 @@
 // from "chose on"). With the default on everywhere that key said nothing the stored value does not: removed (a
 // masterOnChoice left by a test build is ignored; the switch always mirrored it into masterOn).
 
+#include "RouteBudget.h"
+
 #include <QSettings>
 #include <QString>
 #include <QVariant>
@@ -45,6 +47,27 @@ inline bool bypassMasterOn()
 {
     const QSettings s;
     return bypassMasterOn(s);
+}
+
+// The mode's SITE routes are on: the switch, and a route budget that is not 0 (RouteBudget.h: 0 only on Android 13+ at
+// N = 0, where the apps layer alone works). The one predicate of everything that acts on the site routes (round 59
+// review, finding 2): the seed (AvpnEngineQml::applyRuBypassSplit), the tunnel's split and DNS decision
+// (VpnConnectionTunnelControl::up), the RU-sites check (RuSplitSentinel) and the Doctor's RU stages. Off Android and on
+// Android 12 and lower the budget is unlimited, so this is the switch itself.
+inline bool bypassSitesOn(bool modeOn, int routeBudget)
+{
+    return modeOn && routeBudget != 0;
+}
+
+inline bool bypassSitesOn(const QSettings &s)
+{
+    return bypassSitesOn(bypassMasterOn(s), bypassRouteBudgetHere());
+}
+
+inline bool bypassSitesOn()
+{
+    const QSettings s;
+    return bypassSitesOn(s);
 }
 
 } // namespace avpn

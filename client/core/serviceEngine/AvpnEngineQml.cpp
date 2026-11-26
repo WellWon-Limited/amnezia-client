@@ -900,7 +900,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                          /*quiet=*/true);
         },
         [this] { return benchExtra().value(QStringLiteral("net_type")).toString(); },
-        [] { return avpn::bypassMasterOn(); },
+        // round 59 review, finding 2: the RU-sites check follows the site routes - while RU sites go through the VPN
+        // (Android 13+ at N = 0) it neither probes them nor reports their failures
+        [] { return avpn::bypassSitesOn(); },
         this);
     connect(m_ruSentinel, &RuSplitSentinel::sitesStateChanged, this, &AvpnEngineQml::changed);
     connect(this, &AvpnEngineQml::changed, this, [this] {
@@ -6224,7 +6226,7 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     reliabilityEvent(QStringLiteral("native_state=%1 intent_on=%2 engine=%3 node=%4 proto=%5")
         .arg(int(s)).arg(m_wantConnected).arg(m_engine.debugSnapshot().state)
         .arg(m_engine.currentNodeId()).arg(m_engine.currentNodeProto()));
-    const Vpn::ConnectionState viewBefore = m_lastTunnelState; // F2: is this a new sight of an unfinished state
+    [[maybe_unused]] const Vpn::ConnectionState viewBefore = m_lastTunnelState; // F2 (Android): a new sight of an unfinished state?
     if (m_probe) m_probe->cancel();
     // Волна «как апстрим» (2026-09-28): keep-alive соединения к API, открытые через туннель, после
     // его гашения мертвы, но QNAM их переиспользует — все запросы висели до таймаута 15 с (журнал
@@ -10119,8 +10121,8 @@ void AvpnEngineQml::applyRuBypassSplit()
     const int routeBudget = avpn::bypassRouteBudgetHere(); // RouteBudget.h: unlimited off Android and on Android <= 12
     applyRuBypassApps(masterOn); // Android layer 1 (apps) - before the sites' early returns: the mode off clears it too
     // the mode's sites (the RU list and its foreign endpoints): with the switch, unless the budget is 0 (Android 13+ at
-    // N = 0 - no routes, the apps layer alone); Li Auto keeps its own switch as before
-    const bool sitesOn = masterOn && routeBudget != 0;
+    // N = 0 - no routes, the apps layer alone); Li Auto keeps its own switch as before. The same predicate as up()'s.
+    const bool sitesOn = avpn::bypassSitesOn(masterOn, routeBudget);
     // AVPN (китайские сервисы, 2026-07-03): второй независимый тумблер «Li Auto» (default ВКЛ). Оба тумблера
     // сеют в один и тот же split-набор (RouteMode::VpnAllExceptSites) — оси не конфликтуют, список объединяется.
     const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
@@ -12259,7 +12261,7 @@ void AvpnEngineQml::docDirectSpeed(double down, int idle, int loaded, bool colla
     bool masterOn = false;
     {
         QSettings st;
-        masterOn = avpn::bypassMasterOn(st);
+        masterOn = avpn::bypassSitesOn(st); // the site routes (round 59 review, finding 2)
     }
     if (!suspicious || url.isEmpty() || !masterOn) {
         docStageDone(doctor::speedStage(down, idle, loaded, collapsed, -1));
@@ -12304,7 +12306,7 @@ void AvpnEngineQml::docStartRuSplit()
     bool masterOn = false;
     {
         QSettings st;
-        masterOn = avpn::bypassMasterOn(st);
+        masterOn = avpn::bypassSitesOn(st); // the site routes (round 59 review, finding 2)
     }
     if (!masterOn) {
         docStageDone(doctor::ruSplitStage({}, {}, /*enabled=*/false));

@@ -364,6 +364,9 @@ PageType {
     // Whether the mode's sites go directly here (RouteBudget.h): false only on Android 13+ at a route budget of 0, where
     // the mode's apps layer alone works - the card's secondary line says so (owner 26.11). Preview: true.
     readonly property bool ruSitesDirect: hasEngine ? TribeEngine.bypassSitesDirect === true : true
+    // The caption says what is applied (round 59 review, finding 1): only with the switch ON and the site routes not
+    // applied - off, every app goes through the VPN and the card keeps its offer line.
+    readonly property bool ruAppsOnlyCaption: ruAccessOn && !ruSitesDirect
 
     // AVPN: иконка «RU-шар» (редизайн 2026-07-02, по эталон-скрину): тёмная скруглённая плитка,
     // внутри круг с мягким диагональным сине-красным градиентом (RU-мотив, НЕ триколор-полосы)
@@ -678,17 +681,17 @@ PageType {
                     readonly property bool sitesBad: root.ruAccessOn && root.hasEngine && root.ruSitesDirect
                                                      && TribeEngine.ruSitesState === "bad"
                     width: parent.width
-                    text: !root.ruSitesDirect
+                    text: root.ruAppsOnlyCaption
                           ? qsTr("На Android 13+ напрямую идут российские приложения, сайты РФ — через VPN.")
                           : sitesBad ? qsTr("Сайты РФ сейчас не открываются")
                           : root.ruAccessOn ? qsTr("Теперь VPN выключать не нужно.")
                                                : qsTr("Ozon, WB, Госуслуги, Банки, Kinopoisk")
                     color: sitesBad ? Theme.color.warning : root.slate500; elide: Text.ElideRight
-                    height: root.ruSitesDirect ? implicitHeight : 46
-                    wrapMode: root.ruSitesDirect ? Text.NoWrap : Text.WordWrap
-                    maximumLineCount: root.ruSitesDirect ? 1 : 3
-                    fontSizeMode: root.ruSitesDirect ? Text.HorizontalFit : Text.Fit
-                    minimumPixelSize: root.ruSitesDirect ? 9 : 10
+                    height: root.ruAppsOnlyCaption ? 46 : implicitHeight
+                    wrapMode: root.ruAppsOnlyCaption ? Text.WordWrap : Text.NoWrap
+                    maximumLineCount: root.ruAppsOnlyCaption ? 3 : 1
+                    fontSizeMode: root.ruAppsOnlyCaption ? Text.Fit : Text.HorizontalFit
+                    minimumPixelSize: root.ruAppsOnlyCaption ? 10 : 9
                     font.family: Theme.font.body; font.pixelSize: 11
                 }
             }

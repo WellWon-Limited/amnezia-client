@@ -27,6 +27,17 @@ static void value()
     CHECK(kBypassMasterKey == QStringLiteral("AvpnBypass/masterOn"));
 }
 
+// Round 59 review, finding 2: the one predicate of the site routes (seed, up(), RU-sites check, Doctor)
+static void sitesOn()
+{
+    CHECK(bypassSitesOn(true, kRouteBudgetUnlimited));   // off Android, Android 12 and lower: the switch itself
+    CHECK(!bypassSitesOn(false, kRouteBudgetUnlimited));
+    CHECK(!bypassSitesOn(true, 0));                      // Android 13+ at N = 0: no site routes, the apps alone
+    CHECK(!bypassSitesOn(false, 0));
+    CHECK(bypassSitesOn(true, 500));                     // a budget: the switch
+    CHECK(!bypassSitesOn(false, 500));
+}
+
 static void store()
 {
     QTemporaryDir dir;
@@ -41,7 +52,9 @@ static void store()
     // a test build of 15210ecdf..e8a24fa0a left AvpnBypass/masterOnChoice: ignored (the switch mirrored it into masterOn)
     s.setValue(QStringLiteral("AvpnBypass/masterOnChoice"), false);
     CHECK(bypassMasterOn(s));
+    CHECK(bypassSitesOn(s)); // the host: unlimited budget, the switch is on
     s.setValue(kBypassMasterKey, false);
+    CHECK(!bypassSitesOn(s));
     s.sync();
     QSettings again(dir.filePath(QStringLiteral("t.ini")), QSettings::IniFormat); // survives a restart (a new store)
     CHECK(storedBool(again, kBypassMasterKey) == std::optional<bool>(false));
@@ -52,6 +65,7 @@ int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     value();
+    sitesOn();
     store();
     if (g_fail == 0)
         std::printf("bypass_master_check: OK\n");

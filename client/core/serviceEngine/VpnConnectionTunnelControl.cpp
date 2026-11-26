@@ -369,7 +369,10 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     {
         QSettings s;
         const bool ruNode = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
-        const bool masterOn = avpn::bypassMasterOn(s); // the effective value (BypassMaster.h)
+        // the mode's SITE routes (BypassMaster.h bypassSitesOn: the switch and a non-zero route budget) - the same
+        // predicate as the seed's (round 59 review, finding 2: up() turned the split back on with the switch alone and
+        // re-sent the list the store held from an earlier seed). Off Android and on Android 12 and lower = the switch.
+        const bool sitesOn = avpn::bypassSitesOn(s);
         // AVPN (звонки, 2026-07-03): dnsMaskOn — саб-опция «RU-DNS маскировка» (дефолт ВКЛ). Измерено:
         // Яндекс-DNS-на-всё с загран-egress выдаёт RU-гео edge → WhatsApp-инфра 131мс vs 75мс честного
         // гео (+75%) — страдают звонки/realtime. Поэтому:
@@ -384,7 +387,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         // туннель-движке даёт macOS-качество (стелс И честный гео сразу) — при нём маска не нужна
         // и НЕ применяется (тумблер маскировки остаётся в UI, просто игнорируется при dnsFwd=ON).
         const bool dnsFwdOn = s.value(QStringLiteral("AvpnBypass/dnsFwd"), true).toBool();
-        if (!ruNode && masterOn && dnsMaskOn && !dnsFwdOn) {
+        if (!ruNode && sitesOn && dnsMaskOn && !dnsFwdOn) {
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
             splitDns = true; // DNS ноды (1.1.1.1) не подменяем — RU-суффиксы уйдут на Яндекс через демона
 #else
@@ -410,7 +413,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         // applyRuBypassSplit (объединяет оба набора по тем же тумблерам).
         if (m_appStore) {
             const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
-            bool splitOn = (masterOn || liAutoOn) && !ruNode;
+            bool splitOn = (sitesOn || liAutoOn) && !ruNode;
 #if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID) && !defined(MACOS_NE)
             // AVPN awg31-xray-v1: десктопный XrayProtocol::setupRouting умеет ТОЛЬКО VpnAllSites
             // (VpnAllExceptSites для xray на десктопе апстримом не реализован — с ним маршруты в tun

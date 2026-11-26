@@ -1436,11 +1436,12 @@ static void f2cStatusTakesOverARebuild()
 }
 
 // Phone 26.11 (T1) / round 58 review, finding 3: Connect, Stop in the app, then the notification's «Подключиться» - a
-// session the service started by itself in a live UI process. Its CONNECTED edge now reaches the facade as a native
-// Connected (VpnConnection restores the protocol it dropped at the Stop) and the STATUS snapshot gets the protocol back too
-// (ensureAndroidProtocol); both go through the ONE Adopt rule. The notification's button is the person's own tap: after a
-// confirmed Stop nothing of ours is pending, so the OFF intent does not block the new session (A4) - it is adopted, never
-// stopped; only a Stop of ours still unconfirmed with the request off stops it.
+// session the service started by itself in a live UI process. The FIX is in VpnConnection (the protocol restored for a
+// CONNECTED without one, ensureAndroidProtocol): it is not host-testable and is proven by
+// check_android_adopt_protocol_wiring.sh P1-P4 (fails on the old code) and the phone (T1 4/4, phone-3). These rows do NOT
+// test the fix (round 59 review: they pass with and without it) - they pin the UNCHANGED Adopt rule the fix routes the fact
+// into: after a confirmed Stop nothing of ours is pending, so the OFF intent does not block the new session (A4) - it is
+// adopted, never stopped; only a Stop of ours still unconfirmed with the request off stops it.
 static void t1NotificationStartIsAdopted()
 {
     using A = AndroidStatusAction;

@@ -328,10 +328,12 @@ PageType {
 
                 // карточка «АнтиVPN активирован» с демо-тумблером
                 Rectangle {
-                    // The card says «Доступ к сайтам РФ включён»: shown only while the engine's effective value is on
-                    // (BypassMaster.h: the stored switch, on when absent). Hidden, the column
-                    // drops it with its margin: the next label keeps its own top margin, the spacers re-centre the rest.
-                    visible: !root.hasEngine || TribeEngine.bypassMasterOn === true
+                    // The card says «Доступ к сайтам РФ включён» / «Теперь VPN выключать не нужно»: shown only while the
+                    // site routes are really applied - the switch on (BypassMaster.h) and the sites going directly
+                    // (TribeEngine.bypassSitesDirect: hidden on Android 13+ at a route budget of 0, round 59 review).
+                    // Hidden, the column drops it with its margin: the next label keeps its own top margin, the spacers
+                    // re-centre the rest.
+                    visible: !root.hasEngine || (TribeEngine.bypassMasterOn === true && TribeEngine.bypassSitesDirect === true)
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.xl
                     implicitHeight: antiRow.implicitHeight + 2 * Theme.space.lg

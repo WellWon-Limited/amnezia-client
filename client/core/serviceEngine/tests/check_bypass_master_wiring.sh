@@ -12,7 +12,9 @@
 #   B6  the onboarding card that states the switch is on is shown only while the value is on;
 #   B7  the main screen's switch is an ordinary one, and its secondary line says what the mode does where the sites do
 #       not go directly (TribeEngine.bypassSitesDirect = the route budget is not 0; RU source, EN/ES translated);
-#   B8  the switch's write and the A/B bench are never refused; the seed gives the sites only with a budget.
+#   B8  the switch's write and the A/B bench are never refused; the seed gives the sites only with a budget;
+#   B9  (round 59 review, finding 2) ONE predicate for the site routes - bypassSitesOn - in every consumer: the seed,
+#       VpnConnectionTunnelControl::up (split and DNS), the RU-sites check and the Doctor's two RU stages.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -51,8 +53,8 @@ has "$rest" 'put(avpn::kBypassMasterKey, m_abOrigStored);' || bad "B2: the bench
 [ "$(count "$eng" 'abRestoreBypassMaster();')" -eq 2 ] || bad "B2: both ends of the bench must restore through abRestoreBypassMaster"
 
 # ---- B3 ----
-[ "$(count "$eng" 'avpn::bypassMasterOn(')" -ge 9 ] || bad "B3: the engine's readers must ask avpn::bypassMasterOn"
-has "$(code "$VTC")" 'const bool masterOn = avpn::bypassMasterOn(s);' || bad "B3: the tunnel control must ask avpn::bypassMasterOn"
+[ "$(count "$eng" 'avpn::bypassMasterOn(')" -ge 6 ] || bad "B3: the engine's readers must ask avpn::bypassMasterOn"
+has "$(code "$VTC")" 'const bool sitesOn = avpn::bypassSitesOn(s);' || bad "B3: the tunnel control must ask avpn::bypassSitesOn"
 
 # ---- B4 ----
 stores=$(cd "$CLIENT/ui/qml" && grep -rlE 'category:[[:space:]]*"AvpnBypass"' --include='*.qml' . || true)
@@ -82,8 +84,9 @@ grep -rqE 'bypassMasterUnavailable|bypassMasterAvailable|bypassMasterDefaultOff'
 
 # ---- B6 ---- the onboarding card that says «Доступ к сайтам РФ включён» shows only while the effective value is on
 onb="$(code "$CLIENT/ui/qml/Tribe/Pages/PageOnboardingTribe.qml")"
-printf '%s\n' "$onb" | grep -A1 -F '                Rectangle {' | grep -qF 'visible: !root.hasEngine || TribeEngine.bypassMasterOn === true' \
-    || bad "B6: the onboarding's «включён» card must follow TribeEngine.bypassMasterOn"
+printf '%s\n' "$onb" | grep -A1 -F '                Rectangle {' \
+    | grep -qF 'visible: !root.hasEngine || (TribeEngine.bypassMasterOn === true && TribeEngine.bypassSitesDirect === true)' \
+    || bad "B6: the onboarding's «включён» card must follow the switch AND the applied site routes (round 59 review)"
 
 # ---- B7 ---- an ordinary switch; the caption where the sites do not go directly
 has "$(code "$HDR")" 'Q_PROPERTY(bool bypassSitesDirect READ bypassSitesDirect NOTIFY bypassMasterOnChanged)' \
@@ -95,8 +98,9 @@ has "$page" 'readonly property bool ruSitesDirect: hasEngine ? TribeEngine.bypas
 tog="$(printf '%s\n' "$page" | awk '/id: avCardToggle/ { on = 1 } on { print } on && /onToggled/ { exit }')"
 printf '%s\n' "$tog" | grep -q 'enabled:' && bad "B7: the switch must be an ordinary one (no disabled state)"
 cap='На Android 13+ напрямую идут российские приложения, сайты РФ — через VPN.'
-has "$page" "text: !root.ruSitesDirect" && has "$page" "? qsTr(\"$cap\")" \
-    || bad "B7: the card's secondary line must say what the mode does where the sites do not go directly"
+has "$page" 'readonly property bool ruAppsOnlyCaption: ruAccessOn && !ruSitesDirect' \
+    && has "$page" "text: root.ruAppsOnlyCaption" && has "$page" "? qsTr(\"$cap\")" \
+    || bad "B7: the caption only with the switch on and the site routes not applied (round 59 review)"
 TR="$CLIENT/translations/tribe"
 for l in en es; do
     grep -A1 -F "<source>$cap</source>" "$TR/tribe_$l.ts" | grep -q '<translation>[^<]' \
@@ -110,9 +114,18 @@ printf '%s\n' "$sw" | grep -qE 'return;' && bad "B8: the switch's write must not
 ab="$(body "$ENG" 'void AvpnEngineQml::startBypassAb()')"
 printf '%s\n' "$ab" | grep -qF 'Android 13' && bad "B8: the A/B bench must not be refused on Android 13+"
 seed="$(body "$ENG" 'void AvpnEngineQml::applyRuBypassSplit()')"
-has "$seed" 'const bool sitesOn = masterOn && routeBudget != 0;' && has "$seed" 'if (sitesOn) {' \
+has "$seed" 'const bool sitesOn = avpn::bypassSitesOn(masterOn, routeBudget);' && has "$seed" 'if (sitesOn) {' \
     && has "$seed" 'applyRuBypassApps(masterOn);' \
     || bad "B8: the apps follow the switch, the sites the switch and a non-zero budget"
+
+# ---- B9 ----
+has "$(code "$HERE/../BypassMaster.h" | tr -s ' \n' ' ')" 'inline bool bypassSitesOn(bool modeOn, int routeBudget) { return modeOn && routeBudget != 0; }' \
+    || bad "B9: the site routes' predicate must be the switch and a non-zero budget"
+vtc="$(code "$VTC")"
+has "$vtc" 'bool splitOn = (sitesOn || liAutoOn) && !ruNode;' && has "$vtc" 'if (!ruNode && sitesOn && dnsMaskOn && !dnsFwdOn) {' \
+    || bad "B9: up() must decide the split and the DNS by the site routes' predicate"
+has "$eng" '[] { return avpn::bypassSitesOn(); },' || bad "B9: the RU-sites check must follow the site routes"
+[ "$(count "$eng" 'masterOn = avpn::bypassSitesOn(st);')" -eq 2 ] || bad "B9: the Doctor's two RU stages must follow the site routes"
 
 [ "$fail" -eq 0 ] && echo "bypass master wiring: OK"
 exit "$fail"
