@@ -255,10 +255,10 @@ int main(int argc, char **argv)
         CHECK(r.eng.pathStateHere(QStringLiteral("16")) == QLatin1String("suspect"));
     }
 
-    // 2a. T1 (owner road 26.11, J1): the app thaws on an AmneziaWG session whose path is dead and the extension's fresh
-    //     status says so (data_stall_s >= awg_probe_dead_stall_s): the facade's trigger (DebugSnapshot.h
-    //     thawStallCheckDue) starts the existing re-check once; its failure is a lost live session and the failover
-    //     attempt walks on at once - no 4-probe wait.
+    // 2a. T1 (owner road 26.11, J1; review C5): the app returns on an AmneziaWG session whose path is dead and the first
+    //     status asked after the return says so: the stall verdict as the live probe reads it (freshDataStallSec) is past
+    //     the threshold outside the network grace - the facade's judgement (DebugSnapshot.h judgeThawStall) starts the
+    //     existing re-check once; its failure is a lost live session and the failover attempt walks on at once.
     {
         Rig r(pool);
         QString err;
@@ -266,23 +266,34 @@ int main(int argc, char **argv)
         r.up();
         CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
         r.result();
+        const qint64 nowEpoch = r.now / 1000;
+        TunnelStats reply;
+        reply.dataStallSec = 600;
+        reply.dataStallAtMs = r.now - 400; // asked after the return
         ThawStallCheckInput in;
+        in.armedForThawMs = r.now - 1000;
+        in.stallAtMs = reply.dataStallAtMs;
+        in.stallSec = r.eng.freshDataStallSec(nowEpoch, reply);
+        in.networkGrace = r.eng.inNetworkGrace(nowEpoch);
         in.awgConnected = r.eng.state() == EngineState::Connected && !r.eng.currentNodeIsXray() && !r.eng.currentNodeIsUpstream();
         in.intentOn = true;
         in.idle = !r.eng.attemptRunning() && !r.eng.isVerifying();
-        in.thawMs = r.now;
-        in.stallSec = 600;
-        in.stallAtMs = r.now + 900;
         in.thresholdSec = awgProbeDeadStallSTuned();
-        CHECK(in.awgConnected && thawStallCheckDue(in) && r.eng.reenterVerifying() && r.eng.isVerifying());
-        in.checkedThawMs = in.thawMs;          // the facade marks the thaw
-        in.idle = !r.eng.attemptRunning() && !r.eng.isVerifying();
-        CHECK(!thawStallCheckDue(in));          // once, and not while its check runs
+        CHECK(in.stallSec == 600 && !in.networkGrace && judgeThawStall(in) == ThawStallJudgement::Check);
+        CHECK(r.eng.reenterVerifying() && r.eng.isVerifying());
+        // a stale reply (older than the live probe's freshness) reads as unknown: no check
+        TunnelStats stale = reply;
+        stale.dataStallAtMs = r.now - 60000;
+        CHECK(r.eng.freshDataStallSec(nowEpoch, stale) < 0);
         const int upsBefore = int(r.tun.ups.size());
         CHECK(r.eng.verifyFailed(QStringLiteral("whoami no data")) && r.eng.attemptRunning());
         r.confirmStop();
         CHECK(int(r.tun.ups.size()) == upsBefore + 1 && r.last() != QLatin1String("17")); // the failover, another server
         CHECK(journalHas(r.journal, "live_lost node=17 outcome=no_data"));
+        // inside the network-change grace the same reply disarms it
+        r.eng.noteNetworkChange(r.now / 1000);
+        in.networkGrace = r.eng.inNetworkGrace(r.now / 1000);
+        CHECK(in.networkGrace && judgeThawStall(in) == ThawStallJudgement::Disarm);
     }
 
     // 3. Health DEAD of the live session: the first does not blame the node (re-up of the same node first); once

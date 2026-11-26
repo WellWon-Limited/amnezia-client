@@ -379,6 +379,12 @@ public:
     // platform, called only from the facade's Q_OS_IOS block (PLATFORM-SCOPING §2).
     bool reenterVerifying();
     bool feedProbeResult(bool ok);
+    // The extension's stall verdict as the live probe's corroboration reads it: fresh (<= 5 s) and never longer than this
+    // network was observed (K1); -1 = none. And the network-change grace of the health loop. T1 (review C5): the facade's
+    // thaw check reads the same two.
+    qint64 freshDataStallSec(qint64 nowEpoch) const;
+    qint64 freshDataStallSec(qint64 nowEpoch, const TunnelStats &live) const; // the same rule on one given reply
+    bool inNetworkGrace(qint64 nowEpoch) const { return m_health.inNetworkGrace(nowEpoch); }
     // Device round air-D (K1): `startedAtMs` = when the probe started (wall clock; -1 = unknown). With the evidence
     // restart on, a failed probe that started before the last network change says nothing about this network.
     bool feedProbeResult(bool ok, qint64 startedAtMs);

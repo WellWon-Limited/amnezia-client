@@ -1418,6 +1418,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             [this](const QString &line) { reliabilityEvent(line); }, Qt::QueuedConnection);
     connect(IosController::Instance(), &IosController::tunnelEngineDown, this,
             &AvpnEngineQml::onTunnelEngineDown, Qt::QueuedConnection);
+    // T1 (owner road 26.11; review C5): every AmneziaWG status reply's stall verdict - the first one asked after a real
+    // return is judged once (checkStalledTunnelAfterThaw); no timer of its own
+    connect(IosController::Instance(), &IosController::dataStallChanged, this,
+            [this](qint64 seconds, qint64 requestSentMs) { checkStalledTunnelAfterThaw(seconds, requestSentMs); },
+            Qt::QueuedConnection);
     // Floor 19.11: the AmneziaWG stage "extension Connected -> handshake seen by the status poll" (fast while a start
     // is in flight, IosNativePolicy.h::statusPollIntervalMs) - one journal line per awaited handshake.
     connect(IosController::Instance(), &IosController::handshakeConfirmed, this,
@@ -1873,6 +1878,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     if (!foregroundIsReturn(hidden, inactiveFor))
                         return;
 #ifdef Q_OS_IOS
+                    // T1 (owner road 26.11; review C5): a real return arms the one judgement of the first status
+                    // asked after it (checkStalledTunnelAfterThaw)
+                    m_thawStallArmedMs = now;
                     // AVPN (iOS data watch, 141): refresh the extension's plan (the kill switch too). The
                     // hand-over itself needs no call here: a process that was suspended is recognised by
                     // its overdue tick (TunnelWatchResume.h).
@@ -4150,31 +4158,38 @@ void AvpnEngineQml::setupTunnelWatchResume()
 }
 
 #ifdef Q_OS_IOS
-// T1 (owner road 26.11, J1): the extension's stall verdict of a status asked after the thaw starts the existing data check
-// of the live session at once (DebugSnapshot.h thawStallCheckDue) - the entry the data watch's resume uses
-// (reenterVerifying -> startDataPathVerification); a failed check is a lost live session (verifyFailed ->
-// loseLiveSession: failover in Auto, the honest failure of an exact or preferred choice). Rides on the facade's tick.
-void AvpnEngineQml::checkStalledTunnelAfterThaw()
+// T1 (owner road 26.11, J1; review C5): the first AmneziaWG status asked after a real return from the background is
+// judged once (DebugSnapshot.h judgeThawStall): its stall verdict, read as the live probe's corroboration reads it
+// (ServiceEngine::freshDataStallSec, inNetworkGrace), starts the existing data check of the live session - the entry
+// the data watch's resume uses (reenterVerifying -> startDataPathVerification); a failed check is a lost live session
+// (verifyFailed -> loseLiveSession). Any other answer disarms it.
+void AvpnEngineQml::checkStalledTunnelAfterThaw(qint64 stallSec, qint64 requestSentMs)
 {
-    const avpn::TunnelStats st = m_engine.currentStats();
+    const qint64 nowEpoch = QDateTime::currentSecsSinceEpoch();
+    avpn::TunnelStats reply;
+    reply.dataStallSec = stallSec;
+    reply.dataStallAtMs = requestSentMs;
     avpn::ThawStallCheckInput in;
+    in.armedForThawMs = m_thawStallArmedMs;
+    in.stallAtMs = requestSentMs;
+    in.stallSec = m_engine.freshDataStallSec(nowEpoch, reply);
+    in.networkGrace = m_engine.inNetworkGrace(nowEpoch);
     in.awgConnected = m_engine.state() == avpn::EngineState::Connected && m_lastTunnelState == Vpn::Connected
                       && !m_engine.currentNodeId().isEmpty() && !m_engine.currentNodeIsXray()
                       && !m_engine.currentNodeIsUpstream();
     in.intentOn = m_wantConnected;
     in.idle = m_op == Op::None && !m_opInFlight && !m_engine.attemptRunning() && !m_engine.isVerifying()
               && !ownStopping() && !m_latch.awaitingStopConfirm && !m_latch.needStatusBeforeStart && !m_paused;
-    in.thawMs = m_lastResumeMs;
-    in.checkedThawMs = m_thawStallCheckedMs;
-    in.stallSec = st.dataStallSec;
-    in.stallAtMs = st.dataStallAtMs;
     in.thresholdSec = avpn::awgProbeDeadStallSTuned();
-    if (!avpn::thawStallCheckDue(in) || !m_engine.reenterVerifying())
+    const avpn::ThawStallJudgement j = avpn::judgeThawStall(in);
+    if (j == avpn::ThawStallJudgement::Wait)
         return;
-    m_thawStallCheckedMs = m_lastResumeMs; // one check per thaw
+    m_thawStallArmedMs = 0; // one judgement per return
+    if (j != avpn::ThawStallJudgement::Check || !m_engine.reenterVerifying())
+        return;
     reliabilityEvent(QStringLiteral("thaw_stall_check node=%1 stall_s=%2 threshold_s=%3 thaw_ago_ms=%4")
                          .arg(m_engine.currentNodeId()).arg(in.stallSec).arg(in.thresholdSec)
-                         .arg(QDateTime::currentMSecsSinceEpoch() - m_lastResumeMs));
+                         .arg(QDateTime::currentMSecsSinceEpoch() - in.armedForThawMs));
     refreshDataFlowing();
     startDataPathVerification();
     emit changed();
@@ -4503,7 +4518,6 @@ void AvpnEngineQml::onTick()
     if (m_effectsPending && uiForeground() && state() == QLatin1String("connected"))
         runConnectEffects();
 #ifdef Q_OS_IOS
-    checkStalledTunnelAfterThaw(); // T1 (owner road 26.11): before the data watch's hold, which it does not depend on
     // AVPN (iOS data watch, 141): after a return / thaw the health verdict waits for the extension's
     // snapshot (features.ios_tunnel_watch; at most ios_tw_resume_wait_ms). Only the verdict waits:
     // the health sample is not fed on this tick, the rest of the tick runs.

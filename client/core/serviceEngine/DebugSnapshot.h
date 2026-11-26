@@ -674,26 +674,34 @@ inline ScanRowEnd scanRowEndOf(quint64 resultAttempt, quint64 notStartedAttempt)
 
 // T1 (owner road 26.11, journal J1): the app opened on an AmneziaWG tunnel whose path had been dead for minutes - the
 // extension's ladder kept restarting the same peer, the foreground handler only refreshed the status, the live probe
-// needs 4 failures about 12 s apart: the person waited 32 s and pressed Stop. On a thaw the extension's own verdict
-// (data_stall_s, tribe.22: reported only while its ladder sees a stall right now - demand out, nothing in for 4 s - and
-// counted from the last lasting data; 0 on an idle or a healthy tunnel) of a status asked AFTER the thaw starts the
-// existing data check at once when it is past awg_probe_dead_stall_s; that check's verdict does the rest (a lost live
-// session: failover in Auto, the honest failure of an exact or preferred choice). One check per thaw; nothing while
-// anything else runs; no data watch flag.
+// needs 4 failures about 12 s apart: the person waited 32 s and pressed Stop. A real return from the background
+// (foregroundIsReturn) arms one judgement: the FIRST status asked after it. Its stall verdict (data_stall_s, tribe.22:
+// reported only while the ladder sees a stall right now - demand out, nothing in for 4 s - counted from the last
+// lasting data; 0 on an idle or a healthy tunnel), read as the live probe's corroboration reads it (fresh, never longer
+// than this network was observed: ServiceEngine::freshDataStallSec) and outside the health loop's network-change grace,
+// starts the existing data check at or past awg_probe_dead_stall_s; that check's verdict does the rest (a lost live
+// session: failover in Auto; an exact choice ends with its honest failure; a preferred server falls back to its other
+// transports, then to any path with the fallback notice). Any other answer disarms it too (review C5): one judgement per
+// return, nothing while anything else runs, no data watch flag.
+enum class ThawStallJudgement { Wait, Disarm, Check };
 struct ThawStallCheckInput {
+    qint64 armedForThawMs = 0; // the real return from the background it is armed for (<= 0: not armed)
+    qint64 stallAtMs = 0;      // when the status request that carried the verdict was sent
+    qint64 stallSec = -1;      // the verdict as freshDataStallSec reads it (-1 unknown / stale)
+    bool networkGrace = false; // the health loop's grace after a network change
     bool awgConnected = false; // the engine Connected on an own AmneziaWG session, the platform tunnel Connected
     bool intentOn = false;     // the person's intent is on
     bool idle = false;         // no own start / stop / teardown latch / attempt / data check / pause in progress
-    qint64 thawMs = 0;         // the last return to the foreground (<= 0: none)
-    qint64 checkedThawMs = 0;  // the thaw this check already ran for
-    qint64 stallSec = -1;      // the extension's data_stall_s (-1 unknown)
-    qint64 stallAtMs = 0;      // when the status request that carried it was sent
     int thresholdSec = 0;      // awg_probe_dead_stall_s (0 = off)
 };
-inline bool thawStallCheckDue(const ThawStallCheckInput &in)
+inline ThawStallJudgement judgeThawStall(const ThawStallCheckInput &in)
 {
-    return in.thresholdSec > 0 && in.awgConnected && in.intentOn && in.idle && in.thawMs > 0
-           && in.checkedThawMs != in.thawMs && in.stallAtMs >= in.thawMs && in.stallSec >= in.thresholdSec;
+    if (in.armedForThawMs <= 0 || in.stallAtMs < in.armedForThawMs)
+        return ThawStallJudgement::Wait; // not armed, or a status asked before the return
+    if (in.thresholdSec > 0 && in.awgConnected && in.intentOn && in.idle && !in.networkGrace
+        && in.stallSec >= in.thresholdSec)
+        return ThawStallJudgement::Check;
+    return ThawStallJudgement::Disarm; // the first status after the return said no: judged
 }
 
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)

@@ -1100,7 +1100,7 @@ private:
     void restoreChoiceBeforeRow(const avpn::ExactRowRequest &req);
     void endScanRowRequest(const QString &node, const char *why); // S1: the one end of a Scanner row's request
     void endScanRowRequestNotStarted(); // S1 rule 2: an attempt that never started ends the row's request, no verdict
-    void checkStalledTunnelAfterThaw(); // T1: the extension's stall verdict after a thaw starts the data check
+    void checkStalledTunnelAfterThaw(qint64 stallSec, qint64 requestSentMs); // T1: the first status after a return
     qint64 m_verifyWallStartMs = 0;  // R1: wall clock at the start of the data check
     quint64 m_verifyNetGen = 0;      // the network generation at the start of the data check
     qint64 m_verifyRxStart = -1;     // R1: the tunnel's receive counter then (-1 = unknown)       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
@@ -1461,7 +1461,7 @@ private:
     QVariantMap                 m_serviceSessionMeta;  // Android (android2 P7): the session the VPN service runs (STATUS)
     quint64                     m_judgedAttempt = 0;   // the attempt whose result syncAttempt judged last (startRefusal)
     quint64                     m_notStartedAttempt = 0; // S1 rule 2: the attempt that ended inside connect()
-    qint64                      m_thawStallCheckedMs = 0; // T1: the thaw the stall check already ran for
+    qint64                      m_thawStallArmedMs = 0;   // T1: the real return the one stall judgement is armed for
     // K3: после liveSessionFound ждём реальный статус профиля ограниченно (без вечного m_busy);
     // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
     bool                        m_liveSessionPending = false;

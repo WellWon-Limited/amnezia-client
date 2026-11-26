@@ -1573,22 +1573,32 @@ bool ServiceEngine::feedProbeResult(bool ok)
             return false;
     } else {
         const qint64 nowEpoch = nowMs() / 1000; // the wall clock (a test sets its own)
-        // tribe.17 (device round 24.11 B1): the extension's stall verdict corroborates too, while fresh; -1 on every
-        // platform but iOS with a tribe.17 extension (TunnelStats::dataStallSec), where this is the rule of 141.
-        const TunnelStats live = m_tunnel ? m_tunnel->readStats() : TunnelStats{};
-        qint64 dataStallSec = HealthLoop::freshDataStall(live.dataStallSec, live.dataStallAtMs, nowMs());
-        // K1 (air-D): never longer than what was observed on this network (an extension before tribe.19 does not
-        // restart its verdict at a roam).
-        if (m_restartEvidence && dataStallSec > 0 && m_health.evidenceSinceEpoch() > 0)
-            dataStallSec = qMin(dataStallSec, qMax<qint64>(0, nowEpoch - m_health.evidenceSinceEpoch()));
+        const qint64 dataStallSec = freshDataStallSec(nowEpoch);
         if (!HealthLoop::probeDeadCorroborated(m_probeFailStreak, awgProbeFailCyclesTuned(),
-                                               m_health.inNetworkGrace(nowEpoch), m_health.latestHandshakeEpoch(),
+                                               inNetworkGrace(nowEpoch), m_health.latestHandshakeEpoch(),
                                                nowEpoch, awgProbeDeadHandshakeAgeSTuned(), dataStallSec,
                                                awgProbeDeadStallSTuned()))
             return false;
     }
     m_probeFailStreak = 0;
     return onDead(/*tunnelStillUp=*/true, QStringLiteral("probe failed (failover)"));
+}
+
+// tribe.17 (device round 24.11 B1): the extension's stall verdict, while fresh (HealthLoop::freshDataStall: at most 5 s
+// old); -1 on every platform but iOS with a tribe.17 extension (TunnelStats::dataStallSec), where this is the rule of 141.
+// K1 (air-D): never longer than what was observed on this network (an extension before tribe.19 does not restart its
+// verdict at a roam). One reading for the live probe's corroboration and the facade's thaw check (T1, review C5).
+qint64 ServiceEngine::freshDataStallSec(qint64 nowEpoch) const
+{
+    return freshDataStallSec(nowEpoch, m_tunnel ? m_tunnel->readStats() : TunnelStats{});
+}
+
+qint64 ServiceEngine::freshDataStallSec(qint64 nowEpoch, const TunnelStats &live) const
+{
+    qint64 dataStallSec = HealthLoop::freshDataStall(live.dataStallSec, live.dataStallAtMs, nowMs());
+    if (m_restartEvidence && dataStallSec > 0 && m_health.evidenceSinceEpoch() > 0)
+        dataStallSec = qMin(dataStallSec, qMax<qint64>(0, nowEpoch - m_health.evidenceSinceEpoch()));
+    return dataStallSec;
 }
 
 // The platform reports the tunnel up. For a leg of the owner that is its TunnelUp: the data check follows

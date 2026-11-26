@@ -1946,45 +1946,43 @@ static void s1ExactRowWinsOverTheMode()
     CHECK(scanRowEndOf(0, 0) == ScanRowEnd::Failed);
 }
 
-// T1 (owner road 26.11, journal J1): the thaw's stall check - due once per thaw, only on a live AmneziaWG session with the
-// intent on and nothing else running, only on a status asked after the thaw, only at or past the threshold.
+// T1 (owner road 26.11, journal J1; review C5): one judgement per real return - the first status asked after it; a check
+// only on a live AmneziaWG session with the intent on, nothing else running, outside the network-change grace, at or
+// past the threshold; any other first answer disarms it.
 static void t1ThawStallCheck()
 {
     ThawStallCheckInput in;
+    in.armedForThawMs = 1'000'000;
+    in.stallAtMs = 1'001'200;
+    in.stallSec = 600; // J1: ten minutes of demand without data
     in.awgConnected = true;
     in.intentOn = true;
     in.idle = true;
-    in.thawMs = 1'000'000;
-    in.checkedThawMs = 0;
-    in.stallSec = 600; // J1: ten minutes of demand without data
-    in.stallAtMs = 1'001'200;
     in.thresholdSec = 45;
-    CHECK(thawStallCheckDue(in));
+    CHECK(judgeThawStall(in) == ThawStallJudgement::Check);
     ThawStallCheckInput x = in;
     x.stallSec = 45;
-    CHECK(thawStallCheckDue(x));          // at the threshold
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Check);   // at the threshold
     x.stallSec = 44;
-    CHECK(!thawStallCheckDue(x));         // below
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // below: judged, disarmed
     x = in; x.stallSec = 0;
-    CHECK(!thawStallCheckDue(x));         // tribe.22: 0 = data flows or nobody sends (an idle healthy tunnel)
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // tribe.22: 0 = data flows or nobody sends
     x = in; x.stallSec = -1;
-    CHECK(!thawStallCheckDue(x));         // unknown
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // unknown or stale (freshDataStallSec)
     x = in; x.stallAtMs = 999'000;
-    CHECK(!thawStallCheckDue(x));         // the snapshot from before the thaw
-    x = in; x.checkedThawMs = in.thawMs;
-    CHECK(!thawStallCheckDue(x));         // once per thaw
-    x = in; x.checkedThawMs = 500'000;
-    CHECK(thawStallCheckDue(x));          // an earlier thaw's check does not count
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Wait);    // a status asked before the return: not this judgement
+    x = in; x.armedForThawMs = 0;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Wait);    // not armed: an Inactive -> Active flicker, or judged already
+    x = in; x.networkGrace = true;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // a network change is being healed
     x = in; x.idle = false;
-    CHECK(!thawStallCheckDue(x));         // an own start / stop / teardown latch / attempt / check / pause
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // an own start / stop / teardown latch / attempt / check / pause
     x = in; x.intentOn = false;
-    CHECK(!thawStallCheckDue(x));
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);
     x = in; x.awgConnected = false;
-    CHECK(!thawStallCheckDue(x));         // Xray, a provider, not connected
-    x = in; x.thawMs = -1;
-    CHECK(!thawStallCheckDue(x));         // no thaw yet
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // Xray, a provider, not connected
     x = in; x.thresholdSec = 0;
-    CHECK(!thawStallCheckDue(x));         // awg_probe_dead_stall_s off
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // awg_probe_dead_stall_s off
 }
 
 int main()

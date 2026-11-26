@@ -621,7 +621,7 @@ callers="$(grep -ln 'reenterVerifying()' "$ENGINE"/*.cpp "$ENGINE"/*.h "$IOS"/*.
 [ "$callers" = "AvpnEngineQml.cpp ServiceEngine.cpp ServiceEngine.h TunnelWatchResume.h " ] || bad "A9: reenterVerifying is referenced from: $callers"
 [ "$(count "$ENGINE/TunnelWatchResume.h" 'm_ops.reenterVerifying()')" = "1" ] || bad "A9: the hand-over asks for the engine's consent at one place"
 [ "$(count "$FACADE" 'm_engine.reenterVerifying()')" = "2" ] || bad "A9: the facade must call reenterVerifying from the hand-over's op and the thaw's stall check only"
-has "$(code "$FACADE" | awk '/^void AvpnEngineQml::checkStalledTunnelAfterThaw\(\)/{f=1} f{print} f&&/^}$/{exit}')" 'm_engine.reenterVerifying()' \
+has "$(code "$FACADE" | awk '/^void AvpnEngineQml::checkStalledTunnelAfterThaw\(/{f=1} f{print} f&&/^}$/{exit}')" 'm_engine.reenterVerifying()' \
     || bad "A9: the second caller must be the thaw's stall check"
 
 # ---- X1: one registry of numbers, the same bounds on both sides ----------------------------------------------------
