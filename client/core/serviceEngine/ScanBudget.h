@@ -144,11 +144,19 @@ public:
         for (const QJsonValue &v : a) {
             const QJsonObject o = v.toObject();
             const qint64 at = qint64(o.value(QLatin1String("at_ms")).toDouble(0));
-            const qint64 b = qint64(o.value(QLatin1String("bytes")).toDouble(0));
-            if (at > 0 && b > 0 && b < (qint64(1) << 40))
+            const qint64 b = storedBytes(o.value(QLatin1String("bytes")));
+            if (at > 0 && b > 0)
                 l.add(at, b, o.value(QLatin1String("cellular")).toBool(false));
         }
         return l;
+    }
+
+    // The one guard on a byte count read back from the store (the ledger's entries, the last plan's projection -
+    // review of f0cca9dbb): a value outside (0, 2^40) is no count - 0.
+    static qint64 storedBytes(const QJsonValue &v)
+    {
+        const double d = v.toDouble(0);
+        return d > 0 && d < double(qint64(1) << 40) ? qint64(d) : 0;
     }
 
 private:

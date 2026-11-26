@@ -3129,6 +3129,9 @@ static void s3BudgetGateIsTheStartRule()
         ScanMachine b(w.caps);
         b.restoreProjection(a.projectionJson());
         CHECK(b.projectionJson() == a.projectionJson());
+        // a corrupt stored value reads as none (the ledger's guard, ScanBudgetLedger::storedBytes), never an overflow
+        b.restoreProjection(QJsonObject{{QStringLiteral("cellular"), 1e300}, {QStringLiteral("other"), -5.0}});
+        CHECK(b.projectionJson().value(QStringLiteral("cellular")).toDouble() == 0 && b.projectionJson().value(QStringLiteral("other")).toDouble() == 0);
     }
     // a start that blocks because the plan grew: the projection is stored first - the gate is blocked from then on
     {

@@ -2349,8 +2349,8 @@ public:
     // (TribeScanner writes it whenever it writes the ledger) and given back at construction, before the first view.
     void restoreProjection(const QJsonObject &o)
     {
-        m_lastProjectionCell = qMax<qint64>(0, qint64(o.value(QLatin1String("cellular")).toDouble(0)));
-        m_lastProjectionOther = qMax<qint64>(0, qint64(o.value(QLatin1String("other")).toDouble(0)));
+        m_lastProjectionCell = ScanBudgetLedger::storedBytes(o.value(QLatin1String("cellular"))); // the ledger's guard
+        m_lastProjectionOther = ScanBudgetLedger::storedBytes(o.value(QLatin1String("other")));
     }
     QJsonObject projectionJson() const
     {

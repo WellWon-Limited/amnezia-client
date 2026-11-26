@@ -8,7 +8,8 @@
 #   B3  nothing else in the machine judges the allowance;
 #   B4  the coordinator restores the ledger and the projection at construction and writes the projection wherever it
 #       writes the ledger;
-#   B5  outside a running scan the live probe follows the gate (a blocked hour sends nothing chargeable).
+#   B5  outside a running scan the live probe follows the gate (a blocked hour sends nothing chargeable);
+#   B6  the projection is read back through the ledger's own guard (ScanBudgetLedger::storedBytes), not a second one.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SE="$HERE/.."
@@ -33,5 +34,8 @@ has "$T" 'm_m.restoreBudget(' && has "$T" 'm_m.restoreProjection(QJsonDocument::
     || bad "B4: the projection must be written wherever the ledger is"
 live="$(printf '%s\n' "$M" | awk '/    void maybeProbeLive\(ScanStep &s\)/{f=1} f{print} f&&/^    }$/{exit}')"
 has "$live" 'if (!inScan && budgetBlocked(m_last).hourly) {' || bad "B5: the live probe outside a scan must follow the gate"
+has "$M" 'm_lastProjectionCell = ScanBudgetLedger::storedBytes(o.value(QLatin1String("cellular")));' \
+    && has "$(code "$SE/ScanBudget.h")" 'const qint64 b = storedBytes(o.value(QLatin1String("bytes")));' \
+    || bad "B6: the ledger and the projection must be read back through one guard"
 [ "$fail" = "0" ] && echo "check_scan_budget_gate_wiring: OK"
 exit "$fail"
