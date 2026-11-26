@@ -152,6 +152,7 @@ private:
     static void onServiceError(JNIEnv *env, jobject thiz);
     static void onVpnPermissionRejected(JNIEnv *env, jobject thiz);
     static void onVpnPermissionPrompt(JNIEnv *env, jobject thiz, jint state); // AVPN, optional native
+    static void onActivityFinalDestroy(JNIEnv *env, jobject thiz); // AVPN (emulator round 2, F1), optional native
     static void onTunnelBuild(JNIEnv *env, jobject thiz, jint state, jint seq, jlong leg); // AVPN, optional native
     static void onSessionMetadata(JNIEnv *env, jobject thiz, jstring json); // AVPN (android2 P7), optional native
     static void onNotificationStateChanged(JNIEnv *env, jobject thiz);

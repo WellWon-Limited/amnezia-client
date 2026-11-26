@@ -569,6 +569,18 @@ class AmneziaActivity : QtActivity() {
         unregisterBroadcastReceiver(notificationStateReceiver)
         notificationStateReceiver = null
         mainScope.cancel()
+        // AVPN (emulator round 2, 26.11, F1): a destroy for good (not for a configuration change - the same test as Qt's
+        // m_retainNonConfigurationInstance) ends the UI process here, before Qt's teardown: QtActivityBase.onDestroy's
+        // terminateQtNativeApplication froze 1 swipe in 3 in a wait between this thread, Qt's main loop and the render
+        // thread (android_controller.cpp onActivityFinalDestroy). Qt ends the process after that teardown anyway
+        // (System.exit); the tunnel runs in its own service process. Without the native half: Qt's teardown, as before.
+        if (!isChangingConfigurations) {
+            try {
+                QtAndroidController.onActivityFinalDestroy() // does not return
+            } catch (e: UnsatisfiedLinkError) {
+                Log.w(TAG, "No native onActivityFinalDestroy: $e")
+            }
+        }
         super.onDestroy()
     }
 

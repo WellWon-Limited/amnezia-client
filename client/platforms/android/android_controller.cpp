@@ -11,6 +11,11 @@
 #include "android_utils.h"
 #include "avpn_fcm_bridge.h" // AVPN (Task 9): FCM natives + запрос токена
 #include "avpn_selfupdate_android.h" // AVPN (2026-11-16): site APK self-update natives
+#include <QSettings>  // AVPN (emulator round 2, F1): the settings sync at the activity's final destroy
+#include <unistd.h>   // AVPN (emulator round 2, F1): _exit at the activity's final destroy
+#ifdef AVPN_ENGINE_ENABLED
+#include "core/serviceEngine/CrashGuard.h" // AVPN (emulator round 2, F1): a clean exit is not a dirty_exit
+#endif
 #include "ui/controllers/importUiController.h"
 
 namespace
@@ -142,6 +147,17 @@ bool AndroidController::initialize()
         if (!env.registerNativeMethods(QT_ANDROID_CONTROLLER_CLASS, promptMethods, 1)) {
             env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent);
             qWarning() << "AndroidController: no onVpnPermissionPrompt in the Kotlin half - no pause for the VPN dialog";
+        }
+    }
+    // AVPN (emulator round 2, 26.11, F1): the activity's final destroy ends the process here, optional the same way
+    // (without it the activity falls back to Qt's teardown, as before).
+    {
+        const JNINativeMethod destroyMethods[] = {
+            {"onActivityFinalDestroy", "()V", reinterpret_cast<void *>(onActivityFinalDestroy)},
+        };
+        if (!env.registerNativeMethods(QT_ANDROID_CONTROLLER_CLASS, destroyMethods, 1)) {
+            env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent);
+            qWarning() << "AndroidController: no onActivityFinalDestroy in the Kotlin half - Qt's teardown ends the process";
         }
     }
     // AVPN (local build): the service's own build of the tunnel interface, optional the same way (without it the
@@ -679,6 +695,33 @@ void AndroidController::onVpnPermissionPrompt(JNIEnv *env, jobject thiz, jint st
     Q_UNUSED(thiz);
 
     emit AndroidController::instance()->vpnPermissionPrompt(int(state));
+}
+
+// static
+// AVPN (emulator round 2, 26.11, F1): called on Android's main thread from AmneziaActivity.onDestroy when the activity is
+// destroyed for good (not for a configuration change), BEFORE Qt's own teardown. That teardown
+// (QtActivityBase.onDestroy -> QtNative.terminateQtNativeApplication -> System.exit) froze the UI process 1 swipe in 3 in
+// the emulator: the main thread waited in flushWindowSystemEvents for Qt's main loop, the main loop (an expose event of
+// the threaded render loop) waited for the render thread, and the render thread waited in makeCurrent for the main
+// thread - the splash stood on every reopen and only Force stop (which also ended the VPN) helped. The UI process has
+// nothing left to do once its activity goes: the tunnel runs in its own service process. So it ends here, with the end
+// state of main.cpp's androidUiProcessEnd, without asking any other thread for anything: the settings are synced on this
+// thread (QSettings keeps every unwritten change in the shared file object; its write is atomic), the crash guard's
+// sentinel is removed as on a clean quit (otherwise the next start reports a dirty_exit), the log is flushed per message
+// already, and _exit skips the static destructors (main.cpp, D1).
+void AndroidController::onActivityFinalDestroy(JNIEnv *env, jobject thiz)
+{
+    Q_UNUSED(env);
+    Q_UNUSED(thiz);
+    {
+        QSettings settings;
+        settings.sync();
+    }
+#ifdef AVPN_ENGINE_ENABLED
+    CrashGuard::instance().markCleanExit();
+#endif
+    qInfo() << "UI process ends with _exit(0) at the activity's final destroy";
+    ::_exit(0);
 }
 
 // static

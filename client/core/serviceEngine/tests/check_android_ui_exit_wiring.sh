@@ -5,7 +5,10 @@
 # them. The UI process now ends with _exit once main's work is done (as iOS ends with _exit). Each line fails if reverted:
 #   X1  main.cpp declares the Android ending first in main, under Q_OS_ANDROID only, so it runs after every other local
 #       (~AmneziaApplication included);
-#   X2  it syncs the settings, then _exit()s with main's own result (the return assigns the code).
+#   X2  it syncs the settings, then _exit()s with main's own result (the return assigns the code);
+#   X3  (round 2, F1) the activity's destroy for good ends the process before Qt's teardown, a configuration change
+#       keeps Qt's path, and without the native the activity falls back to Qt;
+#   X4  the native syncs the settings and marks the clean exit on its own thread, then _exit(0), waiting for nothing.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -39,6 +42,35 @@ e=$(printf '%s\n' "$dtor" | grep -nF '::_exit(code);' | head -1 | cut -d: -f1)
 if [ -z "$s" ] || [ -z "$e" ] || [ "$s" -ge "$e" ]; then bad "X2: the ending must sync the settings, then _exit(code)"; fi
 printf '%s\n' "$body" | grep -qF 'return androidUiProcessEnd.code = app.exec();' \
     || bad "X2: the Android return must hand main's result to the ending"
+
+# ---- X3 (emulator round 2, F1) ---- the activity's destroy for good ends the process BEFORE Qt's teardown (its
+# terminateQtNativeApplication froze in a three-thread wait); a configuration change keeps Qt's path; without the native,
+# Qt's teardown as before.
+ACT="$CLIENT/android/src/org/amnezia/vpn/AmneziaActivity.kt"
+dest="$(code "$ACT" | awk '/override fun onDestroy\(\) \{/ { on = 1 } on { print } on && /^    }$/ { exit }')"
+fd=$(printf '%s\n' "$dest" | grep -nF 'QtAndroidController.onActivityFinalDestroy()' | head -1 | cut -d: -f1)
+sd=$(printf '%s\n' "$dest" | grep -nF 'super.onDestroy()' | head -1 | cut -d: -f1)
+if [ -z "$fd" ] || [ -z "$sd" ] || [ "$fd" -ge "$sd" ]; then bad "X3: onDestroy must end the process before super.onDestroy()"; fi
+printf '%s\n' "$dest" | grep -qF 'if (!isChangingConfigurations) {' || bad "X3: only a destroy for good may end the process"
+printf '%s\n' "$dest" | grep -qF 'catch (e: UnsatisfiedLinkError)' || bad "X3: without the native half the activity must fall back to Qt"
+grep -qF 'external fun onActivityFinalDestroy()' "$CLIENT/android/src/org/amnezia/vpn/qt/QtAndroidController.kt" \
+    || bad "X3: QtAndroidController must declare onActivityFinalDestroy"
+
+# ---- X4 ---- the native: registered optional; settings synced on the calling thread, a clean exit marked, then _exit -
+# nothing that waits for another thread (no queued/blocking call, no event loop)
+AC="$CLIENT/platforms/android/android_controller.cpp"
+ac="$(code "$AC")"
+printf '%s\n' "$ac" | grep -qF '{"onActivityFinalDestroy", "()V", reinterpret_cast<void *>(onActivityFinalDestroy)},' \
+    || bad "X4: onActivityFinalDestroy must be registered"
+nat="$(printf '%s\n' "$ac" | awk 'index($0, "void AndroidController::onActivityFinalDestroy(JNIEnv *env, jobject thiz)") == 1 { on = 1 } on { print } on && /^}$/ { exit }')"
+s=$(printf '%s\n' "$nat" | grep -nF 'settings.sync();' | head -1 | cut -d: -f1)
+c=$(printf '%s\n' "$nat" | grep -nF 'CrashGuard::instance().markCleanExit();' | head -1 | cut -d: -f1)
+e=$(printf '%s\n' "$nat" | grep -nF '::_exit(0);' | head -1 | cut -d: -f1)
+if [ -z "$s" ] || [ -z "$c" ] || [ -z "$e" ] || [ "$s" -ge "$e" ] || [ "$c" -ge "$e" ]; then
+    bad "X4: the native must sync the settings and mark the clean exit before _exit(0)"
+fi
+printf '%s\n' "$nat" | grep -qE 'invokeMethod|BlockingQueued|QEventLoop|waitFor|QWaitCondition' \
+    && bad "X4: the final destroy must not wait for another thread"
 
 [ "$fail" -eq 0 ] && echo "android ui exit wiring: OK"
 exit "$fail"

@@ -27,6 +27,10 @@ object QtAndroidController {
     // AVPN (android2 P7): the tribeSessionMetadata JSON of the session the service runs ("" = none), before the STATUS /
     // STATUS_CHANGED state it came with. Registered by AndroidController::initialize as an optional native.
     external fun onSessionMetadata(json: String)
+    // AVPN (emulator round 2, 26.11, F1): the activity's final destroy - the native side makes the settings durable, marks
+    // the exit clean and ends the UI process (does not return). Registered by AndroidController::initialize as an
+    // optional native "()V"; the caller falls back to Qt's own teardown without it.
+    external fun onActivityFinalDestroy()
     external fun onNotificationStateChanged()
     external fun onVpnStateChanged(stateCode: Int)
     external fun onStatisticsUpdate(rxBytes: Long, txBytes: Long, lastHandshakeSec: Long) // AVPN: + handshake
