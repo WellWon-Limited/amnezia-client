@@ -1702,6 +1702,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     st == AndroidController::ConnectionState::CONNECTED, st == AndroidController::ConnectionState::DISCONNECTED,
                     thinkConnected, observedTunnelOf(m_lastTunnelState), m_engine.attemptRunning(),
                     m_latch.awaitingStopConfirm, m_wantConnected);
+                // F2: a snapshot after a return sees what the live edge would have (the activity was unbound): a rebuild
+                // of the session the engine holds starts its bound from now (no-op when the edge already did), a
+                // Connected service ends it. Nothing else changes for these states.
+                if (st == AndroidController::ConnectionState::RECONNECTING && m_engine.noteLiveRebuild())
+                    reliabilityEvent(QStringLiteral("rebuild_wait node=%1 via=status").arg(m_engine.currentNodeId()));
+                else if (st == AndroidController::ConnectionState::CONNECTED)
+                    m_engine.noteLiveSessionUp();
                 if (action == AndroidStatusAction::StopIt) {
                     // the person's Stop of a start that ran on anyway: the service is stopped, the intent stays off (the
                     // stop the person asked for is still unconfirmed: its Disconnected ends it, VpnConnection's listener)
@@ -6330,17 +6337,14 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
         break;
     case Vpn::Reconnecting:
 #if defined(Q_OS_ANDROID)
-        // Emulator round 2 (26.11, F2): on Android Reconnecting is the VPN service rebuilding the session it holds by
-        // itself after a network change; the rebuilt tunnel reports Connected only after its first handshake, with no
-        // deadline, and while Reconnecting nothing judges it - the live probe's result is dropped off Connected, and an
-        // AmneziaWG session has no handshake statistics for the dead rule (3 min 58 s of «Connecting…» in the round;
-        // e475d4553's health-gate input could not fire). The live session is lost (Inconclusive) and the owner's
-        // ordinary attempt takes over: its stop ends the rebuild, its legs run on the existing deadlines (the end of this
-        // function syncs the attempt). iOS keeps its intermediate Reconnecting (below).
-        if (m_engine.leaveRebuiltSession()) {
-            reliabilityEvent(QStringLiteral("service_rebuild live_lost node=%1").arg(m_engine.currentNodeId()));
-            ++m_verifyEpoch; // a check of the rebuilt session is over
-        }
+        // Emulator rounds of 26.11 (F2): on Android Reconnecting is the VPN service rebuilding the session it holds in
+        // place after a network change (the new interface first, then the old backend off - seamless), reporting
+        // Connected only after the rebuilt tunnel's first handshake, with no deadline of its own. The rebuild stays as
+        // upstream has it; the engine gives it a leg's bound (ServiceEngine::noteLiveRebuild): in time it is invisible,
+        // past it the live session is lost as a failed leg and the owner's attempt walks on. iOS keeps its intermediate
+        // Reconnecting (below).
+        if (m_engine.noteLiveRebuild())
+            reliabilityEvent(QStringLiteral("rebuild_wait node=%1 via=edge").arg(m_engine.currentNodeId()));
 #endif
         // Промежуточное iOS-Reconnecting: НЕ инициируем свитч/реконнект — дождёмся терминала.
         break;

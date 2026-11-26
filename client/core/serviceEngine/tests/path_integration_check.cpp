@@ -255,28 +255,120 @@ int main(int argc, char **argv)
         CHECK(r.eng.pathStateHere(QStringLiteral("16")) == QLatin1String("suspect"));
     }
 
-    // 2r. Emulator round 2 (26.11, F2, Android): the VPN service rebuilt the live session by itself after a network change
-    //     and the rebuild never handshook - 3 min 58 s of «Connecting…» with nothing judging it. Now the live session is
-    //     lost (Inconclusive: nothing recorded against the node), the owner's stop ends the rebuild and its ordinary
-    //     attempt walks on the existing leg deadlines.
+    // 2r. Emulator rounds of 26.11 (F2, Android): the VPN service rebuilds the live session in place after a network
+    //     change and reports Reconnecting until the rebuilt tunnel's first handshake, with no deadline. A rebuild is a
+    //     leg's connect to the same node: it gets the local-build limit plus the AmneziaWG start deadline (20 + 4.5 s with
+    //     the compiled timings), in the owner's awake time. In time it is invisible; past it the session is a failed leg.
     {
-        Rig r(pool);
-        QString err;
-        CHECK(!r.eng.leaveRebuiltSession()); // no live session yet: nothing to lose
-        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
-        r.up();
-        CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
-        r.result();
-        const int downs = r.tun.downs;
-        const int ups = int(r.tun.ups.size());
-        CHECK(r.eng.leaveRebuiltSession() && r.tun.downs == downs + 1 && r.eng.attemptRunning());
-        CHECK(!r.eng.leaveRebuiltSession()); // once: the session is already lost
-        r.confirmStop();
-        CHECK(int(r.tun.ups.size()) == ups + 1); // the attempt's own start after the stop
-        CHECK(r.eng.pathStateHere(QStringLiteral("17")) != QLatin1String("suspect")); // Inconclusive: no evidence
-        CHECK(r.last() == QLatin1String("17")); // the same node first again
-        r.noHandshake(); // the restarted leg never handshakes either: an ordinary failed leg on its deadline
-        CHECK(int(r.tun.ups.size()) == ups + 2 && r.last() == QLatin1String("16"));
+        const qint64 boundMs = 20000 + 4500;
+        auto live = [&](Rig &r) {
+            QString err;
+            CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+            r.up();
+            CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
+            r.result();
+        };
+        // a. In time: nothing lost, nothing recorded, no stop, no new start.
+        {
+            Rig r(pool);
+            CHECK(!r.eng.noteLiveRebuild()); // no live session yet (cold start: the engine holds nothing)
+            live(r);
+            const int downs = r.tun.downs, ups = int(r.tun.ups.size());
+            CHECK(r.eng.noteLiveRebuild() && r.eng.liveRebuildWaiting());
+            CHECK(!r.eng.noteLiveRebuild()); // a later sight (a status snapshot after the edge) does not extend it
+            r.pass(boundMs - 2000);
+            CHECK(!r.eng.onTunnelConnected()); // the rebuild's Connected: not a new session for the facade
+            CHECK(!r.eng.liveRebuildWaiting());
+            r.pass(boundMs);
+            CHECK(r.tun.downs == downs && int(r.tun.ups.size()) == ups && !r.eng.attemptRunning());
+            CHECK(r.eng.state() == EngineState::Connected && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("working"));
+        }
+        // b. No Connected: lost at the bound as a failed leg - the node counts as tried, the next node is dialled first.
+        {
+            Rig r(pool);
+            live(r);
+            const int downs = r.tun.downs, ups = int(r.tun.ups.size());
+            CHECK(r.eng.noteLiveRebuild());
+            r.pass(boundMs - 1000);
+            CHECK(r.tun.downs == downs && r.eng.liveRebuildWaiting()); // not yet
+            r.pass(1500);
+            CHECK(r.tun.downs == downs + 1 && r.eng.attemptRunning() && !r.eng.liveRebuildWaiting());
+            r.confirmStop();
+            CHECK(int(r.tun.ups.size()) == ups + 1 && r.last() == QLatin1String("16")); // not 17 again
+            CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect")); // the leg's NoHandshake
+        }
+        // c. Reconnecting -> Connected -> Reconnecting again: the second rebuild has its own full bound.
+        {
+            Rig r(pool);
+            live(r);
+            const int downs = r.tun.downs;
+            CHECK(r.eng.noteLiveRebuild());
+            r.pass(20000);
+            r.eng.onTunnelConnected();
+            CHECK(r.eng.noteLiveRebuild());
+            r.pass(boundMs - 2000); // 42 s after the first sight: the first bound would have fired long ago
+            CHECK(r.tun.downs == downs && r.eng.liveRebuildWaiting());
+            r.pass(2500);
+            CHECK(r.tun.downs == downs + 1 && r.eng.attemptRunning());
+        }
+        // d. The person's Stop during the wait: the stop goes out, nothing fires later.
+        {
+            Rig r(pool);
+            live(r);
+            CHECK(r.eng.noteLiveRebuild());
+            r.pass(5000);
+            r.eng.requestStop();
+            CHECK(!r.eng.liveRebuildWaiting());
+            r.confirmStop();
+            const int downs = r.tun.downs, ups = int(r.tun.ups.size());
+            r.pass(boundMs * 2);
+            CHECK(r.tun.downs == downs && int(r.tun.ups.size()) == ups && !r.eng.attemptRunning());
+        }
+        // e. Disconnected during the wait: the existing loss path, once; the bound never fires after it.
+        {
+            Rig r(pool);
+            live(r);
+            CHECK(r.eng.noteLiveRebuild());
+            r.pass(3000);
+            r.eng.onTunnelDisconnected();
+            CHECK(!r.eng.liveRebuildWaiting());
+            const int downs = r.tun.downs, ups = int(r.tun.ups.size());
+            r.pass(boundMs * 2);
+            CHECK(r.tun.downs == downs && int(r.tun.ups.size()) == ups);
+        }
+        // f. The owner's own stop (a new start of the person's while connected): the wait ends, nothing extra fires.
+        {
+            Rig r(pool);
+            live(r);
+            CHECK(r.eng.noteLiveRebuild());
+            r.pass(3000);
+            QString err;
+            CHECK(r.eng.connect(err)); // a new attempt: the owner stops the live leg itself
+            r.pass(500);
+            CHECK(!r.eng.liveRebuildWaiting());
+            const int downs = r.tun.downs;
+            r.confirmStop();
+            r.up();
+            CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
+            r.result();
+            r.pass(boundMs * 2);
+            CHECK(r.tun.downs == downs && !r.eng.attemptRunning());
+        }
+        // g. A suspension inside the wait does not count, and the platform's answer gets the resume grace.
+        {
+            Rig r(pool);
+            live(r);
+            const int downs = r.tun.downs;
+            CHECK(r.eng.noteLiveRebuild());
+            r.pass(boundMs - 1000);
+            r.now += 10 * 60 * 1000; // ten minutes frozen in the background
+            r.eng.attemptTick();
+            r.pass(1500); // inside the resume grace (2 s): the status read on return still decides
+            CHECK(r.tun.downs == downs && r.eng.liveRebuildWaiting());
+            r.eng.noteLiveSessionUp(); // the snapshot says Connected
+            r.pass(boundMs);
+            CHECK(r.tun.downs == downs && r.eng.state() == EngineState::Connected);
+        }
     }
 
     // 2a. T1 (owner road 26.11, J1; review C5): the app returns on an AmneziaWG session whose path is dead and the first

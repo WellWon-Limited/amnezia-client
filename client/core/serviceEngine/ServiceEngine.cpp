@@ -257,14 +257,66 @@ bool ServiceEngine::leaveUpstreamNode(const QString &code, const QString &detail
     return true;
 }
 
-bool ServiceEngine::leaveRebuiltSession()
+bool ServiceEngine::noteLiveRebuild()
 {
-    if (m_state != EngineState::Connected || m_owner.phase() != path::AttemptPhase::Connected)
+    if (m_state != EngineState::Connected || m_owner.phase() != path::AttemptPhase::Connected || m_owner.running())
         return false;
-    appendSwitchLog(QStringLiteral("service rebuilt the session on %1: the attempt takes over").arg(m_currentNodeId));
-    loseLiveSession(path::PathOutcome::Inconclusive, /*tunnelGone=*/false, /*restart=*/true,
-                    QStringLiteral("service rebuilt the session"));
+    if (m_rebuildDeadline >= 0)
+        return false; // the wait runs already: a later sight of the same rebuild does not extend it
+    const path::AttemptTimings t = attemptTimings();
+    m_owner.setTimings(t);
+    path::PathKind kind = path::PathKind::OwnAwg;
+    if (const SubscriptionNode *n = findNode(m_currentNodeId))
+        kind = path::pathCandidateFromNode(*n).kind;
+    const qint64 boundMs = qint64(t.localBuildMs) + m_owner.startTimeoutMs(kind);
+    m_rebuildDeadline = m_owner.awakeMs() + boundMs;
+    m_rebuildLastTickMs = nowMs();
+    attemptJournal(QStringLiteral("rebuild_wait node=%1 bound_ms=%2")
+                       .arg(m_currentNodeId.isEmpty() ? QStringLiteral("?") : m_currentNodeId)
+                       .arg(boundMs));
     return true;
+}
+
+void ServiceEngine::noteLiveSessionUp()
+{
+    if (m_rebuildDeadline >= 0)
+        endLiveRebuild(QStringLiteral("connected"));
+}
+
+void ServiceEngine::endLiveRebuild(const QString &why)
+{
+    if (m_rebuildDeadline < 0)
+        return;
+    m_rebuildDeadline = -1;
+    m_rebuildLastTickMs = -1;
+    attemptJournal(QStringLiteral("rebuild_end node=%1 why=%2")
+                       .arg(m_currentNodeId.isEmpty() ? QStringLiteral("?") : m_currentNodeId, why));
+}
+
+void ServiceEngine::judgeLiveRebuild()
+{
+    if (m_rebuildDeadline < 0)
+        return;
+    // The live session changed otherwise (the owner's own stop, the person's stop or start, a loss): the wait is over.
+    if (m_state != EngineState::Connected || m_owner.phase() != path::AttemptPhase::Connected || m_owner.running()) {
+        endLiveRebuild(QStringLiteral("session_changed"));
+        return;
+    }
+    const qint64 now = nowMs();
+    const path::AttemptTimings t = attemptTimings();
+    // A suspension (the gap does not count in the owner's awake time either): the platform's answer gets the resume
+    // grace a leg in flight gets, so a status that comes with the return is read before the bound is judged.
+    if (m_rebuildLastTickMs >= 0 && now - m_rebuildLastTickMs > t.clockJumpMs)
+        m_rebuildDeadline = std::max(m_rebuildDeadline, m_owner.awakeMs() + t.resumeGraceMs);
+    m_rebuildLastTickMs = now;
+    if (m_owner.awakeMs() < m_rebuildDeadline)
+        return;
+    m_rebuildDeadline = -1;
+    m_rebuildLastTickMs = -1;
+    appendSwitchLog(QStringLiteral("the rebuilt session on %1 did not come back in time: the attempt walks on")
+                        .arg(m_currentNodeId));
+    loseLiveSession(path::PathOutcome::NoHandshake, /*tunnelGone=*/false, /*restart=*/true,
+                    QStringLiteral("rebuilt session without handshake"));
 }
 
 void ServiceEngine::noteStartRefused(const QString &nodeId, const QString &code)
@@ -625,6 +677,7 @@ void ServiceEngine::attemptTick()
     if (m_race.running())
         applyRaceEffects(m_race.tick(nowMs()));
     feedOwner(path::AttemptEvent::tick(nowMs()));
+    judgeLiveRebuild(); // F2: after the tick - an answer the platform gave by now wins over the bound
 }
 
 // ---- Stage 2: the probe race (path/PathRace.h) ------------------------------------------------------------------
@@ -906,6 +959,7 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
 
 void ServiceEngine::loseLiveSession(path::PathOutcome outcome, bool tunnelGone, bool restart, const QString &why)
 {
+    endLiveRebuild(QStringLiteral("session_lost")); // F2: whatever ends the live session ends a rebuild's wait
     attemptJournal(QStringLiteral("live_lost node=%1 outcome=%2 tunnel_gone=%3 failover=%4 why=%5")
                        .arg(m_currentNodeId.isEmpty() ? QStringLiteral("?") : m_currentNodeId,
                             QLatin1String(path::pathOutcomeName(outcome)))
@@ -1648,6 +1702,9 @@ bool ServiceEngine::onTunnelConnected() // AVPN
         feedOwner(path::AttemptEvent::tunnelUp(nowMs(), m_owner.currentLeg()));
         return true;
     }
+    // F2: the rebuild of the live session reports its tunnel up - the wait ends, nothing else changes.
+    if (m_owner.phase() == path::AttemptPhase::Connected)
+        noteLiveSessionUp();
     // A Connected of a leg being stopped (a late answer of the platform) is not a session: nothing to adopt.
     return m_owner.phase() == path::AttemptPhase::Stopping && !m_facadeStop;
 }
@@ -1938,6 +1995,7 @@ bool ServiceEngine::onLocalBuild(LocalBuildReport report, quint64 leg)
 // StoppedByUser once the stop is confirmed (onTunnelDisconnected); the ledger is not touched.
 void ServiceEngine::requestStop() // AVPN
 {
+    endLiveRebuild(QStringLiteral("person_stop")); // F2: the person's Stop ends a rebuild's wait; nothing fires later
     m_sessionHintNodeId.clear();
     m_sessionHintProto.clear();
     m_sessionHintEndpoint.clear();

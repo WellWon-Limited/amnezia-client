@@ -205,11 +205,20 @@ public:
     // The lease owner said the running upstream session must leave its node: the live session is lost (refused /
     // no seat recorded) and the failover attempt walks on without it. false = not connected on an upstream node.
     bool leaveUpstreamNode(const QString &code, const QString &detail = QString());
-    // Android (emulator round 2, 26.11, F2): the VPN service rebuilt the session it holds by itself after a network change
-    // (AmneziaVpnService.reconnect: RECONNECTING until the rebuilt tunnel's first handshake, with no deadline). The live
-    // session is lost - Inconclusive, nothing against the node - and the owner's ordinary attempt takes over: its stop
-    // ends the rebuild, its legs run on the existing deadlines. false = no live session (not Connected).
-    bool leaveRebuiltSession();
+    // Android (emulator rounds of 26.11, F2): the platform rebuilds the live session in place - the VPN service, after a
+    // network change, establishes the new interface, turns the old backend off and reports Reconnecting until the
+    // rebuilt tunnel's first handshake, with no deadline of its own. A rebuild is a leg's connect to the same node, so it
+    // gets a leg's bound: the local-build limit plus the session kind's start deadline (AttemptTimings, no tunable of its
+    // own), counted in the owner's awake time from the first sight of the rebuild - the live Reconnecting edge, or a
+    // status snapshot that says so after a return. A Connected within it ends the wait with nothing changed or recorded
+    // (onTunnelConnected, noteLiveSessionUp); past it the live session is lost as a start leg whose handshake deadline
+    // passed (NoHandshake: the node counts as tried) and the owner's ordinary attempt walks on - judgeLiveRebuild on the
+    // attempt tick. Only for a session the engine holds (Connected, owner Connected, no attempt running).
+    // true = the wait began now (false: no live session, or it waits already - a later sight does not extend it).
+    bool noteLiveRebuild();
+    // A platform fact that the live session is up (a status snapshot after a return): ends a rebuild's wait, nothing else.
+    void noteLiveSessionUp();
+    bool liveRebuildWaiting() const { return m_rebuildDeadline >= 0; }
     bool currentNodeIsUpstream() const;
     // upstream_revision of the subscription in force (0 = none).
     qint64 upstreamRevision() const { return m_pool.subscription().upstreamRevision; }
@@ -653,6 +662,11 @@ private:
     bool applyPendingReseedBetweenRuntimes();
     void markUpStarted();
     void appendSwitchLog(const QString &line);
+    // F2 (rebuild of the live session): the wait ends (a Connected, a loss, a stop), or the bound is judged on the tick.
+    void endLiveRebuild(const QString &why);
+    void judgeLiveRebuild();
+    qint64 m_rebuildDeadline = -1;   // the owner's awake ms by which a rebuilt live session must report Connected
+    qint64 m_rebuildLastTickMs = -1; // the clock at the last tick of the wait (a longer gap = a suspension: resume grace)
     qint64 nowMs() const;
     // Сессия лечения (rebind/переподъём) принадлежит ноде: сбрасывается при смене ноды, стопе,
     // connect() и адопте — переподъём той же ноды бюджет НЕ возвращает (иначе вечная лестница).
