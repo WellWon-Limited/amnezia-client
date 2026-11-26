@@ -1349,6 +1349,8 @@ private:
     void rebuildApiCarveOut();
     // AVPN (разбор 2026-09-23): IP хостов control plane (все edge-кандидаты) → m_apiHostIps заранее.
     void resolveApiCarveHosts(const QStringList &hosts);
+    // Device round air-I review F4: the hosts asked before without a public address yet, asked again (api_reset owner).
+    void resolveApiCarveHostsStillMissing();
     // ЕДИНЫЙ список carve-IP (вкомпиленный фолбэк + m_apiHostIps) — для выреза И для стампа сева
     // (bypassSeedStamp): один источник исключает дрейф «carve изменился, а стамп не заметил».
     QStringList apiCarveIps() const;
@@ -1728,6 +1730,7 @@ private:
     // байпаса — control plane всегда через туннель, см. CidrCarve.h.
     QList<QHostAddress>          m_apiHostIps;
     QHash<QString, QStringList>  m_apiHostIpsByHost;          // AVPN Scanner: the same IPs per host (knownHostIps)
+    QStringList                  m_apiCarveHostsAsked;        // review F4: every host resolveApiCarveHosts was asked for
     QString                      m_lastBypassSeedStamp; // AVPN: стамп последнего доехавшего сева АнтиВПН (BypassSeedStamp.h) — скип пересева при неизменных входах
     bool                         m_busy = false;
     // AVPN (macOS, beachball-фикс): установка root-демона идёт в фоновом потоке; флаг гейтит

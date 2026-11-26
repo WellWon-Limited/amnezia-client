@@ -1,5 +1,6 @@
 #include "TribeScanner.h"
 
+#include "ApiHostAddress.h"  // publicUnicastOnly: review F4
 #include "DoctorReport.h"    // doctor::countryDisplayName: the app's country names (ru / es tables, QLocale)
 #include "ScanPlan.h"        // scanAwgMiniFlag
 #include "TuningStore.h"
@@ -921,8 +922,12 @@ void TribeScanner::finishResolve(const QStringList &ips)
     const Resolving r = m_resolving;
     m_resolving = Resolving();
     m_resolveUntil = -1;
-    emitLog(QStringLiteral("probe base addresses=%1").arg(scanBaseIpsOf(ips).size()));
-    continueManifest(r.requestId, r.result, scanBaseIpsOf(ips));
+    // Device round air-I review F4: only public unicast answers (ApiHostAddress.h) - inside a provider session the
+    // lookup gets its FakeDNS address. None: no base_ips (no AmneziaWG mini probe, "awg_no_api_ip"; no proof by
+    // exclusion, ScanMachine evaluateExclusion "no_base_ip").
+    const QStringList base = scanBaseIpsOf(publicUnicastOnly(ips));
+    emitLog(QStringLiteral("probe base addresses=%1 not_public=%2").arg(base.size()).arg(scanBaseIpsOf(ips).size() - base.size()));
+    continueManifest(r.requestId, r.result, base);
 }
 
 void TribeScanner::continueManifest(const QString &id, const ScanApiClient::Manifest &r, const QStringList &baseIps)

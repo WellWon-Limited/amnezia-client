@@ -2514,16 +2514,33 @@ static void caseBaseIps()
     g_case = QStringLiteral("base_ips_resolved");
     World r;
     r.engine.knownIps.clear();
-    r.resolver.answers.insert(QStringLiteral("tunnel.leakhost.example"), {QStringLiteral("2001:db8::1"), QStringLiteral("192.0.2.20")});
+    // (public unicast answers: a resolution keeps only those - review F4, ApiHostAddress.h)
+    r.resolver.answers.insert(QStringLiteral("tunnel.leakhost.example"), {QStringLiteral("2a01:4f8::1"), QStringLiteral("95.217.135.30")});
     r.liveOn(QStringLiteral("4:xray"));
     r.start();
     r.s->open();
     r.run(20000);
     const QJsonObject *rs = r.host.lastRequest("scan_start");
     CHECK(rs && rs->value("probe").toObject().value("base_ips").toArray()
-                   == (QJsonArray{QStringLiteral("192.0.2.20"), QStringLiteral("2001:db8::1")}));
+                   == (QJsonArray{QStringLiteral("95.217.135.30"), QStringLiteral("2a01:4f8::1")}));
     CHECK_EQ(r.resolver.asked.size(), 1);
     CHECK(r.logsClean());
+
+    // review F4: the resolution answered inside a provider session (its FakeDNS pool, a private / reserved address):
+    // nothing of it is a probe base address - the host gets no base_ips, as when the lookup did not answer
+    g_case = QStringLiteral("base_ips_resolved_not_public");
+    World f;
+    f.engine.knownIps.clear();
+    f.resolver.answers.insert(QStringLiteral("tunnel.leakhost.example"),
+                              {QStringLiteral("100.88.0.5"), QStringLiteral("198.18.0.7"), QStringLiteral("fc00::7"), QStringLiteral("10.0.0.1")});
+    f.liveOn(QStringLiteral("4:xray"));
+    f.start();
+    f.s->open();
+    f.run(20000);
+    const QJsonObject *fs = f.host.lastRequest("scan_start");
+    CHECK(fs && !fs->value("probe").toObject().contains("base_ips"));
+    CHECK_EQ(f.resolver.asked.size(), 1);
+    CHECK_EQ(f.phase(), QStringLiteral("done"));
 
     g_case = QStringLiteral("base_ips_resolution_timeout");
     World n; // the engine knows nothing and the resolver never answers

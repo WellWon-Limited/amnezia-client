@@ -36,6 +36,7 @@
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
 #include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
+#include "ApiHostAddress.h" // review F4: only public unicast answers of our API hosts are kept
 #include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки + BypassListStore
 #include "WhitelistDetector.h" // AVPN (белые списки): детект РКН-режима «работает только whitelist»
 #include "CrashGuard.h" // AVPN (CR-1): свой краш-репортинг (sentinel+сигналы) -> type:"crash" в /v1/bench/report
@@ -2662,6 +2663,8 @@ void AvpnEngineQml::resolveApiCarveHosts(const QStringList &hosts)
     for (const QString &host : hosts) {
         if (host.isEmpty())
             continue;
+        if (!m_apiCarveHostsAsked.contains(host.toLower()))
+            m_apiCarveHostsAsked << host.toLower(); // review F4: asked again while it has no public address
         const QHostAddress literal(host);
         if (!literal.isNull()) {
             if (!m_apiHostIps.contains(literal))
@@ -2674,15 +2677,28 @@ void AvpnEngineQml::resolveApiCarveHosts(const QStringList &hosts)
         QHostInfo::lookupHost(host, this, [this, host](const QHostInfo &info) {
             if (info.error() != QHostInfo::NoError)
                 return;
+            // Device round air-I review F4: only public unicast answers are kept (ApiHostAddress.h) - a provider's
+            // FakeDNS address, recorded, lived until the app restarted and the Scanner dialled it.
             QStringList &mine = m_apiHostIpsByHost[host.toLower()]; // AVPN Scanner: knownHostIps
-            for (const QHostAddress &ip : info.addresses()) {
-                if (!m_apiHostIps.contains(ip))
-                    m_apiHostIps.append(ip);
-                if (!mine.contains(ip.toString()))
-                    mine << ip.toString();
-            }
+            const int dropped = avpn::recordApiHostAnswers(m_apiHostIps, mine, info.addresses());
+            if (dropped > 0)
+                reliabilityEvent(QStringLiteral("api_host_answer_not_public host=%1 dropped=%2 known=%3")
+                                     .arg(host).arg(dropped).arg(mine.size()));
         });
     }
+}
+
+// Device round air-I review F4: the hosts asked before that still have no public address (their answers so far came
+// from inside a provider session, or none came) are looked up again - by the one owner of "the tunnel changed"
+// (applyNativeState, with each API reset). Nothing is dropped from the list.
+void AvpnEngineQml::resolveApiCarveHostsStillMissing()
+{
+    QStringList missing;
+    for (const QString &host : std::as_const(m_apiCarveHostsAsked))
+        if (m_apiHostIpsByHost.value(host).isEmpty() && QHostAddress(host).isNull())
+            missing << host;
+    if (!missing.isEmpty())
+        resolveApiCarveHosts(missing);
 }
 
 // AVPN remote-config (T6): сервер может переопределить цели проб чипов (probeTargets из
@@ -5972,6 +5988,7 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
         avpn::dropCachedHostNamesSoon(avpn::kQtHostCacheClear, this, [this](qint64 ms) {
             reliabilityEvent(QStringLiteral("host_cache_cleared ms=%1").arg(ms));
         });
+        resolveApiCarveHostsStillMissing(); // review F4: an API host without a public address yet is asked again
     }
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).

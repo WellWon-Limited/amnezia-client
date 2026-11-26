@@ -4002,9 +4002,14 @@ private:
             if (!c.exclusionPending)
                 continue;
             c.exclusionPending = false;
-            const QString why = sameNet ? scanExclusionWhy(m_manifest.strictUnverifiable, m_opening, m_openingStamp, closing, stamp, stamp,
-                                                           m_net.sources, c.pendingFacts.startMs, c.pendingFacts.endMs)
-                                        : QStringLiteral("generation");
+            // Device round air-I review F4: without a public address of the probe base from the app the host resolved
+            // the name itself - inside a provider session that is the session's FakeDNS address, and attempts to it
+            // fail at the network level whatever the access network does: no proof by exclusion («Не проверено»).
+            const QString why = !sameNet                        ? QStringLiteral("generation")
+                                : m_manifest.probeBaseIps.isEmpty() ? QStringLiteral("no_base_ip")
+                                                                    : scanExclusionWhy(m_manifest.strictUnverifiable, m_opening, m_openingStamp,
+                                                                                       closing, stamp, stamp, m_net.sources,
+                                                                                       c.pendingFacts.startMs, c.pendingFacts.endMs);
             if (!why.isEmpty()) {
                 m_exclusionWhy = why;
                 continue; // stays «Не проверено» (unverifiable)

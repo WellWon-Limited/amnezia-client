@@ -41,7 +41,9 @@
 //     "Made" means packets left the physical interface: an attempt the host could not send (budget, dns -
 //     the base's name did not resolve, bind - the socket protection failed, no_route) is reported NOT
 //     attempted (null / attempted false) and so never counts as a network-level failure: a not-attempted
-//     opening with a failed closing attempt is no bracket (ScanHostContract.h, "Access attempts").
+//     opening with a failed closing attempt is no bracket (ScanHostContract.h, "Access attempts"). And the machine
+//     asks it only when the app gave the host a public address of the probe base (probe.base_ips; review F4 of
+//     25.11, ScanMachine evaluateExclusion "no_base_ip"): otherwise the host dialled what it resolved itself.
 //  5. Slow: works, but ttfb1 > scan_slow_ttfb_ms or t64 > scan_slow_t64_ms.
 //  6. Speed: Slow class -> speed Slow; Works -> q = rtt + 0.5 * t64 (rtt missing -> ttfb1):
 //     q <= scan_class_fast_ms fast, <= scan_class_slow_ms medium, else slow.
