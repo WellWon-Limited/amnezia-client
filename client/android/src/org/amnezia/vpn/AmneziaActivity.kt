@@ -750,8 +750,10 @@ class AmneziaActivity : QtActivity() {
         // between the tap and the tunnel: no permission-prompt report, the engine's clock runs (c2ff72b32 paused it here
         // too; the VPN dialog keeps its pause). A grant reaches the running service (onRequestPermissionsResult).
         // Emulator round 2 (F3): every leg of an attempt calls start(), so a question shown but not yet answered was shown
-        // again by the next leg (three in the round). It is asked once: marked asked the moment it is shown; any answer,
-        // Back included, is the person's answer and is respected (the Settings switch asks again on their tap).
+        // again by the next leg (three in the round). It is asked once: marked asked the moment it is shown, and its
+        // answer is respected. The Tribe UI has no other door to this permission (the vanilla Settings switch is not
+        // reachable: PageStart.qml avpnNav, Dev.qml amneziaMode has no runtime entry), so the question ends only by its
+        // two buttons - Back or a tap outside it cannot turn a slip of the finger into a permanent «No».
         Prefs.save(PREFS_NOTIFICATION_PERMISSION_ASKED, true)
         AlertDialog.Builder(this)
             .setTitle(R.string.notificationDialogTitle)
@@ -774,13 +776,13 @@ class AmneziaActivity : QtActivity() {
                     )
                 )
             }
-            // AVPN: a dialog dismissed outside its buttons counts as "No" (it is not asked again: marked when shown).
-            .setOnCancelListener { onChecked() }
+            // AVPN (F3): only the two buttons end it (asked once - see above)
+            .setCancelable(false)
             .show()
     }
 
     // AVPN (emulator round 26.11.2026, D5): the service was started before the person answered, so it decided at its start
-    // that there is no notification to keep fresh. A grant tells it the way the Settings request does
+    // that there is no notification to keep fresh. A grant tells it the way the vanilla Settings request does
     // (requestNotificationPermission: enableNotification in the service); a grant given before the bind waits for it,
     // as the start/stop commands do. A denial needs nothing: the service runs and Android hides the notification.
     private var notificationGrantForService = false

@@ -11,7 +11,8 @@
 #   N4  the service registers its screen receivers once, however often it hears of a grant;
 #   N5  (round 2, F3) the question is asked once - marked asked when shown;
 #   N6  Android's dialog is never raised without the person's tap (the engine's push authorization raises nothing);
-#   N7  a grant made outside the app's dialogs reaches the running service (onResume, once per activity).
+#   N7  a grant made outside the app's dialogs reaches the running service (onResume, once per activity);
+#   N8  the question ends only by its two buttons (not cancelable: the Tribe UI has no other door).
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -83,6 +84,11 @@ has "$fcm" 'requestPermissions(' && bad "N6: the push authorization raises Andro
 rsm="$(kfun "$ACT" 'override fun onResume()')"
 printf '%s\n' "$rsm" | tr -s ' \n' ' ' | grep -qF 'if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notificationToldGranted && isNotificationPermissionGranted() ) { tellServiceNotificationGranted()' \
     || bad "N7: onResume must tell the service of a grant it has not heard of"
+
+# ---- N8 (round 57 review, F3) ---- the question is the Tribe UI's only door to the permission: only its two buttons end
+# it - Back or a tap outside cannot make a slip of the finger a permanent No
+has "$dlg" '.setCancelable(false)' || bad "N8: the question must end only by its two buttons"
+has "$dlg" 'setOnCancelListener' && bad "N8: a cancel of the question would be a permanent No"
 
 [ "$fail" -eq 0 ] && echo "android start before notification wiring: OK"
 exit "$fail"
