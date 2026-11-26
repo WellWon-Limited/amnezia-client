@@ -1075,7 +1075,8 @@ PageType {
         // Тот же AvpnSettings/autoUpdate, что у тумблера в TribeUpdateSheet; после клика биндинг
         // восстанавливается, чтобы оба тумблера показывали одно значение.
         TribeListRow {
-            visible: root.hasEngine && TribeEngine.canSelfUpdate === true
+            // Emulator round 26.11 (D4): the same condition as the update sheet's switch, kept once (UpdateSwitches.qml)
+            visible: UpdateSwitches.autoUpdateShown
             Layout.fillWidth: true
             interactive: false
             title: qsTr("Обновлять автоматически")

@@ -92,6 +92,7 @@
         <file>Tribe/Haptic.qml</file>
         <file>Tribe/ScanTexts.qml</file>
         <file>Tribe/ScanSwitches.qml</file>
+        <file>Tribe/UpdateSwitches.qml</file>
         <file>Tribe/ServerListOrder.js</file>
         <file>Tribe/components/TribeButton.qml</file>
         <file>Tribe/components/TribeCard.qml</file>
