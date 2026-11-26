@@ -189,6 +189,8 @@ struct FakeEngine : IScanEngine {
         return true;
     }
     QStringList knownHostIps(const QString &host) const override { return knownIps.value(host); }
+    QSet<QString> tunnelNoData; // the path ledger's S6 fact (ServiceEngine::failedInTunnelHere) of these rows
+    bool rowFailedInTunnelHere(const QString &rowId) const override { return tunnelNoData.contains(rowId); }
     bool reportQueueFull() const override { return queueFull; }
     QString uiLanguage() const override { return QStringLiteral("ru"); }
     void userConnectForScan() override { ++userConnects; }
@@ -2150,6 +2152,68 @@ static void caseRefusedStart()
     CHECK_EQ(w.s->view().value("bar").toMap().value("button").toString(), QStringLiteral("retry_in_s"));
 }
 
+// Owner road 26.11 (S3, J8; review C2): the last plan's projection is written with the ledger and read back at the
+// coordinator's construction - a fresh process over a spent hour shows the limit and sends nothing (no manifest, no
+// live probe through the VPN that is up); a scan writes its projection with the ledger for the next process.
+static void caseBudgetGateAfterRelaunch()
+{
+    g_case = QStringLiteral("budget_gate_after_relaunch");
+    {
+        World w(capsMac(), ScanNetKind::Cellular, 6);
+        QJsonArray spent;
+        spent << QJsonObject{{"at_ms", double(w.clock.t - 20 * 60000)}, {"bytes", 3800000.0}, {"cellular", true}};
+        w.store.m.insert(QLatin1String(kScanBudgetStoreKey), QJsonDocument(spent).toJson(QJsonDocument::Compact));
+        w.store.m.insert(QLatin1String(kScanBudgetProjectionStoreKey),
+                         QJsonDocument(QJsonObject{{"cellular", 1435006.0}, {"other", 0.0}}).toJson(QJsonDocument::Compact));
+        w.liveOn(QStringLiteral("4:xray"));
+        w.start();
+        w.s->open();
+        w.run(2000);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 0);
+        CHECK_EQ(int(w.liveProbes.size()), 0);
+        CHECK_EQ(w.s->view().value("bar").toMap().value("button").toString(), QStringLiteral("retry_in_min"));
+        w.s->retry();
+        w.run(1000);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 0);
+        CHECK_EQ(w.ledgerCount(), 1); // nothing charged
+    }
+    {
+        World w(capsMac(), ScanNetKind::Cellular, 6);
+        w.liveOn(QStringLiteral("4:xray"));
+        w.start();
+        w.s->open();
+        w.run(12000);
+        CHECK_EQ(w.phase(), QStringLiteral("done"));
+        const QJsonObject p = QJsonDocument::fromJson(w.store.m.value(QLatin1String(kScanBudgetProjectionStoreKey))).object();
+        CHECK(p.value(QStringLiteral("cellular")).toDouble() > 0); // written with the ledger at the scan's end
+    }
+}
+
+// Owner road 26.11 (S2, J3; review C1): a start refused for MEMORY after the live probe went through the tunnel - its
+// own text, and no pause: the text tells the person to turn the VPN off and run the check again, so a reopen right after
+// scans at once. Every other refused start keeps its pause (caseRefusedStart).
+static void caseRefusedStartMemory()
+{
+    g_case = QStringLiteral("refused_start_memory");
+    World w(capsMac(), ScanNetKind::Cellular, 6);
+    w.host.refuseStart = QStringLiteral("memory");
+    w.liveOn(QStringLiteral("4:xray"));
+    w.start();
+    w.s->open();
+    w.run(60);
+    CHECK_EQ(w.phase(), QStringLiteral("no_scan"));
+    CHECK_EQ(w.s->view().value("empty").toMap().value("reason").toString(), QStringLiteral("host_memory"));
+    CHECK(w.s->view().value("bar").toMap().value("button").toString() != QStringLiteral("retry_in_s"));
+    const int entries = w.ledgerCount();
+    w.s->close();
+    w.run(500);
+    w.s->open();
+    w.run(1000);
+    CHECK_EQ(w.host.count("scan_start"), 2);
+    CHECK_EQ(w.http.count("/v1/scan/manifest"), 2);
+    CHECK(w.ledgerCount() > entries); // the second attempt's real bytes are charged too
+}
+
 // The host went away mid-scan (the service died / the channel broke) or forgot the running scan: it took the
 // start, so the settle is the draining rule - bounded (scan_freeze_ack_ms), the whole grant charged.
 static void caseHostDied()
@@ -2514,16 +2578,33 @@ static void caseBaseIps()
     g_case = QStringLiteral("base_ips_resolved");
     World r;
     r.engine.knownIps.clear();
-    r.resolver.answers.insert(QStringLiteral("tunnel.leakhost.example"), {QStringLiteral("2001:db8::1"), QStringLiteral("192.0.2.20")});
+    // (public unicast answers: a resolution keeps only those - review F4, ApiHostAddress.h)
+    r.resolver.answers.insert(QStringLiteral("tunnel.leakhost.example"), {QStringLiteral("2a01:4f8::1"), QStringLiteral("95.217.135.30")});
     r.liveOn(QStringLiteral("4:xray"));
     r.start();
     r.s->open();
     r.run(20000);
     const QJsonObject *rs = r.host.lastRequest("scan_start");
     CHECK(rs && rs->value("probe").toObject().value("base_ips").toArray()
-                   == (QJsonArray{QStringLiteral("192.0.2.20"), QStringLiteral("2001:db8::1")}));
+                   == (QJsonArray{QStringLiteral("95.217.135.30"), QStringLiteral("2a01:4f8::1")}));
     CHECK_EQ(r.resolver.asked.size(), 1);
     CHECK(r.logsClean());
+
+    // review F4: the resolution answered inside a provider session (its FakeDNS pool, a private / reserved address):
+    // nothing of it is a probe base address - the host gets no base_ips, as when the lookup did not answer
+    g_case = QStringLiteral("base_ips_resolved_not_public");
+    World f;
+    f.engine.knownIps.clear();
+    f.resolver.answers.insert(QStringLiteral("tunnel.leakhost.example"),
+                              {QStringLiteral("100.88.0.5"), QStringLiteral("198.18.0.7"), QStringLiteral("fc00::7"), QStringLiteral("10.0.0.1")});
+    f.liveOn(QStringLiteral("4:xray"));
+    f.start();
+    f.s->open();
+    f.run(20000);
+    const QJsonObject *fs = f.host.lastRequest("scan_start");
+    CHECK(fs && !fs->value("probe").toObject().contains("base_ips"));
+    CHECK_EQ(f.resolver.asked.size(), 1);
+    CHECK_EQ(f.phase(), QStringLiteral("done"));
 
     g_case = QStringLiteral("base_ips_resolution_timeout");
     World n; // the engine knows nothing and the resolver never answers
@@ -4306,6 +4387,74 @@ static void caseChoiceSlotsAndStop()
     CHECK(!w.s->screenOpen());
 }
 
+// Owner road 26.11 (S4, J8): «N доступно» has one definition. The same stored result gave 7 on the choice and 4 on the
+// rings: the tunnel-no-data set was asked for the rows the machine held only, and «Сканировать» clears them. Both counts
+// now read a set over the held rows and every stored result's rows - before and after the rows are cleared and reloaded.
+static void caseAvailableCountOneDefinition()
+{
+    g_case = QStringLiteral("available_count_one_definition");
+    World w;
+    w.liveOn(QStringLiteral("4:xray"));
+    w.start();
+    w.s->show();
+    w.s->retry();
+    w.run(12000);
+    CHECK_EQ(w.phase(), QStringLiteral("done"));
+    const auto slotWorks = [&w]() {
+        const QJsonArray sl = w.s->viewJson().value(QStringLiteral("slots")).toArray();
+        return sl.isEmpty() ? -1 : sl.first().toObject().value(QStringLiteral("works")).toInt();
+    };
+    const auto ringsAvailable = [&w]() { return w.s->viewJson().value(QStringLiteral("available")).toInt(); };
+    const int all = slotWorks();
+    CHECK(all >= 2 && ringsAvailable() == all);
+    // the ledger marks some working rows (not the live one) "its real tunnel carried no data here"
+    QStringList marked;
+    for (const QVariant &v : w.rows()) {
+        const QVariantMap r = v.toMap();
+        const QString st = r.value(QStringLiteral("state")).toString();
+        if ((st == QStringLiteral("works") || st == QStringLiteral("slow")) && !r.value(QStringLiteral("current")).toBool()
+            && marked.size() < qMin(3, all - 1))
+            marked << r.value(QStringLiteral("id")).toString();
+    }
+    CHECK(!marked.isEmpty());
+    for (const QString &id : marked)
+        w.engine.tunnelNoData.insert(id);
+    w.s->showSlot(QString()); // any step: the coordinator hands the ledger's facts over after it
+    w.run(200);
+    const int want = all - int(marked.size());
+    CHECK_EQ(slotWorks(), want);
+    CHECK_EQ(ringsAvailable(), want);
+    // «Сканировать» clears the rows (here the re-scan fails, NoScan): the choice still counts the stored result the same
+    w.clock.t += 31000;
+    w.server.manifestStatus = 503;
+    w.s->retry();
+    w.run(3000);
+    CHECK_EQ(w.phase(), QStringLiteral("no_scan"));
+    CHECK_EQ(slotWorks(), want);
+    // «Показать результат»: the rows come back, the rings say the same number
+    w.s->showSlot(QString());
+    w.run(500);
+    CHECK_EQ(ringsAvailable(), want);
+    CHECK_EQ(slotWorks(), want);
+    // review C6: a row whose tap failed now leaves both counts (the rings left it out, the choice counted it)
+    QString tapped;
+    for (const QVariant &v : w.rows()) {
+        const QVariantMap r = v.toMap();
+        const QString st = r.value(QStringLiteral("state")).toString();
+        if (tapped.isEmpty() && (st == QStringLiteral("works") || st == QStringLiteral("slow"))
+            && !r.value(QStringLiteral("current")).toBool() && !marked.contains(r.value(QStringLiteral("id")).toString()))
+            tapped = r.value(QStringLiteral("id")).toString();
+    }
+    CHECK(!tapped.isEmpty());
+    w.s->tapRow(tapped);
+    w.run(100);
+    w.s->exactRowFailed(tapped);
+    w.run(200);
+    CHECK_EQ(ringsAvailable(), want - 1);
+    CHECK_EQ(slotWorks(), want - 1);
+    w.s->close();
+}
+
 // Review round 36, F3: after a failed re-scan (HTTP 503 -> NoScan) the choice opens the same scope's fresh result
 // (showSlot): its rows, out of the error state, without a request.
 static void caseShowSlotAfterFailedRescan()
@@ -4548,6 +4697,7 @@ int main(int argc, char **argv)
     caseServerScope();
     caseStoredPoolOwner();
     caseChoiceSlotsAndStop();
+    caseAvailableCountOneDefinition();
     caseShowSlotAfterFailedRescan();
     caseLiveDigest();
     caseManifest304();
@@ -4564,6 +4714,8 @@ int main(int argc, char **argv)
     caseConnectPaths();
     caseHostUnavailable();
     caseRefusedStart();
+    caseRefusedStartMemory();
+    caseBudgetGateAfterRelaunch();
     caseHostReasons();
     caseServiceErrors();
     caseHostDied();

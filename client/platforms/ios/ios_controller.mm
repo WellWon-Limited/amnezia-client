@@ -1265,21 +1265,27 @@ void IosController::checkStatus()
         // AVPN (iOS data watch, build 141, stage 2): the tunnel has no engine after a failed in-place
         // switch; the reply then carries the session metadata and nothing to judge.
         const bool engineDown = [response[@"engine_down"] respondsToSelector:@selector(boolValue)] && [response[@"engine_down"] boolValue];
+        // AVPN (device round air-I, 25.11): the Xray reply carries the core's own fields inside its "core" object
+        // (PacketTunnelProvider+Xray.swift handleXrayStatusMessage -> TunnelRuntimeStatus.payload(core:)); read at the
+        // top level they always came out empty / 0. A WireGuard reply has no "core": empty / 0, as before.
+        // core_log_tail is NOT taken from it here: the tail is up to 80 info-level core lines (16 KB, they name the
+        // hosts the tunnel dials) and the reply comes every second - logging it is a decision of its own.
+        NSDictionary *xrayCore = [response[@"core"] isKindOfClass:[NSDictionary class]] ? response[@"core"] : nil;
         // AVPN: причину отказа старта ядра снимаем ЗДЕСЬ — NSDictionary* response живёт только
         // в этом хендлере; во внутреннюю (GUI-поток) лямбду уезжает уже готовая строка.
-        const QString startFailure = stringFromResponse(response, @"last_start_failure");
+        const QString startFailure = stringFromResponse(xrayCore, @"last_start_failure");
         // AVPN (девайс-разбор 2026-09-02): имя интерфейса и хвост лога ядра — единственное, по чему
         // «Подключено без трафика» отличается от здорового коннекта (индекс интерфейса не отличает
         // Wi-Fi от нашего же utun).
-        const QString ifaceName = stringFromResponse(response, @"active_interface_name");
+        const QString ifaceName = stringFromResponse(xrayCore, @"active_interface_name");
         const QString coreLogTail = stringFromResponse(response, @"core_log_tail");
         // AVPN (upstream nodes, contract section 5): absent for every non-upstream session.
         const avpn_ios::UpstreamStatusFields upstreamStatus = upstreamStatusFromObject(response[@"upstream"]);
         // AVPN (diag 2026-09-03): счётчики привязки сокетов ядра — извлекаем ЗДЕСЬ (response
         // живёт только в этом хендлере), в GUI-лямбду уходят готовые числа.
-        const long long xrayProtectBound = (long long)[response[@"protect_bound"] longLongValue];
-        const long long xrayProtectUnbound = (long long)[response[@"protect_unbound"] longLongValue];
-        const long long xrayProtectRejected = (long long)[response[@"protect_rejected"] longLongValue];
+        const long long xrayProtectBound = (long long)[xrayCore[@"protect_bound"] longLongValue];
+        const long long xrayProtectUnbound = (long long)[xrayCore[@"protect_unbound"] longLongValue];
+        const long long xrayProtectRejected = (long long)[xrayCore[@"protect_rejected"] longLongValue];
         // AVPN seamless roaming (§23.6): счётчики адаптера (path_lost/restored, bumps, rebinds,
         // pauses) — в Qt-лог приложения при изменении, чтобы диагностика видела роуминг даже
         // при выключенном файловом логе NE (ne.log пишется только при isLoggingEnabled).

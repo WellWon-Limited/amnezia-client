@@ -648,6 +648,66 @@ inline StartRefusal startRefusal(quint64 endedAttempt, quint64 judgedAttempt)
     return endedAttempt != 0 && endedAttempt == judgedAttempt ? StartRefusal::JudgedByResult : StartRefusal::DropIntent;
 }
 
+// Decision 9 of 18.11 + owner road 26.11 (S1, journal J2): the server the person tapped wins over the transport mode
+// chosen earlier, judged before the attempt starts (AvpnEngineQml::pinServer is its one owner). A location without
+// the mode's transport (setPinnedNode no_transport) - and a Scanner row, which is one exact path, that the attempt
+// would rank in Auto and does not rank now (ServiceEngine::exactPathRanked: the pool's own admission + the mode rule;
+// judged per row, not per location: Germany 1 has an AmneziaWG listener, so its Xray row passed the pin in AmneziaWG
+// mode and the attempt then refused it, exact_unavailable). Review C4: a row Auto would not dial either (its node no
+// longer runs here or has no health) changes no mode - its tap ends as not started with the engine's own text; for an
+// exact row in both branches (second read: a provider row's pin refused for transport too). A tap from the server list
+// (exactRow false) keeps decision 9 as it is: a location without the mode's transport switches.
+inline bool serverTapSwitchesModeToAuto(bool pinned, const QString &pinError, bool exactRow, bool exactRankedNow,
+                                        bool exactRankedInAuto)
+{
+    const bool noTransport = !pinned && pinError.startsWith(QLatin1String("no_transport"));
+    if (!exactRow)
+        return noTransport;
+    return (noTransport || (pinned && !exactRankedNow)) && exactRankedInAuto;
+}
+
+// S1 rule 2 (owner road 26.11): how the owner's failed result ends a Scanner row's request. An attempt that never
+// started (it ended inside ServiceEngine::connect - AvpnEngineQml guardedStart's attempt_not_started, whatever err) is no
+// evidence about the server: the row goes back to its scan state (no «Не удалось», no outcome to the server, nothing in
+// a ledger); the person gets the engine's own text. Any other failed result marks the row (exactRowFailed).
+enum class ScanRowEnd { NoVerdict, Failed };
+inline ScanRowEnd scanRowEndOf(quint64 resultAttempt, quint64 notStartedAttempt)
+{
+    return resultAttempt != 0 && resultAttempt == notStartedAttempt ? ScanRowEnd::NoVerdict : ScanRowEnd::Failed;
+}
+
+// T1 (owner road 26.11, journal J1): the app opened on an AmneziaWG tunnel whose path had been dead for minutes - the
+// extension's ladder kept restarting the same peer, the foreground handler only refreshed the status, the live probe
+// needs 4 failures about 12 s apart: the person waited 32 s and pressed Stop. A real return from the background
+// (foregroundIsReturn) arms one judgement: the FIRST status asked after it. Its stall verdict (data_stall_s, tribe.22:
+// reported only while the ladder sees a stall right now - demand out, nothing in for 4 s - counted from the last
+// lasting data; 0 on an idle or a healthy tunnel), read as the live probe's corroboration reads it (fresh, never longer
+// than this network was observed: ServiceEngine::freshDataStallSec) and outside the health loop's network-change grace,
+// starts the existing data check at or past awg_probe_dead_stall_s; that check's verdict does the rest (a lost live
+// session: failover in Auto; an exact choice ends with its honest failure; a preferred server falls back to its other
+// transports, then to any path with the fallback notice). Any other answer disarms it too (review C5): one judgement per
+// return, nothing while anything else runs, no data watch flag.
+enum class ThawStallJudgement { Wait, Disarm, Check };
+struct ThawStallCheckInput {
+    qint64 armedForThawMs = 0; // the real return from the background it is armed for (<= 0: not armed)
+    qint64 stallAtMs = 0;      // when the status request that carried the verdict was sent
+    qint64 stallSec = -1;      // the verdict as freshDataStallSec reads it (-1 unknown / stale)
+    bool networkGrace = false; // the health loop's grace after a network change
+    bool awgConnected = false; // the engine Connected on an own AmneziaWG session, the platform tunnel Connected
+    bool intentOn = false;     // the person's intent is on
+    bool idle = false;         // no own start / stop / teardown latch / attempt / data check / pause in progress
+    int thresholdSec = 0;      // awg_probe_dead_stall_s (0 = off)
+};
+inline ThawStallJudgement judgeThawStall(const ThawStallCheckInput &in)
+{
+    if (in.armedForThawMs <= 0 || in.stallAtMs < in.armedForThawMs)
+        return ThawStallJudgement::Wait; // not armed, or a status asked before the return
+    if (in.thresholdSec > 0 && in.awgConnected && in.intentOn && in.idle && !in.networkGrace
+        && in.stallSec >= in.thresholdSec)
+        return ThawStallJudgement::Check;
+    return ThawStallJudgement::Disarm; // the first status after the return said no: judged
+}
+
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
 {
     return legStartFailures > 0 || attemptEndedNothingProven;

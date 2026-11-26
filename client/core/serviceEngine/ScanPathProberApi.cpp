@@ -1,6 +1,8 @@
 // client/core/serviceEngine/ScanPathProberApi.cpp - see ScanPathProberApi.h.
 #include "ScanPathProberApi.h"
 
+#include "ApiHostAddress.h" // publicUnicastOnly: review F4
+
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QHostAddress>
@@ -69,7 +71,7 @@ void ScanApiRaceApi::session(const QString &networkKey, std::function<void(const
             QStringList ips;
             for (const QHostAddress &a : info.addresses())
                 ips << a.toString();
-            s.baseIps = ipLiterals(ips);
+            s.baseIps = ipLiterals(publicUnicastOnly(ips)); // review F4: a FakeDNS answer is no API address
             done(s);
         });
     });

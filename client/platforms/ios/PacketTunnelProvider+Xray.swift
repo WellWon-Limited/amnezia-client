@@ -728,6 +728,10 @@ extension PacketTunnelProvider {
                 _ = retireXrayCallback(identity: callbackIdentity, stopCore: false)
                 return XrayErrors.xrayCoreStartFailed
             }
+            // AVPN (device round air-I review F3, 25.11): the core is running - an earlier start's failure no longer
+            // belongs to this session; the status reply (core.last_start_failure) carries only the failure of the
+            // start it belongs to.
+            lastXrayStartFailure = nil
             return nil
         }
 

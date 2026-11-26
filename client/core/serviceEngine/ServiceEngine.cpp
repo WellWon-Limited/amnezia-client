@@ -302,26 +302,33 @@ path::AttemptTimings ServiceEngine::attemptTimings() const
 
 QList<path::PathCandidate> ServiceEngine::pathPool() const
 {
+    QList<path::PathCandidate> out;
+    for (const SubscriptionNode &n : m_merged)
+        if (std::optional<path::PathCandidate> c = poolCandidate(n, m_choice))
+            out << *c;
+    return out;
+}
+
+// The pool's one admission rule for a node under a choice (pathPool, and the facade's question whether a Scanner row
+// would be dialled in Auto - review C4: exactPathRanked).
+std::optional<path::PathCandidate> ServiceEngine::poolCandidate(const SubscriptionNode &n, const path::UserChoice &choice) const
+{
     // Kill switch transport_auto_pick=false (as before this design): Xray paths are not offered to an automatic
     // choice; a person's exact choice still reaches them.
     const bool autoXray = TuningStore::flag(QStringLiteral("transport_auto_pick"), true)
-                       || m_choice.kind == path::UserChoice::Kind::ExactPath;
-    QList<path::PathCandidate> out;
-    for (const SubscriptionNode &n : m_merged) {
-        if (!isSupportedProtoNode(n) || healthAggregate(n) <= 0.0)
-            continue;
-        if (!autoXray && isXrayProto(protoOf(n)))
-            continue;
-        // Contract 1.14.0: a scan-offered profile is a path only when the person chose it (exact row or preferred
-        // server); Auto keeps to the delivered stubs.
-        if (n.upstream.has_value() && n.upstream->scanOffered && !m_choice.pathIds.contains(n.nodeId))
-            continue;
-        path::PathCandidate c = path::pathCandidateFromNode(n);
-        if (c.kind == path::PathKind::Provider && !c.standbyEntry && m_hasStandbyEntry)
-            c.standbyEntry = m_hasStandbyEntry(n); // lane C: a usable pack entry lets the profile start without the API
-        out << c;
-    }
-    return out;
+                       || choice.kind == path::UserChoice::Kind::ExactPath;
+    if (!isSupportedProtoNode(n) || healthAggregate(n) <= 0.0)
+        return std::nullopt;
+    if (!autoXray && isXrayProto(protoOf(n)))
+        return std::nullopt;
+    // Contract 1.14.0: a scan-offered profile is a path only when the person chose it (exact row or preferred
+    // server); Auto keeps to the delivered stubs.
+    if (n.upstream.has_value() && n.upstream->scanOffered && !choice.pathIds.contains(n.nodeId))
+        return std::nullopt;
+    path::PathCandidate c = path::pathCandidateFromNode(n);
+    if (c.kind == path::PathKind::Provider && !c.standbyEntry && m_hasStandbyEntry)
+        c.standbyEntry = m_hasStandbyEntry(n); // lane C: a usable pack entry lets the profile start without the API
+    return c;
 }
 
 path::SelectionContext ServiceEngine::ownerContext() const
@@ -1595,22 +1602,32 @@ bool ServiceEngine::feedProbeResult(bool ok)
             return false;
     } else {
         const qint64 nowEpoch = nowMs() / 1000; // the wall clock (a test sets its own)
-        // tribe.17 (device round 24.11 B1): the extension's stall verdict corroborates too, while fresh; -1 on every
-        // platform but iOS with a tribe.17 extension (TunnelStats::dataStallSec), where this is the rule of 141.
-        const TunnelStats live = m_tunnel ? m_tunnel->readStats() : TunnelStats{};
-        qint64 dataStallSec = HealthLoop::freshDataStall(live.dataStallSec, live.dataStallAtMs, nowMs());
-        // K1 (air-D): never longer than what was observed on this network (an extension before tribe.19 does not
-        // restart its verdict at a roam).
-        if (m_restartEvidence && dataStallSec > 0 && m_health.evidenceSinceEpoch() > 0)
-            dataStallSec = qMin(dataStallSec, qMax<qint64>(0, nowEpoch - m_health.evidenceSinceEpoch()));
+        const qint64 dataStallSec = freshDataStallSec(nowEpoch);
         if (!HealthLoop::probeDeadCorroborated(m_probeFailStreak, awgProbeFailCyclesTuned(),
-                                               m_health.inNetworkGrace(nowEpoch), m_health.latestHandshakeEpoch(),
+                                               inNetworkGrace(nowEpoch), m_health.latestHandshakeEpoch(),
                                                nowEpoch, awgProbeDeadHandshakeAgeSTuned(), dataStallSec,
                                                awgProbeDeadStallSTuned()))
             return false;
     }
     m_probeFailStreak = 0;
     return onDead(/*tunnelStillUp=*/true, QStringLiteral("probe failed (failover)"));
+}
+
+// tribe.17 (device round 24.11 B1): the extension's stall verdict, while fresh (HealthLoop::freshDataStall: at most 5 s
+// old); -1 on every platform but iOS with a tribe.17 extension (TunnelStats::dataStallSec), where this is the rule of 141.
+// K1 (air-D): never longer than what was observed on this network (an extension before tribe.19 does not restart its
+// verdict at a roam). One reading for the live probe's corroboration and the facade's thaw check (T1, review C5).
+qint64 ServiceEngine::freshDataStallSec(qint64 nowEpoch) const
+{
+    return freshDataStallSec(nowEpoch, m_tunnel ? m_tunnel->readStats() : TunnelStats{});
+}
+
+qint64 ServiceEngine::freshDataStallSec(qint64 nowEpoch, const TunnelStats &live) const
+{
+    qint64 dataStallSec = HealthLoop::freshDataStall(live.dataStallSec, live.dataStallAtMs, nowMs());
+    if (m_restartEvidence && dataStallSec > 0 && m_health.evidenceSinceEpoch() > 0)
+        dataStallSec = qMin(dataStallSec, qMax<qint64>(0, nowEpoch - m_health.evidenceSinceEpoch()));
+    return dataStallSec;
 }
 
 // The platform reports the tunnel up. For a leg of the owner that is its TunnelUp: the data check follows
@@ -2169,6 +2186,17 @@ ServiceEngine::LocationTransports ServiceEngine::locationTransportsFor(const QSt
             lt.anyAllowed = true;
     }
     return lt;
+}
+
+// S1 (owner road 26.11; review C4): whether the attempt owner would rank this node as an exact choice under `mode`
+// (see ServiceEngine.h): the pool's own admission (poolCandidate) and the selection's mode rule (path::modeAllows).
+bool ServiceEngine::exactPathRanked(const QString &nodeId, TransportMode mode) const
+{
+    const SubscriptionNode *n = findNode(nodeId);
+    if (!n)
+        return false;
+    const std::optional<path::PathCandidate> c = poolCandidate(*n, path::UserChoice::exactPath(nodeId));
+    return c && path::modeAllows(c->kind, mode);
 }
 
 // 5.1.109: the rule of setPinnedNode's no_transport refusal for an existing pin (see ServiceEngine.h).

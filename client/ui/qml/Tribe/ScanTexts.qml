@@ -83,6 +83,10 @@ QtObject {
     readonly property string limitTitle: hourLimit                                      // was a caption, now the title, state 22
     readonly property string engineTitle: qsTr("Не удалось запустить проверку")            // title, state 23
     readonly property string engineText: qsTr("Попробуйте ещё раз через минуту.")          // text, state 23
+    // host_memory (owner road 26.11, J3): the tunnel's process refused the scan for memory - the connected server's core
+    // takes almost all the VPN may use; state 23's layout, its own words, no pause (ScanMachine hostFailed)
+    readonly property string memoryTitle: qsTr("Сейчас проверить нельзя")
+    readonly property string memoryText: qsTr("Подключённому серверу нужна почти вся память VPN. Отключите VPN и запустите проверку снова.")
     readonly property string serviceTitle: qsTr("Служба Tribe VPN не запущена")            // title, state 24 (Mac, Windows)
     readonly property string sectionLast: qsTr("ПРОШЛЫЙ РЕЗУЛЬТАТ")                         // caption over the last result, 20-28
     readonly property string fallbackHint: qsTr("VPN выключен — чтобы проверить серверы, нужно подключиться") // hint over the button, state 20
@@ -238,13 +242,14 @@ QtObject {
         case "host_too_large":
         case "host_shutting_down":
         case "host_internal":
-        case "host_memory":
         case "host_version":
         case "host_unknown_action":
         case "host_malformed":
         case "host_other":
         case "host_awg_live_peer_unknown":
             return engine               // state 23
+        case "host_memory":             // state 23's layout, its own text (owner road 26.11, J3)
+            return { layout: "blocked", icon: "alert-circle", title: t.memoryTitle, text: t.memoryText, action: "retry", primary: true }
         case "candidates_unavailable":  // the scope's servers did not come (POST /v1/scan/candidates failed) and the
                                         // device has none of its own there: nothing was checked (device round air-C, D2)
         case "not_entitled":            // NO FRAME (server side): state 23 texts

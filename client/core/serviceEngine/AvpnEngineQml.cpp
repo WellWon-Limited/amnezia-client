@@ -36,6 +36,7 @@
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
 #include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
+#include "ApiHostAddress.h" // review F4: only public unicast answers of our API hosts are kept
 #include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки + BypassListStore
 #include "WhitelistDetector.h" // AVPN (белые списки): детект РКН-режима «работает только whitelist»
 #include "CrashGuard.h" // AVPN (CR-1): свой краш-репортинг (sentinel+сигналы) -> type:"crash" в /v1/bench/report
@@ -1440,6 +1441,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             [this](const QString &line) { reliabilityEvent(line); }, Qt::QueuedConnection);
     connect(IosController::Instance(), &IosController::tunnelEngineDown, this,
             &AvpnEngineQml::onTunnelEngineDown, Qt::QueuedConnection);
+    // T1 (owner road 26.11; review C5): every AmneziaWG status reply's stall verdict - the first one asked after a real
+    // return is judged once (checkStalledTunnelAfterThaw); no timer of its own
+    connect(IosController::Instance(), &IosController::dataStallChanged, this,
+            [this](qint64 seconds, qint64 requestSentMs) { checkStalledTunnelAfterThaw(seconds, requestSentMs); },
+            Qt::QueuedConnection);
     // Floor 19.11: the AmneziaWG stage "extension Connected -> handshake seen by the status poll" (fast while a start
     // is in flight, IosNativePolicy.h::statusPollIntervalMs) - one journal line per awaited handshake.
     connect(IosController::Instance(), &IosController::handshakeConfirmed, this,
@@ -1905,6 +1911,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     if (!foregroundIsReturn(hidden, inactiveFor))
                         return;
 #ifdef Q_OS_IOS
+                    // T1 (owner road 26.11; review C5): a real return arms the one judgement of the first status
+                    // asked after it (checkStalledTunnelAfterThaw)
+                    m_thawStallArmedMs = now;
                     // AVPN (iOS data watch, 141): refresh the extension's plan (the kill switch too). The
                     // hand-over itself needs no call here: a process that was suspended is recognised by
                     // its overdue tick (TunnelWatchResume.h).
@@ -2695,6 +2704,8 @@ void AvpnEngineQml::resolveApiCarveHosts(const QStringList &hosts)
     for (const QString &host : hosts) {
         if (host.isEmpty())
             continue;
+        if (!m_apiCarveHostsAsked.contains(host.toLower()))
+            m_apiCarveHostsAsked << host.toLower(); // review F4: asked again while it has no public address
         const QHostAddress literal(host);
         if (!literal.isNull()) {
             if (!m_apiHostIps.contains(literal))
@@ -2707,15 +2718,29 @@ void AvpnEngineQml::resolveApiCarveHosts(const QStringList &hosts)
         QHostInfo::lookupHost(host, this, [this, host](const QHostInfo &info) {
             if (info.error() != QHostInfo::NoError)
                 return;
+            // Device round air-I review F4: only public unicast answers are kept (ApiHostAddress.h) - a provider's
+            // FakeDNS address, recorded, lived until the app restarted and the Scanner dialled it.
             QStringList &mine = m_apiHostIpsByHost[host.toLower()]; // AVPN Scanner: knownHostIps
-            for (const QHostAddress &ip : info.addresses()) {
-                if (!m_apiHostIps.contains(ip))
-                    m_apiHostIps.append(ip);
-                if (!mine.contains(ip.toString()))
-                    mine << ip.toString();
-            }
+            const int dropped = avpn::recordApiHostAnswers(m_apiHostIps, mine, info.addresses());
+            if (dropped > 0)
+                reliabilityEvent(QStringLiteral("api_host_answer_not_public host=%1 dropped=%2 known=%3")
+                                     .arg(host).arg(dropped).arg(mine.size()));
         });
     }
+}
+
+// Device round air-I review F4: the hosts asked before that still have no public address (their answers so far came
+// from inside a provider session, or none came) are looked up again - by the one owner of "the tunnel changed"
+// (applyNativeState: once the reset's clear of Qt's host cache is done, or with the reset where there is no clear).
+// Nothing is dropped from the list.
+void AvpnEngineQml::resolveApiCarveHostsStillMissing()
+{
+    QStringList missing;
+    for (const QString &host : std::as_const(m_apiCarveHostsAsked))
+        if (m_apiHostIpsByHost.value(host).isEmpty() && QHostAddress(host).isNull())
+            missing << host;
+    if (!missing.isEmpty())
+        resolveApiCarveHosts(missing);
 }
 
 // AVPN remote-config (T6): сервер может переопределить цели проб чипов (probeTargets из
@@ -3539,19 +3564,27 @@ QString AvpnEngineQml::choiceJournal() const
     return QString();
 }
 
-bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err)
+bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err, bool exactRow)
 {
-    if (!m_engine.setPinnedNode(nodeId, err)) {
-        if (!err.startsWith(QLatin1String("no_transport")))
+    const bool pinned = m_engine.setPinnedNode(nodeId, err);
+    // Decision 9 of 18.11: the server the person tapped wins over the transport mode chosen earlier. S1 (owner road
+    // 26.11): a Scanner row is judged by its own path kind, before the attempt starts (DebugSnapshot.h
+    // serverTapSwitchesModeToAuto) - one owner of the switch, here.
+    if (!avpn::serverTapSwitchesModeToAuto(pinned, err, exactRow,
+                                           pinned && m_engine.exactPathRanked(nodeId, m_engine.transportMode()),
+                                           m_engine.exactPathRanked(nodeId, avpn::TransportMode::Auto))) {
+        if (!pinned)
             return false;
-        // Decision 9 of 18.11: the server the person tapped wins over the transport mode chosen earlier.
-        const QString was = avpn::transportModeToString(m_engine.transportMode());
-        setTransportMode(QStringLiteral("auto"));
-        if (!m_engine.setPinnedNode(nodeId, err))
-            return false;
-        reliabilityEvent(QStringLiteral("transport_mode_auto why=server_tap mode_was=%1 node=%2").arg(was, nodeId));
-        emit notice(tr("Режим подключения переключён на «Авто», чтобы подключить выбранный сервер"));
+        syncIntent();
+        return true;
     }
+    const QString was = avpn::transportModeToString(m_engine.transportMode());
+    setTransportMode(QStringLiteral("auto"));
+    if (!m_engine.setPinnedNode(nodeId, err))
+        return false;
+    reliabilityEvent(QStringLiteral("transport_mode_auto why=server_tap mode_was=%1 node=%2 exact=%3")
+                         .arg(was, nodeId).arg(int(exactRow)));
+    emit notice(tr("Режим подключения переключён на «Авто», чтобы подключить выбранный сервер"));
     syncIntent();
     return true;
 }
@@ -3611,6 +3644,22 @@ void AvpnEngineQml::endScanRowRequest(const QString &node, const char *why)
             m_scanner->exactRowFailed(n);
         m_scanner->attemptEnded();
     }
+}
+
+// S1 rule 2 (owner road 26.11, journal J2): the attempt ended inside connect() - nothing was dialled, so the row keeps its
+// scan state and stays tappable: no «Не удалось», no outcome to the server, nothing in a ledger (the Scanner's
+// connectRefused("") - the request is over without a result). The person gets the engine's own text for the reason.
+void AvpnEngineQml::endScanRowRequestNotStarted()
+{
+    if (!m_scanRow.active)
+        return;
+    m_scanRow.active = false;
+    const QString n = m_scanRow.tapped;
+    scanJournal(QStringLiteral("scan_row_not_started reason=scan_row node=%1").arg(n),
+                {{QStringLiteral("event"), QStringLiteral("row_not_started")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
+                 {QStringLiteral("node"), n}});
+    if (m_scanner)
+        m_scanner->connectRefused(QString());
 }
 
 // R3 (device round 4): the end of a Scanner row's one request by the owner's result. On success the row stays as an
@@ -3723,8 +3772,14 @@ bool AvpnEngineQml::syncAttempt()
         m_judgedAttempt = r->attempt; // this result decides the request (a start that ended with it adds nothing)
         if (m_exactReq.active() && r->reason != avpn::path::FailReason::StoppedByUser)
             endExactRowRequest(r->connected);
-        if (!r->connected && r->reason != avpn::path::FailReason::StoppedByUser)
-            endScanRowRequest(QString(), "attempt_failed"); // S1: the owner's terminal result ends the row's request
+        if (!r->connected && r->reason != avpn::path::FailReason::StoppedByUser) {
+            // S1 (device round 5): the owner's terminal result ends the row's request. S1 rule 2 (owner road 26.11):
+            // an attempt that never started is no evidence about the row (DebugSnapshot.h scanRowEndOf).
+            if (avpn::scanRowEndOf(r->attempt, m_notStartedAttempt) == avpn::ScanRowEnd::NoVerdict)
+                endScanRowRequestNotStarted();
+            else
+                endScanRowRequest(QString(), "attempt_failed");
+        }
         const QString lang = appLang();
         if (r->connected) {
             if (r->fallbackNotice) {
@@ -4180,6 +4235,45 @@ void AvpnEngineQml::setupTunnelWatchResume()
     m_watchResume = std::make_unique<avpn::TunnelWatchResume>(std::move(ops));
 #endif
 }
+
+#ifdef Q_OS_IOS
+// T1 (owner road 26.11, J1; review C5): the first AmneziaWG status asked after a real return from the background is
+// judged once (DebugSnapshot.h judgeThawStall): its stall verdict, read as the live probe's corroboration reads it
+// (ServiceEngine::freshDataStallSec, inNetworkGrace), starts the existing data check of the live session - the entry
+// the data watch's resume uses (reenterVerifying -> startDataPathVerification); a failed check is a lost live session
+// (verifyFailed -> loseLiveSession). Any other answer disarms it.
+void AvpnEngineQml::checkStalledTunnelAfterThaw(qint64 stallSec, qint64 requestSentMs)
+{
+    const qint64 nowEpoch = QDateTime::currentSecsSinceEpoch();
+    avpn::TunnelStats reply;
+    reply.dataStallSec = stallSec;
+    reply.dataStallAtMs = requestSentMs;
+    avpn::ThawStallCheckInput in;
+    in.armedForThawMs = m_thawStallArmedMs;
+    in.stallAtMs = requestSentMs;
+    in.stallSec = m_engine.freshDataStallSec(nowEpoch, reply);
+    in.networkGrace = m_engine.inNetworkGrace(nowEpoch);
+    in.awgConnected = m_engine.state() == avpn::EngineState::Connected && m_lastTunnelState == Vpn::Connected
+                      && !m_engine.currentNodeId().isEmpty() && !m_engine.currentNodeIsXray()
+                      && !m_engine.currentNodeIsUpstream();
+    in.intentOn = m_wantConnected;
+    in.idle = m_op == Op::None && !m_opInFlight && !m_engine.attemptRunning() && !m_engine.isVerifying()
+              && !ownStopping() && !m_latch.awaitingStopConfirm && !m_latch.needStatusBeforeStart && !m_paused;
+    in.thresholdSec = avpn::awgProbeDeadStallSTuned();
+    const avpn::ThawStallJudgement j = avpn::judgeThawStall(in);
+    if (j == avpn::ThawStallJudgement::Wait)
+        return;
+    m_thawStallArmedMs = 0; // one judgement per return
+    if (j != avpn::ThawStallJudgement::Check || !m_engine.reenterVerifying())
+        return;
+    reliabilityEvent(QStringLiteral("thaw_stall_check node=%1 stall_s=%2 threshold_s=%3 thaw_ago_ms=%4")
+                         .arg(m_engine.currentNodeId()).arg(in.stallSec).arg(in.thresholdSec)
+                         .arg(QDateTime::currentMSecsSinceEpoch() - in.armedForThawMs));
+    refreshDataFlowing();
+    startDataPathVerification();
+    emit changed();
+}
+#endif
 
 // A decision consults the hand-over first (it also notices a thaw by itself).
 bool AvpnEngineQml::tunnelWatchFrozen(const char *site)
@@ -6064,11 +6158,25 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // clear runs only with AVPN_ENGINE=OFF). Nothing here waits for Qt's HTTP thread: later requests start on a new
     // generation of the shared manager, the ones in flight are aborted on the next turn and re-issued by their owners
     // (DebugSnapshot.h newApiGeneration, NetAwait.h TribeNetworkAccessManager).
+    // Device round air-I (25.11): and Qt's cached host names are dropped (iOS) - a name resolved inside the tunnel that is
+    // gone says nothing about the next one. Off this thread: the drop waits for a lookup already running
+    // (NetAwait.h dropCachedHostNamesSoon); its line "host_cache_cleared ms=" follows when it is done.
     if (m_nam && newApiGeneration(observedTunnelOf(m_lastTunnelState), observedTunnelOf(s))) {
         avpn::resetApiConnections(m_nam);
         const auto *api = avpn::TribeNetworkAccessManager::of(m_nam);
         reliabilityEvent(QStringLiteral("api_reset generation=%1 retiring=%2")
                              .arg(api ? api->generation() : 0).arg(api ? api->retiringGenerations() : -1));
+        // Review F4: an API host without a public address yet is asked again - after the clear where there is one:
+        // QHostInfo::lookupHost answers from Qt's cache in the calling thread (qhostinfo.cpp:792-805), so asked before
+        // the clear it would get the gone tunnel's cached FakeDNS name, and its own lookup would be one more for the
+        // clear to wait for. Without a clear (a shared Qt) it is asked now: stale for at most the cache's 60 s, then
+        // an applied config, an edge change or the Scanner's own lookup ask again.
+        const bool dropping = avpn::dropCachedHostNamesSoon(avpn::kQtHostCacheClear, this, [this](qint64 ms) {
+            reliabilityEvent(QStringLiteral("host_cache_cleared ms=%1").arg(ms));
+            resolveApiCarveHostsStillMissing();
+        });
+        if (!dropping)
+            resolveApiCarveHostsStillMissing();
     }
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).
@@ -7127,6 +7235,7 @@ void AvpnEngineQml::guardedStart()
         settleOperation("attempt_not_started");
         const std::optional<avpn::path::AttemptResult> &ended = m_engine.pendingAttemptResult();
         const quint64 endedAttempt = connectCalled && ended ? ended->attempt : 0;
+        m_notStartedAttempt = endedAttempt; // S1 rule 2: its result ends a Scanner row without a verdict
         syncAttempt(); // the attempt's journal lines and its result (ended at once)
         if (startRefusal(endedAttempt, m_judgedAttempt) == StartRefusal::JudgedByResult) {
             reliabilityEvent(QStringLiteral("attempt_not_started judged_by_result attempt=%1 err=%2 want=%3")
@@ -8591,7 +8700,7 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
     // The pin is checked before the intent changes: a row that cannot be pinned leaves everything as it was.
     const QString pinBefore = m_engine.pinnedNodeId(); // before the pin changes: a refused seat restores it
     QString err;
-    if (!pinServer(nodeId, err)) {
+    if (!pinServer(nodeId, err, /*exactRow=*/true)) { // S1: the row's own path kind against the mode
         scanJournal(QStringLiteral("scan_connect_ignored reason=scan_row why=pin node=%1").arg(nodeId),
                     {{QStringLiteral("event"), QStringLiteral("connect_ignored")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                      {QStringLiteral("why"), QStringLiteral("pin")}, {QStringLiteral("node"), nodeId}});
@@ -12786,7 +12895,16 @@ void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, quint64 prepareId,
             m_exactReq.clear();
             syncIntent();
         }
-        endScanRowRequest(nodeId, "seat_first_failed");
+        // Review C3 (owner road 26.11): the seat was refused before anything was dialled - the way of the other
+        // pre-attempt refusals (connectToNode): the row reads «Не удалось», no outcome goes to the server
+        if (m_scanRow.active) {
+            m_scanRow.active = false;
+            scanJournal(QStringLiteral("scan_connect_ignored reason=scan_row why=seat_first_failed node=%1").arg(nodeId),
+                        {{QStringLiteral("event"), QStringLiteral("connect_ignored")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
+                         {QStringLiteral("why"), QStringLiteral("seat_first_failed")}, {QStringLiteral("node"), nodeId}});
+            if (m_scanner)
+                m_scanner->connectRefused(nodeId);
+        }
         emit changed();
         return;
     }

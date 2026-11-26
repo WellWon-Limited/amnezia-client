@@ -57,7 +57,8 @@ done
 has "$(body "$FACADE" 'void AvpnEngineQml::reconcile()')" 'if (m_engine.attemptRunning() || m_engine.state() == avpn::EngineState::Switching) {' \
     || bad "PE: reconcile must leave a running attempt to its owner"
 [ "$(code "$ENGINE/TunnelWatchResume.h" | grep -cF 'm_ops.reenterVerifying()')" = "1" ] || bad "§33: reenterVerifying has more than one caller in TunnelWatchResume"
-[ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "1" ] || bad "§33: the facade calls reenterVerifying outside the hand-over's op"
+# owner road 26.11 (T1): the thaw's stall check is the second, deliberate caller (checkStalledTunnelAfterThaw)
+[ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "2" ] || bad "§33: the facade calls reenterVerifying outside the hand-over's op and the thaw's stall check"
 
 # Coordinator 18.11 (c): the Scanner hears a network change when the path engine's network generation moved (one
 # rule with the attempt owner) or its cache identity moved (device round air9 19.11 10:08: it completed with the same
@@ -132,11 +133,15 @@ has "$(code "$CLIENT/ui/qml/Tribe/Pages/PageConnectTribe.qml")" ': root.engineOw
 awk '/#ifdef AVPN_DEV_TOOLS/{f=1} f&&/tribe-reset-ledger/{print "ok"; exit} f&&/#endif/{exit}' "$FACADE" | grep -q ok \
     || bad "R6: the empty-ledger control file must exist only in AVPN_DEV_TOOLS builds"
 
-# S1 (device round 5): every Scanner row request that does not connect ends through endScanRowRequest - the owner's
-# failed result and a seat-first failure with the live tunnel kept; the seat client follows the request's route.
+# S1 (device round 5): every Scanner row request that does not connect ends - the owner's failed result through
+# endScanRowRequest, a seat-first failure with the live tunnel kept through the pre-attempt refusal (review C3 of the
+# owner road 26.11: nothing was dialled, no outcome - connectRefused(node)); the seat client follows the request's route.
 has "$(code "$FACADE")" 'endScanRowRequest(QString(), "attempt_failed");' \
-    && has "$(code "$FACADE")" 'endScanRowRequest(nodeId, "seat_first_failed");' \
+    && has "$(code "$FACADE")" 'scan_connect_ignored reason=scan_row why=seat_first_failed node=%1' \
+    && has "$(code "$FACADE")" 'm_scanner->connectRefused(nodeId);' \
     || bad "S1: a Scanner row request must end on the owner's failure and on a seat-first failure"
+code "$FACADE" | grep -qF 'endScanRowRequest(nodeId, "seat_first_failed");' \
+    && bad "S1 (C3): a refused seat was never dialled - it must not end as a verdict (no outcome)"
 [ "$(code "$FACADE" | grep -c 'm_scanner->attemptEnded();')" -le 2 ] || bad "S1: the row's end is told from one function (and the chain observer)"
 has "$(code "$FACADE")" 'm_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->activeBaseUrl() : m_baseUrl; },' \
     || bad "S1: the seat client must take the edge of the route the request takes now"

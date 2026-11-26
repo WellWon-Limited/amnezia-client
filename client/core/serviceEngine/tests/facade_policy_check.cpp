@@ -1993,8 +1993,78 @@ static void r50UplinkMoveVoidsTheLiveClaim()
     }
 }
 
+// S1 (owner road 26.11, journal J2): the server the person tapped wins over the transport mode - a location without the
+// mode's transport, and a Scanner row whose own path kind the mode excludes; an attempt that never started ends the row's
+// request without a verdict.
+static void s1ExactRowWinsOverTheMode()
+{
+    // a location the mode cannot serve (setPinnedNode no_transport): switch, whatever the row
+    CHECK(serverTapSwitchesModeToAuto(false, QStringLiteral("no_transport: location x has no 'awg' transport"), false, false, false));
+    CHECK(serverTapSwitchesModeToAuto(false, QStringLiteral("no_transport: location x has no 'awg' transport"), true, false, true));
+    // another refusal of the pin: no switch (the pin's own error)
+    CHECK(!serverTapSwitchesModeToAuto(false, QStringLiteral("node not in subscription: 12:xray"), true, false, false));
+    CHECK(!serverTapSwitchesModeToAuto(false, QStringLiteral("unsupported_proto: node 9 proto 'x'"), true, false, true));
+    // the pin passed by location (Germany 1 has an AmneziaWG listener): a Scanner Xray row in AmneziaWG mode that Auto
+    // would dial switches; a server of the list does not (a preference: its allowed transports); a row ranked now does not
+    CHECK(serverTapSwitchesModeToAuto(true, QString(), true, false, true));
+    CHECK(!serverTapSwitchesModeToAuto(true, QString(), false, false, true));
+    CHECK(!serverTapSwitchesModeToAuto(true, QString(), true, true, true));
+    // review C4: a row Auto would not dial either (no health, a platform without its proto): no mode change
+    CHECK(!serverTapSwitchesModeToAuto(true, QString(), true, false, false));
+    // second read: also when the exact row's pin was refused for transport (a provider row in AmneziaWG mode) -
+    // switch only if Auto would dial it; a tap from the server list keeps decision 9 (location level)
+    CHECK(!serverTapSwitchesModeToAuto(false, QStringLiteral("no_transport: location x has no 'awg' transport"), true, false, false));
+    CHECK(serverTapSwitchesModeToAuto(false, QStringLiteral("no_transport: location x has no 'awg' transport"), false, false, false));
+    // rule 2: only the result of the attempt that ended inside connect() ends the row without a verdict
+    CHECK(scanRowEndOf(3, 3) == ScanRowEnd::NoVerdict);
+    CHECK(scanRowEndOf(4, 3) == ScanRowEnd::Failed);  // a later attempt that dialled
+    CHECK(scanRowEndOf(3, 0) == ScanRowEnd::Failed);  // nothing ended at once
+    CHECK(scanRowEndOf(0, 0) == ScanRowEnd::Failed);
+}
+
+// T1 (owner road 26.11, journal J1; review C5): one judgement per real return - the first status asked after it; a check
+// only on a live AmneziaWG session with the intent on, nothing else running, outside the network-change grace, at or
+// past the threshold; any other first answer disarms it.
+static void t1ThawStallCheck()
+{
+    ThawStallCheckInput in;
+    in.armedForThawMs = 1'000'000;
+    in.stallAtMs = 1'001'200;
+    in.stallSec = 600; // J1: ten minutes of demand without data
+    in.awgConnected = true;
+    in.intentOn = true;
+    in.idle = true;
+    in.thresholdSec = 45;
+    CHECK(judgeThawStall(in) == ThawStallJudgement::Check);
+    ThawStallCheckInput x = in;
+    x.stallSec = 45;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Check);   // at the threshold
+    x.stallSec = 44;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // below: judged, disarmed
+    x = in; x.stallSec = 0;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // tribe.22: 0 = data flows or nobody sends
+    x = in; x.stallSec = -1;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // unknown or stale (freshDataStallSec)
+    x = in; x.stallAtMs = 999'000;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Wait);    // a status asked before the return: not this judgement
+    x = in; x.armedForThawMs = 0;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Wait);    // not armed: an Inactive -> Active flicker, or judged already
+    x = in; x.networkGrace = true;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // a network change is being healed
+    x = in; x.idle = false;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // an own start / stop / teardown latch / attempt / check / pause
+    x = in; x.intentOn = false;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);
+    x = in; x.awgConnected = false;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // Xray, a provider, not connected
+    x = in; x.thresholdSec = 0;
+    CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // awg_probe_dead_stall_s off
+}
+
 int main()
 {
+    s1ExactRowWinsOverTheMode();
+    t1ThawStallCheck();
     r50UplinkMoveVoidsTheLiveClaim();
     r20PhysicalLossDuringConnect();
     p5bOfflineObservation();

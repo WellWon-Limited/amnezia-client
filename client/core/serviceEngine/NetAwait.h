@@ -22,6 +22,7 @@
 #include <QNetworkRequest>
 #include <QPointer>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QThread>
 #include <QTimer>
 
@@ -30,6 +31,15 @@
 #include <functional>
 #include <memory>
 #include <utility>
+
+#if defined(Q_OS_IOS)
+QT_BEGIN_NAMESPACE
+// Qt's own, private: qtbase 6.11.1 src/network/kernel/qhostinfo_p.h:108 "void Q_AUTOTEST_EXPORT qt_qhostinfo_clear_cache();".
+// Hidden in a shared Qt; the iOS Qt is a static archive and the app links it (nm -m: "private external
+// __Z24qt_qhostinfo_clear_cachev"). Why and what it does: dropCachedHostNamesSoon below.
+void qt_qhostinfo_clear_cache();
+QT_END_NAMESPACE
+#endif
 
 namespace avpn {
 
@@ -307,6 +317,75 @@ private:
     QHash<QNetworkAccessManager *, QList<QPointer<QNetworkReply>>> m_replies; // every live generation -> its replies
     quint64 m_generation = 0;
 };
+
+// The host names of a tunnel transition (device round air-I, 25.11: own Xray started 20-30 s after a provider session
+// stopped; every API call in it failed RemoteHostClosed - whoami err=2 - and the path ledger marked that own row
+// suspect, "does not answer on this network"). A new generation has no connection, but it resolves through Qt's ONE
+// host cache of the whole process (qtbase 6.11.1 qhostinfo.cpp:1105-1112 "QHostInfoCache::QHostInfoCache() :
+// max_age(60) ... // cache for 60 seconds"; get() :1114-1129 answers any entry younger than max_age*1000 ms; put()
+// stores every successful lookup, no TTL). The HTTP connection's lookup (qhttpnetworkconnection.cpp:1258
+// qt_qhostinfo_lookup) and QAbstractSocket's both take it. So a name resolved inside one tunnel is answered for up to
+// 60 s after that tunnel is gone: a provider profile answers from its FakeDNS pool (100.88.0.0/16, TTL 1), an address
+// only that provider's core can route, and the next tunnel carried our API calls to it.
+//
+// What Qt offers (none public: QHostInfo has no cache control; clearConnectionCache()/clearAccessCache() drop
+// connections and credentials only):
+//  - qt_qhostinfo_enable_cache(bool) (qhostinfo_p.h:109) is compiled only under QT_BUILD_INTERNAL (qhostinfo.cpp:1086)
+//    - absent from the release Qt of iOS, macOS and Android (nm), not callable;
+//  - qt_qhostinfo_clear_cache() (qhostinfo.cpp:1078-1084 -> QHostInfoLookupManager::clear(), :907-925): in the iOS Qt
+//    (static, the app links it); not exported by the shared Qt of macOS and Android - there nothing is done and a name
+//    stays cached up to 60 s after a transition.
+// clear() deletes the lookups not started yet (queued behind a running lookup of the same name, or behind 20 running
+// ones - their requesters get no answer and end on their own bounds: the old generation's requests are aborted on the
+// next turn anyway, the Scanner's resolution ends at scan_stage1_timeout_ms), then waits for every running lookup and
+// joins the pool's idle threads (threadPool.waitForDone()), then empties the cache. The wait is a getaddrinfo already
+// under way - as long as the system resolver takes, so it never runs on the GUI thread: dropCachedHostNamesSoon hands
+// it to a thread of its own and returns at once. Why that is enough: a name becomes wrong when the tunnel it was
+// resolved in goes away, and every tunnel ends with a Disconnected the owner resets on (journal of air-I: 36 of 36);
+// the next tunnel comes up seconds later, the drop takes microseconds without a running lookup. Left: a lookup that is
+// still running at that Disconnected until the next tunnel is up keeps the drop (and the old names) until it returns.
+
+// The thread Qt's host names are dropped on: started once, never joined (the process ends it).
+inline QObject *apiHostNamesWorker()
+{
+    static QObject *const worker = []() {
+        auto *t = new QThread;
+        t->setObjectName(QStringLiteral("Tribe API host names"));
+        auto *w = new QObject;
+        w->moveToThread(t);
+        t->start();
+        return w;
+    }();
+    return worker;
+}
+
+#if defined(Q_OS_IOS)
+inline constexpr void (*kQtHostCacheClear)() = &QT_PREPEND_NAMESPACE(qt_qhostinfo_clear_cache);
+#else
+inline constexpr void (*kQtHostCacheClear)() = nullptr; // not exported by a shared Qt (see above)
+#endif
+
+// Drops Qt's cached host names on apiHostNamesWorker() and returns at once (false where nothing is callable: no call,
+// no `done`). `done(ms)` runs on the application's thread when the names are gone - only if `context` still lives -
+// with the time clear() took. Requests made meanwhile queue behind one another on that thread.
+inline bool dropCachedHostNamesSoon(void (*clearHostCache)(), QObject *context, std::function<void(qint64)> done)
+{
+    if (!clearHostCache)
+        return false;
+    QPointer<QObject> ctx(context);
+    QMetaObject::invokeMethod(apiHostNamesWorker(), [clearHostCache, ctx, done = std::move(done)]() {
+        QElapsedTimer t;
+        t.start();
+        clearHostCache();
+        const qint64 ms = t.elapsed();
+        if (QCoreApplication *app = QCoreApplication::instance(); app && done)
+            QMetaObject::invokeMethod(app, [ctx, done, ms]() {
+                if (ctx)
+                    done(ms);
+            }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
+    return true;
+}
 
 // The one owner's step on a tunnel transition (AvpnEngineQml::applyNativeState). A manager that is not the facade
 // (none in the app) can only have its running requests aborted.

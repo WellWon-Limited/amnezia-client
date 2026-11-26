@@ -389,6 +389,12 @@ public:
     // platform, called only from the facade's Q_OS_IOS block (PLATFORM-SCOPING §2).
     bool reenterVerifying();
     bool feedProbeResult(bool ok);
+    // The extension's stall verdict as the live probe's corroboration reads it: fresh (<= 5 s) and never longer than this
+    // network was observed (K1); -1 = none. And the network-change grace of the health loop. T1 (review C5): the facade's
+    // thaw check reads the same two.
+    qint64 freshDataStallSec(qint64 nowEpoch) const;
+    qint64 freshDataStallSec(qint64 nowEpoch, const TunnelStats &live) const; // the same rule on one given reply
+    bool inNetworkGrace(qint64 nowEpoch) const { return m_health.inNetworkGrace(nowEpoch); }
     // Device round air-D (K1): `startedAtMs` = when the probe started (wall clock; -1 = unknown). With the evidence
     // restart on, a failed probe that started before the last network change says nothing about this network.
     bool feedProbeResult(bool ok, qint64 startedAtMs);
@@ -476,6 +482,11 @@ public:
     // interrupted-switch replay). False without a pin, for a pin no longer in the pool and in Auto.
     // The facade clears such a pin on a mode change (DebugSnapshot.h::decidePinOnTransportMode).
     bool pinLacksTransport(TransportMode mode) const;
+    // S1 (owner road 26.11; review C4): whether the attempt owner would rank THIS node as an exact choice with the
+    // transport mode `mode` - the pool's own admission (supported, health above 0, the scan-offered rule) and the
+    // selection's mode rule, asked before the attempt starts (AvpnEngineQml::pinServer: the mode yields only when Auto
+    // makes the row dialable). False for a node not in the subscription.
+    bool exactPathRanked(const QString &nodeId, TransportMode mode) const;
     // 5.1.109 (review R1): the pin the last pool refresh dropped because its location no longer has a
     // node the effective transport mode allows (the pinned listener was removed). One-shot: the facade
     // persists the cleared pin and journals pin_cleared why=reseed. Empty = nothing dropped that way.
@@ -600,6 +611,7 @@ private:
 
     // The pool of the attempt owner: supported, alive nodes as paths (path::pathCandidateFromNode).
     QList<path::PathCandidate> pathPool() const;
+    std::optional<path::PathCandidate> poolCandidate(const SubscriptionNode &n, const path::UserChoice &choice) const;
     path::SelectionContext ownerContext() const;
     void prepareProber(); // prober->prepare() unless the control plane is known unreachable (lane C2)
     void journalControlPlaneSkips(); // one line per attempt: the provider paths C1 leaves out

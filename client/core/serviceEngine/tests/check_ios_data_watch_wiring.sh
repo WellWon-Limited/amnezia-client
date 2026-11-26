@@ -40,7 +40,8 @@
 #    A7. the tunnel-restart guard keeps its own two calls; the arming holds under its own reason and
 #        asks the system itself whether the app is on the screen;
 #    A8. the effects handed to the hand-over never touch the pin, the intent or the "data proven" marks;
-#    A9. the engine's way back to Verifying is called from one place;
+#    A9. the engine's way back to Verifying is called from two places only: the hand-over's op and the thaw's stall
+#        check (owner road 26.11, T1: AvpnEngineQml::checkStalledTunnelAfterThaw, no flag of its own);
 #    A10. stage 2 in the app: candidates only with both flags, one entry point for an adopted switch
 #        (from any status reply), the way back and the engine-down restart go through the ordinary restart;
 #    X1. the numbers the extension reads and their bounds are those of the app's table;
@@ -619,7 +620,9 @@ order "$resume_h" 'if (watchVerdictForgetsNode(w.verdict))' 'm_ops.forgetNode(no
 callers="$(grep -ln 'reenterVerifying()' "$ENGINE"/*.cpp "$ENGINE"/*.h "$IOS"/*.mm 2>/dev/null | xargs -n1 basename | sort | tr '\n' ' ')"
 [ "$callers" = "AvpnEngineQml.cpp ServiceEngine.cpp ServiceEngine.h TunnelWatchResume.h " ] || bad "A9: reenterVerifying is referenced from: $callers"
 [ "$(count "$ENGINE/TunnelWatchResume.h" 'm_ops.reenterVerifying()')" = "1" ] || bad "A9: the hand-over asks for the engine's consent at one place"
-[ "$(count "$FACADE" 'm_engine.reenterVerifying()')" = "1" ] || bad "A9: the facade must call reenterVerifying from one place"
+[ "$(count "$FACADE" 'm_engine.reenterVerifying()')" = "2" ] || bad "A9: the facade must call reenterVerifying from the hand-over's op and the thaw's stall check only"
+has "$(code "$FACADE" | awk '/^void AvpnEngineQml::checkStalledTunnelAfterThaw\(/{f=1} f{print} f&&/^}$/{exit}')" 'm_engine.reenterVerifying()' \
+    || bad "A9: the second caller must be the thaw's stall check"
 
 # ---- X1: one registry of numbers, the same bounds on both sides ----------------------------------------------------
 # The app clamps a server number (ConnectTunables.h) and the extension clamps it again (fromPlan):

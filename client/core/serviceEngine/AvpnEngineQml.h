@@ -1107,6 +1107,8 @@ private:
     void endExactRowRequest(bool connected);
     void restoreChoiceBeforeRow(const avpn::ExactRowRequest &req);
     void endScanRowRequest(const QString &node, const char *why); // S1: the one end of a Scanner row's request
+    void endScanRowRequestNotStarted(); // S1 rule 2: an attempt that never started ends the row's request, no verdict
+    void checkStalledTunnelAfterThaw(qint64 stallSec, qint64 requestSentMs); // T1: the first status after a return
     qint64 m_verifyWallStartMs = 0;  // R1: wall clock at the start of the data check
     quint64 m_verifyNetGen = 0;      // the network generation at the start of the data check
     qint64 m_verifyRxStart = -1;     // R1: the tunnel's receive counter then (-1 = unknown)       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
@@ -1138,7 +1140,7 @@ private:
     QString choiceJournal() const;
     // Pin a server the person tapped. A server the transport mode cannot serve switches the mode to Auto and is
     // selected (coordinator decision 9 of 18.11: the latest explicit action wins; the UI gets a notice).
-    bool pinServer(const QString &nodeId, QString &err);
+    bool pinServer(const QString &nodeId, QString &err, bool exactRow = false); // S1: exactRow = a Scanner row
     // The attempt owner's journal lines, its ledger (persisted) and its result for the person. true = something
     // changed for the UI.
     bool syncAttempt();
@@ -1386,6 +1388,8 @@ private:
     void rebuildApiCarveOut();
     // AVPN (разбор 2026-09-23): IP хостов control plane (все edge-кандидаты) → m_apiHostIps заранее.
     void resolveApiCarveHosts(const QStringList &hosts);
+    // Device round air-I review F4: the hosts asked before without a public address yet, asked again (api_reset owner).
+    void resolveApiCarveHostsStillMissing();
     // ЕДИНЫЙ список carve-IP (вкомпиленный фолбэк + m_apiHostIps) — для выреза И для стампа сева
     // (bypassSeedStamp): один источник исключает дрейф «carve изменился, а стамп не заметил».
     QStringList apiCarveIps() const;
@@ -1494,6 +1498,8 @@ private:
     int                         m_tunnelBuildSeq = -1; // Android local build: the service's start being built (seq)
     QVariantMap                 m_serviceSessionMeta;  // Android (android2 P7): the session the VPN service runs (STATUS)
     quint64                     m_judgedAttempt = 0;   // the attempt whose result syncAttempt judged last (startRefusal)
+    quint64                     m_notStartedAttempt = 0; // S1 rule 2: the attempt that ended inside connect()
+    qint64                      m_thawStallArmedMs = 0;   // T1: the real return the one stall judgement is armed for
     // K3: после liveSessionFound ждём реальный статус профиля ограниченно (без вечного m_busy);
     // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
     bool                        m_liveSessionPending = false;
@@ -1766,6 +1772,7 @@ private:
     // байпаса — control plane всегда через туннель, см. CidrCarve.h.
     QList<QHostAddress>          m_apiHostIps;
     QHash<QString, QStringList>  m_apiHostIpsByHost;          // AVPN Scanner: the same IPs per host (knownHostIps)
+    QStringList                  m_apiCarveHostsAsked;        // review F4: every host resolveApiCarveHosts was asked for
     QString                      m_lastBypassSeedStamp; // AVPN: стамп последнего доехавшего сева АнтиВПН (BypassSeedStamp.h) — скип пересева при неизменных входах
     bool                         m_busy = false;
     // AVPN (macOS, beachball-фикс): установка root-демона идёт в фоновом потоке; флаг гейтит

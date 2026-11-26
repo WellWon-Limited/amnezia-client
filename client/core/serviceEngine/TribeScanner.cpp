@@ -1,5 +1,6 @@
 #include "TribeScanner.h"
 
+#include "ApiHostAddress.h"  // publicUnicastOnly: review F4
 #include "DoctorReport.h"    // doctor::countryDisplayName: the app's country names (ru / es tables, QLocale)
 #include "ScanPlan.h"        // scanAwgMiniFlag
 #include "TuningStore.h"
@@ -206,6 +207,7 @@ TribeScanner::TribeScanner(const Deps &d, QObject *parent)
             self->timerFired();
     };
     m_m.restoreBudget(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetStoreKey))).array());
+    m_m.restoreProjection(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetProjectionStoreKey))).object());
     // the pool's last answer is restored in configureApi: it is shown only for the account it was fetched for
     m_enabled = scannerSwitchOn(TuningStore::flag(QLatin1String(kScannerFlag), false), kScanHostOnThisBuild);
     m_doctorLegacy = TuningStore::flag(QLatin1String(kDoctorLegacyFlag), false);
@@ -329,7 +331,7 @@ void TribeScanner::syncTunnelFacts()
     if (m_syncingTunnelFacts)
         return;
     QStringList ids;
-    for (const QString &id : m_m.rowIds())
+    for (const QString &id : m_m.tunnelFactIds()) // S4: the held rows and every stored result's rows
         if (!ids.contains(id) && m_engine->rowFailedInTunnelHere(id))
             ids << id;
     ids.sort();
@@ -386,6 +388,8 @@ void TribeScanner::execute(const ScanAction &a)
         break;
     case ScanActionKind::PersistBudget:
         m_store->write(QLatin1String(kScanBudgetStoreKey), compactArray(a.ledger));
+        m_store->write(QLatin1String(kScanBudgetProjectionStoreKey), // S3 (review C2): with the ledger, always
+                       QJsonDocument(m_m.projectionJson()).toJson(QJsonDocument::Compact));
         break;
     case ScanActionKind::CloseScreen:
         emitLog(QStringLiteral("action close_screen"));
@@ -921,8 +925,12 @@ void TribeScanner::finishResolve(const QStringList &ips)
     const Resolving r = m_resolving;
     m_resolving = Resolving();
     m_resolveUntil = -1;
-    emitLog(QStringLiteral("probe base addresses=%1").arg(scanBaseIpsOf(ips).size()));
-    continueManifest(r.requestId, r.result, scanBaseIpsOf(ips));
+    // Device round air-I review F4: only public unicast answers (ApiHostAddress.h) - inside a provider session the
+    // lookup gets its FakeDNS address. None: no base_ips (no AmneziaWG mini probe, "awg_no_api_ip"; no proof by
+    // exclusion, ScanMachine evaluateExclusion "no_base_ip").
+    const QStringList base = scanBaseIpsOf(publicUnicastOnly(ips));
+    emitLog(QStringLiteral("probe base addresses=%1 not_public=%2").arg(base.size()).arg(scanBaseIpsOf(ips).size() - base.size()));
+    continueManifest(r.requestId, r.result, base);
 }
 
 void TribeScanner::continueManifest(const QString &id, const ScanApiClient::Manifest &r, const QStringList &baseIps)
@@ -1288,7 +1296,11 @@ void TribeScanner::onStartReply(const HostAsk &ask, const ScanStartRequest &req,
         finishHeldStart(id, &r); // the second refusal: no third attempt
         return;
     }
-    emitLog(QStringLiteral("host start error=%1").arg(QLatin1String(scanHostErrorName(r.error))));
+    // owner road 26.11 (J3): a memory refusal carries the host's available and needed MB (ScanHostContract "memory")
+    emitLog(r.memMb >= 0 || r.needMb >= 0
+                ? QStringLiteral("host start error=%1 mem_mb=%2 need_mb=%3")
+                      .arg(QLatin1String(scanHostErrorName(r.error))).arg(r.memMb).arg(r.needMb)
+                : QStringLiteral("host start error=%1").arg(QLatin1String(scanHostErrorName(r.error))));
     // The error IS the reply to scan_start: the host never took it (host charge 0, settled at once). Its detail
     // names the cause where it has one (kill_switch_exemption -> host_kill_switch, the core's rule).
     machineStartNotTaken(id, r.error, scanHostFailureDetail(r));
@@ -2316,6 +2328,7 @@ void TribeScanner::chargeOutsideScan(qint64 bytes, bool cellular)
     l.prune(now());
     m_m.restoreBudget(l.toJson());
     m_store->write(QLatin1String(kScanBudgetStoreKey), compactArray(l.toJson()));
+    m_store->write(QLatin1String(kScanBudgetProjectionStoreKey), QJsonDocument(m_m.projectionJson()).toJson(QJsonDocument::Compact));
 }
 
 void TribeScanner::sampleSpeed(qint64 bytes, int timeoutMs, std::function<void(const ScanSpeedSample &)> done)

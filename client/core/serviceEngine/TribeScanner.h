@@ -268,6 +268,8 @@ inline constexpr char kScannerReturnHomeFlag[] = "scanner_return_home";
 // with that reason - the same one the iOS refusal gives.
 inline constexpr char kScanCapsAwgWithheldField[] = "awg_unavailable";
 inline constexpr char kScanBudgetStoreKey[] = "avpn/scanBudget";
+// S3 (review C2): the last plan's projection per network kind, written with the ledger, read back at construction.
+inline constexpr char kScanBudgetProjectionStoreKey[] = "avpn/scanBudgetProjection";
 inline constexpr char kScanCacheStorePrefix[] = "avpn/scanCache/";
 inline constexpr char kScanCacheIndexKey[] = "avpn/scanCacheIndex";
 inline constexpr int kScanCacheMaxNetworks = 8;
@@ -463,7 +465,7 @@ private:
     void dispatch(const ScanStep &s);
     void execute(const ScanAction &a);
     void afterStep();
-    void syncTunnelFacts();          // the ledger's S6 fact on the machine's rows (tunnelNoDataHere)
+    void syncTunnelFacts();          // the ledger's S6 fact on the machine's rows and stored results (tunnelNoDataHere)
     QStringList m_tunnelNoData;      // the set last handed over
     bool m_syncingTunnelFacts = false;
     void reschedule();

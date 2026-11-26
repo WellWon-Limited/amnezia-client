@@ -957,12 +957,19 @@ public:
         finishStep(s, now);
         return s;
     }
-    // Every row the machine holds (fresh, cached, the live one): what the coordinator asks the ledger about.
-    QStringList rowIds() const
+    // What the coordinator asks the ledger about (tunnelNoDataHere): every row the machine holds (fresh, cached, the live
+    // one) AND every row of the stored results the choice counts (m_slots, slotWorks). Owner road 26.11 (S4, J8): with
+    // only the held rows, «Сканировать» cleared them, the set went empty and the choice said 7 where the result's rings
+    // said 4 - one definition of «N доступно» needs a set that does not depend on which rows are loaded.
+    QStringList tunnelFactIds() const
     {
         QStringList out;
         for (const Row &r : m_rows)
             out << r.id;
+        for (const ScanCachedResult &c : m_slots)
+            for (const ScanCachedRow &r : c.rows)
+                if (!out.contains(r.id))
+                    out << r.id;
         return out;
     }
 
@@ -1213,8 +1220,12 @@ public:
             if (st->hostStarted && st->stage != HostStage::Settled) {
                 if (!accepted) {
                     settleHost(*st, 0, now, s); // the start was refused: nothing was admitted
-                    if (st == &m_cur && !m_liveProbeSent)
-                        m_cooldownUntil = m_cooldownPrev; // nothing was probed: no cooldown (retry at once)
+                    // Nothing was probed: no cooldown (retry at once) - unless the live probe already went through
+                    // the tunnel (bytes moved: the pause holds, its texts say «через минуту»). A refusal for memory
+                    // always gives the pause back (owner road 26.11, J3; review C1): its text tells the person to turn
+                    // the VPN off and run the check again - a pause would refuse exactly that. The bytes stay charged.
+                    if (st == &m_cur && (!m_liveProbeSent || e == ScanHostError::Memory))
+                        m_cooldownUntil = m_cooldownPrev;
                 }
                 else if (st->stage == HostStage::Running)
                     freezeHost(*st, now, s);    // bytes may have moved: the draining rule
@@ -2318,15 +2329,35 @@ private:
         return budgetBlocked(now).hourly ? QStringLiteral("budget") : QString();
     }
 
+    // S3 (owner road 26.11; review C2): the gate is the start's own rule over the last plan's projection of this network
+    // kind (persisted with the ledger, restoreProjection), ScanBudget.h decideScanStart.
     ScanBudgetDecision budgetBlocked(qint64 now) const
     {
-        if (m_net.kind != ScanNetKind::Cellular && m_manifest.manifest.deviceBytesPerHour <= 0) {
-            ScanBudgetDecision d;
-            return d;
-        }
-        const qint64 projection = (m_lastProjection > 0 ? m_lastProjection : 0) + appWorstCase();
-        return decideScanBudget(m_ledger, now, m_net.kind, projection, m_manifest.manifest.deviceBytesPerHour, m_t);
+        return decideScanStart(m_ledger, now, m_net.kind, startNeed(lastProjectionFor(m_net.kind)),
+                               m_manifest.manifest.deviceBytesPerHour, m_t);
     }
+    // What a start needs of the allowance for a plan of `planBytes`: the plan, the app side at its worst cases, the host's
+    // opening and closing access attempts. One expression for the gate and the start check.
+    qint64 startNeed(qint64 planBytes) const
+    {
+        return qMax<qint64>(0, planBytes) + appWorstCase() + 2 * qint64(m_t.costNetinfoBytes);
+    }
+    qint64 lastProjectionFor(ScanNetKind k) const { return k == ScanNetKind::Cellular ? m_lastProjectionCell : m_lastProjectionOther; }
+
+public:
+    // S3 (review C2): the last plan's projection per network kind, kept with the ledger in the coordinator's store
+    // (TribeScanner writes it whenever it writes the ledger) and given back at construction, before the first view.
+    void restoreProjection(const QJsonObject &o)
+    {
+        m_lastProjectionCell = ScanBudgetLedger::storedBytes(o.value(QLatin1String("cellular"))); // the ledger's guard
+        m_lastProjectionOther = ScanBudgetLedger::storedBytes(o.value(QLatin1String("other")));
+    }
+    QJsonObject projectionJson() const
+    {
+        return QJsonObject{{QStringLiteral("cellular"), double(m_lastProjectionCell)}, {QStringLiteral("other"), double(m_lastProjectionOther)}};
+    }
+
+private:
 
     void adoptNetwork(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now)
     {
@@ -2459,9 +2490,16 @@ private:
         const QString scope = scanScopeOf(c.scope);
         int n = 0;
         for (const ScanCachedRow &r : c.rows)
-            n += (scanClassWorking(r.cls) && scanRowInScope(r.countryCode, scope)
-                  && !(m_tunnelNoData.contains(r.id) && !r.fullProof)) ? 1 : 0;
+            n += (scanClassWorking(r.cls) && scanRowInScope(r.countryCode, scope) && !failedHere(r.id, r.fullProof)) ? 1 : 0;
         return n;
+    }
+    // The one rule of «не удалось здесь» for both counts of «N доступно» (the result's rings through rowViewOf, the
+    // choice through slotWorks): the row's real tunnel carried no data on this network (unless this result proved its
+    // full path), or a tap on it failed now (review C6 of the owner road 26.11: the rings left a tap-failed row out, the
+    // choice counted it).
+    bool failedHere(const QString &id, bool fullProof) const
+    {
+        return (m_tunnelNoData.contains(id) && !fullProof) || m_tapFailed.contains(id);
     }
     qint64 slotFreshMs() const { return qMin(kScanCacheShowMaxMs, qint64(m_t.cacheWorksTtlS) * 1000); }
 
@@ -2642,6 +2680,14 @@ private:
             return;
         if (m_liveProbeNode == m_current.nodeId)
             return;
+        // S3 (review C2): outside a running scan the probe is a request of its own against the hour - it follows the
+        // button's gate: with the hour blocked an open or a tap sends nothing chargeable (the row stays «Подключено»,
+        // unproven, as with no room in the allowance)
+        const bool inScan = m_cur.open && !m_cur.scanEnded && m_cur.scanId == m_scanId;
+        if (!inScan && budgetBlocked(m_last).hourly) {
+            m_liveReasons.insert(m_current.nodeId, QStringLiteral("live_budget"));
+            return;
+        }
         m_liveProbeNode = m_current.nodeId;
         m_liveProbeDone = false;
         ScanAction a = act(ScanActionKind::ProbeLiveTunnel);
@@ -2660,7 +2706,8 @@ private:
     }
 
     // The manual cooldown runs scan_manual_cooldown_s from this scan's START (plan §1.2), armed only by a scan
-    // that reached a host (StartHostScan; a refused start disarms it) or sent the live-tunnel probe.
+    // that reached a host (StartHostScan; a refused start disarms it, unless the live probe went - except for memory)
+    // or sent the live-tunnel probe.
     void armCooldown()
     {
         m_cooldownUntil = qMax(m_cooldownUntil, m_scanStartAt + qint64(m_t.manualCooldownS) * 1000);
@@ -2711,7 +2758,7 @@ private:
 
     void beginScan(qint64 now, ScanStep &s, bool userPressedConnect = false)
     {
-        // Budget pre-check with the last projection (no manifest fetch on a blocked cellular hour).
+        // Budget pre-check by the start's own rule over the last projection (no manifest fetch on a blocked cellular hour).
         const ScanBudgetDecision pre = budgetBlocked(now);
         if (pre.hourly) {
             toNoScan(QStringLiteral("budget"), now, s);
@@ -2957,10 +3004,11 @@ private:
         m_planRemaining = m_fromServer ? (m_serverExhausted ? 0 : 1) : plan.remaining;
         m_planCandidates = plan.probe.size() + plan.orderOnly.size();
         m_manifestRevision = m_manifest.manifest.upstreamRevision;
-        m_lastProjection = plan.projectedBytes;
-        const qint64 attempts = 2 * qint64(m_t.costNetinfoBytes); // the host's opening + closing access attempts
-        const ScanBudgetDecision b = decideScanBudget(m_ledger, now, m_scanNet.kind, plan.projectedBytes + appWorstCase() + attempts,
-                                                      m_manifest.manifest.deviceBytesPerHour, m_t);
+        // S3 (review C2): the projection is stored BEFORE the judgement - a plan that grew past what the hour has left
+        // keeps the gate blocked from now on (persisted with the ledger by the coordinator)
+        (m_scanNet.kind == ScanNetKind::Cellular ? m_lastProjectionCell : m_lastProjectionOther) = plan.projectedBytes;
+        const ScanBudgetDecision b = decideScanStart(m_ledger, now, m_scanNet.kind, startNeed(plan.projectedBytes),
+                                                     m_manifest.manifest.deviceBytesPerHour, m_t);
         if (!b.allowed) {
             m_startedVpn = false;
             toNoScan(QStringLiteral("budget"), now, s);
@@ -4002,9 +4050,14 @@ private:
             if (!c.exclusionPending)
                 continue;
             c.exclusionPending = false;
-            const QString why = sameNet ? scanExclusionWhy(m_manifest.strictUnverifiable, m_opening, m_openingStamp, closing, stamp, stamp,
-                                                           m_net.sources, c.pendingFacts.startMs, c.pendingFacts.endMs)
-                                        : QStringLiteral("generation");
+            // Device round air-I review F4: without a public address of the probe base from the app the host resolved
+            // the name itself - inside a provider session that is the session's FakeDNS address, and attempts to it
+            // fail at the network level whatever the access network does: no proof by exclusion («Не проверено»).
+            const QString why = !sameNet                        ? QStringLiteral("generation")
+                                : m_manifest.probeBaseIps.isEmpty() ? QStringLiteral("no_base_ip")
+                                                                    : scanExclusionWhy(m_manifest.strictUnverifiable, m_opening, m_openingStamp,
+                                                                                       closing, stamp, stamp, m_net.sources,
+                                                                                       c.pendingFacts.startMs, c.pendingFacts.endMs);
             if (!why.isEmpty()) {
                 m_exclusionWhy = why;
                 continue; // stays «Не проверено» (unverifiable)
@@ -4265,7 +4318,7 @@ private:
         // S6 (device round 5) in the one verdict of the row: its real tunnel carried no data on this network and nothing
         // proved it through its own full path since - «Не удалось», never «Доступно» on a light probe (PathLedger stage
         // 2). This network's handshake + data download of the same path outranks the older mark (device round air-C, D1).
-        if (!isCurrent && m_tunnelNoData.contains(r.id) && !fullProofOf(r))
+        if (!isCurrent && failedHere(r.id, fullProofOf(r)))
             v.state = ScanRowState::Failed;
         if (isCurrent) {
             v.state = ScanRowState::Connected;
@@ -4655,7 +4708,6 @@ private:
     qint64 m_lastSeq = 0;
     qint64 m_spent = 0;
     qint64 m_cap = -1;
-    qint64 m_lastProjection = 0;
     QHash<QString, ScanClass> m_verdicts;     // per candidate of this scan (the Doctor summary): every planned one ends here
     QHash<QString, QString> m_nvReasonOf;     // candidate id -> reason key of its NotVerified verdict
     QHash<QString, QString> m_liveReasons;    // node id -> why the live row stayed unproven (live_budget, live_<reason>)
@@ -4700,8 +4752,10 @@ private:
     QHash<QString, Charged> m_charged; // request id -> what the ledger got for it (until its real size comes)
     QStringList m_chargedOrder;
     qint64 m_cooldownUntil = 0;
-    qint64 m_cooldownPrev = 0;        // the cooldown before this scan armed its own (a refused start restores it)
+    qint64 m_lastProjectionCell = 0;  // S3 (review C2): the last plan's projection on cellular / elsewhere (persisted)
+    qint64 m_lastProjectionOther = 0;
     bool m_liveProbeSent = false;     // this scan sent the live-tunnel probe (bytes moved: the cooldown holds)
+    qint64 m_cooldownPrev = 0;        // the cooldown before this scan armed its own (a refused start restores it)
     qint64 m_lastManifestAt = LLONG_MIN / 2; // the last manifest request (the buttons' back-off)
     qint64 m_finishedAt = 0;
     // «Найти ещё» (moreTapped)

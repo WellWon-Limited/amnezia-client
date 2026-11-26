@@ -1106,6 +1106,8 @@ inline QList<Scenario> scenarios()
                       f.check(bar.value(QLatin1String("button_value")).toInt() >= 1, QStringLiteral("minutes >= 1"));
                       f.check(bar.value(QLatin1String("hint")).toString() == QLatin1String("cellular_budget_hour"), QStringLiteral("budget hint"));
                       f.check(countActions(d, ScanActionKind::RequestManifest) == 1, QStringLiteral("second open fetched nothing"));
+                      // S3 (review C2): the blocked hour sends nothing chargeable outside a scan - no live probe either
+                      f.check(countActions(d, ScanActionKind::ProbeLiveTunnel) == 0, QStringLiteral("no live probe while blocked"));
                   }};
 
     // 20. Support chat run_diag: scan, then the button's check runs by itself.
@@ -1308,6 +1310,7 @@ inline QList<Scenario> scenarios()
             if (!n.provider)
                 w.out[n.id].reachOk = false, w.out[n.id].handshake = false;
         w.accessOpen = QStringLiteral("network_error");
+        w.probeBaseIps = {QStringLiteral("95.217.135.30")}; // the app's public address of the probe base (review F4)
         w.script << qMakePair(qint64(0), at("opened", openArgs(w, QString(), false)));
         w.runMs = 12000;
         return w;
@@ -1384,6 +1387,26 @@ inline QList<Scenario> scenarios()
                       return w;
                   },
                   exclNot};
+    // Review F4 (25.11): no public address of the probe base from the app (every answer was the provider session's
+    // FakeDNS pool): the host dialled what it resolved itself - no proof by exclusion, the row stays «Не проверено»,
+    // nothing of it reaches the path ledger (only works / slow cached rows do, AvpnEngineQml::attachScanner).
+    l << Scenario{QStringLiteral("exclusion_no_public_base"),
+                  {QStringLiteral("no public probe base address -> not verified, no cached works row")},
+                  [exclWorld] {
+                      World w = exclWorld("exclusion_no_public_base");
+                      w.probeBaseIps.clear();
+                      return w;
+                  },
+                  [exclNot](const Driver &d, Fail &f) {
+                      exclNot(d, f);
+                      bool cachedWorks = false;
+                      for (const ScanAction &a : actionsOf(d, ScanActionKind::PersistResults))
+                          for (const ScanCachedRow &c : a.cached.rows)
+                              cachedWorks = cachedWorks || (c.id == up(1) && (c.cls == ScanClass::Works || c.cls == ScanClass::Slow));
+                      f.check(!cachedWorks, QStringLiteral("no works row for the path ledger"));
+                      f.check(d.m.lastStats().value(QLatin1String("exclusion_why")).toString() == QLatin1String("no_base_ip"),
+                              QStringLiteral("why: no_base_ip"));
+                  }};
     l << Scenario{QStringLiteral("exclusion_strict"),
                   {QStringLiteral("features.upstream_unverifiable_strict -> not verified")},
                   [exclWorld] {

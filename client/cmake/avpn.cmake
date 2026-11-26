@@ -92,6 +92,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/WhitelistDetector.h
     ${AVPN_SE}/DoctorReport.h
     ${AVPN_SE}/WhoamiVerdict.h
+    ${AVPN_SE}/ApiHostAddress.h
     ${AVPN_SE}/Ipv6Presence.h
     ${AVPN_SE}/CrashGuard.h
     ${AVPN_SE}/TribeNetInfo.h

@@ -144,11 +144,19 @@ public:
         for (const QJsonValue &v : a) {
             const QJsonObject o = v.toObject();
             const qint64 at = qint64(o.value(QLatin1String("at_ms")).toDouble(0));
-            const qint64 b = qint64(o.value(QLatin1String("bytes")).toDouble(0));
-            if (at > 0 && b > 0 && b < (qint64(1) << 40))
+            const qint64 b = storedBytes(o.value(QLatin1String("bytes")));
+            if (at > 0 && b > 0)
                 l.add(at, b, o.value(QLatin1String("cellular")).toBool(false));
         }
         return l;
+    }
+
+    // The one guard on a byte count read back from the store (the ledger's entries, the last plan's projection -
+    // review of f0cca9dbb): a value outside (0, 2^40) is no count - 0.
+    static qint64 storedBytes(const QJsonValue &v)
+    {
+        const double d = v.toDouble(0);
+        return d > 0 && d < double(qint64(1) << 40) ? qint64(d) : 0;
     }
 
 private:
@@ -201,6 +209,18 @@ inline ScanBudgetDecision decideScanBudget(const ScanBudgetLedger &ledger, qint6
     }
     d.capBytes = cap;
     return d;
+}
+
+// S3 (owner road 26.11, J8; review C2): THE allowance rule of a scan start - the button's gate and the start check
+// alike. needBytes = a plan's projection with the app side at its worst cases and the host's access attempts
+// (ScanMachine::startNeed): the start passes the plan it just built, the gate the last plan's projection, persisted with
+// the ledger and restored at construction (none known yet: the smallest need, the app side alone). The start stores
+// its plan's projection before it judges, so a start that blocks because the plan grew leaves the gate blocked from
+// then on - at most one spent request per growth of the plan, never a false block of a scan that fits.
+inline ScanBudgetDecision decideScanStart(const ScanBudgetLedger &ledger, qint64 nowMs, ScanNetKind net, qint64 needBytes,
+                                          qint64 deviceBytesPerHour, const ScanTunables &t)
+{
+    return decideScanBudget(ledger, nowMs, net, needBytes, deviceBytesPerHour, t);
 }
 
 // Whole minutes for the «Повторить через N мин» button (at least 1 while blocked).

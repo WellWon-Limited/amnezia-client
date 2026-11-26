@@ -28,11 +28,35 @@ using namespace avpn;
 
 namespace {
 
-// The one owner's step (AvpnEngineQml::applyNativeState).
+// The host-name drop as a test sees it (the app's is Qt's qt_qhostinfo_clear_cache, iOS only - NetAwait.h
+// kQtHostCacheClear): counts the calls, records the thread they ran on, optionally stands for a lookup that is still
+// running (holdMs: clear() waits for it).
+struct HostCacheProbe {
+    static inline std::atomic<int> clears{0};
+    static inline std::atomic<int> holdMs{0};
+    static inline std::atomic<QThread *> ranOn{nullptr};
+    static void reset(int hold = 0)
+    {
+        clears = 0;
+        holdMs = hold;
+        ranOn = nullptr;
+    }
+    static void clear()
+    {
+        ranOn = QThread::currentThread();
+        if (holdMs > 0)
+            QThread::msleep(holdMs);
+        ++clears;
+    }
+};
+
+// The one owner's step (AvpnEngineQml::applyNativeState): the reset, then the host names off its thread.
 void onTransition(QNetworkAccessManager *nam, ObservedTunnel previous, ObservedTunnel now)
 {
-    if (newApiGeneration(previous, now))
+    if (newApiGeneration(previous, now)) {
         resetApiConnections(nam);
+        dropCachedHostNamesSoon(&HostCacheProbe::clear, nam, [](qint64) {});
+    }
 }
 
 QByteArray readEnvFile(const char *var)
@@ -166,6 +190,110 @@ private slots:
         QVERIFY(!newApiGeneration(ObservedTunnel::Unknown, ObservedTunnel::Disconnected)); // cold start, tunnel off
         QVERIFY(!newApiGeneration(ObservedTunnel::Connected, ObservedTunnel::Transitional));
         QVERIFY(!newApiGeneration(ObservedTunnel::Disconnected, ObservedTunnel::Disconnected));
+    }
+
+    // Device round air-I (25.11, candidate b29ed248b, app journal): 37 tunnel-up and 36 tunnel-down events gave 73
+    // api_reset lines - one each; the 32 repeated Connecting, 31 repeated Disconnecting, 6 re-asserts (Connected ->
+    // Connecting) and 5 Error gave none. The journal's own sequences through the one owner's step: one reset - and one
+    // drop of the host names - per tunnel up and per tunnel down; a roam series adds one per re-assert, nothing else.
+    void journalSequencesResetOncePerTransition()
+    {
+        using O = ObservedTunnel;
+        struct Case {
+            const char *name;
+            QList<O> states; // states[0]: what the app held before; then every native state in order
+            quint64 resets;
+        };
+        const QList<Case> cases = {
+            // a start, three Wi-Fi off/on cycles of own Xray with the tunnel up (W4: each a re-assert, seen as
+            // Connecting), the stop
+            {"start-roam-x3-stop",
+             {O::Disconnected, O::Transitional, O::Transitional, O::Connected, O::Transitional, O::Connected,
+              O::Transitional, O::Connected, O::Transitional, O::Connected, O::Transitional, O::Transitional,
+              O::Disconnected},
+             5},
+            // the automatic failover chain of 18:09:48-18:10:28: a leg up and stopped, a provider leg whose start
+            // failed (Error), the next leg up and stopped
+            {"failover-chain",
+             {O::Disconnected, O::Transitional, O::Transitional, O::Connected, O::Transitional, O::Transitional,
+              O::Disconnected, O::Error, O::Transitional, O::Disconnected, O::Transitional, O::Transitional,
+              O::Connected, O::Transitional, O::Transitional, O::Disconnected},
+             5},
+            // AmneziaWG Wi-Fi -> LTE -> Wi-Fi (W1) and airplane flaps (W3): the tunnel roams in place, the app sees no
+            // native state at all
+            {"awg-roam-in-place", {O::Connected}, 0},
+            // a repeated Connected (6 in the air-H journal, none in air-I): one each, as upstream cleared on every one
+            {"connected-repeats", {O::Connected, O::Connected, O::Connected}, 2},
+            // a cold start with the tunnel off, then repeated Disconnected statuses: nothing
+            {"repeats-down", {O::Unknown, O::Disconnected, O::Disconnected, O::Disconnected}, 0},
+        };
+        for (const Case &c : cases) {
+            TribeNetworkAccessManager nam;
+            HostCacheProbe::reset();
+            for (int i = 1; i < c.states.size(); ++i)
+                onTransition(&nam, c.states.at(i - 1), c.states.at(i));
+            QVERIFY2(nam.generation() == c.resets, qPrintable(QString("%1: %2 resets").arg(c.name).arg(nam.generation())));
+            QTRY_VERIFY2(quint64(HostCacheProbe::clears.load()) == c.resets,
+                         qPrintable(QString("%1: %2 host-name drops").arg(c.name).arg(HostCacheProbe::clears.load())));
+            QTest::qWait(50); // and no late one
+            QCOMPARE(quint64(HostCacheProbe::clears.load()), c.resets);
+        }
+    }
+
+    // The drop waits for a lookup that is still running (clear(): threadPool.waitForDone()) - never on the caller's
+    // thread: the transition returns at once, the reset is done, the next one too, and API calls run while the drop is
+    // held; it runs on its own thread, one after another, and reports on the caller's thread when done. Where nothing is
+    // callable: no call at all.
+    void theHostNameDropNeverWaitsOnTheCallersThread()
+    {
+        TribeNetworkAccessManager nam;
+        HostCacheProbe::reset(/*hold=*/1500); // a getaddrinfo the resolver keeps for 1.5 s
+        int completed = 0, reissued = 0;
+        fetch(&nam, &completed, &reissued);
+        QTRY_COMPARE(requests, 1);
+        QElapsedTimer t;
+        t.start();
+        onTransition(&nam, ObservedTunnel::Connected, ObservedTunnel::Disconnected);
+        onTransition(&nam, ObservedTunnel::Disconnected, ObservedTunnel::Connected);
+        QVERIFY2(t.elapsed() < 100, qPrintable(QString("the transitions took %1 ms").arg(t.elapsed())));
+        QCOMPARE(nam.generation(), quint64(2));
+        QCOMPARE(HostCacheProbe::clears.load(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(completed, 1, 1400); // re-issued and answered while the first drop is still held
+        QCOMPARE(reissued, 1);
+        QCOMPARE(HostCacheProbe::clears.load(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(HostCacheProbe::clears.load(), 2, 5000); // one after another
+        QVERIFY(HostCacheProbe::ranOn.load() != QThread::currentThread());
+
+        HostCacheProbe::reset(/*hold=*/300);
+        bool called = false;
+        qint64 tookMs = -1;
+        QThread *reportedOn = nullptr;
+        QVERIFY(dropCachedHostNamesSoon(&HostCacheProbe::clear, &nam, [&](qint64 ms) {
+            called = true;
+            tookMs = ms;
+            reportedOn = QThread::currentThread();
+        }));
+        QVERIFY(!called);
+        QTRY_VERIFY_WITH_TIMEOUT(called, 3000);
+        QVERIFY(tookMs >= 290);
+        QCOMPARE(reportedOn, QThread::currentThread());
+
+        auto *gone = new QObject; // the owner is destroyed before the drop is done: no report
+        bool reported = false;
+        QVERIFY(dropCachedHostNamesSoon(&HostCacheProbe::clear, gone, [&](qint64) { reported = true; }));
+        delete gone;
+        QTRY_COMPARE_WITH_TIMEOUT(HostCacheProbe::clears.load(), 2, 3000);
+        QTest::qWait(100);
+        QVERIFY(!reported);
+
+        HostCacheProbe::reset();
+        QVERIFY(!dropCachedHostNamesSoon(nullptr, &nam, [&](qint64) { reported = true; }));
+        QTest::qWait(50);
+        QVERIFY(!reported);
+#if !defined(Q_OS_IOS)
+        // this build's Qt is shared: qt_qhostinfo_clear_cache is not exported, the app's default is nothing
+        QVERIFY(kQtHostCacheClear == nullptr);
+#endif
     }
 
     // The Qt behaviour the design never relies on: after clearConnectionCache() the server answers, the reply never

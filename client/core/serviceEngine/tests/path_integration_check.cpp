@@ -255,6 +255,47 @@ int main(int argc, char **argv)
         CHECK(r.eng.pathStateHere(QStringLiteral("16")) == QLatin1String("suspect"));
     }
 
+    // 2a. T1 (owner road 26.11, J1; review C5): the app returns on an AmneziaWG session whose path is dead and the first
+    //     status asked after the return says so: the stall verdict as the live probe reads it (freshDataStallSec) is past
+    //     the threshold outside the network grace - the facade's judgement (DebugSnapshot.h judgeThawStall) starts the
+    //     existing re-check once; its failure is a lost live session and the failover attempt walks on at once.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        r.up();
+        CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
+        r.result();
+        const qint64 nowEpoch = r.now / 1000;
+        TunnelStats reply;
+        reply.dataStallSec = 600;
+        reply.dataStallAtMs = r.now - 400; // asked after the return
+        ThawStallCheckInput in;
+        in.armedForThawMs = r.now - 1000;
+        in.stallAtMs = reply.dataStallAtMs;
+        in.stallSec = r.eng.freshDataStallSec(nowEpoch, reply);
+        in.networkGrace = r.eng.inNetworkGrace(nowEpoch);
+        in.awgConnected = r.eng.state() == EngineState::Connected && !r.eng.currentNodeIsXray() && !r.eng.currentNodeIsUpstream();
+        in.intentOn = true;
+        in.idle = !r.eng.attemptRunning() && !r.eng.isVerifying();
+        in.thresholdSec = awgProbeDeadStallSTuned();
+        CHECK(in.stallSec == 600 && !in.networkGrace && judgeThawStall(in) == ThawStallJudgement::Check);
+        CHECK(r.eng.reenterVerifying() && r.eng.isVerifying());
+        // a stale reply (older than the live probe's freshness) reads as unknown: no check
+        TunnelStats stale = reply;
+        stale.dataStallAtMs = r.now - 60000;
+        CHECK(r.eng.freshDataStallSec(nowEpoch, stale) < 0);
+        const int upsBefore = int(r.tun.ups.size());
+        CHECK(r.eng.verifyFailed(QStringLiteral("whoami no data")) && r.eng.attemptRunning());
+        r.confirmStop();
+        CHECK(int(r.tun.ups.size()) == upsBefore + 1 && r.last() != QLatin1String("17")); // the failover, another server
+        CHECK(journalHas(r.journal, "live_lost node=17 outcome=no_data"));
+        // inside the network-change grace the same reply disarms it
+        r.eng.noteNetworkChange(r.now / 1000);
+        in.networkGrace = r.eng.inNetworkGrace(r.now / 1000);
+        CHECK(in.networkGrace && judgeThawStall(in) == ThawStallJudgement::Disarm);
+    }
+
     // 3. Health DEAD of the live session: the first does not blame the node (re-up of the same node first); once
     //    its re-up budget is spent the node is recorded and the failover attempt walks on without it.
     {
@@ -332,6 +373,87 @@ int main(int argc, char **argv)
         CHECK(!r.eng.connect(err) && err == QLatin1String("exact_unavailable")); // the mode is stronger: not started
         CHECK(r.tun.ups.size() == 2);
         r.eng.setTransportMode(TransportMode::Auto);
+    }
+
+    // 6a. S1 (owner road 26.11, J2; review C4): a Scanner Xray row in AmneziaWG mode. The pin passes by location (the
+    //     host has an AmneziaWG listener); the exact path is not ranked now and would be in Auto - the facade
+    //     (DebugSnapshot.h serverTapSwitchesModeToAuto) switches the mode before the attempt, which then dials exactly
+    //     that row. A row whose node has no health is not ranked in Auto either: no switch, and its tap is not started.
+    {
+        QByteArray dead = xray("17x", 17, "EE", "2.2.2.17:443");
+        dead.replace(R"("weight": 1.0,)", R"("weight": 1.0, "health": { "ru": 0.0 },)");
+        Rig r(sub({ awg("16", 16, "NL", "1.1.1.16:585"), xray("16x", 16, "NL", "2.2.2.16:443"),
+                    awg("17", 17, "EE", "1.1.1.17:585"), dead }));
+        r.eng.setTransportMode(TransportMode::Awg);
+        QString err;
+        CHECK(r.eng.setPinnedNode(QStringLiteral("16x"), err)); // judged per location: passes
+        CHECK(!r.eng.exactPathRanked(QStringLiteral("16x"), TransportMode::Awg)
+              && r.eng.exactPathRanked(QStringLiteral("16x"), TransportMode::Auto)
+              && r.eng.exactPathRanked(QStringLiteral("16"), TransportMode::Awg));
+        CHECK(!r.eng.exactPathRanked(QStringLiteral("nope"), TransportMode::Auto));
+        CHECK(serverTapSwitchesModeToAuto(true, QString(), true, r.eng.exactPathRanked(QStringLiteral("16x"), TransportMode::Awg),
+                                          r.eng.exactPathRanked(QStringLiteral("16x"), TransportMode::Auto)));
+        // the node with no health: Auto would not dial it either - no switch
+        CHECK(r.eng.setPinnedNode(QStringLiteral("17x"), err));
+        CHECK(!r.eng.exactPathRanked(QStringLiteral("17x"), TransportMode::Awg)
+              && !r.eng.exactPathRanked(QStringLiteral("17x"), TransportMode::Auto));
+        CHECK(!serverTapSwitchesModeToAuto(true, QString(), true, false, r.eng.exactPathRanked(QStringLiteral("17x"), TransportMode::Auto)));
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("17x")));
+        CHECK(!r.eng.connect(err) && err == QLatin1String("exact_unavailable") && r.tun.ups.isEmpty()); // not started
+        // before the switch: the Xray row in AmneziaWG mode is refused before any dial
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("16x")));
+        CHECK(!r.eng.connect(err) && err == QLatin1String("exact_unavailable") && r.tun.ups.isEmpty());
+        // after the switch: started, the tapped row first and only
+        r.eng.setTransportMode(TransportMode::Auto);
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("16x")));
+        CHECK(r.eng.connect(err) && r.tun.ups.size() == 1 && r.last() == QLatin1String("16x"));
+        r.noHandshake();
+        CHECK(r.result().reason == path::FailReason::ExactNodeFailed && r.tun.ups.size() == 1); // never another row
+    }
+
+    // 6c. Second read of C4: an exact provider row in AmneziaWG mode - its pin is refused for transport (the location
+    //     has no AmneziaWG node). The mode yields only when Auto would dial the row: healthy -> switch and dial it;
+    //     zero health -> no mode change, the tap not started. A tap from the server list keeps decision 9 (switch).
+    {
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true},
+                              {QStringLiteral("upstream_nodes"), true}}, {}, {});
+        avpn::upstreamPlatformRuntimeReady().store(true);
+        const auto stub = [](const char *id, double health) {
+            SubscriptionNode n;
+            n.nodeId = QString::fromLatin1(id);
+            n.region = QStringLiteral("upstream");
+            n.proto = QStringLiteral("xray");
+            if (health >= 0)
+                n.health.insert(QStringLiteral("ru"), health);
+            UpstreamStub u;
+            u.profileId = n.nodeId.mid(3);
+            u.kind = UpstreamKind::Auto;
+            n.upstream = u;
+            return n;
+        };
+        Rig r(pool);
+        r.eng.setStandbyCandidates({ stub("up:ok1", -1), stub("up:dead1", 0.0) });
+        r.eng.setTransportMode(TransportMode::Awg);
+        QString err;
+        // healthy: the pin is refused for transport, Auto would dial it - the exact row switches (and so does a list tap)
+        CHECK(!r.eng.setPinnedNode(QStringLiteral("up:ok1"), err) && err.startsWith(QLatin1String("no_transport")));
+        const QString okErr = err;
+        CHECK(r.eng.exactPathRanked(QStringLiteral("up:ok1"), TransportMode::Auto));
+        CHECK(serverTapSwitchesModeToAuto(false, okErr, true, false, r.eng.exactPathRanked(QStringLiteral("up:ok1"), TransportMode::Auto)));
+        CHECK(serverTapSwitchesModeToAuto(false, okErr, false, false, false)); // the server list: decision 9 as before
+        // zero health: Auto would not dial it either - the exact row changes no mode, and its tap is not started
+        CHECK(!r.eng.setPinnedNode(QStringLiteral("up:dead1"), err) && err.startsWith(QLatin1String("no_transport")));
+        CHECK(!r.eng.exactPathRanked(QStringLiteral("up:dead1"), TransportMode::Auto));
+        CHECK(!serverTapSwitchesModeToAuto(false, err, true, false, r.eng.exactPathRanked(QStringLiteral("up:dead1"), TransportMode::Auto)));
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("up:dead1")));
+        CHECK(!r.eng.connect(err) && err == QLatin1String("exact_unavailable") && r.tun.ups.isEmpty());
+        // the healthy row after the switch: pinned, started, dialled alone
+        r.eng.setTransportMode(TransportMode::Auto);
+        CHECK(r.eng.setPinnedNode(QStringLiteral("up:ok1"), err));
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("up:ok1")));
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("up:ok1"));
+        avpn::upstreamPlatformRuntimeReady().store(false);
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true}}, {}, {});
     }
 
     // 6b. A server of the list is a preference (owner decision of 17.11, coordinator 18.11): its transports first,

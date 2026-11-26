@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <memory>
 #include <random>
 
 using namespace avpn;
@@ -1326,6 +1327,72 @@ static void machineRules()
         for (const ScanRowView &r : m.view(kT0 + 1200).rows)
             offered = offered || (r.id == QLatin1String("2:xray") && r.tappable);
         CHECK(!offered && m.connectingId().isEmpty());
+    }
+    // S1 rule 2 (owner road 26.11, journal J2): the engine refused the tap before it dialled anything (the attempt ended
+    // inside connect(): exact_unavailable, no_transport, no_network, ...). The facade ends the row's request with
+    // connectRefused("") (AvpnEngineQml::endScanRowRequestNotStarted): no outcome before or after, the row keeps its scan
+    // state and takes a tap again. Before, exactRowFailed sent outcome no_data for the never-dialled row and painted it
+    // «Не удалось».
+    {
+        const auto scanned = [&w]() {
+            auto m = std::make_unique<ScanMachine>(w.caps);
+            m->opened(openOf(w, QStringLiteral("1"), true), kT0);
+            m->manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+            ScanHostProgress p;
+            p.scanId = m->scanId();
+            p.phase = QStringLiteral("data");
+            ScanProbeFacts f = goodData();
+            f.id = QStringLiteral("2:xray");
+            f.egressNode = QStringLiteral("2");
+            f.seq = 1;
+            p.items << withBurst(f);
+            m->hostProgress(p, kT0 + 600);
+            return m;
+        };
+        const auto rowOf = [](const ScanView &v, const QString &id) {
+            for (const ScanRowView &r : v.rows)
+                if (r.id == id)
+                    return r;
+            return ScanRowView();
+        };
+        // failure outcomes of the row (the tap stops the scan, whose own proof of the row - works - goes out as before)
+        const auto outcomesFor = [](const ScanStep &st, const QString &id) {
+            int n = 0;
+            for (const ScanAction &a : st.actions)
+                if (a.kind == ScanActionKind::SendOutcomes)
+                    for (const ScanOutcomeItem &it : a.outcomes)
+                        n += it.id == id && !scanClassWorking(it.outcome) ? 1 : 0;
+            return n;
+        };
+        const QString row = QStringLiteral("2:xray");
+        auto m = scanned();
+        const ScanRowView before = rowOf(m->view(kT0 + 650), row);
+        CHECK(before.id == row && before.tappable && before.state != ScanRowState::Failed);
+        const ScanStep tap = m->rowTapped(row, kT0 + 700);
+        CHECK(tap.has(ScanActionKind::ConnectRow) && outcomesFor(tap, row) == 0); // nothing before a dial
+        const ScanStep refused = m->connectRefused(QString(), kT0 + 720);
+        CHECK(outcomesFor(refused, row) == 0 && m->connectingId().isEmpty());
+        int later = 0;
+        for (qint64 t = kT0 + 1000; t < kT0 + 120000; t += 5000)
+            later += outcomesFor(m->tick(t), row);
+        CHECK(later == 0);
+        const ScanRowView after = rowOf(m->view(kT0 + 120000), row);
+        CHECK(after.state == before.state && after.verified == before.verified && after.tappable && !after.dimmed);
+        CHECK(m->rowTapped(row, kT0 + 120100).has(ScanActionKind::ConnectRow)); // tappable again
+        // review C3: a row refused before anything was dialled (a provider row whose seat request failed, the facade's
+        // seat-first Stay): connectRefused(row) - «Не удалось» until the list is rebuilt, and no outcome at all
+        auto rf = scanned();
+        rf->rowTapped(row, kT0 + 700);
+        int refusedOutcomes = outcomesFor(rf->connectRefused(row, kT0 + 720), row);
+        for (qint64 t = kT0 + 1000; t < kT0 + 60000; t += 5000)
+            refusedOutcomes += outcomesFor(rf->tick(t), row);
+        const ScanRowView refusedRow = rowOf(rf->view(kT0 + 60000), row);
+        CHECK(refusedOutcomes == 0 && !refusedRow.tappable && rf->connectingId().isEmpty());
+        // the contrast: a failure of a dialled exact row (exactRowFailed) is a verdict - outcome and «Не удалось»
+        auto f = scanned();
+        f->rowTapped(row, kT0 + 700);
+        const ScanStep failed = f->exactRowFailed(row, kT0 + 720);
+        CHECK(outcomesFor(failed, row) == 1 && rowOf(f->view(kT0 + 730), row).state == ScanRowState::Failed);
     }
     // R6 (review of 141): the tapped row is an exact request. Its failure ends the chain at once: the old pair
     // connectFailed + attemptEnded moved the chain to the next row and marked THAT row failed, untried.
@@ -3008,6 +3075,77 @@ static void labSeams()
     }
 }
 
+// S3 (owner road 26.11, J8; review C2): after a relaunch the button already knows the hour is spent. The gate is the
+// start's own rule over the last plan's projection, persisted with the ledger and restored at construction
+// (ScanBudget.h decideScanStart, ScanMachine startNeed): a fresh process over a spent hour and a persisted projection
+// shows the limit and sends nothing - no manifest, no live probe; with 1.2 MiB left and a persisted 0.65 MiB projection
+// it is free (no false block of a scan that fits); a start that blocks because the plan grew stores the bigger
+// projection first, so the next tap sends nothing.
+static void s3BudgetGateIsTheStartRule()
+{
+    World w = baseWorld("s3_gate", hostMac(), ScanNetKind::Cellular);
+    const auto ledgerOf = [](qint64 spent) {
+        QJsonArray l;
+        l << QJsonObject{{QStringLiteral("at_ms"), double(kT0 - 20 * 60000)}, {QStringLiteral("bytes"), double(spent)},
+                         {QStringLiteral("cellular"), true}};
+        return l;
+    };
+    const auto projection = [](qint64 cell) {
+        return QJsonObject{{QStringLiteral("cellular"), double(cell)}, {QStringLiteral("other"), 0.0}};
+    };
+    const auto chargeable = [](const ScanStep &st) {
+        return st.has(ScanActionKind::RequestManifest) || st.has(ScanActionKind::ProbeLiveTunnel)
+               || st.has(ScanActionKind::StartHostScan) || st.has(ScanActionKind::RequestProbeBatch)
+               || st.has(ScanActionKind::RequestCandidates) || st.has(ScanActionKind::SendOutcomes);
+    };
+    // the hour spent (as on 26.11: about 3.7 MB of 5 MiB) and the last plan's projection persisted - a fresh process,
+    // the VPN up on a row: blocked, nothing chargeable on open, tap or «Найти ещё»
+    {
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(3800000));
+        m.restoreProjection(projection(1435006));
+        const ScanStep open = m.opened(openOf(w, QStringLiteral("1"), true), kT0);
+        CHECK(!chargeable(open) && m.phase() == ScanPhase::NoScan);
+        const ScanView v = m.view(kT0);
+        CHECK(v.bar.button == ScanBarButton::RetryInMinutes && !v.bar.buttonEnabled && v.bar.buttonValue >= 1
+              && v.bar.hint == ScanHint::CellularBudgetHour);
+        CHECK(!chargeable(m.retryTapped(kT0 + 2000)));
+        CHECK(!chargeable(m.moreTapped(QString(), kT0 + 2100)));
+        CHECK(m.ledger().spentInHour(kT0 + 2200, true) == 3800000); // nothing charged
+    }
+    // 1.2 MiB left, a persisted projection of 0.65 MiB: the scan fits - free, the open fetches the manifest
+    {
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(5242880 - 1258291));
+        m.restoreProjection(projection(681574));
+        const ScanStep open = m.opened(openOf(w, QString(), false), kT0);
+        CHECK(open.has(ScanActionKind::RequestManifest) && m.phase() == ScanPhase::Preparing);
+        CHECK(m.view(kT0).bar.hint != ScanHint::CellularBudgetHour);
+    }
+    // the projection travels with the ledger: what one machine stored, the next one (a relaunch) restores
+    {
+        ScanMachine a(w.caps);
+        a.restoreProjection(projection(777777));
+        ScanMachine b(w.caps);
+        b.restoreProjection(a.projectionJson());
+        CHECK(b.projectionJson() == a.projectionJson());
+        // a corrupt stored value reads as none (the ledger's guard, ScanBudgetLedger::storedBytes), never an overflow
+        b.restoreProjection(QJsonObject{{QStringLiteral("cellular"), 1e300}, {QStringLiteral("other"), -5.0}});
+        CHECK(b.projectionJson().value(QStringLiteral("cellular")).toDouble() == 0 && b.projectionJson().value(QStringLiteral("other")).toDouble() == 0);
+    }
+    // a start that blocks because the plan grew: the projection is stored first - the gate is blocked from then on
+    {
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(5242880 - 900000)); // room for a small plan only
+        m.restoreProjection(projection(0));
+        CHECK(m.opened(openOf(w, QString(), false), kT0).has(ScanActionKind::RequestManifest));
+        m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50); // the whole pool: its projection does not fit
+        CHECK(m.phase() == ScanPhase::NoScan && m.view(kT0 + 60).empty.reason == QLatin1String("budget"));
+        CHECK(m.projectionJson().value(QStringLiteral("cellular")).toDouble() > 0);
+        CHECK(!chargeable(m.retryTapped(kT0 + 2000)) && m.view(kT0 + 2000).bar.button == ScanBarButton::RetryInMinutes);
+    }
+}
+
 static void cooldownRule()
 {
     World w = baseWorld("cool", hostMac(), ScanNetKind::Cellular);
@@ -3059,6 +3197,27 @@ static void cooldownRule()
         CHECK(ls.has(ScanActionKind::ProbeLiveTunnel));
         l.hostFailed(l.scanId(), ScanHostError::Internal, kT0 + 70, false);
         CHECK(l.cooldownUntil() == kT0 + 30000);
+        // owner road 26.11 (S2, J3; review C1): the same refused start for MEMORY gives the pause back - its text tells
+        // the person to turn the VPN off and run the check again; a cooldown armed before this tap stays as it was
+        ScanMachine lm(w.caps);
+        lm.opened(openOf(w, QStringLiteral("2:xray"), true), kT0);
+        CHECK(lm.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50).has(ScanActionKind::ProbeLiveTunnel));
+        lm.hostFailed(lm.scanId(), ScanHostError::Memory, kT0 + 70, false);
+        CHECK(lm.cooldownUntil() <= kT0);
+        const ScanView lv = lm.view(kT0 + 70);
+        CHECK(lv.empty.reason == QLatin1String("host_memory") && lv.bar.button == ScanBarButton::Retry && lv.bar.buttonEnabled
+              && lv.bar.buttonValue == 0);
+        CHECK(lm.retryTapped(kT0 + 1100).has(ScanActionKind::RequestManifest));
+        ScanMachine k(w.caps);
+        k.opened(openOf(w, QString(), false), kT0);
+        k.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50); // armed until kT0 + 30000 by the host start
+        k.hostProgress(progressOf(k, {}, 1000, 0), kT0 + 400);
+        k.hostFailed(k.scanId(), ScanHostError::Internal, kT0 + 500, false); // took the start: the pause holds
+        k.tick(kT0 + 31000);
+        CHECK(k.retryTapped(kT0 + 31000).has(ScanActionKind::RequestManifest));
+        k.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050);
+        k.hostFailed(k.scanId(), ScanHostError::Memory, kT0 + 31070, false);
+        CHECK(k.cooldownUntil() == kT0 + 30000); // what it was before the tap
         // the host never started but the app-side scan sent the live probe (grant below one probe): the cooldown
         World ws = baseWorld("cool_app_side", hostMac(), ScanNetKind::Cellular);
         ws.manifestBytes = 270336;
@@ -5641,6 +5800,7 @@ int main(int argc, char **argv)
     hostFailures();
     contractV23();
     labSeams();
+    s3BudgetGateIsTheStartRule();
     cooldownRule();
     rowsAfter17Nov();
     countrylessRows();
