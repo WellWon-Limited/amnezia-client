@@ -334,6 +334,29 @@ int main(int argc, char **argv)
         r.eng.setTransportMode(TransportMode::Auto);
     }
 
+    // 6a. S1 (owner road 26.11, journal J2): a Scanner Xray row in AmneziaWG mode. The pin passes by location (the host
+    //     has an AmneziaWG listener), the exact path's own kind does not - the facade (DebugSnapshot.h
+    //     serverTapSwitchesModeToAuto) switches the mode to Auto before the attempt, which then dials exactly that row.
+    {
+        Rig r(sub({ awg("16", 16, "NL", "1.1.1.16:585"), xray("16x", 16, "NL", "2.2.2.16:443") }));
+        r.eng.setTransportMode(TransportMode::Awg);
+        QString err;
+        CHECK(r.eng.setPinnedNode(QStringLiteral("16x"), err)); // judged per location: passes
+        CHECK(!r.eng.modeAllowsExactPath(QStringLiteral("16x")) && r.eng.modeAllowsExactPath(QStringLiteral("16")));
+        CHECK(!r.eng.modeAllowsExactPath(QStringLiteral("nope")));
+        CHECK(serverTapSwitchesModeToAuto(true, QString(), true, r.eng.modeAllowsExactPath(QStringLiteral("16x"))));
+        // before: the exact row in AmneziaWG mode is refused before any dial
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("16x")));
+        CHECK(!r.eng.connect(err) && err == QLatin1String("exact_unavailable") && r.tun.ups.isEmpty());
+        // after the switch: started, the tapped row first and only
+        r.eng.setTransportMode(TransportMode::Auto);
+        CHECK(r.eng.modeAllowsExactPath(QStringLiteral("16x")));
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("16x")));
+        CHECK(r.eng.connect(err) && r.tun.ups.size() == 1 && r.last() == QLatin1String("16x"));
+        r.noHandshake();
+        CHECK(r.result().reason == path::FailReason::ExactNodeFailed && r.tun.ups.size() == 1); // never another row
+    }
+
     // 6b. A server of the list is a preference (owner decision of 17.11, coordinator 18.11): its transports first,
     //     then the best available path with the fallback notice; the preference is kept for the next start. A Scanner
     //     row (exact) on the same dead server ends with an honest error instead.

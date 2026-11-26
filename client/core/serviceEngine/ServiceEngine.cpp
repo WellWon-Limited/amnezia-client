@@ -2142,6 +2142,13 @@ ServiceEngine::LocationTransports ServiceEngine::locationTransportsFor(const QSt
     return lt;
 }
 
+// S1 (owner road 26.11): the exact path's own kind against the mode in force (see ServiceEngine.h).
+bool ServiceEngine::modeAllowsExactPath(const QString &nodeId) const
+{
+    const SubscriptionNode *n = findNode(nodeId);
+    return n && path::modeAllows(path::pathKindOf(*n), transportMode());
+}
+
 // 5.1.109: the rule of setPinnedNode's no_transport refusal for an existing pin (see ServiceEngine.h).
 bool ServiceEngine::pinLacksTransport(TransportMode mode) const
 {

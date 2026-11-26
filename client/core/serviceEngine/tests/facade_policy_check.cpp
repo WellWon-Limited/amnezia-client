@@ -1921,8 +1921,32 @@ static void r50UplinkMoveVoidsTheLiveClaim()
     }
 }
 
+// S1 (owner road 26.11, journal J2): the server the person tapped wins over the transport mode - a location without the
+// mode's transport, and a Scanner row whose own path kind the mode excludes; an attempt that never started ends the row's
+// request without a verdict.
+static void s1ExactRowWinsOverTheMode()
+{
+    // a location the mode cannot serve (setPinnedNode no_transport): switch, whatever the row
+    CHECK(serverTapSwitchesModeToAuto(false, QStringLiteral("no_transport: location x has no 'awg' transport"), false, false));
+    CHECK(serverTapSwitchesModeToAuto(false, QStringLiteral("no_transport: location x has no 'awg' transport"), true, false));
+    // another refusal of the pin: no switch (the pin's own error)
+    CHECK(!serverTapSwitchesModeToAuto(false, QStringLiteral("node not in subscription: 12:xray"), true, false));
+    CHECK(!serverTapSwitchesModeToAuto(false, QStringLiteral("unsupported_proto: node 9 proto 'x'"), true, true));
+    // the pin passed by location (Germany 1 has an AmneziaWG listener): a Scanner Xray row in AmneziaWG mode switches,
+    // a server of the list does not (a preference: its allowed transports), an allowed exact row does not
+    CHECK(serverTapSwitchesModeToAuto(true, QString(), true, false));
+    CHECK(!serverTapSwitchesModeToAuto(true, QString(), false, false));
+    CHECK(!serverTapSwitchesModeToAuto(true, QString(), true, true));
+    // rule 2: only the result of the attempt that ended inside connect() ends the row without a verdict
+    CHECK(scanRowEndOf(3, 3) == ScanRowEnd::NoVerdict);
+    CHECK(scanRowEndOf(4, 3) == ScanRowEnd::Failed);  // a later attempt that dialled
+    CHECK(scanRowEndOf(3, 0) == ScanRowEnd::Failed);  // nothing ended at once
+    CHECK(scanRowEndOf(0, 0) == ScanRowEnd::Failed);
+}
+
 int main()
 {
+    s1ExactRowWinsOverTheMode();
     r50UplinkMoveVoidsTheLiveClaim();
     r20PhysicalLossDuringConnect();
     p5bOfflineObservation();

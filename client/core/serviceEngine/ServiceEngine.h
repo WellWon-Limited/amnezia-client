@@ -466,6 +466,10 @@ public:
     // interrupted-switch replay). False without a pin, for a pin no longer in the pool and in Auto.
     // The facade clears such a pin on a mode change (DebugSnapshot.h::decidePinOnTransportMode).
     bool pinLacksTransport(TransportMode mode) const;
+    // S1 (owner road 26.11): whether the transport mode in force lets THIS node's own path be dialled - the rule the
+    // attempt owner applies to an exact choice (path::modeAllows on path::pathKindOf), asked before the attempt starts
+    // (AvpnEngineQml::pinServer). False for a node not in the subscription.
+    bool modeAllowsExactPath(const QString &nodeId) const;
     // 5.1.109 (review R1): the pin the last pool refresh dropped because its location no longer has a
     // node the effective transport mode allows (the pinned listener was removed). One-shot: the facade
     // persists the cleared pin and journals pin_cleared why=reseed. Empty = nothing dropped that way.

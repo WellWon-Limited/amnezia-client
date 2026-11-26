@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <memory>
 #include <random>
 
 using namespace avpn;
@@ -1326,6 +1327,63 @@ static void machineRules()
         for (const ScanRowView &r : m.view(kT0 + 1200).rows)
             offered = offered || (r.id == QLatin1String("2:xray") && r.tappable);
         CHECK(!offered && m.connectingId().isEmpty());
+    }
+    // S1 rule 2 (owner road 26.11, journal J2): the engine refused the tap before it dialled anything (the attempt ended
+    // inside connect(): exact_unavailable, no_transport, no_network, ...). The facade ends the row's request with
+    // connectRefused("") (AvpnEngineQml::endScanRowRequestNotStarted): no outcome before or after, the row keeps its scan
+    // state and takes a tap again. Before, exactRowFailed sent outcome no_data for the never-dialled row and painted it
+    // «Не удалось».
+    {
+        const auto scanned = [&w]() {
+            auto m = std::make_unique<ScanMachine>(w.caps);
+            m->opened(openOf(w, QStringLiteral("1"), true), kT0);
+            m->manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+            ScanHostProgress p;
+            p.scanId = m->scanId();
+            p.phase = QStringLiteral("data");
+            ScanProbeFacts f = goodData();
+            f.id = QStringLiteral("2:xray");
+            f.egressNode = QStringLiteral("2");
+            f.seq = 1;
+            p.items << withBurst(f);
+            m->hostProgress(p, kT0 + 600);
+            return m;
+        };
+        const auto rowOf = [](const ScanView &v, const QString &id) {
+            for (const ScanRowView &r : v.rows)
+                if (r.id == id)
+                    return r;
+            return ScanRowView();
+        };
+        // failure outcomes of the row (the tap stops the scan, whose own proof of the row - works - goes out as before)
+        const auto outcomesFor = [](const ScanStep &st, const QString &id) {
+            int n = 0;
+            for (const ScanAction &a : st.actions)
+                if (a.kind == ScanActionKind::SendOutcomes)
+                    for (const ScanOutcomeItem &it : a.outcomes)
+                        n += it.id == id && !scanClassWorking(it.outcome) ? 1 : 0;
+            return n;
+        };
+        const QString row = QStringLiteral("2:xray");
+        auto m = scanned();
+        const ScanRowView before = rowOf(m->view(kT0 + 650), row);
+        CHECK(before.id == row && before.tappable && before.state != ScanRowState::Failed);
+        const ScanStep tap = m->rowTapped(row, kT0 + 700);
+        CHECK(tap.has(ScanActionKind::ConnectRow) && outcomesFor(tap, row) == 0); // nothing before a dial
+        const ScanStep refused = m->connectRefused(QString(), kT0 + 720);
+        CHECK(outcomesFor(refused, row) == 0 && m->connectingId().isEmpty());
+        int later = 0;
+        for (qint64 t = kT0 + 1000; t < kT0 + 120000; t += 5000)
+            later += outcomesFor(m->tick(t), row);
+        CHECK(later == 0);
+        const ScanRowView after = rowOf(m->view(kT0 + 120000), row);
+        CHECK(after.state == before.state && after.verified == before.verified && after.tappable && !after.dimmed);
+        CHECK(m->rowTapped(row, kT0 + 120100).has(ScanActionKind::ConnectRow)); // tappable again
+        // the contrast: a failure of a dialled exact row (exactRowFailed) is a verdict - outcome and «Не удалось»
+        auto f = scanned();
+        f->rowTapped(row, kT0 + 700);
+        const ScanStep failed = f->exactRowFailed(row, kT0 + 720);
+        CHECK(outcomesFor(failed, row) == 1 && rowOf(f->view(kT0 + 730), row).state == ScanRowState::Failed);
     }
     // R6 (review of 141): the tapped row is an exact request. Its failure ends the chain at once: the old pair
     // connectFailed + attemptEnded moved the chain to the next row and marked THAT row failed, untried.

@@ -647,6 +647,28 @@ inline StartRefusal startRefusal(quint64 endedAttempt, quint64 judgedAttempt)
     return endedAttempt != 0 && endedAttempt == judgedAttempt ? StartRefusal::JudgedByResult : StartRefusal::DropIntent;
 }
 
+// Decision 9 of 18.11 + owner road 26.11 (S1, journal J2): the server the person tapped wins over the transport mode
+// chosen earlier, judged before the attempt starts (AvpnEngineQml::pinServer is its one owner). A location without
+// the mode's transport (setPinnedNode no_transport) - and a Scanner row, which is one exact path, whose OWN path kind the
+// mode in force excludes (path::modeAllows; judged per row, not per location: Germany 1 has an AmneziaWG listener, so
+// its Xray row passed the pin in AmneziaWG mode and the attempt then refused it, exact_unavailable).
+inline bool serverTapSwitchesModeToAuto(bool pinned, const QString &pinError, bool exactRow, bool exactPathAllowed)
+{
+    if (!pinned)
+        return pinError.startsWith(QLatin1String("no_transport"));
+    return exactRow && !exactPathAllowed;
+}
+
+// S1 rule 2 (owner road 26.11): how the owner's failed result ends a Scanner row's request. An attempt that never
+// started (it ended inside ServiceEngine::connect - AvpnEngineQml guardedStart's attempt_not_started, whatever err) is no
+// evidence about the server: the row goes back to its scan state (no «Не удалось», no outcome to the server, nothing in
+// a ledger); the person gets the engine's own text. Any other failed result marks the row (exactRowFailed).
+enum class ScanRowEnd { NoVerdict, Failed };
+inline ScanRowEnd scanRowEndOf(quint64 resultAttempt, quint64 notStartedAttempt)
+{
+    return resultAttempt != 0 && resultAttempt == notStartedAttempt ? ScanRowEnd::NoVerdict : ScanRowEnd::Failed;
+}
+
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
 {
     return legStartFailures > 0 || attemptEndedNothingProven;

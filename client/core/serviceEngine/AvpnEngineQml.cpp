@@ -3477,19 +3477,25 @@ QString AvpnEngineQml::choiceJournal() const
     return QString();
 }
 
-bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err)
+bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err, bool exactRow)
 {
-    if (!m_engine.setPinnedNode(nodeId, err)) {
-        if (!err.startsWith(QLatin1String("no_transport")))
+    const bool pinned = m_engine.setPinnedNode(nodeId, err);
+    // Decision 9 of 18.11: the server the person tapped wins over the transport mode chosen earlier. S1 (owner road
+    // 26.11): a Scanner row is judged by its own path kind, before the attempt starts (DebugSnapshot.h
+    // serverTapSwitchesModeToAuto) - one owner of the switch, here.
+    if (!avpn::serverTapSwitchesModeToAuto(pinned, err, exactRow, pinned && m_engine.modeAllowsExactPath(nodeId))) {
+        if (!pinned)
             return false;
-        // Decision 9 of 18.11: the server the person tapped wins over the transport mode chosen earlier.
-        const QString was = avpn::transportModeToString(m_engine.transportMode());
-        setTransportMode(QStringLiteral("auto"));
-        if (!m_engine.setPinnedNode(nodeId, err))
-            return false;
-        reliabilityEvent(QStringLiteral("transport_mode_auto why=server_tap mode_was=%1 node=%2").arg(was, nodeId));
-        emit notice(tr("Режим подключения переключён на «Авто», чтобы подключить выбранный сервер"));
+        syncIntent();
+        return true;
     }
+    const QString was = avpn::transportModeToString(m_engine.transportMode());
+    setTransportMode(QStringLiteral("auto"));
+    if (!m_engine.setPinnedNode(nodeId, err))
+        return false;
+    reliabilityEvent(QStringLiteral("transport_mode_auto why=server_tap mode_was=%1 node=%2 exact=%3")
+                         .arg(was, nodeId).arg(int(exactRow)));
+    emit notice(tr("Режим подключения переключён на «Авто», чтобы подключить выбранный сервер"));
     syncIntent();
     return true;
 }
@@ -3549,6 +3555,22 @@ void AvpnEngineQml::endScanRowRequest(const QString &node, const char *why)
             m_scanner->exactRowFailed(n);
         m_scanner->attemptEnded();
     }
+}
+
+// S1 rule 2 (owner road 26.11, journal J2): the attempt ended inside connect() - nothing was dialled, so the row keeps its
+// scan state and stays tappable: no «Не удалось», no outcome to the server, nothing in a ledger (the Scanner's
+// connectRefused("") - the request is over without a result). The person gets the engine's own text for the reason.
+void AvpnEngineQml::endScanRowRequestNotStarted()
+{
+    if (!m_scanRow.active)
+        return;
+    m_scanRow.active = false;
+    const QString n = m_scanRow.tapped;
+    scanJournal(QStringLiteral("scan_row_not_started reason=scan_row node=%1").arg(n),
+                {{QStringLiteral("event"), QStringLiteral("row_not_started")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
+                 {QStringLiteral("node"), n}});
+    if (m_scanner)
+        m_scanner->connectRefused(QString());
 }
 
 // R3 (device round 4): the end of a Scanner row's one request by the owner's result. On success the row stays as an
@@ -3661,8 +3683,14 @@ bool AvpnEngineQml::syncAttempt()
         m_judgedAttempt = r->attempt; // this result decides the request (a start that ended with it adds nothing)
         if (m_exactReq.active() && r->reason != avpn::path::FailReason::StoppedByUser)
             endExactRowRequest(r->connected);
-        if (!r->connected && r->reason != avpn::path::FailReason::StoppedByUser)
-            endScanRowRequest(QString(), "attempt_failed"); // S1: the owner's terminal result ends the row's request
+        if (!r->connected && r->reason != avpn::path::FailReason::StoppedByUser) {
+            // S1 (device round 5): the owner's terminal result ends the row's request. S1 rule 2 (owner road 26.11):
+            // an attempt that never started is no evidence about the row (DebugSnapshot.h scanRowEndOf).
+            if (avpn::scanRowEndOf(r->attempt, m_notStartedAttempt) == avpn::ScanRowEnd::NoVerdict)
+                endScanRowRequestNotStarted();
+            else
+                endScanRowRequest(QString(), "attempt_failed");
+        }
         const QString lang = appLang();
         if (r->connected) {
             if (r->fallbackNotice) {
@@ -7035,6 +7063,7 @@ void AvpnEngineQml::guardedStart()
         settleOperation("attempt_not_started");
         const std::optional<avpn::path::AttemptResult> &ended = m_engine.pendingAttemptResult();
         const quint64 endedAttempt = connectCalled && ended ? ended->attempt : 0;
+        m_notStartedAttempt = endedAttempt; // S1 rule 2: its result ends a Scanner row without a verdict
         syncAttempt(); // the attempt's journal lines and its result (ended at once)
         if (startRefusal(endedAttempt, m_judgedAttempt) == StartRefusal::JudgedByResult) {
             reliabilityEvent(QStringLiteral("attempt_not_started judged_by_result attempt=%1 err=%2 want=%3")
@@ -8277,7 +8306,7 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
     // The pin is checked before the intent changes: a row that cannot be pinned leaves everything as it was.
     const QString pinBefore = m_engine.pinnedNodeId(); // before the pin changes: a refused seat restores it
     QString err;
-    if (!pinServer(nodeId, err)) {
+    if (!pinServer(nodeId, err, /*exactRow=*/true)) { // S1: the row's own path kind against the mode
         scanJournal(QStringLiteral("scan_connect_ignored reason=scan_row why=pin node=%1").arg(nodeId),
                     {{QStringLiteral("event"), QStringLiteral("connect_ignored")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                      {QStringLiteral("why"), QStringLiteral("pin")}, {QStringLiteral("node"), nodeId}});
