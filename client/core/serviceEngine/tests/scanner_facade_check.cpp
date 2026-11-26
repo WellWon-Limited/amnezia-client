@@ -2141,17 +2141,40 @@ static void caseRefusedStart()
     CHECK(onlyScanEntryAppSide(w, appSlice, t)); // nothing charged later for the host either
     const int entries = w.ledgerCount();
     CHECK_EQ(w.host.count("scan_poll"), 0);
-    // reopen right after the failure: a start the host refused ran no scan, so there is no pause (owner road 26.11,
-    // S2 - before, the live probe sent before the refusal kept 30 s); the reopen scans again at once (refused again
-    // here) and its real bytes are charged too
+    // reopen right after the failure: the cooldown holds, nothing new is fetched or started
+    w.s->close();
+    w.run(500);
+    w.s->open();
+    w.run(1000);
+    CHECK_EQ(w.host.count("scan_start"), 1);
+    CHECK_EQ(w.http.count("/v1/scan/manifest"), 1);
+    CHECK_EQ(w.ledgerCount(), entries);
+    CHECK_EQ(w.s->view().value("bar").toMap().value("button").toString(), QStringLiteral("retry_in_s"));
+}
+
+// Owner road 26.11 (S2, J3; review C1): a start refused for MEMORY after the live probe went through the tunnel - its
+// own text, and no pause: the text tells the person to turn the VPN off and run the check again, so a reopen right after
+// scans at once. Every other refused start keeps its pause (caseRefusedStart).
+static void caseRefusedStartMemory()
+{
+    g_case = QStringLiteral("refused_start_memory");
+    World w(capsMac(), ScanNetKind::Cellular, 6);
+    w.host.refuseStart = QStringLiteral("memory");
+    w.liveOn(QStringLiteral("4:xray"));
+    w.start();
+    w.s->open();
+    w.run(60);
+    CHECK_EQ(w.phase(), QStringLiteral("no_scan"));
+    CHECK_EQ(w.s->view().value("empty").toMap().value("reason").toString(), QStringLiteral("host_memory"));
+    CHECK(w.s->view().value("bar").toMap().value("button").toString() != QStringLiteral("retry_in_s"));
+    const int entries = w.ledgerCount();
     w.s->close();
     w.run(500);
     w.s->open();
     w.run(1000);
     CHECK_EQ(w.host.count("scan_start"), 2);
     CHECK_EQ(w.http.count("/v1/scan/manifest"), 2);
-    CHECK(w.ledgerCount() > entries);
-    CHECK(w.s->view().value("bar").toMap().value("button").toString() != QStringLiteral("retry_in_s"));
+    CHECK(w.ledgerCount() > entries); // the second attempt's real bytes are charged too
 }
 
 // The host went away mid-scan (the service died / the channel broke) or forgot the running scan: it took the
@@ -4638,6 +4661,7 @@ int main(int argc, char **argv)
     caseConnectPaths();
     caseHostUnavailable();
     caseRefusedStart();
+    caseRefusedStartMemory();
     caseHostReasons();
     caseServiceErrors();
     caseHostDied();

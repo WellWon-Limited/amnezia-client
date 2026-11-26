@@ -1220,12 +1220,11 @@ public:
             if (st->hostStarted && st->stage != HostStage::Settled) {
                 if (!accepted) {
                     settleHost(*st, 0, now, s); // the start was refused: nothing was admitted
-                    // A start the host refused ran no scan: the manual cooldown goes back to what it was before the
-                    // tap, in every case (owner road 26.11, J3: the live probe sent before the refusal kept the 30 s
-                    // pause after "memory"). The cooldown paces the person's own scans; the bytes of the live probe
-                    // stay charged to the allowance as they are (honest accounting), and the server limits scan
-                    // tokens per device itself (scan_token_per_device_per_hour).
-                    if (st == &m_cur)
+                    // Nothing was probed: no cooldown (retry at once) - unless the live probe already went through
+                    // the tunnel (bytes moved: the pause holds, its texts say «через минуту»). A refusal for memory
+                    // always gives the pause back (owner road 26.11, J3; review C1): its text tells the person to turn
+                    // the VPN off and run the check again - a pause would refuse exactly that. The bytes stay charged.
+                    if (st == &m_cur && (!m_liveProbeSent || e == ScanHostError::Memory))
                         m_cooldownUntil = m_cooldownPrev;
                 }
                 else if (st->stage == HostStage::Running)
@@ -2663,11 +2662,13 @@ private:
         }
         m_liveReqId = a.requestId;
         s.actions << a;
+        m_liveProbeSent = true;
         armCooldown(); // probe bytes through the live tunnel
     }
 
     // The manual cooldown runs scan_manual_cooldown_s from this scan's START (plan §1.2), armed only by a scan
-    // that reached a host (StartHostScan) or sent the live-tunnel probe; a start the host refused disarms it.
+    // that reached a host (StartHostScan; a refused start disarms it, unless the live probe went - except for memory)
+    // or sent the live-tunnel probe.
     void armCooldown()
     {
         m_cooldownUntil = qMax(m_cooldownUntil, m_scanStartAt + qint64(m_t.manualCooldownS) * 1000);
@@ -2764,6 +2765,7 @@ private:
         // (armCooldown); a scan that ends before (no host, refused start, manifest unavailable, budget)
         // leaves «Повторить» enabled at once.
         m_cooldownPrev = m_cooldownUntil;
+        m_liveProbeSent = false;
         m_access = ScanAccess();     // fresh evidence per scan token (F5)
         m_releaseDeferred.clear();
         m_appSideOnly = false;
@@ -4709,6 +4711,7 @@ private:
     QHash<QString, Charged> m_charged; // request id -> what the ledger got for it (until its real size comes)
     QStringList m_chargedOrder;
     qint64 m_cooldownUntil = 0;
+    bool m_liveProbeSent = false;     // this scan sent the live-tunnel probe (bytes moved: the cooldown holds)
     qint64 m_cooldownPrev = 0;        // the cooldown before this scan armed its own (a refused start restores it)
     qint64 m_lastManifestAt = LLONG_MIN / 2; // the last manifest request (the buttons' back-off)
     qint64 m_finishedAt = 0;

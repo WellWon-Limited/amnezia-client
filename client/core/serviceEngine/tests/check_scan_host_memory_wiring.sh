@@ -4,7 +4,8 @@
 # restores the cooldown, the live probe's bytes stay charged). Wired here - each line fails if reverted:
 #   M1  ScanTexts.qml: host_memory has its own title and hint in state 23's layout (not the shared state 23 texts);
 #   M2  both shipped translations carry the two sentences (no "unfinished");
-#   M3  ScanMachine hostFailed: a refused start restores the cooldown in every case (no live-probe exception);
+#   M3  ScanMachine hostFailed: a start refused for memory restores the cooldown even after the live probe; every
+#       other refused start keeps the pause once the live probe went (review C1: their texts say «через минуту»);
 #   M4  the host's available / needed MB of the refusal are in the existing "host start error" line.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -36,8 +37,8 @@ done
 
 # ---- M3 ----
 hf="$(code "$SE/ScanMachine.h" | awk '/ScanStep hostFailed\(const QString &scanId, ScanHostError e, qint64 now/{f=1} f{print} f&&/^    }$/{exit}')"
-has "$hf" 'if (st == &m_cur)' && has "$hf" 'm_cooldownUntil = m_cooldownPrev;' || bad "M3: a refused start must restore the cooldown"
-code "$SE/ScanMachine.h" | grep -q 'm_liveProbeSent' && bad "M3: the live probe must not keep the pause after a refused start"
+has "$hf" 'if (st == &m_cur && (!m_liveProbeSent || e == ScanHostError::Memory))' && has "$hf" 'm_cooldownUntil = m_cooldownPrev;' \
+    || bad "M3: only a memory refusal restores the cooldown after the live probe; the others keep it"
 
 # ---- M4 ----
 has "$(code "$SE/TribeScanner.cpp")" 'QStringLiteral("host start error=%1 mem_mb=%2 need_mb=%3")' \
