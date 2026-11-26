@@ -9,7 +9,8 @@
 #   B3  every C++ reader asks avpn::bypassMasterOn (the engine and its tunnel control);
 #   B4  QML no longer stores the switch: no QtCore Settings of the AvpnBypass category anywhere, and the main screen reads
 #       TribeEngine.bypassMasterOn and writes only through TribeEngine.setBypassMasterOn; the engine notifies it;
-#   B5  the Android 13+ default is the one constant kBypassMasterOffByDefaultOnAndroid13.
+#   B5  the Android 13+ default is the one constant kBypassMasterOffByDefaultOnAndroid13;
+#   B6  the onboarding card that states the switch is on is shown only while the effective value is on.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -70,6 +71,11 @@ bm="$(code "$HERE/../BypassMaster.h")"
 [ "$(count "$bm" 'inline constexpr bool kBypassMasterOffByDefaultOnAndroid13 = ')" -eq 1 ] || bad "B5: the Android 13+ default must be one constant"
 printf '%s\n' "$bm" | tr -s ' \n' ' ' | grep -qF 'return kBypassMasterOffByDefaultOnAndroid13 && android && sdkVersion >= 33;' \
     || bad "B5: the platform default must read the constant"
+
+# ---- B6 ---- the onboarding card that says «Доступ к сайтам РФ включён» shows only while the effective value is on
+onb="$(code "$CLIENT/ui/qml/Tribe/Pages/PageOnboardingTribe.qml")"
+printf '%s\n' "$onb" | grep -A1 -F '                Rectangle {' | grep -qF 'visible: !root.hasEngine || TribeEngine.bypassMasterOn === true' \
+    || bad "B6: the onboarding's «включён» card must follow TribeEngine.bypassMasterOn"
 
 [ "$fail" -eq 0 ] && echo "bypass master wiring: OK"
 exit "$fail"

@@ -328,6 +328,10 @@ PageType {
 
                 // карточка «АнтиVPN активирован» с демо-тумблером
                 Rectangle {
+                    // The card says «Доступ к сайтам РФ включён»: shown only while the engine's effective value is on
+                    // (BypassMaster.h; off by default on Android 13+, on elsewhere - as before there). Hidden, the column
+                    // drops it with its margin: the next label keeps its own top margin, the spacers re-centre the rest.
+                    visible: !root.hasEngine || TribeEngine.bypassMasterOn === true
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.xl
                     implicitHeight: antiRow.implicitHeight + 2 * Theme.space.lg
