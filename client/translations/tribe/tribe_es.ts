@@ -1124,7 +1124,7 @@
         <translation>Acceso activado en este dispositivo</translation>
     </message>
     <message>
-        <location line="+328"/>
+        <location line="+335"/>
         <source>Доступ к сайтам РФ включён</source>
         <translation>Acceso a sitios rusos activado</translation>
     </message>
@@ -1134,7 +1134,7 @@
         <translation>¿Cansado de apagar la VPN?</translation>
     </message>
     <message>
-        <location line="+18"/>
+        <location line="+17"/>
         <source>Сайты РФ сейчас не открываются</source>
         <translation>Los sitios rusos no se abren ahora</translation>
     </message>
@@ -1149,7 +1149,7 @@
         <translation>Ozon, WB, Gosuslugi (servicios públicos), Bancos, Kinopoisk</translation>
     </message>
     <message>
-        <location line="+207"/>
+        <location line="+204"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>
@@ -1201,7 +1201,7 @@
         <translation>Conectado, pero el tráfico no pasa</translation>
     </message>
     <message>
-        <location line="-716"/>
+        <location line="-719"/>
         <source>Нет связи</source>
         <translation>Sin conexión</translation>
     </message>
@@ -1211,12 +1211,12 @@
         <translation>Cargando…</translation>
     </message>
     <message>
-        <location line="+492"/>
-        <source>На Android 13+ напрямую идут российские приложения, сайты РФ — через VPN.</source>
-        <translation>En Android 13+, las apps rusas se conectan directamente; los sitios rusos van por la VPN.</translation>
+        <location line="+498"/>
+        <source>Российские приложения — напрямую, сайты РФ — через VPN.</source>
+        <translation>Las apps rusas se conectan directamente; los sitios rusos van por la VPN.</translation>
     </message>
     <message>
-        <location line="+220"/>
+        <location line="+217"/>
         <source>Ищем рабочий сервер — пробуем %1 из %2</source>
         <translation>Buscando un servidor que funcione: probando %1 de %2</translation>
     </message>
@@ -1593,7 +1593,7 @@
         <translation>¿Cansado de apagar el VPN?</translation>
     </message>
     <message>
-        <location line="+98"/>
+        <location line="+100"/>
         <source>Теперь VPN выключать не нужно.</source>
         <translation>Ya no hace falta apagar el VPN.</translation>
     </message>
@@ -1675,12 +1675,12 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Puedes cambiar de servidor</translation>
     </message>
     <message>
-        <location line="-211"/>
+        <location line="-213"/>
         <source>Умная маршрутизация сама решает, какой трафик нужно направить через VPN.</source>
         <translation>El enrutamiento inteligente decide por sí solo qué tráfico pasa por la VPN.</translation>
     </message>
     <message>
-        <location line="+76"/>
+        <location line="+78"/>
         <source>Доступ к сайтам РФ включён</source>
         <translation>Acceso a sitios rusos activado</translation>
     </message>
@@ -3256,7 +3256,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4900"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4914"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3372,12 +3372,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+163"/>
-        <location line="+4832"/>
+        <location line="+4843"/>
         <source>Готово, перезапускаем приложение…</source>
         <translation>Listo, reiniciando la aplicación…</translation>
     </message>
     <message>
-        <location line="-4812"/>
+        <location line="-4823"/>
         <source>Обновление внутри приложения тут недоступно</source>
         <translation>Las actualizaciones dentro de la aplicación no están disponibles aquí</translation>
     </message>
@@ -3453,12 +3453,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+4266"/>
+        <location line="+4277"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-4263"/>
+        <location line="-4274"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
     </message>
@@ -3569,7 +3569,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>baseline y amnezia ven el mismo egress (%1): parece que la VPN no estaba apagada durante la medición baseline</translation>
     </message>
     <message>
-        <location line="+1157"/>
+        <location line="+1168"/>
         <source>Установка службы VPN отменена</source>
         <translation>Instalación del servicio VPN cancelada</translation>
     </message>
@@ -3615,8 +3615,8 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Este servidor no está disponible ahora: conectando otro</translation>
     </message>
     <message>
-        <location line="-4287"/>
-        <location line="+4299"/>
+        <location line="-4298"/>
+        <location line="+4310"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>

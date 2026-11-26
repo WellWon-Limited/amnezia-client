@@ -97,7 +97,7 @@ has "$page" 'readonly property bool ruSitesDirect: hasEngine ? TribeEngine.bypas
     || bad "B7: the main screen must read it from the engine"
 tog="$(printf '%s\n' "$page" | awk '/id: avCardToggle/ { on = 1 } on { print } on && /onToggled/ { exit }')"
 printf '%s\n' "$tog" | grep -q 'enabled:' && bad "B7: the switch must be an ordinary one (no disabled state)"
-cap='На Android 13+ напрямую идут российские приложения, сайты РФ — через VPN.'
+cap='Российские приложения — напрямую, сайты РФ — через VPN.'
 has "$page" 'readonly property bool ruAppsOnlyCaption: ruAccessOn && !ruSitesDirect' \
     && has "$page" "text: root.ruAppsOnlyCaption" && has "$page" "? qsTr(\"$cap\")" \
     || bad "B7: the caption only with the switch on and the site routes not applied (round 59 review)"
@@ -107,6 +107,15 @@ for l in en es; do
         || bad "B7: the caption has no finished $l translation"
 done
 grep -qF 'пока недоступно' "$PAGE" && bad "B7: the «unavailable» caption is back"
+# phone 27.11: the caption is never fitted into a box (it was cut and its height binding looped) - normal size, wrapped,
+# and the card grows with its content (68 px as before whenever the content fits)
+sub="$(printf '%s\n' "$page" | awk '/readonly property bool sitesBad:/ { on = 1 } on { print } on && /font.pixelSize: 11/ { exit }')"
+printf '%s\n' "$sub" | grep -qE 'Text\.Fit|^[[:space:]]+height:|maximumLineCount' && bad "B7: the caption must not be fitted, cut or sized"
+has "$sub" 'wrapMode: root.ruAppsOnlyCaption ? Text.WordWrap : Text.NoWrap' \
+    && has "$sub" 'fontSizeMode: root.ruAppsOnlyCaption ? Text.FixedSize : Text.HorizontalFit; minimumPixelSize: 9' \
+    || bad "B7: the caption wraps at the normal size; the other lines keep their single fitted line"
+has "$page" 'implicitHeight: Math.max(68, avCardTexts.implicitHeight + 2 * Theme.space.md); height: implicitHeight' \
+    || bad "B7: the card must follow its content (at least 68 px)"
 
 # ---- B8 ---- never refused; the seed gives the sites only with a budget
 sw="$(body "$ENG" 'void AvpnEngineQml::setBypassMasterOn(bool on)')"

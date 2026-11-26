@@ -630,7 +630,10 @@ PageType {
         anchors.left: parent.left; anchors.right: parent.right
         anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
         anchors.rightMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
-        implicitHeight: 68; height: 68   // ниже серверной карточки (84) — компактный баннер
+        // ниже серверной карточки (84) — компактный баннер 68 px; its height follows its text like the kit's other cards
+        // (content + margins) only when the content needs more - the Android 13+ caption in 3 lines on a narrow screen
+        // (phone 27.11: a fixed 68 px clipped it). Every other text fits in 68 px, so the card is 68 px as before.
+        implicitHeight: Math.max(68, avCardTexts.implicitHeight + 2 * Theme.space.md); height: implicitHeight
         radius: Theme.radius.xl
         color: Qt.rgba(0x1E/255, 0x29/255, 0x3B/255, 0.40)
         border.width: 1; border.color: Qt.rgba(0x33/255, 0x41/255, 0x55/255, 0.5)
@@ -656,6 +659,7 @@ PageType {
                 }
             }
             Column {
+                id: avCardTexts
                 // отступы уже (md/sm, не lg/md) — обе текстовки влезают без обрезки // AVPN
                 anchors.left: avCardIcon.right; anchors.leftMargin: Theme.space.md
                 anchors.right: avCardToggle.left; anchors.rightMargin: Theme.space.sm
@@ -673,25 +677,21 @@ PageType {
                 // AVPN (Scanner, variant B 18.11): the «Сайты РФ» status left the Scanner with its card; when the
                 // engine's background RU check (RuSplitSentinel) says the sites do not open, the banner says so.
                 // WAITS FOR THE ENGINE: TribeEngine.ruSitesState "ok" | "bad" | "unknown" (not sent yet).
-                // Sites not direct here (Android 13+ at a route budget of 0, owner 26.11): the same secondary line says what
-                // the mode does on this phone, wrapped into the rest of the card's 68 px (46 under the 22 px title).
-                // Measured (27.11): 11 px in 2-3 lines from a 162 px text column (360 dp screens) for EN/ES and from 195 px
-                // for RU; RU on 360-390 dp screens shrinks to 10 px in 3 lines - the only case the shrink is still needed.
+                // The switch on and the site routes not applied (Android 13+ at a route budget of 0, owner 26-27.11): the
+                // same secondary line says what the mode does on this phone - at its normal size, wrapped, never cut (the
+                // card grows with it); no fitting to a box (phone 27.11: the shrink-to-fit cut the text and looped).
                 Text {
                     readonly property bool sitesBad: root.ruAccessOn && root.hasEngine && root.ruSitesDirect
                                                      && TribeEngine.ruSitesState === "bad"
                     width: parent.width
                     text: root.ruAppsOnlyCaption
-                          ? qsTr("На Android 13+ напрямую идут российские приложения, сайты РФ — через VPN.")
+                          ? qsTr("Российские приложения — напрямую, сайты РФ — через VPN.")
                           : sitesBad ? qsTr("Сайты РФ сейчас не открываются")
                           : root.ruAccessOn ? qsTr("Теперь VPN выключать не нужно.")
                                                : qsTr("Ozon, WB, Госуслуги, Банки, Kinopoisk")
                     color: sitesBad ? Theme.color.warning : root.slate500; elide: Text.ElideRight
-                    height: root.ruAppsOnlyCaption ? 46 : implicitHeight
                     wrapMode: root.ruAppsOnlyCaption ? Text.WordWrap : Text.NoWrap
-                    maximumLineCount: root.ruAppsOnlyCaption ? 3 : 1
-                    fontSizeMode: root.ruAppsOnlyCaption ? Text.Fit : Text.HorizontalFit
-                    minimumPixelSize: root.ruAppsOnlyCaption ? 10 : 9
+                    fontSizeMode: root.ruAppsOnlyCaption ? Text.FixedSize : Text.HorizontalFit; minimumPixelSize: 9
                     font.family: Theme.font.body; font.pixelSize: 11
                 }
             }
