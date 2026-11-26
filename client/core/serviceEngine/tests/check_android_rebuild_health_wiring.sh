@@ -37,11 +37,16 @@ WG="$CLIENT/android/wireguard/src/main/kotlin/org/amnezia/vpn/protocol/wireguard
 # ---- H1 ----
 ans="$(body "$FACADE" 'void AvpnEngineQml::applyNativeState(')"
 [ -n "$ans" ] || bad "H1: applyNativeState not found"
+# one place for the edge and the snapshot (emulator round 4, case d), Android only, before the state switch
+ansf="$(printf '%s\n' "$ans" | tr -s ' \n' ' ')"
+has "$ansf" '#if defined(Q_OS_ANDROID) if (s == Vpn::Reconnecting || s == Vpn::Connecting) { const bool newSight = avpn::rebuildSightIsNew(viewBefore == Vpn::Reconnecting || viewBefore == Vpn::Connecting); if (m_engine.noteLiveRebuild(/*newRebuild=*/newSight))' \
+    || bad "H1: the Android unfinished states must start the rebuild's bound in one place, new only from a finished view"
+v=$(printf '%s\n' "$ans" | grep -nF 'const Vpn::ConnectionState viewBefore = m_lastTunnelState;' | head -1 | cut -d: -f1)
+a=$(printf '%s\n' "$ans" | grep -nF 'm_lastTunnelState = s;' | head -1 | cut -d: -f1)
+if [ -z "$v" ] || [ -z "$a" ] || [ "$v" -ge "$a" ]; then bad "H1: the view before the state must be read before it changes"; fi
 rc="$(printf '%s\n' "$ans" | awk '/    case Vpn::Reconnecting:/ { on = 1 } on { print } on && /^        break;$/ { exit }' | tr -s ' \n' ' ')"
-has "$rc" '#if defined(Q_OS_ANDROID) if (m_engine.noteLiveRebuild(/*newRebuild=*/true))' \
-    || bad "H1: the Android Reconnecting edge must start the rebuild's bound afresh (review finding 4)"
-has "$rc" '#endif' || bad "H1: the bound's start must stay Android-only"
-printf '%s\n' "$rc" | grep -qE 'leaveRebuiltSession|loseLiveSession|requestStop' && bad "H1: the Reconnecting case hands the live session over again"
+printf '%s\n' "$rc" | grep -qE 'leaveRebuiltSession|loseLiveSession|requestStop|noteLiveRebuild' \
+    && bad "H1: the Reconnecting case hands the live session over again or arms a second bound"
 tick="$(body "$FACADE" 'void AvpnEngineQml::onTick()')"
 has "$tick" 'if (!healthTickAllowed(m_latch, m_lastTunnelState == Vpn::Connected, m_paused)) {' \
     || bad "H1: the health gate is the platform's Connected"
@@ -50,10 +55,15 @@ grep -rqF --include='*.h' --include='*.cpp' 'leaveRebuiltSession' "$HERE/.." && 
 
 # ---- H2 ----
 fac="$(code "$FACADE")"
-has "$fac" 'if (serviceUnfinished && m_engine.noteLiveRebuild())' \
-    || bad "H2: a snapshot of an unfinished state (RECONNECTING or CONNECTING, review finding 7) must start the bound"
-has "$fac" 'else if (st == AndroidController::ConnectionState::CONNECTED)' && has "$fac" 'm_engine.noteLiveSessionUp();' \
-    || bad "H2: a CONNECTED snapshot must end the bound"
+st2="$(code "$FACADE" | awk '/&AndroidController::status, this,/{f=1} f{print} f&&/^            Qt::QueuedConnection\);$/{exit}' | tr -s ' \n' ' ')"
+has "$st2" 'if (thinkConnected) {' \
+    && has "$st2" 'if (avpn::snapshotFeedsView(seen != Vpn::Unknown, seen == m_lastTunnelState)) {' \
+    && has "$st2" 'applyNativeState(seen, /*confirmsOwnStop=*/false);' \
+    || bad "H2: a snapshot of the session the engine holds must feed the one native-state entry (view, health gate, bound)"
+printf '%s\n' "$st2" | grep -qF 'noteLiveRebuild(' && bad "H2: the snapshot must not arm the bound beside the native-state entry"
+has "$st2" 'st == AndroidController::ConnectionState::CONNECTING ? Vpn::Connecting' \
+    && has "$st2" 'st == AndroidController::ConnectionState::RECONNECTING ? Vpn::Reconnecting' \
+    || bad "H2: both unfinished states (review finding 7) reach the view"
 
 # ---- H3 ----
 nl="$(body "$SE" 'bool ServiceEngine::noteLiveRebuild(bool newRebuild)')"

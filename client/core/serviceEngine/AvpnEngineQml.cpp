@@ -1713,14 +1713,26 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                                                || st == AndroidController::ConnectionState::RECONNECTING;
                 const AndroidStatusAction rebuild = androidRebuildStatusDecision(
                     serviceUnfinished, thinkConnected, m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);
-                // F2: a snapshot after a return sees what the live edge would have (the activity was unbound): the service
-                // in an unfinished state for a session the engine holds - a rebuild, or (round 58 review, finding 7) a
-                // start Android redelivered after the service process was restarted - starts its bound from now (no-op
-                // when the edge already did), a Connected service ends it. Nothing else changes for these states.
-                if (serviceUnfinished && m_engine.noteLiveRebuild())
-                    reliabilityEvent(QStringLiteral("rebuild_wait node=%1 via=status").arg(m_engine.currentNodeId()));
-                else if (st == AndroidController::ConnectionState::CONNECTED)
-                    m_engine.noteLiveSessionUp();
+                // F2 + emulator round 4, case d (warm return onto a dead network: ~25 s of «Connected» with nothing
+                // loading): a snapshot of the session the engine holds gives the view exactly what the live edge gives -
+                // through the same native-state entry (applyNativeState: the screen, the health gate and the rebuild's
+                // bound together), only when the view differs. A rebuild (RECONNECTING) or a redelivered start
+                // (CONNECTING, review finding 7) becomes the view's unfinished state and starts its bound; a CONNECTED
+                // puts the view back and ends the wait (also a Connected missed while unbound). Only for a session the
+                // engine holds (thinkConnected is the engine's own state, not this view) - so it never meets the
+                // take-over or the adoption below, which are for a session the engine does NOT hold.
+                if (thinkConnected) {
+                    const Vpn::ConnectionState seen = st == AndroidController::ConnectionState::CONNECTED ? Vpn::Connected
+                        : st == AndroidController::ConnectionState::RECONNECTING                       ? Vpn::Reconnecting
+                        : st == AndroidController::ConnectionState::CONNECTING                         ? Vpn::Connecting
+                                                                                                        : Vpn::Unknown;
+                    if (avpn::snapshotFeedsView(seen != Vpn::Unknown, seen == m_lastTunnelState)) {
+                        reliabilityEvent(QStringLiteral("snapshot_view state=%1 view=%2").arg(int(seen)).arg(int(m_lastTunnelState)));
+                        applyNativeState(seen, /*confirmsOwnStop=*/false);
+                    } else if (st == AndroidController::ConnectionState::CONNECTED) {
+                        m_engine.noteLiveSessionUp();
+                    }
+                }
                 if (action == AndroidStatusAction::StopIt) {
                     // the person's Stop of a start that ran on anyway: the service is stopped, the intent stays off (the
                     // stop the person asked for is still unconfirmed: its Disconnected ends it, VpnConnection's listener)
@@ -6212,6 +6224,7 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     reliabilityEvent(QStringLiteral("native_state=%1 intent_on=%2 engine=%3 node=%4 proto=%5")
         .arg(int(s)).arg(m_wantConnected).arg(m_engine.debugSnapshot().state)
         .arg(m_engine.currentNodeId()).arg(m_engine.currentNodeProto()));
+    const Vpn::ConnectionState viewBefore = m_lastTunnelState; // F2: is this a new sight of an unfinished state
     if (m_probe) m_probe->cancel();
     // Волна «как апстрим» (2026-09-28): keep-alive соединения к API, открытые через туннель, после
     // его гашения мертвы, но QNAM их переиспользует — все запросы висели до таймаута 15 с (журнал
@@ -6290,6 +6303,25 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     // приложения посреди перехода не даст гейт mayCommit в момент передачи финишеру.
     if (s == Vpn::Disconnected || s == Vpn::Error || s == Vpn::Connected)
         QTimer::singleShot(1500, this, [this] { maybeAutoUpdate(); });
+#if defined(Q_OS_ANDROID)
+    // Emulator rounds of 26.11 (F2) + emulator round 4, case d: on Android Reconnecting is the VPN service rebuilding the
+    // session it holds in place after a network change (the new interface first, then the old backend off - seamless),
+    // reporting Connected only after the rebuilt tunnel's first handshake, with no deadline of its own; Connecting of a
+    // session the engine holds is a start Android redelivered after the service process restarted. The engine gives
+    // both a leg's bound (ServiceEngine::noteLiveRebuild): in time it is invisible, past it the live session is lost as
+    // a failed leg and the owner's attempt walks on. ONE place for both entries - the live edge and a status snapshot of
+    // the session the engine holds (the snapshot feeds this function, see the STATUS handler) - so the screen, the
+    // health gate and the bound always agree. A sight is new when the view was not already unfinished: the edge from
+    // Connected, or a snapshot after a return that found the view Connected (a missed Connected put back by a CONNECTED
+    // snapshot first); the same rebuild seen twice - a snapshot and then its edge after the re-bind, or the reverse - is
+    // one rebuild and never restarts the bound. iOS keeps its intermediate Reconnecting.
+    if (s == Vpn::Reconnecting || s == Vpn::Connecting) {
+        const bool newSight = avpn::rebuildSightIsNew(viewBefore == Vpn::Reconnecting || viewBefore == Vpn::Connecting);
+        if (m_engine.noteLiveRebuild(/*newRebuild=*/newSight))
+            reliabilityEvent(QStringLiteral("rebuild_wait node=%1 new=%2 state=%3")
+                                 .arg(m_engine.currentNodeId()).arg(int(newSight)).arg(int(s)));
+    }
+#endif
     // Правдивый статус: маппим РЕАЛЬНОЕ состояние VpnConnection в фазу движка. up() лишь ставит
     // туннель в очередь (async) и НЕ объявляет Connected — переход прилетает сюда.
     switch (s) {
@@ -6375,16 +6407,7 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
     }
         break;
     case Vpn::Reconnecting:
-#if defined(Q_OS_ANDROID)
-        // Emulator rounds of 26.11 (F2): on Android Reconnecting is the VPN service rebuilding the session it holds in
-        // place after a network change (the new interface first, then the old backend off - seamless), reporting
-        // Connected only after the rebuilt tunnel's first handshake, with no deadline of its own. The rebuild stays as
-        // upstream has it; the engine gives it a leg's bound (ServiceEngine::noteLiveRebuild): in time it is invisible,
-        // past it the live session is lost as a failed leg and the owner's attempt walks on. iOS keeps its intermediate
-        // Reconnecting (below).
-        if (m_engine.noteLiveRebuild(/*newRebuild=*/true)) // the edge is always a new rebuild (from CONNECTED)
-            reliabilityEvent(QStringLiteral("rebuild_wait node=%1 via=edge").arg(m_engine.currentNodeId()));
-#endif
+        // Android: the rebuild's bound is given above the switch (one place for the edge and the snapshot).
         // Промежуточное iOS-Reconnecting: НЕ инициируем свитч/реконнект — дождёмся терминала.
         break;
     default: // Unknown/Preparing/Connecting/Disconnecting — промежуточные, фазу движка не трогаем.

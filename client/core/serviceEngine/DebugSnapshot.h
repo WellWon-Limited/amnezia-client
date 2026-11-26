@@ -258,6 +258,21 @@ inline AndroidStatusAction androidStatusDecision(bool serviceConnected, bool ser
     return a;
 }
 
+// Emulator round 4, case d (Android): a status snapshot of the session the engine holds feeds the one native-state entry
+// (applyNativeState) exactly as the live edge does - only when it says something the view does not (a known state that
+// differs): the screen, the health gate and the rebuild's bound then agree whichever entry saw it first.
+inline bool snapshotFeedsView(bool stateKnown, bool sameAsView)
+{
+    return stateKnown && !sameAsView;
+}
+// A sight of an unfinished state (Reconnecting, or Connecting of a held session) is a NEW rebuild - its bound starts afresh -
+// when the view was not already unfinished: the live edge from Connected, or a snapshot that found the view Connected.
+// The same rebuild seen by both entries (a snapshot and then its edge after the re-bind, or the reverse) is one rebuild.
+inline bool rebuildSightIsNew(bool viewWasUnfinished)
+{
+    return !viewWasUnfinished;
+}
+
 // Emulator rounds of 26.11 (F2, entry c - Android): a snapshot says the service holds an UNFINISHED tunnel - RECONNECTING
 // (its rebuild after a network change) or CONNECTING (a start whose UI process is gone: the person swiped the app away
 // during the first connect, round 3) - that no attempt of ours owns: the engine holds nothing and no attempt runs. The

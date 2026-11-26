@@ -354,9 +354,8 @@ int main(int argc, char **argv)
             r.pass(boundMs * 2);
             CHECK(r.tun.downs == downs && !r.eng.attemptRunning());
         }
-        // h. Round 58 review, finding 4: a rebuild whose Connected was missed while unbound, then a NEW rebuild (the live
-        //    edge - the service reports Reconnecting only from CONNECTED): the new one gets its own full bound; a
-        //    snapshot's sight of the same wait never extends it.
+        // h. Round 58 review, finding 4: the engine restarts the bound when told the sight is a new rebuild (the facade's
+        //    rule, rebuildSightIsNew - case i models both entries), and a sight of the same rebuild never extends it.
         {
             Rig r(pool);
             live(r);
@@ -369,6 +368,87 @@ int main(int argc, char **argv)
             CHECK(r.tun.downs == downs && r.eng.liveRebuildWaiting());
             r.pass(1500);
             CHECK(r.tun.downs == downs + 1 && r.eng.attemptRunning());
+        }
+        // i. Emulator round 4, case d: the live edge and a status snapshot feed ONE entry (the facade's applyNativeState),
+        //    modelled here with the facade's view and its two rules (DebugSnapshot.h snapshotFeedsView, rebuildSightIsNew).
+        {
+            enum View { Connected, Unfinished };
+            struct Facade {
+                Rig &r;
+                View view = Connected;
+                int arms = 0;
+                void native(View s) // applyNativeState: the bound for an unfinished state, the Connected ends it
+                {
+                    const View before = view;
+                    view = s;
+                    if (s == Unfinished) {
+                        if (r.eng.noteLiveRebuild(rebuildSightIsNew(before == Unfinished)))
+                            ++arms;
+                    } else {
+                        r.eng.onTunnelConnected();
+                    }
+                }
+                void edge(View s) { native(s); }
+                void snapshot(View s)
+                {
+                    if (snapshotFeedsView(true, s == view))
+                        native(s);
+                }
+            };
+            // order 1: a warm return finds the rebuild (snapshot), then its live edge arrives after the re-bind
+            {
+                Rig r(pool);
+                live(r);
+                Facade f{r};
+                const int downs = r.tun.downs;
+                f.snapshot(Unfinished); // the view leaves «Connected» at once (the screen says Connecting), bound armed
+                CHECK(f.view == Unfinished && f.arms == 1 && r.eng.liveRebuildWaiting());
+                r.pass(10000);
+                f.edge(Unfinished); // the same rebuild: not a new sight, the bound does not restart
+                CHECK(f.arms == 1);
+                r.pass(boundMs - 10000 + 500); // the bound of the FIRST sight fires
+                CHECK(r.tun.downs == downs + 1 && r.eng.attemptRunning());
+            }
+            // order 2: the live edge first, then a snapshot of the same rebuild: the snapshot changes nothing
+            {
+                Rig r(pool);
+                live(r);
+                Facade f{r};
+                const int downs = r.tun.downs;
+                f.edge(Unfinished);
+                CHECK(f.arms == 1);
+                r.pass(10000);
+                f.snapshot(Unfinished); // same as the view: not fed
+                CHECK(f.arms == 1);
+                r.pass(boundMs - 10000 + 500);
+                CHECK(r.tun.downs == downs + 1);
+            }
+            // a Connected missed while unbound: the CONNECTED snapshot puts the view back and ends the wait; the next
+            // rebuild is a new sight with its own full bound (review finding 4, both entries)
+            {
+                Rig r(pool);
+                live(r);
+                Facade f{r};
+                const int downs = r.tun.downs;
+                f.edge(Unfinished);
+                r.pass(15000);
+                f.snapshot(Connected);
+                CHECK(f.view == Connected && !r.eng.liveRebuildWaiting());
+                f.snapshot(Unfinished); // the second rebuild, seen at the next return
+                CHECK(f.arms == 2 && r.eng.liveRebuildWaiting());
+                r.pass(boundMs - 1000);
+                CHECK(r.tun.downs == downs); // its own bound, not the rest of the first
+                r.pass(1500);
+                CHECK(r.tun.downs == downs + 1);
+            }
+            // a snapshot of an unchanged Connected changes nothing
+            {
+                Rig r(pool);
+                live(r);
+                Facade f{r};
+                f.snapshot(Connected);
+                CHECK(f.view == Connected && f.arms == 0 && !r.eng.liveRebuildWaiting());
+            }
         }
         // g. A suspension inside the wait does not count, and the platform's answer gets the resume grace.
         {
