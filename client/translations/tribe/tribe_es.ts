@@ -141,12 +141,12 @@
         <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+139"/>
         <location line="+7"/>
         <location line="+257"/>
-        <location line="+979"/>
+        <location line="+980"/>
         <source>Движок недоступен — обновите приложение</source>
         <translation>Motor no disponible: actualiza la app</translation>
     </message>
     <message>
-        <location line="-1229"/>
+        <location line="-1230"/>
         <location line="+12"/>
         <location line="+20"/>
         <source>Проверяем…</source>
@@ -181,12 +181,12 @@
     </message>
     <message>
         <location line="-276"/>
-        <location line="+952"/>
+        <location line="+953"/>
         <source>Устройство</source>
         <translation>Dispositivo</translation>
     </message>
     <message>
-        <location line="-674"/>
+        <location line="-675"/>
         <source>Пробный</source>
         <translation>Prueba</translation>
     </message>
@@ -341,7 +341,7 @@
         <translation>¿Perdió el dispositivo? Escriba al soporte desde el nuevo dispositivo e indique el pago: importe, fecha y método. Transferiremos su acceso manualmente.</translation>
     </message>
     <message>
-        <location line="+217"/>
+        <location line="+218"/>
         <source>Выберите устройство, которое нужно отключить, чтобы активировать код здесь.</source>
         <translation>Elija el dispositivo que desea desconectar para activar el código aquí.</translation>
     </message>
@@ -361,7 +361,7 @@
         <translation>Apunte la cámara al QR de transferencia o del código de activación y manténgala un par de segundos.</translation>
     </message>
     <message>
-        <location line="-901"/>
+        <location line="-902"/>
         <source>Создайте одноразовую ссылку и откройте её на другом устройстве. Текущее устройство отключится автоматически.</source>
         <translation>Crea un enlace de un solo uso y ábrelo en otro dispositivo. Este dispositivo se desconectará automáticamente.</translation>
     </message>
@@ -418,12 +418,12 @@
     </message>
     <message>
         <location line="+26"/>
-        <location line="+509"/>
+        <location line="+510"/>
         <source>Отключить</source>
         <translation>Desconectar</translation>
     </message>
     <message>
-        <location line="-505"/>
+        <location line="-506"/>
         <source>устройство</source>
         <translation>dispositivo</translation>
     </message>
@@ -478,7 +478,7 @@
         <translation>%1 (compilación %2)</translation>
     </message>
     <message>
-        <location line="+13"/>
+        <location line="+14"/>
         <source>Обновлять автоматически</source>
         <translation>Actualizar automáticamente</translation>
     </message>
@@ -1084,7 +1084,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+201"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+200"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1099,7 +1099,7 @@
         <translation>∞</translation>
     </message>
     <message>
-        <location line="+67"/>
+        <location line="+81"/>
         <source>Серверы сервиса запускаются — пробный доступ появится в ближайшем обновлении, аккаунт не нужен</source>
         <translation>Nuestros servidores están arrancando: el acceso de prueba llegará en una próxima actualización, sin necesidad de cuenta</translation>
     </message>
@@ -1124,7 +1124,7 @@
         <translation>Acceso activado en este dispositivo</translation>
     </message>
     <message>
-        <location line="+337"/>
+        <location line="+331"/>
         <source>Доступ к сайтам РФ включён</source>
         <translation>Acceso a sitios rusos activado</translation>
     </message>
@@ -1134,7 +1134,12 @@
         <translation>¿Cansado de apagar la VPN?</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="+15"/>
+        <source>На Android 13 и новее пока недоступно. Вернём в одном из следующих обновлений.</source>
+        <translation>Aún no disponible en Android 13 y posteriores. Volverá en una próxima actualización.</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Сайты РФ сейчас не открываются</source>
         <translation>Los sitios rusos no se abren ahora</translation>
     </message>
@@ -1149,7 +1154,7 @@
         <translation>Ozon, WB, Gosuslugi (servicios públicos), Bancos, Kinopoisk</translation>
     </message>
     <message>
-        <location line="+203"/>
+        <location line="+205"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>
@@ -1201,7 +1206,7 @@
         <translation>Conectado, pero el tráfico no pasa</translation>
     </message>
     <message>
-        <location line="-701"/>
+        <location line="-715"/>
         <source>Нет связи</source>
         <translation>Sin conexión</translation>
     </message>
@@ -1211,7 +1216,7 @@
         <translation>Cargando…</translation>
     </message>
     <message>
-        <location line="+697"/>
+        <location line="+711"/>
         <source>Ищем рабочий сервер — пробуем %1 из %2</source>
         <translation>Buscando un servidor que funcione: probando %1 de %2</translation>
     </message>
@@ -1588,7 +1593,7 @@
         <translation>¿Cansado de apagar el VPN?</translation>
     </message>
     <message>
-        <location line="+94"/>
+        <location line="+98"/>
         <source>Теперь VPN выключать не нужно.</source>
         <translation>Ya no hace falta apagar el VPN.</translation>
     </message>
@@ -1670,12 +1675,12 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Puedes cambiar de servidor</translation>
     </message>
     <message>
-        <location line="-207"/>
+        <location line="-211"/>
         <source>Умная маршрутизация сама решает, какой трафик нужно направить через VPN.</source>
         <translation>El enrutamiento inteligente decide por sí solo qué tráfico pasa por la VPN.</translation>
     </message>
     <message>
-        <location line="+72"/>
+        <location line="+76"/>
         <source>Доступ к сайтам РФ включён</source>
         <translation>Acceso a sitios rusos activado</translation>
     </message>
@@ -1839,7 +1844,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>no disponible en esta versión</translation>
     </message>
     <message>
-        <location line="+79"/>
+        <location line="+120"/>
         <source>Выбор сервера</source>
         <translation>Elegir servidor</translation>
     </message>
@@ -1864,12 +1869,12 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>El servicio elige el nodo más rápido</translation>
     </message>
     <message>
-        <location line="+52"/>
+        <location line="+45"/>
         <source>РЕЖИМ СОЕДИНЕНИЯ</source>
         <translation>MODO DE CONEXIÓN</translation>
     </message>
     <message>
-        <location line="+30"/>
+        <location line="+31"/>
         <source>Только транспорт Amnezia (AmneziaWG)</source>
         <translation>Solo transporte Amnezia (AmneziaWG)</translation>
     </message>
@@ -1904,12 +1909,12 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>~%1 ms</translation>
     </message>
     <message>
-        <location line="+26"/>
+        <location line="-425"/>
         <source>Режим соединения — «Авто»: у этого сервера нет транспорта %1</source>
         <translation>Modo de conexión «Auto»: este servidor no tiene transporte %1</translation>
     </message>
     <message>
-        <location line="+43"/>
+        <location line="+471"/>
         <source>Нет активного доступа</source>
         <translation>Sin acceso activo</translation>
     </message>
@@ -3205,7 +3210,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Actualizar</translation>
     </message>
     <message>
-        <location line="+39"/>
+        <location line="+40"/>
         <source>Обновлять автоматически</source>
         <translation>Actualizar automáticamente</translation>
     </message>
@@ -3251,7 +3256,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4687"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4888"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3271,7 +3276,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Auto-A/B de bypass: primero conecta Tribe VPN</translation>
     </message>
     <message>
-        <location line="+45"/>
+        <location line="+53"/>
         <source>замер %1/2 · байпас %2</source>
         <translation>medición %1/2 · bypass %2</translation>
     </message>
@@ -3296,7 +3301,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>restaurando ajustes y reconectando…</translation>
     </message>
     <message>
-        <location line="+94"/>
+        <location line="+93"/>
         <source>Авто-A/B прерван: %1. Тумблер байпаса возвращён.</source>
         <translation>Auto-A/B interrumpido: %1. Interruptor de bypass restaurado.</translation>
     </message>
@@ -3351,7 +3356,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-3212"/>
+        <location line="-3335"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3367,11 +3372,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+163"/>
+        <location line="+4837"/>
         <source>Готово, перезапускаем приложение…</source>
         <translation>Listo, reiniciando la aplicación…</translation>
     </message>
     <message>
-        <location line="+20"/>
+        <location line="-4817"/>
         <source>Обновление внутри приложения тут недоступно</source>
         <translation>Las actualizaciones dentro de la aplicación no están disponibles aquí</translation>
     </message>
@@ -3396,7 +3402,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Descargando la actualización…</translation>
     </message>
     <message>
-        <location line="+435"/>
+        <location line="+452"/>
         <source>Текущий сервер</source>
         <translation>Servidor actual</translation>
     </message>
@@ -3411,7 +3417,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo actualizar la lista de servidores. Vuelve a conectarte.</translation>
     </message>
     <message>
-        <location line="+97"/>
+        <location line="+133"/>
         <source>Режим подключения переключён на «Авто», чтобы подключить выбранный сервер</source>
         <translation>El modo de conexión ahora es «Auto» para conectar el servidor elegido</translation>
     </message>
@@ -3447,12 +3453,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3951"/>
+        <location line="+4271"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-3948"/>
+        <location line="-4268"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
     </message>
@@ -3467,7 +3473,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se encontró ningún servidor que funcione en esta red: revise la red e inténtelo de nuevo</translation>
     </message>
     <message>
-        <location line="+521"/>
+        <location line="+560"/>
         <source>Отправляем…</source>
         <translation>Enviando…</translation>
     </message>
@@ -3482,7 +3488,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Grabando, enviado a las %1</translation>
     </message>
     <message>
-        <location line="+1154"/>
+        <location line="+705"/>
+        <source>Авто-A/B байпаса: на Android 13 и новее режим пока недоступен</source>
+        <translation>A/B automático del bypass: el modo aún no está disponible en Android 13 y posteriores</translation>
+    </message>
+    <message>
+        <location line="+480"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>Este informe ya se ha entregado</translation>
     </message>
@@ -3563,17 +3574,17 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>baseline y amnezia ven el mismo egress (%1): parece que la VPN no estaba apagada durante la medición baseline</translation>
     </message>
     <message>
-        <location line="+1129"/>
+        <location line="+1157"/>
         <source>Установка службы VPN отменена</source>
         <translation>Instalación del servicio VPN cancelada</translation>
     </message>
     <message>
-        <location line="+144"/>
+        <location line="+221"/>
         <source>Не удалось установить службу VPN</source>
         <translation>No se pudo instalar el servicio VPN</translation>
     </message>
     <message>
-        <location line="+500"/>
+        <location line="+645"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation>No se pudo desactivar la VPN. Inténtalo de nuevo o desactívala en los Ajustes de iOS.</translation>
     </message>
@@ -3609,8 +3620,8 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Este servidor no está disponible ahora: conectando otro</translation>
     </message>
     <message>
-        <location line="-3972"/>
-        <location line="+3984"/>
+        <location line="-4292"/>
+        <location line="+4304"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>
@@ -3625,17 +3636,17 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No hay servidores disponibles: actualice la lista de servidores</translation>
     </message>
     <message>
-        <location line="+132"/>
+        <location line="+133"/>
         <source>Недостаточно живых серверов для переключения</source>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
     <message>
-        <location line="+716"/>
+        <location line="+717"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>
     <message>
-        <location line="+685"/>
+        <location line="+696"/>
         <source>Введите код доступа</source>
         <translation>Introduce tu código de acceso</translation>
     </message>
@@ -3706,7 +3717,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo activar la clave</translation>
     </message>
     <message>
-        <location line="+419"/>
+        <location line="+461"/>
         <source>Не указано устройство</source>
         <translation>No se especificó el dispositivo</translation>
     </message>

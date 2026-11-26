@@ -282,6 +282,9 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(bool autoUpdate READ autoUpdate WRITE setAutoUpdate NOTIFY autoUpdateChanged)
     // AVPN «Доступ к сайтам РФ»: the effective value (BypassMaster.h, one decision); QML shows it and never stores it.
     Q_PROPERTY(bool bypassMasterOn READ bypassMasterOn NOTIFY bypassMasterOnChanged)
+    // Whether this device can apply the split at all (BypassMaster.h: not on Android 13+ in this release) - the main
+    // screen's switch is disabled with a caption where it cannot; the same predicate turns the effective value off.
+    Q_PROPERTY(bool bypassMasterAvailable READ bypassMasterAvailable CONSTANT)
     Q_PROPERTY(bool selfUpdateBusy READ selfUpdateBusy NOTIFY selfUpdateChanged)
     Q_PROPERTY(bool selfUpdateBackground READ selfUpdateBackground NOTIFY selfUpdateChanged)
     Q_PROPERTY(QString selfUpdateStage READ selfUpdateStage NOTIFY selfUpdateChanged)
@@ -908,6 +911,7 @@ public:
     Q_INVOKABLE void setBypassMasterOn(bool on);
     // The switch's effective value (avpn::bypassMasterOn, BypassMaster.h): the person's choice, else the platform default.
     bool bypassMasterOn() const;
+    bool bypassMasterAvailable() const; // !avpn::bypassMasterUnavailableHere()
     void abRestoreBypassMaster(); // the bench's end: the switch's stored keys as before it
 
     // AVPN (звонки, 2026-07-03): саб-опция «RU-DNS маскировка» (AvpnBypass/dnsMaskOn, default ВКЛ).

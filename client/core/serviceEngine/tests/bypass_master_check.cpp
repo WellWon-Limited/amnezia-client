@@ -1,6 +1,7 @@
-// AVPN «Доступ к сайтам РФ» (owner 26.11.2026, AND-67 temporary variant): the decision table of the switch's effective
-// value (BypassMaster.h) - the person's choice, a legacy false, and the platform default (off on Android API 33+), plus
-// the store reading in a scratch settings file. Build/run: tests/build_bypass_master.sh
+// AVPN «Доступ к сайтам РФ» (owner 26.11.2026, AND-67): the decision table of the switch's effective value
+// (BypassMaster.h) - unavailable on Android API 33+ in this release (off whatever is stored, the stored keys untouched);
+// elsewhere the person's choice, a legacy false, else on - plus the store reading in a scratch settings file.
+// Build/run: tests/build_bypass_master.sh
 #include "../BypassMaster.h"
 
 #include <QCoreApplication>
@@ -21,39 +22,57 @@ static int g_fail = 0;
 
 static const std::optional<bool> kAbsent = std::nullopt;
 
-static void platformDefault()
+static void platformCapability()
 {
-    // THE row of the open decision: Android 13+ follows kBypassMasterOffByDefaultOnAndroid13 (flip it there, nowhere else)
-    const bool off13 = kBypassMasterOffByDefaultOnAndroid13;
-    CHECK(bypassMasterDefaultOff(true, 33) == off13); // Android 13
-    CHECK(bypassMasterDefaultOff(true, 36) == off13); // Android 16
-    CHECK(!bypassMasterDefaultOff(true, 32)); // Android 12L: unchanged
-    CHECK(!bypassMasterDefaultOff(true, 28)); // the minimum SDK
-    CHECK(!bypassMasterDefaultOff(false, 0)); // iOS, macOS, Windows
-    CHECK(!bypassMasterDefaultOff(false, 99));
+    // THE boundary: Android 13+ follows kBypassMasterUnavailableOnAndroid13 (one constant, the engine and the UI read it)
+    const bool gone13 = kBypassMasterUnavailableOnAndroid13;
+    CHECK(gone13); // this release: unavailable on Android 13+ (owner 26.11: 0 of 3 connects with it on, phone + emulator)
+    CHECK(bypassMasterUnavailable(true, 33) == gone13); // Android 13
+    CHECK(bypassMasterUnavailable(true, 36) == gone13); // Android 16 (the phone of 26.11)
+    CHECK(!bypassMasterUnavailable(true, 32)); // Android 12L: available, unchanged
+    CHECK(!bypassMasterUnavailable(true, 28)); // the minimum SDK
+    CHECK(!bypassMasterUnavailable(false, 0)); // iOS, macOS, Windows
+    CHECK(!bypassMasterUnavailable(false, 99));
+}
+
+// the effective value on a platform: the predicate and the table together, as bypassMasterOn(s) composes them
+static bool on(bool android, int sdk, std::optional<bool> choice, std::optional<bool> legacy)
+{
+    return bypassMasterEffective(choice, legacy, bypassMasterUnavailable(android, sdk));
 }
 
 static void table()
 {
-    for (bool defaultOff : {false, true}) {
-        // the person's explicit choice wins everywhere
-        CHECK(bypassMasterEffective(true, kAbsent, defaultOff));
-        CHECK(!bypassMasterEffective(false, kAbsent, defaultOff));
-        CHECK(bypassMasterEffective(true, false, defaultOff));  // chose on after an old off
-        CHECK(!bypassMasterEffective(false, true, defaultOff)); // chose off; the legacy mirror lagged
-        // a legacy false is a choice: off everywhere
-        CHECK(!bypassMasterEffective(kAbsent, false, defaultOff));
+    // Android 13+ (this release): off whatever is stored - no choice, a choice on, a choice off, a legacy true or false
+    for (const int sdk : {33, 34, 35, 36}) {
+        CHECK(!on(true, sdk, kAbsent, kAbsent)); // new install
+        CHECK(!on(true, sdk, kAbsent, true));    // upgrade from 141 with the switch ON (Qt's default or the toggle: 141
+                                                 // has no choice key, only the legacy one)
+        CHECK(!on(true, sdk, kAbsent, false));   // upgrade with the switch off
+        CHECK(!on(true, sdk, true, kAbsent));    // chose on in an earlier 143 build: the choice is not honoured now...
+        CHECK(!on(true, sdk, true, true));
+        CHECK(!on(true, sdk, false, kAbsent));
     }
-    // legacy true or absent, nothing chosen: the platform default
-    const bool android33 = bypassMasterDefaultOff(true, 33), android32 = bypassMasterDefaultOff(true, 32),
-               other = bypassMasterDefaultOff(false, 0);
-    const bool on13 = !kBypassMasterOffByDefaultOnAndroid13;
-    CHECK(bypassMasterEffective(kAbsent, true, android33) == on13);    // upgrade from 139 on Android 13+: the default
-    CHECK(bypassMasterEffective(kAbsent, kAbsent, android33) == on13); // new install on Android 13+: the default
-    CHECK(bypassMasterEffective(kAbsent, true, android32));     // Android below 13: on, as today
-    CHECK(bypassMasterEffective(kAbsent, kAbsent, android32));
-    CHECK(bypassMasterEffective(kAbsent, true, other));         // iOS / macOS / Windows: on, as today
-    CHECK(bypassMasterEffective(kAbsent, kAbsent, other));
+    // ...and is not lost: the same stored keys where the split can be applied give the choice back
+    CHECK(bypassMasterEffective(true, true, /*unavailable=*/false));
+    CHECK(!bypassMasterEffective(false, true, /*unavailable=*/false));
+    // Android 12 and lower, and every other platform: exactly as before
+    for (const int sdk : {28, 31, 32}) {
+        CHECK(on(true, sdk, kAbsent, kAbsent)); // never chose: on
+        CHECK(on(true, sdk, kAbsent, true));    // upgrade from 141 with the switch ON: on
+        CHECK(!on(true, sdk, kAbsent, false));  // a legacy false is a choice: off
+        CHECK(on(true, sdk, true, kAbsent));
+        CHECK(on(true, sdk, true, false));      // chose on after an old off
+        CHECK(!on(true, sdk, false, kAbsent));
+        CHECK(!on(true, sdk, false, true));     // chose off; the legacy mirror lagged
+    }
+    for (const int sdk : {0, 99}) { // iOS, macOS, Windows
+        CHECK(on(false, sdk, kAbsent, kAbsent));
+        CHECK(on(false, sdk, kAbsent, true));
+        CHECK(!on(false, sdk, kAbsent, false));
+        CHECK(on(false, sdk, true, false));
+        CHECK(!on(false, sdk, false, true));
+    }
 }
 
 static void migration()
@@ -65,14 +84,18 @@ static void migration()
     CHECK(!bypassMasterMigratesLegacy(false, false));
     // after the move the value is the same: off
     CHECK(!bypassMasterEffective(false, false, false));
+    // the move does not depend on the platform: a legacy false is the person's choice on Android 13+ too (kept for the
+    // day the mode returns)
+    CHECK(bypassMasterMigratesLegacy(kAbsent, false));
 }
 
-// The store reading (host build: not Android, default on): absent keys, a stored legacy true, false, a choice.
+// The store reading (host build: not Android, available): absent keys, a stored legacy true, false, a choice.
 static void store()
 {
     QTemporaryDir dir;
     CHECK(dir.isValid());
     QSettings s(dir.filePath(QStringLiteral("t.ini")), QSettings::IniFormat);
+    CHECK(!bypassMasterUnavailableHere()); // the host is not Android
     CHECK(!storedBool(s, kBypassMasterChoiceKey).has_value());
     CHECK(bypassMasterOn(s)); // nothing stored: on here (host = not Android)
     s.setValue(kBypassMasterLegacyKey, true);
@@ -92,7 +115,7 @@ static void store()
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
-    platformDefault();
+    platformCapability();
     table();
     migration();
     store();

@@ -357,11 +357,15 @@ PageType {
     // конструктора уже ПОСЛЕ показа окна (QTimer::singleShot) — безопасно, как обычный start().
     Timer { id: simTimer; interval: 1500; onTriggered: { root.simConnecting = false; root.simConnected = true } }
 
-    // AVPN RU-direct: «Доступ к сайтам РФ» shows the engine's effective value (BypassMaster.h, owner 26.11): the person's
-    // choice, else the platform default (off on Android 13+). This page no longer stores the switch: its QtCore Settings
-    // object wrote the default true on the first load (Qt writes every missing key), so «never touched» could not be told
-    // from «chose on»; the one writer is TribeEngine.setBypassMasterOn. Without an engine (preview) it shows on.
+    // AVPN RU-direct: «Доступ к сайтам РФ» shows the engine's effective value (BypassMaster.h, owner 26.11): off where the
+    // split cannot be applied (Android 13+ in this release), else the person's choice, else on. This page no longer stores
+    // the switch: its QtCore Settings object wrote the default true on the first load (Qt writes every missing key), so
+    // «never touched» could not be told from «chose on»; the one writer is TribeEngine.setBypassMasterOn. Without an engine
+    // (preview) it shows on.
     readonly property bool ruAccessOn: hasEngine ? TribeEngine.bypassMasterOn === true : true
+    // Where the split cannot be applied (BypassMaster.h, the same predicate as the value) the card stays with its switch
+    // disabled and off, and the caption says so (owner 26.11). Without an engine (preview): available.
+    readonly property bool ruAccessAvailable: hasEngine ? TribeEngine.bypassMasterAvailable === true : true
 
     // AVPN: иконка «RU-шар» (редизайн 2026-07-02, по эталон-скрину): тёмная скруглённая плитка,
     // внутри круг с мягким диагональным сине-красным градиентом (RU-мотив, НЕ триколор-полосы)
@@ -641,6 +645,7 @@ PageType {
             TribeToggle {
                 id: avCardToggle
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                enabled: root.ruAccessAvailable
                 checked: root.ruAccessOn
                 // тост при переключении убран (реш. 2026-07-02) — состояние видно по текстовке баннера
                 onToggled: {
@@ -668,15 +673,21 @@ PageType {
                 // AVPN (Scanner, variant B 18.11): the «Сайты РФ» status left the Scanner with its card; when the
                 // engine's background RU check (RuSplitSentinel) says the sites do not open, the banner says so.
                 // WAITS FOR THE ENGINE: TribeEngine.ruSitesState "ok" | "bad" | "unknown" (not sent yet).
+                // Unavailable here (Android 13+, owner 26.11): the same secondary line carries the caption, wrapped
+                // within the card's height instead of shrunk.
                 Text {
                     readonly property bool sitesBad: root.ruAccessOn && root.hasEngine
                                                      && TribeEngine.ruSitesState === "bad"
                     width: parent.width
-                    text: sitesBad ? qsTr("Сайты РФ сейчас не открываются")
+                    text: !root.ruAccessAvailable
+                          ? qsTr("На Android 13 и новее пока недоступно. Вернём в одном из следующих обновлений.")
+                          : sitesBad ? qsTr("Сайты РФ сейчас не открываются")
                           : root.ruAccessOn ? qsTr("Теперь VPN выключать не нужно.")
                                                : qsTr("Ozon, WB, Госуслуги, Банки, Kinopoisk")
                     color: sitesBad ? Theme.color.warning : root.slate500; elide: Text.ElideRight
-                    fontSizeMode: Text.HorizontalFit; minimumPixelSize: 9
+                    wrapMode: root.ruAccessAvailable ? Text.NoWrap : Text.WordWrap
+                    maximumLineCount: root.ruAccessAvailable ? 1 : 3
+                    fontSizeMode: root.ruAccessAvailable ? Text.HorizontalFit : Text.FixedSize; minimumPixelSize: 9
                     font.family: Theme.font.body; font.pixelSize: 11
                 }
             }

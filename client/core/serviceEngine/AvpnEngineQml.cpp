@@ -5170,6 +5170,10 @@ void AvpnEngineQml::startBypassAb()
         emit error(tr("Авто-A/B байпаса: сначала подключи Tribe VPN"));
         return;
     }
+    if (avpn::bypassMasterUnavailableHere()) { // both halves would measure the same tunnel (BypassMaster.h)
+        emit error(tr("Авто-A/B байпаса: на Android 13 и новее режим пока недоступен"));
+        return;
+    }
     ++m_abEpoch;
     {
         const QSettings s;
@@ -10173,6 +10177,13 @@ void AvpnEngineQml::applyRuBypassSplit()
 // движок не должен зависеть от дебаунса UI-стора.
 void AvpnEngineQml::setBypassMasterOn(bool on)
 {
+    // Where the split cannot be applied (Android 13+ in this release) the switch is disabled and the stored choice is
+    // left as it is - it applies again when the mode returns (BypassMaster.h). The view re-reads the value (off).
+    if (avpn::bypassMasterUnavailableHere()) {
+        qInfo().noquote() << "[AVPN bypass] switch refused: the mode is unavailable on this Android version";
+        emit bypassMasterOnChanged();
+        return;
+    }
     QSettings s;
     // The person's choice (BypassMaster.h) - this switch is its only writer; the legacy key is mirrored so a build of
     // before 26.11 (a rollback) reads the same choice.
@@ -10186,6 +10197,11 @@ void AvpnEngineQml::setBypassMasterOn(bool on)
 bool AvpnEngineQml::bypassMasterOn() const
 {
     return avpn::bypassMasterOn();
+}
+
+bool AvpnEngineQml::bypassMasterAvailable() const
+{
+    return !avpn::bypassMasterUnavailableHere();
 }
 
 // The A/B bench flips the switch through setBypassMasterOn and puts the stored keys back exactly at its end: a bench
