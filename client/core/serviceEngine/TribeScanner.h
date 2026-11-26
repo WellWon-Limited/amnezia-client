@@ -463,7 +463,7 @@ private:
     void dispatch(const ScanStep &s);
     void execute(const ScanAction &a);
     void afterStep();
-    void syncTunnelFacts();          // the ledger's S6 fact on the machine's rows (tunnelNoDataHere)
+    void syncTunnelFacts();          // the ledger's S6 fact on the machine's rows and stored results (tunnelNoDataHere)
     QStringList m_tunnelNoData;      // the set last handed over
     bool m_syncingTunnelFacts = false;
     void reschedule();

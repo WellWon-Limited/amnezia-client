@@ -189,6 +189,8 @@ struct FakeEngine : IScanEngine {
         return true;
     }
     QStringList knownHostIps(const QString &host) const override { return knownIps.value(host); }
+    QSet<QString> tunnelNoData; // the path ledger's S6 fact (ServiceEngine::failedInTunnelHere) of these rows
+    bool rowFailedInTunnelHere(const QString &rowId) const override { return tunnelNoData.contains(rowId); }
     bool reportQueueFull() const override { return queueFull; }
     QString uiLanguage() const override { return QStringLiteral("ru"); }
     void userConnectForScan() override { ++userConnects; }
@@ -4325,6 +4327,58 @@ static void caseChoiceSlotsAndStop()
     CHECK(!w.s->screenOpen());
 }
 
+// Owner road 26.11 (S4, J8): «N доступно» has one definition. The same stored result gave 7 on the choice and 4 on the
+// rings: the tunnel-no-data set was asked for the rows the machine held only, and «Сканировать» clears them. Both counts
+// now read a set over the held rows and every stored result's rows - before and after the rows are cleared and reloaded.
+static void caseAvailableCountOneDefinition()
+{
+    g_case = QStringLiteral("available_count_one_definition");
+    World w;
+    w.liveOn(QStringLiteral("4:xray"));
+    w.start();
+    w.s->show();
+    w.s->retry();
+    w.run(12000);
+    CHECK_EQ(w.phase(), QStringLiteral("done"));
+    const auto slotWorks = [&w]() {
+        const QJsonArray sl = w.s->viewJson().value(QStringLiteral("slots")).toArray();
+        return sl.isEmpty() ? -1 : sl.first().toObject().value(QStringLiteral("works")).toInt();
+    };
+    const auto ringsAvailable = [&w]() { return w.s->viewJson().value(QStringLiteral("available")).toInt(); };
+    const int all = slotWorks();
+    CHECK(all >= 2 && ringsAvailable() == all);
+    // the ledger marks some working rows (not the live one) "its real tunnel carried no data here"
+    QStringList marked;
+    for (const QVariant &v : w.rows()) {
+        const QVariantMap r = v.toMap();
+        const QString st = r.value(QStringLiteral("state")).toString();
+        if ((st == QStringLiteral("works") || st == QStringLiteral("slow")) && !r.value(QStringLiteral("current")).toBool()
+            && marked.size() < qMin(3, all - 1))
+            marked << r.value(QStringLiteral("id")).toString();
+    }
+    CHECK(!marked.isEmpty());
+    for (const QString &id : marked)
+        w.engine.tunnelNoData.insert(id);
+    w.s->showSlot(QString()); // any step: the coordinator hands the ledger's facts over after it
+    w.run(200);
+    const int want = all - int(marked.size());
+    CHECK_EQ(slotWorks(), want);
+    CHECK_EQ(ringsAvailable(), want);
+    // «Сканировать» clears the rows (here the re-scan fails, NoScan): the choice still counts the stored result the same
+    w.clock.t += 31000;
+    w.server.manifestStatus = 503;
+    w.s->retry();
+    w.run(3000);
+    CHECK_EQ(w.phase(), QStringLiteral("no_scan"));
+    CHECK_EQ(slotWorks(), want);
+    // «Показать результат»: the rows come back, the rings say the same number
+    w.s->showSlot(QString());
+    w.run(500);
+    CHECK_EQ(ringsAvailable(), want);
+    CHECK_EQ(slotWorks(), want);
+    w.s->close();
+}
+
 // Review round 36, F3: after a failed re-scan (HTTP 503 -> NoScan) the choice opens the same scope's fresh result
 // (showSlot): its rows, out of the error state, without a request.
 static void caseShowSlotAfterFailedRescan()
@@ -4567,6 +4621,7 @@ int main(int argc, char **argv)
     caseServerScope();
     caseStoredPoolOwner();
     caseChoiceSlotsAndStop();
+    caseAvailableCountOneDefinition();
     caseShowSlotAfterFailedRescan();
     caseLiveDigest();
     caseManifest304();

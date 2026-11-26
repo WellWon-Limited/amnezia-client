@@ -957,12 +957,19 @@ public:
         finishStep(s, now);
         return s;
     }
-    // Every row the machine holds (fresh, cached, the live one): what the coordinator asks the ledger about.
-    QStringList rowIds() const
+    // What the coordinator asks the ledger about (tunnelNoDataHere): every row the machine holds (fresh, cached, the live
+    // one) AND every row of the stored results the choice counts (m_slots, slotWorks). Owner road 26.11 (S4, J8): with
+    // only the held rows, «Сканировать» cleared them, the set went empty and the choice said 7 where the result's rings
+    // said 4 - one definition of «N доступно» needs a set that does not depend on which rows are loaded.
+    QStringList tunnelFactIds() const
     {
         QStringList out;
         for (const Row &r : m_rows)
             out << r.id;
+        for (const ScanCachedResult &c : m_slots)
+            for (const ScanCachedRow &r : c.rows)
+                if (!out.contains(r.id))
+                    out << r.id;
         return out;
     }
 

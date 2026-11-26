@@ -330,7 +330,7 @@ void TribeScanner::syncTunnelFacts()
     if (m_syncingTunnelFacts)
         return;
     QStringList ids;
-    for (const QString &id : m_m.rowIds())
+    for (const QString &id : m_m.tunnelFactIds()) // S4: the held rows and every stored result's rows
         if (!ids.contains(id) && m_engine->rowFailedInTunnelHere(id))
             ids << id;
     ids.sort();
