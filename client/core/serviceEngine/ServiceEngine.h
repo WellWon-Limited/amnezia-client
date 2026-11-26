@@ -466,10 +466,11 @@ public:
     // interrupted-switch replay). False without a pin, for a pin no longer in the pool and in Auto.
     // The facade clears such a pin on a mode change (DebugSnapshot.h::decidePinOnTransportMode).
     bool pinLacksTransport(TransportMode mode) const;
-    // S1 (owner road 26.11): whether the transport mode in force lets THIS node's own path be dialled - the rule the
-    // attempt owner applies to an exact choice (path::modeAllows on path::pathKindOf), asked before the attempt starts
-    // (AvpnEngineQml::pinServer). False for a node not in the subscription.
-    bool modeAllowsExactPath(const QString &nodeId) const;
+    // S1 (owner road 26.11; review C4): whether the attempt owner would rank THIS node as an exact choice with the
+    // transport mode `mode` - the pool's own admission (supported, health above 0, the scan-offered rule) and the
+    // selection's mode rule, asked before the attempt starts (AvpnEngineQml::pinServer: the mode yields only when Auto
+    // makes the row dialable). False for a node not in the subscription.
+    bool exactPathRanked(const QString &nodeId, TransportMode mode) const;
     // 5.1.109 (review R1): the pin the last pool refresh dropped because its location no longer has a
     // node the effective transport mode allows (the pinned listener was removed). One-shot: the facade
     // persists the cleared pin and journals pin_cleared why=reseed. Empty = nothing dropped that way.
@@ -594,6 +595,7 @@ private:
 
     // The pool of the attempt owner: supported, alive nodes as paths (path::pathCandidateFromNode).
     QList<path::PathCandidate> pathPool() const;
+    std::optional<path::PathCandidate> poolCandidate(const SubscriptionNode &n, const path::UserChoice &choice) const;
     path::SelectionContext ownerContext() const;
     void prepareProber(); // prober->prepare() unless the control plane is known unreachable (lane C2)
     void journalControlPlaneSkips(); // one line per attempt: the provider paths C1 leaves out

@@ -3483,7 +3483,9 @@ bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err, bool exactRow
     // Decision 9 of 18.11: the server the person tapped wins over the transport mode chosen earlier. S1 (owner road
     // 26.11): a Scanner row is judged by its own path kind, before the attempt starts (DebugSnapshot.h
     // serverTapSwitchesModeToAuto) - one owner of the switch, here.
-    if (!avpn::serverTapSwitchesModeToAuto(pinned, err, exactRow, pinned && m_engine.modeAllowsExactPath(nodeId))) {
+    if (!avpn::serverTapSwitchesModeToAuto(pinned, err, exactRow,
+                                           pinned && m_engine.exactPathRanked(nodeId, m_engine.transportMode()),
+                                           pinned && m_engine.exactPathRanked(nodeId, avpn::TransportMode::Auto))) {
         if (!pinned)
             return false;
         syncIntent();

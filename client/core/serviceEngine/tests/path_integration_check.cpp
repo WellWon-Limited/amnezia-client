@@ -364,23 +364,36 @@ int main(int argc, char **argv)
         r.eng.setTransportMode(TransportMode::Auto);
     }
 
-    // 6a. S1 (owner road 26.11, journal J2): a Scanner Xray row in AmneziaWG mode. The pin passes by location (the host
-    //     has an AmneziaWG listener), the exact path's own kind does not - the facade (DebugSnapshot.h
-    //     serverTapSwitchesModeToAuto) switches the mode to Auto before the attempt, which then dials exactly that row.
+    // 6a. S1 (owner road 26.11, J2; review C4): a Scanner Xray row in AmneziaWG mode. The pin passes by location (the
+    //     host has an AmneziaWG listener); the exact path is not ranked now and would be in Auto - the facade
+    //     (DebugSnapshot.h serverTapSwitchesModeToAuto) switches the mode before the attempt, which then dials exactly
+    //     that row. A row whose node has no health is not ranked in Auto either: no switch, and its tap is not started.
     {
-        Rig r(sub({ awg("16", 16, "NL", "1.1.1.16:585"), xray("16x", 16, "NL", "2.2.2.16:443") }));
+        QByteArray dead = xray("17x", 17, "EE", "2.2.2.17:443");
+        dead.replace(R"("weight": 1.0,)", R"("weight": 1.0, "health": { "ru": 0.0 },)");
+        Rig r(sub({ awg("16", 16, "NL", "1.1.1.16:585"), xray("16x", 16, "NL", "2.2.2.16:443"),
+                    awg("17", 17, "EE", "1.1.1.17:585"), dead }));
         r.eng.setTransportMode(TransportMode::Awg);
         QString err;
         CHECK(r.eng.setPinnedNode(QStringLiteral("16x"), err)); // judged per location: passes
-        CHECK(!r.eng.modeAllowsExactPath(QStringLiteral("16x")) && r.eng.modeAllowsExactPath(QStringLiteral("16")));
-        CHECK(!r.eng.modeAllowsExactPath(QStringLiteral("nope")));
-        CHECK(serverTapSwitchesModeToAuto(true, QString(), true, r.eng.modeAllowsExactPath(QStringLiteral("16x"))));
-        // before: the exact row in AmneziaWG mode is refused before any dial
+        CHECK(!r.eng.exactPathRanked(QStringLiteral("16x"), TransportMode::Awg)
+              && r.eng.exactPathRanked(QStringLiteral("16x"), TransportMode::Auto)
+              && r.eng.exactPathRanked(QStringLiteral("16"), TransportMode::Awg));
+        CHECK(!r.eng.exactPathRanked(QStringLiteral("nope"), TransportMode::Auto));
+        CHECK(serverTapSwitchesModeToAuto(true, QString(), true, r.eng.exactPathRanked(QStringLiteral("16x"), TransportMode::Awg),
+                                          r.eng.exactPathRanked(QStringLiteral("16x"), TransportMode::Auto)));
+        // the node with no health: Auto would not dial it either - no switch
+        CHECK(r.eng.setPinnedNode(QStringLiteral("17x"), err));
+        CHECK(!r.eng.exactPathRanked(QStringLiteral("17x"), TransportMode::Awg)
+              && !r.eng.exactPathRanked(QStringLiteral("17x"), TransportMode::Auto));
+        CHECK(!serverTapSwitchesModeToAuto(true, QString(), true, false, r.eng.exactPathRanked(QStringLiteral("17x"), TransportMode::Auto)));
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("17x")));
+        CHECK(!r.eng.connect(err) && err == QLatin1String("exact_unavailable") && r.tun.ups.isEmpty()); // not started
+        // before the switch: the Xray row in AmneziaWG mode is refused before any dial
         r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("16x")));
         CHECK(!r.eng.connect(err) && err == QLatin1String("exact_unavailable") && r.tun.ups.isEmpty());
         // after the switch: started, the tapped row first and only
         r.eng.setTransportMode(TransportMode::Auto);
-        CHECK(r.eng.modeAllowsExactPath(QStringLiteral("16x")));
         r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("16x")));
         CHECK(r.eng.connect(err) && r.tun.ups.size() == 1 && r.last() == QLatin1String("16x"));
         r.noHandshake();

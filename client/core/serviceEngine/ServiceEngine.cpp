@@ -302,26 +302,33 @@ path::AttemptTimings ServiceEngine::attemptTimings() const
 
 QList<path::PathCandidate> ServiceEngine::pathPool() const
 {
+    QList<path::PathCandidate> out;
+    for (const SubscriptionNode &n : m_merged)
+        if (std::optional<path::PathCandidate> c = poolCandidate(n, m_choice))
+            out << *c;
+    return out;
+}
+
+// The pool's one admission rule for a node under a choice (pathPool, and the facade's question whether a Scanner row
+// would be dialled in Auto - review C4: exactPathRanked).
+std::optional<path::PathCandidate> ServiceEngine::poolCandidate(const SubscriptionNode &n, const path::UserChoice &choice) const
+{
     // Kill switch transport_auto_pick=false (as before this design): Xray paths are not offered to an automatic
     // choice; a person's exact choice still reaches them.
     const bool autoXray = TuningStore::flag(QStringLiteral("transport_auto_pick"), true)
-                       || m_choice.kind == path::UserChoice::Kind::ExactPath;
-    QList<path::PathCandidate> out;
-    for (const SubscriptionNode &n : m_merged) {
-        if (!isSupportedProtoNode(n) || healthAggregate(n) <= 0.0)
-            continue;
-        if (!autoXray && isXrayProto(protoOf(n)))
-            continue;
-        // Contract 1.14.0: a scan-offered profile is a path only when the person chose it (exact row or preferred
-        // server); Auto keeps to the delivered stubs.
-        if (n.upstream.has_value() && n.upstream->scanOffered && !m_choice.pathIds.contains(n.nodeId))
-            continue;
-        path::PathCandidate c = path::pathCandidateFromNode(n);
-        if (c.kind == path::PathKind::Provider && !c.standbyEntry && m_hasStandbyEntry)
-            c.standbyEntry = m_hasStandbyEntry(n); // lane C: a usable pack entry lets the profile start without the API
-        out << c;
-    }
-    return out;
+                       || choice.kind == path::UserChoice::Kind::ExactPath;
+    if (!isSupportedProtoNode(n) || healthAggregate(n) <= 0.0)
+        return std::nullopt;
+    if (!autoXray && isXrayProto(protoOf(n)))
+        return std::nullopt;
+    // Contract 1.14.0: a scan-offered profile is a path only when the person chose it (exact row or preferred
+    // server); Auto keeps to the delivered stubs.
+    if (n.upstream.has_value() && n.upstream->scanOffered && !choice.pathIds.contains(n.nodeId))
+        return std::nullopt;
+    path::PathCandidate c = path::pathCandidateFromNode(n);
+    if (c.kind == path::PathKind::Provider && !c.standbyEntry && m_hasStandbyEntry)
+        c.standbyEntry = m_hasStandbyEntry(n); // lane C: a usable pack entry lets the profile start without the API
+    return c;
 }
 
 path::SelectionContext ServiceEngine::ownerContext() const
@@ -2142,11 +2149,15 @@ ServiceEngine::LocationTransports ServiceEngine::locationTransportsFor(const QSt
     return lt;
 }
 
-// S1 (owner road 26.11): the exact path's own kind against the mode in force (see ServiceEngine.h).
-bool ServiceEngine::modeAllowsExactPath(const QString &nodeId) const
+// S1 (owner road 26.11; review C4): whether the attempt owner would rank this node as an exact choice under `mode`
+// (see ServiceEngine.h): the pool's own admission (poolCandidate) and the selection's mode rule (path::modeAllows).
+bool ServiceEngine::exactPathRanked(const QString &nodeId, TransportMode mode) const
 {
     const SubscriptionNode *n = findNode(nodeId);
-    return n && path::modeAllows(path::pathKindOf(*n), transportMode());
+    if (!n)
+        return false;
+    const std::optional<path::PathCandidate> c = poolCandidate(*n, path::UserChoice::exactPath(nodeId));
+    return c && path::modeAllows(c->kind, mode);
 }
 
 // 5.1.109: the rule of setPinnedNode's no_transport refusal for an existing pin (see ServiceEngine.h).

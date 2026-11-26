@@ -3,8 +3,9 @@
 # are pure (DebugSnapshot.h serverTapSwitchesModeToAuto, scanRowEndOf - facade_policy_check s1ExactRowWinsOverTheMode;
 # ServiceEngine::modeAllowsExactPath - path_integration_check 6a; the machine's connectRefused("") - scan_core_check
 # S1 rule 2). AvpnEngineQml.cpp has no unit harness, so where they are wired is checked here - each line fails if reverted:
-#   E1  the row tap pins as an exact row, and the one switch of the mode (pinServer) judges the row's own path kind;
-#   E2  the engine asks the attempt owner's own rule (path::modeAllows on path::pathKindOf) for that kind;
+#   E1  the row tap pins as an exact row, and the one switch of the mode (pinServer) asks whether the attempt ranks the
+#       row now and would in Auto (review C4: no switch for a row Auto would not dial either);
+#   E2  the engine answers with the pool's own admission (poolCandidate, the one pathPool uses) and path::modeAllows;
 #   E3  the attempt that ended inside connect() is remembered before its result is judged, and that result ends the
 #       row's request without a verdict (connectRefused(""), never exactRowFailed / attemptEnded).
 set -u
@@ -22,15 +23,17 @@ has() { printf '%s\n' "$1" | grep -F -- "$2" > /dev/null; }
 tap="$(body_of 'void AvpnEngineQml::connectToNode(' "$FAC")"
 has "$tap" 'if (!pinServer(nodeId, err, /*exactRow=*/true)) {' || bad "E1: the Scanner row must be pinned as an exact row"
 pin="$(body_of 'bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err, bool exactRow)' "$FAC")"
-has "$pin" 'avpn::serverTapSwitchesModeToAuto(pinned, err, exactRow, pinned && m_engine.modeAllowsExactPath(nodeId))' \
-    || bad "E1: the mode switch must judge the exact row's own path kind"
+printf '%s\n' "$pin" | tr -s ' \n' ' ' | grep -qF 'avpn::serverTapSwitchesModeToAuto(pinned, err, exactRow, pinned && m_engine.exactPathRanked(nodeId, m_engine.transportMode()), pinned && m_engine.exactPathRanked(nodeId, avpn::TransportMode::Auto))' \
+    || bad "E1: the mode switch must ask whether the attempt ranks the row now and in Auto"
 has "$pin" 'setTransportMode(QStringLiteral("auto"));' || bad "E1: the switch itself stays in pinServer"
 [ "$(code "$FAC" | grep -cF 'transport_mode_auto why=server_tap')" = "1" ] || bad "E1: one owner of the server-tap switch"
 
 # ---- E2 ----
-rule="$(body_of 'bool ServiceEngine::modeAllowsExactPath(const QString &nodeId) const' "$ENG")"
-has "$rule" 'return n && path::modeAllows(path::pathKindOf(*n), transportMode());' \
-    || bad "E2: the exact path's kind must be judged by the attempt owner's own rule"
+rule="$(body_of 'bool ServiceEngine::exactPathRanked(const QString &nodeId, TransportMode mode) const' "$ENG")"
+has "$rule" 'poolCandidate(*n, path::UserChoice::exactPath(nodeId));' && has "$rule" 'return c && path::modeAllows(c->kind, mode);' \
+    || bad "E2: the exact path must be judged by the pool's own admission and the mode rule"
+pool="$(body_of 'QList<path::PathCandidate> ServiceEngine::pathPool() const' "$ENG")"
+has "$pool" 'if (std::optional<path::PathCandidate> c = poolCandidate(n, m_choice))' || bad "E2: the pool must use the same admission"
 
 # ---- E3 ----
 start="$(code "$FAC" | awk '/settleOperation\("attempt_not_started"\);/{f=1} f{print} f&&/syncAttempt\(\);/{exit}')"

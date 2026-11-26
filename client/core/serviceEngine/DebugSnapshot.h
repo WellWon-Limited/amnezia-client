@@ -649,14 +649,17 @@ inline StartRefusal startRefusal(quint64 endedAttempt, quint64 judgedAttempt)
 
 // Decision 9 of 18.11 + owner road 26.11 (S1, journal J2): the server the person tapped wins over the transport mode
 // chosen earlier, judged before the attempt starts (AvpnEngineQml::pinServer is its one owner). A location without
-// the mode's transport (setPinnedNode no_transport) - and a Scanner row, which is one exact path, whose OWN path kind the
-// mode in force excludes (path::modeAllows; judged per row, not per location: Germany 1 has an AmneziaWG listener, so
-// its Xray row passed the pin in AmneziaWG mode and the attempt then refused it, exact_unavailable).
-inline bool serverTapSwitchesModeToAuto(bool pinned, const QString &pinError, bool exactRow, bool exactPathAllowed)
+// the mode's transport (setPinnedNode no_transport) - and a Scanner row, which is one exact path, that the attempt
+// would rank in Auto and does not rank now (ServiceEngine::exactPathRanked: the pool's own admission + the mode rule;
+// judged per row, not per location: Germany 1 has an AmneziaWG listener, so its Xray row passed the pin in AmneziaWG
+// mode and the attempt then refused it, exact_unavailable). Review C4: a row Auto would not dial either (its node no
+// longer runs here or has no health) changes no mode - its tap ends as not started with the engine's own text.
+inline bool serverTapSwitchesModeToAuto(bool pinned, const QString &pinError, bool exactRow, bool exactRankedNow,
+                                        bool exactRankedInAuto)
 {
     if (!pinned)
         return pinError.startsWith(QLatin1String("no_transport"));
-    return exactRow && !exactPathAllowed;
+    return exactRow && !exactRankedNow && exactRankedInAuto;
 }
 
 // S1 rule 2 (owner road 26.11): how the owner's failed result ends a Scanner row's request. An attempt that never
