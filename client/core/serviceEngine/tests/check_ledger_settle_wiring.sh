@@ -6,8 +6,9 @@
 #   L1  record() settles the stored entry before the new observation; its probe-pass block reads noDataMarkHolds;
 #   L2  view() and tunnelNoDataHere() read a settled copy (after the revision / evidenceTtlMs check);
 #   L3  the rule: void once the quarantine is over and the newest failure is failureTtlMs old - the streak, the
-#       no-data time, the ended quarantine and the data proof that predates the failure; the failure time is
-#       lastFailureMs, falling back to noDataMs, never touchedMs;
+#       no-data time, the ended quarantine; the data proof only when the forgotten evidence holds a no-data not
+#       older than it (noDataMarkHolds, read before the streak is cleared - review of 863c9d8e8); the failure time
+#       is lastFailureMs, falling back to noDataMs, never touchedMs;
 #   L4  the no-data mark reads the settled entry only (no age or streak special case of its own);
 #   L5  ServiceEngine::failedInTunnelHere asks the ledger's tunnelNoDataHere and keeps no copy of the rule;
 #   L6  the default TTL is the quarantine ladder's last step.
@@ -35,9 +36,12 @@ rule="$(body "$L" '    static LedgerEntry settled(LedgerEntry e, qint64 nowMs, c
 has "$rule" 'const qint64 last = lastFailureAt(e);' || bad "L3: the rule must age from the newest failure"
 has "$rule" 'if (last <= 0 || nowMs < e.quarantineUntilMs || nowMs - last < t.failureTtlMs)' \
     || bad "L3: void only once the quarantine is over and the newest failure is failureTtlMs old"
-for line in 'e.failStreak = 0;' 'e.noDataMs = 0;' 'e.quarantineUntilMs = 0;' 'if (e.dataOkMs > 0 && e.dataOkMs <= last) {' 'e.dataOkMs = 0;'; do
+for line in 'e.failStreak = 0;' 'e.noDataMs = 0;' 'e.quarantineUntilMs = 0;' 'if (supersededProof) {' 'e.dataOkMs = 0;'; do
     has "$rule" "$line" || bad "L3: the settle must void: $line"
 done
+printf '%s\n' "$rule" | awk '/const bool supersededProof = noDataMarkHolds\(e\);/{p=NR} /e.failStreak = 0;/{c=NR} END{exit !(p && c && p < c)}' \
+    || bad "L3: only a no-data (noDataMarkHolds, read before the streak is cleared) may void the data proof"
+has "$rule" 'e.dataOkMs <= last' && bad "L3: a data proof voided by the failure time alone (lost handshakes must keep it)"
 has "$rule" 'probeOkMs' && bad "L3: the settle must keep the probe facts"
 has "$L" 'static qint64 lastFailureAt(const LedgerEntry &e) { return e.lastFailureMs > 0 ? e.lastFailureMs : e.noDataMs; }' \
     || bad "L3: the failure time is lastFailureMs, then noDataMs"

@@ -345,18 +345,69 @@ static void testFailureSettle()
         CHECK(v.state == PathState::Unknown && v.strength == EvidenceStrength::None && v.failStreak == 0
               && v.speedMs == -1 && v.lastSuccessMs == 0);
         CHECK(!l.tunnelNoDataHere(net, p, t0 + ttl) && l.entry(net, p.id) != nullptr); // never pruned, not reported
-        // the difference pinned (do not unify): a lost handshake contradicted by a fresh probe pass restores the
-        // earlier state, data proof included - contradiction by newer evidence, not forgetting by age
+        // two ways out of a lost handshake, kept apart in the code (do not unify): a fresh probe pass contradicts it
+        // and restores the earlier state, data proof included; forgetting it by age keeps the proof the same way
+        // (review of 863c9d8e8: forgetting by age is never harsher than the probe lift) - while age forgets a
+        // no-data together with the proof it superseded (above)
         const PathId h{ QStringLiteral("h"), QStringLiteral("r") };
         l.record(net, h, PathOutcome::DataOk, t0 - hour, 1800, 900);
         l.record(net, h, PathOutcome::NoHandshake, t0);
         l.record(net, h, PathOutcome::ProbeOk, t0 + minute, 900);
         const PathView vh = l.view(net, h, t0 + minute);
         CHECK(vh.state == PathState::Working && vh.strength == EvidenceStrength::Data && vh.failStreak == 0);
-        const PathId a{ QStringLiteral("a"), QStringLiteral("r") };     // ... while age alone drops that proof
+        const PathId a{ QStringLiteral("a"), QStringLiteral("r") };
         l.record(net, a, PathOutcome::DataOk, t0 - hour, 1800, 900);
         l.record(net, a, PathOutcome::NoHandshake, t0);
-        CHECK(l.view(net, a, t0 + ttl).state == PathState::Unknown);
+        CHECK(l.view(net, a, t0 + ttl - 1).state == PathState::Suspect);
+        const PathView va = l.view(net, a, t0 + ttl);
+        CHECK(va.state == PathState::Working && va.strength == EvidenceStrength::Data && va.speedMs == 2700
+              && va.failStreak == 0);
+    }
+    {   // review of 863c9d8e8: only a tunnel that carried no data supersedes a data proof
+        const PathCandidate fast = xray("21:xray", "FI"), slow = awg("22", "DE");
+        const auto rig = [&](PathOutcome failure) {
+            PathLedger l(lt);
+            l.record(net, fast.id, PathOutcome::DataOk, t0 - hour, 600, 300);   // the fastest, proven first
+            l.record(net, fast.id, failure, t0);                                // then one failure, no probe after
+            l.record(net, slow.id, PathOutcome::DataOk, t0 + hour, 2500, 500);  // a slower one carries the VPN
+            return l;
+        };
+        SelectInput in;
+        in.pool = { slow, fast };
+        // one lost start deadline, 6 h without a probe: proven by data again with its speed, first in Auto
+        PathLedger hs = rig(PathOutcome::NoHandshake);
+        const PathView vf = hs.view(net, fast.id, t0 + ttl);
+        CHECK(vf.state == PathState::Working && vf.strength == EvidenceStrength::Data && vf.speedMs == 900);
+        in.evidence = hs.viewOf(net, in.pool, t0 + ttl);
+        CHECK(ids(selectPaths(in)) == QStringList({ "21:xray", "22" }));
+        // the same with a tunnel that carried no data: unknown, behind the proven one
+        PathLedger nd = rig(PathOutcome::NoData);
+        CHECK(nd.view(net, fast.id, t0 + ttl).state == PathState::Unknown);
+        in.evidence = nd.viewOf(net, in.pool, t0 + ttl);
+        CHECK(ids(selectPaths(in)) == QStringList({ "22", "21:xray" }));
+        // two lost handshakes, quarantine over, 6 h since the last: clean with the proof kept
+        PathLedger two(lt);
+        two.record(net, fast.id, PathOutcome::DataOk, t0 - hour, 600, 300);
+        two.record(net, fast.id, PathOutcome::NoHandshake, t0);
+        two.record(net, fast.id, PathOutcome::NoHandshake, t0 + minute);
+        CHECK(two.view(net, fast.id, t0 + minute + ttl - 1).state == PathState::Dead
+              && !two.view(net, fast.id, t0 + minute + ttl - 1).inQuarantine);
+        const PathView v2 = two.view(net, fast.id, t0 + minute + ttl);
+        CHECK(v2.state == PathState::Working && v2.strength == EvidenceStrength::Data && v2.speedMs == 900);
+        // mixed: a no-data, later a lost handshake - the no-data superseded the proof: voided
+        PathLedger mixed(lt);
+        mixed.record(net, fast.id, PathOutcome::DataOk, t0 - hour, 600, 300);
+        mixed.record(net, fast.id, PathOutcome::NoData, t0);
+        mixed.record(net, fast.id, PathOutcome::NoHandshake, t0 + hour);
+        CHECK(mixed.view(net, fast.id, t0 + hour + ttl).state == PathState::Unknown
+              && mixed.view(net, fast.id, t0 + hour + ttl).strength == EvidenceStrength::None);
+        // a no-data older than the proof (an earlier streak, ended by that data ok) supersedes nothing
+        PathLedger older(lt);
+        older.record(net, fast.id, PathOutcome::NoData, t0 - 2 * hour);
+        older.record(net, fast.id, PathOutcome::DataOk, t0 - hour, 600, 300);
+        older.record(net, fast.id, PathOutcome::NoHandshake, t0);
+        CHECK(older.view(net, fast.id, t0 + ttl).state == PathState::Working
+              && older.view(net, fast.id, t0 + ttl).strength == EvidenceStrength::Data);
     }
     {   // P1: an expired no-data must not come back with fresh failures; the streak counts the fresh failures only
         for (const bool liftInBetween : { false, true }) {
