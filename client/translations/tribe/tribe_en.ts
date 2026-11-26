@@ -2155,12 +2155,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+84"/>
+        <location line="+88"/>
         <source>Отправляем отчёт…</source>
         <translation>Sending the report…</translation>
     </message>
     <message>
-        <location line="-81"/>
+        <location line="-85"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>All seats are taken right now — connecting the next server</translation>
     </message>
@@ -2215,6 +2215,16 @@ You can attach a photo or video.</translation>
         <translation>Try again in a minute.</translation>
     </message>
     <message>
+        <location line="+3"/>
+        <source>Сейчас проверить нельзя</source>
+        <translation>Can&apos;t check right now</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Подключённому серверу нужна почти вся память VPN. Отключите VPN и запустите проверку снова.</source>
+        <translation>The connected server needs almost all of the VPN&apos;s memory. Turn the VPN off and run the check again.</translation>
+    </message>
+    <message>
         <location line="+1"/>
         <source>Служба Tribe VPN не запущена</source>
         <translation>The Tribe VPN service is not running</translation>
@@ -2266,13 +2276,13 @@ You can attach a photo or video.</translation>
         <translation>Scan stopped · %1</translation>
     </message>
     <message>
-        <location line="+92"/>
+        <location line="+93"/>
         <source>ru</source>
         <comment>plural rule of this translation: ru (one/few/many) or en (one/other)</comment>
         <translation>en</translation>
     </message>
     <message>
-        <location line="-163"/>
+        <location line="-164"/>
         <source>Подключаться к VPN можно как обычно, а Сканеру нужна обновлённая служба.</source>
         <translation>You can connect to the VPN as usual, but the Scanner needs the updated service.</translation>
     </message>
@@ -2507,7 +2517,7 @@ You can attach a photo or video.</translation>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-85"/>
+        <location line="-89"/>
         <source>только что</source>
         <translation>just now</translation>
     </message>
@@ -2582,7 +2592,7 @@ You can attach a photo or video.</translation>
         <translation>Connect to Wi‑Fi — VPN usually works through it. Then open the Scanner and tap “Scan”.</translation>
     </message>
     <message>
-        <location line="+36"/>
+        <location line="+40"/>
         <source>Службу Tribe VPN нужно обновить</source>
         <translation>The Tribe VPN service needs an update</translation>
     </message>
@@ -3241,7 +3251,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4642"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4687"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3341,7 +3351,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-3168"/>
+        <location line="-3212"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3386,7 +3396,7 @@ You can attach a photo or video.</translation>
         <translation>Downloading the update…</translation>
     </message>
     <message>
-        <location line="+419"/>
+        <location line="+435"/>
         <source>Текущий сервер</source>
         <translation>Current server</translation>
     </message>
@@ -3401,12 +3411,12 @@ You can attach a photo or video.</translation>
         <translation>Could not refresh the server list. Try connecting again.</translation>
     </message>
     <message>
-        <location line="+90"/>
+        <location line="+97"/>
         <source>Режим подключения переключён на «Авто», чтобы подключить выбранный сервер</source>
         <translation>Connection mode is now “Auto” to connect the selected server</translation>
     </message>
     <message>
-        <location line="+185"/>
+        <location line="+206"/>
         <source>«%1» в этой сети не работает — подключено через другой сервер</source>
         <translation>“%1” does not work on this network — connected via another server</translation>
     </message>
@@ -3437,12 +3447,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3936"/>
+        <location line="+3951"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>There is no server in the selected mode — switch to “Auto”</translation>
     </message>
     <message>
-        <location line="-3933"/>
+        <location line="-3948"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>No network — connect when it is back</translation>
     </message>
@@ -3553,12 +3563,12 @@ You can attach a photo or video.</translation>
         <translation>baseline and amnezia see the same egress (%1) — looks like the VPN wasn&apos;t off during the baseline measurement</translation>
     </message>
     <message>
-        <location line="+1115"/>
+        <location line="+1129"/>
         <source>Установка службы VPN отменена</source>
         <translation>VPN service installation cancelled</translation>
     </message>
     <message>
-        <location line="+143"/>
+        <location line="+144"/>
         <source>Не удалось установить службу VPN</source>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
@@ -3599,8 +3609,8 @@ You can attach a photo or video.</translation>
         <translation>This server is unavailable right now — connecting another one</translation>
     </message>
     <message>
-        <location line="-3957"/>
-        <location line="+3969"/>
+        <location line="-3972"/>
+        <location line="+3984"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>No network — we will connect when it is back</translation>
     </message>

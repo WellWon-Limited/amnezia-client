@@ -2155,12 +2155,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+84"/>
+        <location line="+88"/>
         <source>Отправляем отчёт…</source>
         <translation>Enviando el informe…</translation>
     </message>
     <message>
-        <location line="-81"/>
+        <location line="-85"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>Ahora todas las plazas están ocupadas: conectando el siguiente servidor</translation>
     </message>
@@ -2215,6 +2215,16 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Inténtelo de nuevo en un minuto.</translation>
     </message>
     <message>
+        <location line="+3"/>
+        <source>Сейчас проверить нельзя</source>
+        <translation>Ahora no se puede comprobar</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Подключённому серверу нужна почти вся память VPN. Отключите VPN и запустите проверку снова.</source>
+        <translation>El servidor conectado necesita casi toda la memoria de la VPN. Desconecte la VPN y vuelva a iniciar la comprobación.</translation>
+    </message>
+    <message>
         <location line="+1"/>
         <source>Служба Tribe VPN не запущена</source>
         <translation>El servicio de Tribe VPN no está en ejecución</translation>
@@ -2266,13 +2276,13 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Escaneo detenido · %1</translation>
     </message>
     <message>
-        <location line="+92"/>
+        <location line="+93"/>
         <source>ru</source>
         <comment>plural rule of this translation: ru (one/few/many) or en (one/other)</comment>
         <translation>en</translation>
     </message>
     <message>
-        <location line="-163"/>
+        <location line="-164"/>
         <source>Подключаться к VPN можно как обычно, а Сканеру нужна обновлённая служба.</source>
         <translation>Puede conectarse a la VPN como siempre, pero el escáner necesita el servicio actualizado.</translation>
     </message>
@@ -2507,7 +2517,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Iniciar el servicio</translation>
     </message>
     <message>
-        <location line="-85"/>
+        <location line="-89"/>
         <source>только что</source>
         <translation>ahora mismo</translation>
     </message>
@@ -2582,7 +2592,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Conéctese a Wi‑Fi: la VPN suele funcionar a través de ella. Luego abra el Escáner y pulse «Escanear».</translation>
     </message>
     <message>
-        <location line="+36"/>
+        <location line="+40"/>
         <source>Службу Tribe VPN нужно обновить</source>
         <translation>Hay que actualizar el servicio de Tribe VPN</translation>
     </message>
@@ -3241,7 +3251,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4642"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4687"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3341,7 +3351,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-3168"/>
+        <location line="-3212"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3386,7 +3396,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Descargando la actualización…</translation>
     </message>
     <message>
-        <location line="+419"/>
+        <location line="+435"/>
         <source>Текущий сервер</source>
         <translation>Servidor actual</translation>
     </message>
@@ -3401,12 +3411,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo actualizar la lista de servidores. Vuelve a conectarte.</translation>
     </message>
     <message>
-        <location line="+90"/>
+        <location line="+97"/>
         <source>Режим подключения переключён на «Авто», чтобы подключить выбранный сервер</source>
         <translation>El modo de conexión ahora es «Auto» para conectar el servidor elegido</translation>
     </message>
     <message>
-        <location line="+185"/>
+        <location line="+206"/>
         <source>«%1» в этой сети не работает — подключено через другой сервер</source>
         <translation>«%1» no funciona en esta red: conectado mediante otro servidor</translation>
     </message>
@@ -3437,12 +3447,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3936"/>
+        <location line="+3951"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-3933"/>
+        <location line="-3948"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
     </message>
@@ -3553,12 +3563,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>baseline y amnezia ven el mismo egress (%1): parece que la VPN no estaba apagada durante la medición baseline</translation>
     </message>
     <message>
-        <location line="+1115"/>
+        <location line="+1129"/>
         <source>Установка службы VPN отменена</source>
         <translation>Instalación del servicio VPN cancelada</translation>
     </message>
     <message>
-        <location line="+143"/>
+        <location line="+144"/>
         <source>Не удалось установить службу VPN</source>
         <translation>No se pudo instalar el servicio VPN</translation>
     </message>
@@ -3599,8 +3609,8 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Este servidor no está disponible ahora: conectando otro</translation>
     </message>
     <message>
-        <location line="-3957"/>
-        <location line="+3969"/>
+        <location line="-3972"/>
+        <location line="+3984"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>Sin red: nos conectaremos cuando vuelva</translation>
     </message>

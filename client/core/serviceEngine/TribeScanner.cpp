@@ -1293,7 +1293,11 @@ void TribeScanner::onStartReply(const HostAsk &ask, const ScanStartRequest &req,
         finishHeldStart(id, &r); // the second refusal: no third attempt
         return;
     }
-    emitLog(QStringLiteral("host start error=%1").arg(QLatin1String(scanHostErrorName(r.error))));
+    // owner road 26.11 (J3): a memory refusal carries the host's available and needed MB (ScanHostContract "memory")
+    emitLog(r.memMb >= 0 || r.needMb >= 0
+                ? QStringLiteral("host start error=%1 mem_mb=%2 need_mb=%3")
+                      .arg(QLatin1String(scanHostErrorName(r.error))).arg(r.memMb).arg(r.needMb)
+                : QStringLiteral("host start error=%1").arg(QLatin1String(scanHostErrorName(r.error))));
     // The error IS the reply to scan_start: the host never took it (host charge 0, settled at once). Its detail
     // names the cause where it has one (kill_switch_exemption -> host_kill_switch, the core's rule).
     machineStartNotTaken(id, r.error, scanHostFailureDetail(r));

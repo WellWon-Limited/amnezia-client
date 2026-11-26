@@ -3110,13 +3110,30 @@ static void cooldownRule()
         a.tick(kT0 + 1500);
         CHECK(a.cooldownUntil() == kT0 + 30000 && a.view(kT0 + 1500).bar.button == ScanBarButton::RetryInSeconds
               && a.retryTapped(kT0 + 2000).actions.isEmpty());
-        // a refused start while the live probe went through the tunnel: bytes moved, the cooldown holds
+        // owner road 26.11 (S2, J3): a refused start while the live probe went through the tunnel ran no scan - the
+        // cooldown goes back to what it was before the tap (before: it held 30 s after "memory"); the bytes that moved
+        // stay charged to the allowance
         ScanMachine l(w.caps);
         l.opened(openOf(w, QStringLiteral("2:xray"), true), kT0);
         const ScanStep ls = l.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
         CHECK(ls.has(ScanActionKind::ProbeLiveTunnel));
-        l.hostFailed(l.scanId(), ScanHostError::Internal, kT0 + 70, false);
-        CHECK(l.cooldownUntil() == kT0 + 30000);
+        l.hostFailed(l.scanId(), ScanHostError::Memory, kT0 + 70, false);
+        CHECK(l.cooldownUntil() <= kT0);
+        const ScanView lv = l.view(kT0 + 70);
+        CHECK(lv.empty.reason == QLatin1String("host_memory") && lv.bar.button == ScanBarButton::Retry && lv.bar.buttonEnabled
+              && lv.bar.buttonValue == 0);
+        CHECK(l.retryTapped(kT0 + 1100).has(ScanActionKind::RequestManifest));
+        // a cooldown armed before this tap (an earlier scan that reached a host) is kept, not cleared
+        ScanMachine k(w.caps);
+        k.opened(openOf(w, QString(), false), kT0);
+        k.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50); // armed until kT0 + 30000 by the host start
+        k.hostProgress(progressOf(k, {}, 1000, 0), kT0 + 400);
+        k.hostFailed(k.scanId(), ScanHostError::Internal, kT0 + 500, false); // took the start: the pause holds
+        k.tick(kT0 + 31000);
+        CHECK(k.retryTapped(kT0 + 31000).has(ScanActionKind::RequestManifest));
+        k.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050);
+        k.hostFailed(k.scanId(), ScanHostError::Memory, kT0 + 31070, false);
+        CHECK(k.cooldownUntil() == kT0 + 30000); // what it was before the tap
         // the host never started but the app-side scan sent the live probe (grant below one probe): the cooldown
         World ws = baseWorld("cool_app_side", hostMac(), ScanNetKind::Cellular);
         ws.manifestBytes = 270336;
