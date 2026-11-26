@@ -455,6 +455,14 @@ class AmneziaActivity : QtActivity() {
         super.onResume()
         isActivityResumed = true
         Log.d(TAG, "Resume Amnezia activity")
+        // AVPN (emulator round 2, 26.11, F3): a notification permission granted outside a dialog of this activity
+        // (Android's app info while the app lived, or while only the service ran) reaches the running service once
+        // per activity; it is idempotent there (enableNotification).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notificationToldGranted &&
+            isNotificationPermissionGranted()
+        ) {
+            tellServiceNotificationGranted()
+        }
         if (qtInitialized.isCompleted) {
             QtAndroidController.onActivityResumed()
         }
@@ -605,6 +613,15 @@ class AmneziaActivity : QtActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         Log.d(TAG, "Process permission result, code: ${actionCodeToString(requestCode)}, " +
                 "permissions: ${permissions.contentToString()}, results: ${grantResults.contentToString()}")
+        // AVPN (emulator round 2, 26.11, F3): a notification grant from ANY dialog (the in-app question's, the Settings
+        // switch's, or one of another request code) reaches the running session: the service decided at its start that
+        // there was no notification to show, and a grant made while it runs was lost (no notification while connected).
+        val notifications = permissions.indexOf(Manifest.permission.POST_NOTIFICATIONS)
+        if (notifications >= 0 && notifications < grantResults.size &&
+            grantResults[notifications] == PackageManager.PERMISSION_GRANTED
+        ) {
+            tellServiceNotificationGranted()
+        }
         permissionRequestHandlers[requestCode]?.let { handler ->
             if (grantResults.isNotEmpty()) {
                 if (grantResults[0] == PackageManager.PERMISSION_GRANTED) handler.onSuccess()
@@ -731,7 +748,11 @@ class AmneziaActivity : QtActivity() {
     private fun showNotificationPermissionDialog(onChecked: () -> Unit) {
         // AVPN (emulator round 26.11.2026, D5): asked after the tunnel start (start()), so this dialog no longer stands
         // between the tap and the tunnel: no permission-prompt report, the engine's clock runs (c2ff72b32 paused it here
-        // too; the VPN dialog keeps its pause). A grant reaches the running service (tellServiceNotificationGranted).
+        // too; the VPN dialog keeps its pause). A grant reaches the running service (onRequestPermissionsResult).
+        // Emulator round 2 (F3): every leg of an attempt calls start(), so a question shown but not yet answered was shown
+        // again by the next leg (three in the round). It is asked once: marked asked the moment it is shown; any answer,
+        // Back included, is the person's answer and is respected (the Settings switch asks again on their tap).
+        Prefs.save(PREFS_NOTIFICATION_PERMISSION_ASKED, true)
         AlertDialog.Builder(this)
             .setTitle(R.string.notificationDialogTitle)
             .setMessage(R.string.notificationDialogMessage)
@@ -747,16 +768,13 @@ class AmneziaActivity : QtActivity() {
                     Manifest.permission.POST_NOTIFICATIONS,
                     CHECK_NOTIFICATION_PERMISSION_ACTION_CODE,
                     PermissionRequestHandler(
-                        onSuccess = {
-                            saveAsked()
-                            tellServiceNotificationGranted()
-                        },
+                        onSuccess = saveAsked, // the grant reaches the service in onRequestPermissionsResult
                         onFail = saveAsked,
                         onAny = onChecked
                     )
                 )
             }
-            // AVPN: a dialog dismissed outside its buttons counts as "No" for this tap (asked again next time).
+            // AVPN: a dialog dismissed outside its buttons counts as "No" (it is not asked again: marked when shown).
             .setOnCancelListener { onChecked() }
             .show()
     }
@@ -766,8 +784,11 @@ class AmneziaActivity : QtActivity() {
     // (requestNotificationPermission: enableNotification in the service); a grant given before the bind waits for it,
     // as the start/stop commands do. A denial needs nothing: the service runs and Android hides the notification.
     private var notificationGrantForService = false
+    // Emulator round 2 (F3): the running service has been told of the grant in this activity's life (onResume).
+    private var notificationToldGranted = false
 
     private fun tellServiceNotificationGranted() {
+        notificationToldGranted = true
         if (isServiceConnected) vpnServiceMessenger.send(Action.NOTIFICATION_PERMISSION_GRANTED)
         else notificationGrantForService = true
         mainScope.launch {

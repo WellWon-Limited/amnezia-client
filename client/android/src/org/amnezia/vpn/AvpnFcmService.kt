@@ -6,7 +6,6 @@
 package org.amnezia.vpn
 
 import android.Manifest
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -89,12 +88,14 @@ class AvpnFcmService : FirebaseMessagingService() {
 
         // Рантайм-запрос POST_NOTIFICATIONS (зеркало iOS UN authorization): движок зовёт ОДИН
         // раз после первого коннекта (AvpnPushBridge::requestAuthorization → authRequester).
+        // AVPN (emulator round 2, 26.11, F3): on Android it raises nothing. Android's dialog opened by itself at the first
+        // «connected» (request code 7401), right after the person had refused in it - a tap meant for the app landed on
+        // «Allow». On Android the one permission behind pushes and the VPN notification belongs to the app's own
+        // question (asked once, on the first Connect) and to the Settings switch (the person's tap); the engine's call
+        // (shared with iOS, where it is the system's UN prompt) stays and resolves here.
         @JvmStatic
         fun requestPermission(ctx: Context) {
-            if (Build.VERSION.SDK_INT < 33) return
-            val activity = ctx as? Activity ?: return
-            if (authStatus(activity) == "granted") return
-            activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7401)
+            Log.i(TAG, "push authorization: the notification permission is the app question's and the Settings switch's")
         }
 
         // Тап по системному уведомлению (background-доставка): FCM кладёт data-ключи в extras
