@@ -57,7 +57,8 @@ done
 has "$(body "$FACADE" 'void AvpnEngineQml::reconcile()')" 'if (m_engine.attemptRunning() || m_engine.state() == avpn::EngineState::Switching) {' \
     || bad "PE: reconcile must leave a running attempt to its owner"
 [ "$(code "$ENGINE/TunnelWatchResume.h" | grep -cF 'm_ops.reenterVerifying()')" = "1" ] || bad "§33: reenterVerifying has more than one caller in TunnelWatchResume"
-[ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "1" ] || bad "§33: the facade calls reenterVerifying outside the hand-over's op"
+# owner road 26.11 (T1): the thaw's stall check is the second, deliberate caller (checkStalledTunnelAfterThaw)
+[ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "2" ] || bad "§33: the facade calls reenterVerifying outside the hand-over's op and the thaw's stall check"
 
 # Coordinator 18.11 (c): the Scanner hears a network change when the path engine's network generation moved (one
 # rule with the attempt owner) or its cache identity moved (device round air9 19.11 10:08: it completed with the same

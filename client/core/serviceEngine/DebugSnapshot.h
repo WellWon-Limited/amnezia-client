@@ -669,6 +669,30 @@ inline ScanRowEnd scanRowEndOf(quint64 resultAttempt, quint64 notStartedAttempt)
     return resultAttempt != 0 && resultAttempt == notStartedAttempt ? ScanRowEnd::NoVerdict : ScanRowEnd::Failed;
 }
 
+// T1 (owner road 26.11, journal J1): the app opened on an AmneziaWG tunnel whose path had been dead for minutes - the
+// extension's ladder kept restarting the same peer, the foreground handler only refreshed the status, the live probe
+// needs 4 failures about 12 s apart: the person waited 32 s and pressed Stop. On a thaw the extension's own verdict
+// (data_stall_s, tribe.22: reported only while its ladder sees a stall right now - demand out, nothing in for 4 s - and
+// counted from the last lasting data; 0 on an idle or a healthy tunnel) of a status asked AFTER the thaw starts the
+// existing data check at once when it is past awg_probe_dead_stall_s; that check's verdict does the rest (a lost live
+// session: failover in Auto, the honest failure of an exact or preferred choice). One check per thaw; nothing while
+// anything else runs; no data watch flag.
+struct ThawStallCheckInput {
+    bool awgConnected = false; // the engine Connected on an own AmneziaWG session, the platform tunnel Connected
+    bool intentOn = false;     // the person's intent is on
+    bool idle = false;         // no own start / stop / teardown latch / attempt / data check / pause in progress
+    qint64 thawMs = 0;         // the last return to the foreground (<= 0: none)
+    qint64 checkedThawMs = 0;  // the thaw this check already ran for
+    qint64 stallSec = -1;      // the extension's data_stall_s (-1 unknown)
+    qint64 stallAtMs = 0;      // when the status request that carried it was sent
+    int thresholdSec = 0;      // awg_probe_dead_stall_s (0 = off)
+};
+inline bool thawStallCheckDue(const ThawStallCheckInput &in)
+{
+    return in.thresholdSec > 0 && in.awgConnected && in.intentOn && in.idle && in.thawMs > 0
+           && in.checkedThawMs != in.thawMs && in.stallAtMs >= in.thawMs && in.stallSec >= in.thresholdSec;
+}
+
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
 {
     return legStartFailures > 0 || attemptEndedNothingProven;

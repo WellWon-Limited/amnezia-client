@@ -1944,9 +1944,51 @@ static void s1ExactRowWinsOverTheMode()
     CHECK(scanRowEndOf(0, 0) == ScanRowEnd::Failed);
 }
 
+// T1 (owner road 26.11, journal J1): the thaw's stall check - due once per thaw, only on a live AmneziaWG session with the
+// intent on and nothing else running, only on a status asked after the thaw, only at or past the threshold.
+static void t1ThawStallCheck()
+{
+    ThawStallCheckInput in;
+    in.awgConnected = true;
+    in.intentOn = true;
+    in.idle = true;
+    in.thawMs = 1'000'000;
+    in.checkedThawMs = 0;
+    in.stallSec = 600; // J1: ten minutes of demand without data
+    in.stallAtMs = 1'001'200;
+    in.thresholdSec = 45;
+    CHECK(thawStallCheckDue(in));
+    ThawStallCheckInput x = in;
+    x.stallSec = 45;
+    CHECK(thawStallCheckDue(x));          // at the threshold
+    x.stallSec = 44;
+    CHECK(!thawStallCheckDue(x));         // below
+    x = in; x.stallSec = 0;
+    CHECK(!thawStallCheckDue(x));         // tribe.22: 0 = data flows or nobody sends (an idle healthy tunnel)
+    x = in; x.stallSec = -1;
+    CHECK(!thawStallCheckDue(x));         // unknown
+    x = in; x.stallAtMs = 999'000;
+    CHECK(!thawStallCheckDue(x));         // the snapshot from before the thaw
+    x = in; x.checkedThawMs = in.thawMs;
+    CHECK(!thawStallCheckDue(x));         // once per thaw
+    x = in; x.checkedThawMs = 500'000;
+    CHECK(thawStallCheckDue(x));          // an earlier thaw's check does not count
+    x = in; x.idle = false;
+    CHECK(!thawStallCheckDue(x));         // an own start / stop / teardown latch / attempt / check / pause
+    x = in; x.intentOn = false;
+    CHECK(!thawStallCheckDue(x));
+    x = in; x.awgConnected = false;
+    CHECK(!thawStallCheckDue(x));         // Xray, a provider, not connected
+    x = in; x.thawMs = -1;
+    CHECK(!thawStallCheckDue(x));         // no thaw yet
+    x = in; x.thresholdSec = 0;
+    CHECK(!thawStallCheckDue(x));         // awg_probe_dead_stall_s off
+}
+
 int main()
 {
     s1ExactRowWinsOverTheMode();
+    t1ThawStallCheck();
     r50UplinkMoveVoidsTheLiveClaim();
     r20PhysicalLossDuringConnect();
     p5bOfflineObservation();

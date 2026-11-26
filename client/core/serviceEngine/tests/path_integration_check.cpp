@@ -255,6 +255,36 @@ int main(int argc, char **argv)
         CHECK(r.eng.pathStateHere(QStringLiteral("16")) == QLatin1String("suspect"));
     }
 
+    // 2a. T1 (owner road 26.11, J1): the app thaws on an AmneziaWG session whose path is dead and the extension's fresh
+    //     status says so (data_stall_s >= awg_probe_dead_stall_s): the facade's trigger (DebugSnapshot.h
+    //     thawStallCheckDue) starts the existing re-check once; its failure is a lost live session and the failover
+    //     attempt walks on at once - no 4-probe wait.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        r.up();
+        CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
+        r.result();
+        ThawStallCheckInput in;
+        in.awgConnected = r.eng.state() == EngineState::Connected && !r.eng.currentNodeIsXray() && !r.eng.currentNodeIsUpstream();
+        in.intentOn = true;
+        in.idle = !r.eng.attemptRunning() && !r.eng.isVerifying();
+        in.thawMs = r.now;
+        in.stallSec = 600;
+        in.stallAtMs = r.now + 900;
+        in.thresholdSec = awgProbeDeadStallSTuned();
+        CHECK(in.awgConnected && thawStallCheckDue(in) && r.eng.reenterVerifying() && r.eng.isVerifying());
+        in.checkedThawMs = in.thawMs;          // the facade marks the thaw
+        in.idle = !r.eng.attemptRunning() && !r.eng.isVerifying();
+        CHECK(!thawStallCheckDue(in));          // once, and not while its check runs
+        const int upsBefore = int(r.tun.ups.size());
+        CHECK(r.eng.verifyFailed(QStringLiteral("whoami no data")) && r.eng.attemptRunning());
+        r.confirmStop();
+        CHECK(int(r.tun.ups.size()) == upsBefore + 1 && r.last() != QLatin1String("17")); // the failover, another server
+        CHECK(journalHas(r.journal, "live_lost node=17 outcome=no_data"));
+    }
+
     // 3. Health DEAD of the live session: the first does not blame the node (re-up of the same node first); once
     //    its re-up budget is spent the node is recorded and the failover attempt walks on without it.
     {
