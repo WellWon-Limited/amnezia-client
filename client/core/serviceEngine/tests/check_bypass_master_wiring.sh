@@ -1,16 +1,17 @@
 #!/bin/bash
 # AVPN «Доступ к сайтам РФ» (owner 26.11.2026, AND-67): the switch's effective value has ONE decision (BypassMaster.h:
-# off where the platform cannot apply the split - Android 13+ in this release - else the person's choice, a legacy false,
-# else on). The rule is pure and tested by behaviour (build_bypass_master.sh). What is checked here is that nothing goes
-# around it - each line fails if a reader or a store comes back:
+# off where the platform's route budget is 0 - RouteBudget.h - else the person's choice, a legacy false, else the
+# platform default, off on Android 13+). The rule is pure and tested by behaviour (build_bypass_master.sh,
+# build_route_budget.sh). What is checked here is that nothing goes around it - each line fails if a reader or a store
+# comes back:
 #   B1  no code outside BypassMaster.h names either stored key (AvpnBypass/masterOn, AvpnBypass/masterOnChoice);
 #   B2  the choice key is written only by the switch (setBypassMasterOn), the engine start's one-time move of a legacy
 #       false, and the A/B bench's exact restore; the engine start runs that move;
 #   B3  every C++ reader asks avpn::bypassMasterOn (the engine and its tunnel control);
 #   B4  QML no longer stores the switch: no QtCore Settings of the AvpnBypass category anywhere, and the main screen reads
 #       TribeEngine.bypassMasterOn and writes only through TribeEngine.setBypassMasterOn; the engine notifies it;
-#   B5  the Android 13+ boundary is the one constant kBypassMasterUnavailableOnAndroid13, and where it holds the effective
-#       value is off before any stored key is read;
+#   B5  unavailable is the route budget's zero case, read before any stored key; the Android 13+ boundary is one
+#       predicate (androidRoutesLimited) for the budget and the default; the two constants the owner flips exist once;
 #   B6  the onboarding card that states the switch is on is shown only while the effective value is on;
 #   B7  the UI asks the same predicate: the engine exposes bypassMasterAvailable from it, the main screen's switch is
 #       disabled there and its secondary line carries the caption (RU source, EN/ES translated);
@@ -70,18 +71,29 @@ has "$(code "$HDR")" 'Q_PROPERTY(bool bypassMasterOn READ bypassMasterOn NOTIFY 
 has "$(body "$ENG" 'void AvpnEngineQml::setBypassMasterOn(bool on)')" 'emit bypassMasterOnChanged();' \
     || bad "B4: the switch's write must notify QML"
 
-# ---- B5 ---- the Android 13+ boundary is one named constant; unavailable = off before any stored key
+# ---- B5 ---- unavailable = budget 0, before any stored key; one boundary; the owner's two constants
 bm="$(code "$HERE/../BypassMaster.h")"
 bmf="$(printf '%s\n' "$bm" | tr -s ' \n' ' ')"
-[ "$(count "$bm" 'inline constexpr bool kBypassMasterUnavailableOnAndroid13 = ')" -eq 1 ] \
-    || bad "B5: the Android 13+ boundary must be one constant"
-has "$bmf" 'return kBypassMasterUnavailableOnAndroid13 && android && sdkVersion >= 33;' \
-    || bad "B5: the platform predicate must read the constant"
-has "$bmf" 'std::optional<bool> legacy, bool unavailable) { if (unavailable) return false; if (choice.has_value()) return *choice;' \
-    || bad "B5: where the split cannot be applied the value must be off whatever is stored"
-has "$bmf" 'storedBool(s, kBypassMasterLegacyKey), bypassMasterUnavailableHere()); }' \
-    || bad "B5: the store reading must pass this device's predicate"
-printf '%s\n' "$bm" | grep -qE 'OffByDefault|DefaultOff' && bad "B5: a second (default-off) boundary is back"
+rb="$(code "$HERE/../RouteBudget.h")"
+rbf="$(printf '%s\n' "$rb" | tr -s ' \n' ' ')"
+[ "$(count "$bm" 'inline constexpr bool kBypassMasterOffByDefaultOnAndroid13 = ')" -eq 1 ] \
+    || bad "B5: the Android 13+ default must be one constant"
+[ "$(count "$rb" 'inline constexpr int kAndroidBypassRouteBudget = ')" -eq 1 ] || bad "B5: the compiled N must be one constant"
+has "$rbf" 'inline bool androidRoutesLimited(bool android, int sdkVersion) { return android && sdkVersion >= 33; }' \
+    || bad "B5: the Android 13+ boundary must be one predicate"
+has "$bmf" 'return kBypassMasterOffByDefaultOnAndroid13 && androidRoutesLimited(android, sdkVersion);' \
+    || bad "B5: the default must use the same boundary"
+has "$rbf" 'if (!androidRoutesLimited(android, sdkVersion)) return kRouteBudgetUnlimited;' \
+    || bad "B5: the budget must use the same boundary"
+has "$bmf" 'inline bool bypassMasterUnavailable(int routeBudget) { return routeBudget == 0; }' \
+    || bad "B5: unavailable must be the budget's zero case"
+has "$bmf" 'bool unavailable, bool defaultOff) { if (unavailable) return false; if (choice.has_value()) return *choice;' \
+    || bad "B5: where the budget is 0 the value must be off whatever is stored"
+has "$bmf" 'inline bool bypassMasterUnavailableHere() { return bypassMasterUnavailable(bypassRouteBudgetHere()); }' \
+    || bad "B5: this device's availability must be its route budget"
+has "$bmf" 'storedBool(s, kBypassMasterLegacyKey), bypassMasterUnavailableHere(), bypassMasterDefaultOffHere()); }' \
+    || bad "B5: the store reading must pass this device's budget and default"
+printf '%s\n' "$bm" | grep -qE 'UnavailableOnAndroid13' && bad "B5: a second (unavailable) boundary is back"
 
 # ---- B6 ---- the onboarding card that says «Доступ к сайтам РФ включён» shows only while the effective value is on
 onb="$(code "$CLIENT/ui/qml/Tribe/Pages/PageOnboardingTribe.qml")"
@@ -89,7 +101,7 @@ printf '%s\n' "$onb" | grep -A1 -F '                Rectangle {' | grep -qF 'vis
     || bad "B6: the onboarding's «включён» card must follow TribeEngine.bypassMasterOn"
 
 # ---- B7 ---- the UI: one predicate, the switch disabled with its caption
-has "$(code "$HDR")" 'Q_PROPERTY(bool bypassMasterAvailable READ bypassMasterAvailable CONSTANT)' \
+has "$(code "$HDR")" 'Q_PROPERTY(bool bypassMasterAvailable READ bypassMasterAvailable NOTIFY bypassMasterOnChanged)' \
     || bad "B7: the engine must expose the availability"
 has "$(body "$ENG" 'bool AvpnEngineQml::bypassMasterAvailable() const')" 'return !avpn::bypassMasterUnavailableHere();' \
     || bad "B7: the availability must be the value's own predicate"

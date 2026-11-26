@@ -282,9 +282,10 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(bool autoUpdate READ autoUpdate WRITE setAutoUpdate NOTIFY autoUpdateChanged)
     // AVPN «Доступ к сайтам РФ»: the effective value (BypassMaster.h, one decision); QML shows it and never stores it.
     Q_PROPERTY(bool bypassMasterOn READ bypassMasterOn NOTIFY bypassMasterOnChanged)
-    // Whether this device can apply the split at all (BypassMaster.h: not on Android 13+ in this release) - the main
-    // screen's switch is disabled with a caption where it cannot; the same predicate turns the effective value off.
-    Q_PROPERTY(bool bypassMasterAvailable READ bypassMasterAvailable CONSTANT)
+    // Whether this device can apply the split at all (BypassMaster.h: the route budget is not 0 - RouteBudget.h) - the
+    // main screen's switch is disabled with a caption where it cannot; the same predicate turns the effective value off.
+    // The budget can change with the server's number (and a developer build's control file): notified with the value.
+    Q_PROPERTY(bool bypassMasterAvailable READ bypassMasterAvailable NOTIFY bypassMasterOnChanged)
     Q_PROPERTY(bool selfUpdateBusy READ selfUpdateBusy NOTIFY selfUpdateChanged)
     Q_PROPERTY(bool selfUpdateBackground READ selfUpdateBackground NOTIFY selfUpdateChanged)
     Q_PROPERTY(QString selfUpdateStage READ selfUpdateStage NOTIFY selfUpdateChanged)
@@ -912,6 +913,9 @@ public:
     // The switch's effective value (avpn::bypassMasterOn, BypassMaster.h): the person's choice, else the platform default.
     bool bypassMasterOn() const;
     bool bypassMasterAvailable() const; // !avpn::bypassMasterUnavailableHere()
+    // «Доступ к сайтам РФ», Android layer 1 (RuApps.h): the listed Russian apps excluded from the tunnel while the mode
+    // is on, stored as upstream's per-app split; no app excluded while it is off. No-op off Android.
+    void applyRuBypassApps(bool masterOn);
     void abRestoreBypassMaster(); // the bench's end: the switch's stored keys as before it
 
     // AVPN (звонки, 2026-07-03): саб-опция «RU-DNS маскировка» (AvpnBypass/dnsMaskOn, default ВКЛ).

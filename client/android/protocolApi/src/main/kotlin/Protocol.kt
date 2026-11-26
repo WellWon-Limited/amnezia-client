@@ -1,6 +1,7 @@
 package org.amnezia.vpn.protocol
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.IpPrefix
 import android.net.VpnService
 import android.net.VpnService.Builder
@@ -28,6 +29,11 @@ abstract class Protocol {
     protected lateinit var onError: (String) -> Unit
     protected var isInitialized: Boolean = false
 
+    // AVPN «Доступ к сайтам РФ» (RouteBudget.h): the engine's seed counts from the session config, for the one line of
+    // each build in buildVpnInterface (-2 = the config has none)
+    private var bypassRoutesTotal = -2
+    private var bypassRouteBudget = -2
+
     fun initialize(context: Context, state: MutableStateFlow<ProtocolState>, onError: (String) -> Unit) {
         this.context = context
         this.state = state
@@ -45,6 +51,8 @@ abstract class Protocol {
     abstract fun reconnectVpn(vpnBuilder: Builder, protect: (Int) -> Boolean)
 
     protected fun ProtocolConfig.Builder.configSplitTunneling(config: JSONObject) {
+        bypassRoutesTotal = config.optInt("avpnBypassRoutesTotal", -2)
+        bypassRouteBudget = config.optInt("avpnBypassRouteBudget", -2)
         if (!allowSplitTunneling) {
             Log.i(TAG, "Global address split tunneling is prohibited, " +
                 "only tunneling from the protocol config is used")
@@ -127,10 +135,26 @@ abstract class Protocol {
             vpnBuilder.addAllowedApplication(app)
         }
 
+        // AVPN «Доступ к сайтам РФ», layer 1 (RuApps.h): the list is a compiled one, so a listed app that is not installed
+        // (or not visible: AndroidManifest <queries>) is skipped - one missing package must never fail the build.
+        var appsExcluded = 0
         for (app in config.excludedApplications) {
             Log.d(TAG, "addDisallowedApplication")
-            vpnBuilder.addDisallowedApplication(app)
+            try {
+                vpnBuilder.addDisallowedApplication(app)
+                appsExcluded++
+            } catch (e: PackageManager.NameNotFoundException) {
+                // not installed: nothing to exclude
+            }
         }
+        // AVPN (RouteBudget.h): one line per build, counts only (no package names, no addresses)
+        Log.i(TAG, "bypass apps excluded=$appsExcluded of ${config.excludedApplications.size} routes applied=" +
+            "${config.excludedAddresses.size} of ${if (bypassRoutesTotal >= 0) bypassRoutesTotal else "-"} budget=" +
+            when {
+                bypassRouteBudget == -1 -> "unlimited"
+                bypassRouteBudget >= 0 -> bypassRouteBudget.toString()
+                else -> "-"
+            })
 
         Log.d(TAG, "setMtu: ${config.mtu}")
         vpnBuilder.setMtu(config.mtu)

@@ -34,6 +34,7 @@
 #endif
 
 #include "core/serviceEngine/CidrValidate.h" // AVPN: IPv6-CIDR для split-фильтра (header-only)
+#include "core/serviceEngine/RouteBudget.h"  // AVPN «Доступ к сайтам РФ»: the seed's counts for the service's log
 #include "core/serviceEngine/TuningStore.h" // AVPN backend-first-3 (Task 8): status_poll_ms (header-only)
 #include "core/utils/networkUtilities.h"
 #include "core/utils/serverConfigUtils.h"
@@ -646,6 +647,13 @@ void VpnConnection::appendSplitTunnelingConfig()
 
     m_vpnConfiguration.insert(configKey::appSplitTunnelType, appsRouteMode);
     m_vpnConfiguration.insert(configKey::splitTunnelApps, appsJsonArray);
+#if defined(Q_OS_ANDROID)
+    // AVPN «Доступ к сайтам РФ» (RouteBudget.h): the seed's list size before the cut and the route budget, for the
+    // service's one line at each tunnel build ("bypass apps excluded=.. routes applied=.. of <total> budget=<N>").
+    // Counts only; the service ignores them otherwise.
+    m_vpnConfiguration.insert(QStringLiteral("avpnBypassRoutesTotal"), avpn::RouteBudgetInputs::lastSeedTotal());
+    m_vpnConfiguration.insert(QStringLiteral("avpnBypassRouteBudget"), avpn::RouteBudgetInputs::lastSeedBudget());
+#endif
 
     qDebug() << QString("Site split tunneling is %1, route mode is %2")
                         .arg(m_appSettingsRepository->isSitesSplitTunnelingEnabled() ? "enabled" : "disabled")

@@ -36,6 +36,21 @@
          + декларацией в Play Console. AppListProvider без разрешения не крашится (API 30+
          просто отдаёт отфильтрованный список). -->
 
+    <!-- AVPN «Доступ к сайтам РФ», layer 1 (apps, owner 26.11): package visibility (API 30+) of the listed Russian
+         apps only - no QUERY_ALL_PACKAGES. The VPN service excludes the installed ones from the tunnel while the mode
+         is on (addDisallowedApplication); without this block every one of them reads as not installed. GENERATED with
+         client/core/serviceEngine/ru_apps.h by client/android/tools/gen_ru_apps.py - do not edit by hand. -->
+    <!-- avpn-ru-apps-queries:begin -->
+    <queries>
+        <package android:name="com.idamob.tinkoff.android" />
+        <package android:name="com.wildberries.ru" />
+        <package android:name="ru.alfabank.mobile.android" />
+        <package android:name="ru.ozon.app.android" />
+        <package android:name="ru.sberbankmobile" />
+        <package android:name="ru.vtb24.mobilebanking.android" />
+    </queries>
+    <!-- avpn-ru-apps-queries:end -->
+
     <!-- AVPN: android:label — видимое имя приложения = Tribe VPN (ребренд; плейсхолдер androiddeployqt заменён) -->
     <application
         android:name=".AmneziaApplication"

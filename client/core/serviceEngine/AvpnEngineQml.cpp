@@ -5,6 +5,7 @@
 #ifdef Q_OS_ANDROID
 #include "platforms/android/android_controller.h" // AVPN: адопт снапшота статуса (рассинхрон после фона)
 #include "platforms/android/avpn_selfupdate_android.h" // AVPN (2026-11-16): site APK self-update
+#include <QJniObject> // AVPN «Доступ к сайтам РФ», layer 1: our own package name (never excluded)
 #endif
 
 #include "core/repositories/secureAppSettingsRepository.h"
@@ -72,6 +73,9 @@
 #include "EdgeWalk.h"             // AVPN (разбор 2026-09-23): хосты всех edge — в carve-out заранее
 #include "BypassSeedStamp.h"      // AVPN: стамп входов сева АнтиВПН — скип пересева 10k CIDR при неизменных входах
 #include "BypassMaster.h"         // AVPN «Доступ к сайтам РФ»: the one decision of the switch's effective value
+#include "RouteBudget.h"          // AVPN «Доступ к сайтам РФ»: the platform's route budget of the split
+#include "RouteReduce.h"          // AVPN «Доступ к сайтам РФ»: the split list cut to that budget (a subset)
+#include "RuApps.h"               // AVPN «Доступ к сайтам РФ», Android layer 1: Russian apps outside the tunnel
 #include <QHostInfo>              // AVPN RU-direct: async-резолв хоста API для carve-out
 #include <QPointer>               // AVPN (разбор 2026-09-23): колбэк истечения фонового времени iOS
 #include "LegalDocs.h"            // AVPN in-app Legal: URL/кэш/валидация Privacy/Terms
@@ -1241,6 +1245,17 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 if (!m_subRefreshTimer.isActive() || m_subRefreshTimer.interval() != refreshMs)
                     m_subRefreshTimer.start(refreshMs);
                 m_remoteCfg = c;
+                // AVPN «Доступ к сайтам РФ» (RouteBudget.h): the server's route budget (client number
+                // android_bypass_route_budget; absent = the compiled one). A change re-reads the switch and its row.
+                {
+                    const int before = avpn::bypassRouteBudgetHere();
+                    avpn::RouteBudgetInputs::setServer(
+                        c.numbers.contains(avpn::kRouteBudgetNumberKey)
+                            ? std::optional<double>(c.numbers.value(avpn::kRouteBudgetNumberKey))
+                            : std::nullopt);
+                    if (avpn::bypassRouteBudgetHere() != before)
+                        emit bypassMasterOnChanged();
+                }
                 // AVPN (разбор 2026-09-23): новые edge с сервера — сразу в carve-out (см. resolveApiCarveHosts).
                 if (!c.edges.isEmpty())
                     resolveApiCarveHosts(avpn::edgeHosts(c.edges));
@@ -1881,6 +1896,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 devLedgerReset = true;
             }
         }
+        // AVPN (RouteBudget.h): the route budget override of its control file - read here first, then before every seed
+        avpn::RouteBudgetInputs::setDev(avpn::readDevRouteBudget());
 #endif
         m_engine.loadPathLedger(s.value(QLatin1String(kPathLedgerSettingsKey)).toByteArray());
         m_reliabilityRing.lines = s.value(QStringLiteral("avpn/reliabilityLog")).toStringList().mid(0, 128);
@@ -10037,8 +10054,18 @@ void AvpnEngineQml::applyRuBypassSplit()
     // инварианта «apply = реконсиляция»: идемпотентный посев + persist на диск + уборка сирот на
     // старте сервиса + дебаунс RouteMonitor (инцидент: 8646 маршрутов-сирот после краша сервиса).
     using amnezia::RouteMode;
+#ifdef AVPN_DEV_TOOLS
+    { // AVPN (developer build only): the control file is read again before every seed (each connect)
+        const int before = avpn::bypassRouteBudgetHere();
+        avpn::RouteBudgetInputs::setDev(avpn::readDevRouteBudget());
+        if (avpn::bypassRouteBudgetHere() != before)
+            emit bypassMasterOnChanged();
+    }
+#endif
     QSettings s;
     const bool masterOn = avpn::bypassMasterOn(s); // the effective value (BypassMaster.h)
+    const int routeBudget = avpn::bypassRouteBudgetHere(); // RouteBudget.h: unlimited off Android and on Android <= 12
+    applyRuBypassApps(masterOn); // Android layer 1 (apps) - before the sites' early returns: the mode off clears it too
     // AVPN (китайские сервисы, 2026-07-03): второй независимый тумблер «Li Auto» (default ВКЛ). Оба тумблера
     // сеют в один и тот же split-набор (RouteMode::VpnAllExceptSites) — оси не конфликтуют, список объединяется.
     const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
@@ -10052,6 +10079,7 @@ void AvpnEngineQml::applyRuBypassSplit()
     // ФАКТИЧЕСКОЙ ноде в VpnConnectionTunnelControl::up() (покрывает failover/авто-RU-fallback/мёртвый
     // RU-pin — прежний гейт по pinnedNodeIsRu() тут расходился с реальностью, когда нода ≠ pin).
     if (!masterOn && !liAutoOn) {
+        avpn::RouteBudgetInputs::setLastSeed(0, routeBudget);
         m_store->setSitesSplitTunnelingEnabled(false);
         // Страховка (ревью A5): пока сплит выключен, стор могли мутировать в обход этой функции —
         // сбрасываем стамп, чтобы ре-ВКЛ гарантированно пересеял (цена — один сев на переключение).
@@ -10070,7 +10098,8 @@ void AvpnEngineQml::applyRuBypassSplit()
     // Оба-OFF выше чистят стамп (страховка от мутаций стора при выключенном сплите) — ре-ВКЛ
     // всегда пересеет. Carve-IP — из apiCarveIps(), ЕДИНОГО источника с rebuildApiCarveOut.
     const QString seedStamp =
-            avpn::bypassSeedStamp(masterOn, liAutoOn, useRemote, bl.version, apiCarveIps());
+            avpn::bypassSeedStamp(masterOn, liAutoOn, useRemote, bl.version, apiCarveIps())
+            + QStringLiteral("|budget=") + QString::number(routeBudget); // a new budget = a new seed
     if (seedStamp == m_lastBypassSeedStamp) {
         qInfo("[AVPN bypass] seed unchanged — skip (v=%d)", useRemote ? bl.version : -1);
         return;
@@ -10084,6 +10113,7 @@ void AvpnEngineQml::applyRuBypassSplit()
     // вкомпиленном фолбэке) — Госуслуги-carve и LiAuto молча исчезали. usedRemote* ниже — per-group
     // источник для лога (см. qInfo в конце функции).
     bool usedRemoteRu = false, usedRemoteExtra = false, usedRemoteLiAuto = false;
+    QStringList fixedGroups; // the foreign groups below (Gosuslugi endpoints, Li Auto): never cut by the route budget
     if (masterOn) {
         // AVPN Task 10: рунет CIDR — серверный (bl.ruCidrs) при валидном снапшоте, иначе вкомпиленный.
         usedRemoteRu = useRemote;
@@ -10113,6 +10143,7 @@ void AvpnEngineQml::applyRuBypassSplit()
         const QStringList bypassExtra = usedRemoteExtra ? bl.bypassExtra : extraFallback;
         for (const QString &cidr : bypassExtra)
             sites.insert(cidr, {cidr});
+        fixedGroups << bypassExtra;
     }
 
     // AVPN (китайские сервисы, 2026-07-03): узкие /24 серверов Li Auto (理想汽车, app com.chehejia.oc.m01) →
@@ -10144,6 +10175,7 @@ void AvpnEngineQml::applyRuBypassSplit()
         const QStringList liAuto = usedRemoteLiAuto ? bl.cnLiAutoCidrs : liAutoFallback;
         for (const QString &cidr : liAuto)
             sites.insert(cidr, {cidr});
+        fixedGroups << liAuto;
     }
 
     // AVPN carve-out (incident 2026-07-05, extracted in T6 — rebuildApiCarveOut(sites) above): the API
@@ -10152,6 +10184,38 @@ void AvpnEngineQml::applyRuBypassSplit()
     // used to be (same order of operations on the same `sites`). See rebuildApiCarveOut for the
     // current address.
     rebuildApiCarveOut(sites);
+
+    // AVPN «Доступ к сайтам РФ» (RouteBudget.h, RouteReduce.h): the list cut to the platform's route budget - a subset,
+    // never a widened prefix (a left-out RU network goes through the VPN, as with the mode off). The foreign groups (the
+    // Gosuslugi endpoints, Li Auto) are never cut and count against the budget; the RU part takes the rest: a lossless
+    // merge first, then the largest prefixes. Unlimited (off Android, Android <= 12): the list exactly as before.
+    if (routeBudget < 0) {
+        avpn::RouteBudgetInputs::setLastSeed(int(sites.size()), routeBudget);
+    } else {
+        QList<avpn::RoutePrefix> fixedCover;
+        for (const QString &cidr : fixedGroups) {
+            avpn::RoutePrefix p;
+            if (avpn::parseRoutePrefix(cidr, p))
+                fixedCover << p;
+        }
+        QStringList ruPart, fixedPart;
+        for (auto it = sites.cbegin(); it != sites.cend(); ++it)
+            (avpn::routeInsideAny(it.key(), fixedCover) ? fixedPart : ruPart) << it.key();
+        const int ruBudget = std::max(0, routeBudget - int(fixedPart.size()));
+        const avpn::RouteReduction cut = avpn::reduceRoutes(ruPart, ruBudget, /*priority=*/{});
+        if (cut.changed) {
+            QMap<QString, QStringList> reduced;
+            for (const QString &cidr : fixedPart)
+                reduced.insert(cidr, sites.value(cidr));
+            for (const QString &cidr : cut.routes)
+                reduced.insert(cidr, {cidr});
+            sites = reduced;
+        }
+        avpn::RouteBudgetInputs::setLastSeed(int(ruPart.size() + fixedPart.size()), routeBudget);
+        qInfo("[AVPN bypass] routes applied=%d of %d budget=%d merged=%d fixed=%d", int(sites.size()),
+              int(ruPart.size() + fixedPart.size()), routeBudget, cut.merged + int(fixedPart.size()),
+              int(fixedPart.size()));
+    }
 
     // AVPN Task 10 (per-group fallback): источник — ПО ГРУППАМ, не одним общим useRemote — с тех пор
     // как пустая группа на сервере падает на вкомпиленный дефолт, а не на пустой список (см. выше).
@@ -10202,6 +10266,53 @@ bool AvpnEngineQml::bypassMasterOn() const
 bool AvpnEngineQml::bypassMasterAvailable() const
 {
     return !avpn::bypassMasterUnavailableHere();
+}
+
+// AVPN «Доступ к сайтам РФ», Android layer 1 (RuApps.h, owner 26.11): the listed Russian apps (ru_apps.h) excluded from
+// the tunnel while the mode is on - on every Android version, at no route cost. Stored as upstream's per-app split (all
+// apps except these); VpnConnection::appendSplitTunnelingConfig puts it into the session config (appSplitTunnelType 2 +
+// splitTunnelApps) and the service's Protocol.buildVpnInterface excludes the installed ones. The mode off = no app
+// excluded, exactly as before (the upstream per-app screen is not reachable in the Tribe UI, so this list is ours, like
+// the sites one). Written only when it differs: every start calls this.
+void AvpnEngineQml::applyRuBypassApps(bool masterOn)
+{
+#if defined(Q_OS_ANDROID)
+    if (!m_store)
+        return;
+    using amnezia::AppsRouteMode;
+    QString own = avpn::kTribeAndroidPackage;
+    {
+        const QJniObject context = QNativeInterface::QAndroidApplication::context();
+        if (context.isValid()) {
+            const QString pkg = context.callObjectMethod("getPackageName", "()Ljava/lang/String;").toString();
+            if (!pkg.isEmpty())
+                own = pkg;
+        }
+    }
+    const QStringList apps = avpn::bypassAppsForConfig(masterOn, avpn::ruAppPackages(), avpn::ruAppNever(), own);
+    const bool on = !apps.isEmpty();
+    if (on) {
+        QStringList stored;
+        for (const amnezia::InstalledAppInfo &a : m_store->vpnApps(AppsRouteMode::VpnAllExceptApps))
+            stored << a.packageName;
+        if (stored != apps) {
+            QVector<amnezia::InstalledAppInfo> v;
+            for (const QString &p : apps) {
+                amnezia::InstalledAppInfo info;
+                info.packageName = p;
+                v.append(info);
+            }
+            m_store->setVpnApps(AppsRouteMode::VpnAllExceptApps, v);
+        }
+        if (m_store->appsRouteMode() != AppsRouteMode::VpnAllExceptApps)
+            m_store->setAppsRouteMode(AppsRouteMode::VpnAllExceptApps);
+    }
+    if (m_store->isAppsSplitTunnelingEnabled() != on)
+        m_store->setAppsSplitTunnelingEnabled(on);
+    qInfo("[AVPN bypass] apps listed=%d (mode %s)", int(apps.size()), masterOn ? "on" : "off");
+#else
+    Q_UNUSED(masterOn);
+#endif
 }
 
 // The A/B bench flips the switch through setBypassMasterOn and puts the stored keys back exactly at its end: a bench
