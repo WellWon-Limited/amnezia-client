@@ -2735,6 +2735,11 @@ void AvpnEngineQml::resolveApiCarveHosts(const QStringList &hosts)
 // Nothing is dropped from the list.
 void AvpnEngineQml::resolveApiCarveHostsStillMissing()
 {
+    // Merge of lead/143-names into the macOS line: on desktop (no Qt host-cache clear) every tunnel transition asks here
+    // at once - the quit's own stop too, inside the quit pump. Once the exit has begun (round mac-D4 latch) no lookup is
+    // started: Qt's host-info pool would have to finish it while the app tears down, and nothing would read the answer.
+    if (m_exiting)
+        return;
     QStringList missing;
     for (const QString &host : std::as_const(m_apiCarveHostsAsked))
         if (m_apiHostIpsByHost.value(host).isEmpty() && QHostAddress(host).isNull())

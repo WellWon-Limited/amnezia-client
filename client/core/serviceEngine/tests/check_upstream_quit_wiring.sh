@@ -57,5 +57,10 @@ printf '%s\n' "$(body "$VTC" 'void VpnConnectionTunnelControl::abandonUpstreamSt
   || bad "Q5: the adapter's exit cancel is not limited to a start that is not up"
 grep -B1 -F '&& avpn::upstreamSeatFirst(intent.needsRestart' "$ENG" | grep -qF 'if (!m_exiting' || bad "Q5: a seat can be taken for a switch after the exit began"
 
+# Q6 (merge of lead/143-names): the API host re-ask that every tunnel transition runs on desktop (the quit's own stop too)
+# starts no lookup once the exit has begun - it reads the same latch first.
+printf '%s\n' "$(body "$ENG" 'void AvpnEngineQml::resolveApiCarveHostsStillMissing()')" | grep -v '^[[:space:]]*//' | sed -n 2,3p \
+  | grep -qF 'if (m_exiting)' || bad "Q6: the API host re-ask starts lookups after the exit began"
+
 [ "$fail" = 0 ] && echo "check_upstream_quit_wiring: ok"
 exit "$fail"
