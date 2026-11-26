@@ -770,9 +770,7 @@ bool ServiceEngine::failedInTunnelHere(const QString &nodeId) const
     const SubscriptionNode *n = findNode(nodeId);
     if (!n || !m_net.current().usable())
         return false;
-    const path::LedgerEntry *e = m_ledger.entry(m_net.current().local, path::derivePathId(*n).id);
-    return e && e->revision == path::derivePathId(*n).revision && e->failStreak > 0 && e->noDataMs > 0
-        && e->noDataMs >= e->dataOkMs;
+    return m_ledger.tunnelNoDataHere(m_net.current().local, path::derivePathId(*n), nowMs());
 }
 
 bool ServiceEngine::recordProbeProof(const QString &nodeId, const QString &source)

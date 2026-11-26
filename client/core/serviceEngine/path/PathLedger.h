@@ -5,7 +5,8 @@
 //
 // What is recorded - only outcomes that belong to the path itself (design Р12):
 //   probe ok       a light check next to the tunnel passed (weak proof: may raise the path, never "Connected";
-//                  it never clears a tunnel "no data" - only a data ok does), with its time to proof when known;
+//                  it never clears a tunnel "no data" while that mark holds - only a data ok does; a single one
+//                  holds noDataTtlMs from its own moment, noDataMarkHolds), with its time to proof when known;
 //   data ok        data passed through the raised tunnel, with time to tunnel and time to first byte (strong);
 //   no handshake   the path did not come up within its start deadline (AmneziaWG handshake, Xray connect);
 //   no data        the tunnel came up, no data passed within the check deadline;
@@ -172,10 +173,10 @@ public:
                 if (connectMs >= 0)
                     e.probeMs = connectMs;
                 // Stage 2: a tunnel that came up and carried no data outranks a light probe (device round 18.11:
-                // own Xray 15 on LTE probes fine, the real tunnel passes nothing). Only a data ok through the
-                // tunnel clears such a failure; the probe is kept, the path stays suspect / dead, so the race
-                // does not pick it again and again.
-                if (e.failStreak > 0 && e.noDataMs > 0 && e.noDataMs >= e.dataOkMs)
+                // own Xray 15 on LTE probes fine, the real tunnel passes nothing). While the mark holds
+                // (noDataMarkHolds) only a data ok through the tunnel clears the failure; the probe is kept, the
+                // path stays suspect / dead, so the race does not pick it again and again.
+                if (noDataMarkHolds(e, nowMs, m_t))
                     break;
             }
             e.failStreak = 0;
@@ -260,6 +261,33 @@ public:
     {
         const auto it = m_entries.constFind(keyOf(network, pathId));
         return it == m_entries.constEnd() ? nullptr : &it.value();
+    }
+
+    // "The real tunnel of this path carried no data on this network" (the Scanner's «Не удалось», via
+    // ServiceEngine::failedInTunnelHere): the probe-pass block's own rule, on an entry view() still reads (this
+    // revision, touched within evidenceTtlMs).
+    bool tunnelNoDataHere(const QString &network, const PathId &path, qint64 nowMs) const
+    {
+        const auto it = m_entries.constFind(keyOf(network, path.id));
+        if (it == m_entries.constEnd())
+            return false;
+        const LedgerEntry &e = it.value();
+        if (e.revision != path.revision || nowMs - e.touchedMs > m_t.evidenceTtlMs)
+            return false;
+        return noDataMarkHolds(e, nowMs, m_t);
+    }
+
+    // The tunnel "no data" mark - one rule for the probe-pass block (record) and tunnelNoDataHere: the tunnel came
+    // up and carried no data, and nothing carried data through it since. A single failure (suspect) holds for
+    // noDataTtlMs from the moment the no-data was observed: a weaker observation (a probe pass, which also keeps the
+    // entry touched) does not extend the life of a stronger one; afterwards the next probe pass lifts the path as
+    // after any other single failure. Two or more failures (dead) are the quarantine ladder's: the mark holds as
+    // long as the streak does, the ladder alone decides when the path is offered again.
+    static bool noDataMarkHolds(const LedgerEntry &e, qint64 nowMs, const LedgerTunables &t)
+    {
+        if (e.failStreak <= 0 || e.noDataMs <= 0 || e.noDataMs < e.dataOkMs)
+            return false;
+        return e.failStreak >= 2 || nowMs - e.noDataMs < t.noDataTtlMs;
     }
 
     // Drops entries untouched for evidenceTtlMs, then the oldest beyond maxEntries.

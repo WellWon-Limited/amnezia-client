@@ -291,7 +291,8 @@ public:
     // A probe proof that came from elsewhere (the Scanner's finished scan on the current network): recorded at
     // "probe ok" strength, like a race result. false = not recorded (unknown node, no usable network).
     bool recordProbeProof(const QString &nodeId, const QString &source);
-    // S6: the path's real tunnel came up and carried no data on the current network, with no data ok since.
+    // S6: the path's real tunnel came up and carried no data on the current network, with no data ok since - while
+    // the ledger's mark holds (path::PathLedger::tunnelNoDataHere: a single one for noDataTtlMs from its moment).
     bool failedInTunnelHere(const QString &nodeId) const;
     // Lane C: the facade gives the engine the one read-only fact "can the direct control plane be reached on this
     // network" (its owner is ConfigService; the engine keeps no copy) and the one rule "this provider node can start

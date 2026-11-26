@@ -77,6 +77,12 @@ struct LedgerTunables {
     long long probeOkTtlMs = 10LL * 60 * 1000;
     // An entry nothing touched for this long is ignored and pruned (the network or the fleet has changed).
     long long evidenceTtlMs = 7LL * 24 * 3600 * 1000;
+    // A single tunnel "no data" (PathLedger::noDataMarkHolds) outranks probe passes for this long from the moment it
+    // was observed - the top of the quarantine ladder: a single no-data is never held longer than the longest
+    // quarantine (coordinator, 26.11). The key of a mobile network covers the whole operator, while the cause of a
+    // no-data (a whitelist zone, a frozen path) is local in place and time; device round R 26.11: an own Xray row
+    // stayed «не удалось» for days because the scans' probes kept the entry fresh. Compile-time, as the rest here.
+    long long noDataTtlMs = quarantineMs.back();
     // A server refusal or "no free seat" keeps the path out of the first places for this long, without
     // touching the quarantine ladder (it says nothing about the network).
     long long refusalCooldownMs = 2LL * 60 * 1000;

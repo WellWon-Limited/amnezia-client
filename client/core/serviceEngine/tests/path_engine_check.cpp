@@ -298,6 +298,83 @@ static void testLedger()
     CHECK(PathLedger::fromJson(json, tiny).size() == 1); // the bound holds on load too
 }
 
+// A single tunnel "no data" ages from its own moment (device round R, 26.11: own «Финляндия 1 Xray» «не удалось» on
+// LTE and Wi-Fi for days - its only no-data was the err=2 false verdict of 25.11, and every scan's probe pass kept the
+// entry touched); two or more failures stay the quarantine ladder's.
+static void testNoDataMarkTtl()
+{
+    const LedgerTunables lt;
+    CHECK(lt.noDataTtlMs == lt.quarantineMs.back() && lt.noDataTtlMs == 6LL * 3600 * 1000); // the ladder's top
+    const QString net = QStringLiteral("cell:-:lte");
+    const qint64 t0 = 1'800'000'000'000LL;
+    const qint64 minute = 60LL * 1000;
+
+    {   // no data at t0, a probe pass every minute: held until t0 + TTL, then the next pass lifts the path
+        PathLedger l(lt);
+        const PathId p{ QStringLiteral("11:xray"), QStringLiteral("r") };
+        CHECK(l.record(net, p, PathOutcome::NoData, t0));
+        bool heldAll = true;
+        qint64 t = t0 + minute;
+        for (; t < t0 + lt.noDataTtlMs; t += minute) {
+            l.record(net, p, PathOutcome::ProbeOk, t, 900);
+            const PathView v = l.view(net, p, t);
+            heldAll = heldAll && v.state == PathState::Suspect && v.failStreak == 1 && l.tunnelNoDataHere(net, p, t);
+        }
+        CHECK(heldAll);                                                     // the probes neither clear nor extend it
+        CHECK(l.tunnelNoDataHere(net, p, t0 + lt.noDataTtlMs - 1));
+        CHECK(!l.tunnelNoDataHere(net, p, t0 + lt.noDataTtlMs));            // gone at its own age, before any probe
+        CHECK(l.record(net, p, PathOutcome::ProbeOk, t0 + lt.noDataTtlMs, 900));
+        PathView v = l.view(net, p, t0 + lt.noDataTtlMs);
+        CHECK(v.state == PathState::Working && v.strength == EvidenceStrength::Probe && v.failStreak == 0); // rankable
+        // a real no-data after that marks it again, and a probe right after does not lift it
+        const qint64 t1 = t0 + lt.noDataTtlMs + minute;
+        CHECK(l.record(net, p, PathOutcome::NoData, t1));
+        CHECK(l.tunnelNoDataHere(net, p, t1) && l.view(net, p, t1).state == PathState::Suspect);
+        CHECK(l.record(net, p, PathOutcome::ProbeOk, t1 + minute, 900));
+        CHECK(l.tunnelNoDataHere(net, p, t1 + minute) && l.view(net, p, t1 + minute).failStreak == 1);
+        CHECK(!l.tunnelNoDataHere(QStringLiteral("wifi:abc"), p, t1));     // another network knows nothing of it
+        CHECK(!l.tunnelNoDataHere(net, PathId{ p.id, QStringLiteral("r2") }, t1)); // another revision neither
+    }
+    {   // a mark older than the TTL is not reported even when the entry was never pruned; an entry untouched for
+        // evidenceTtlMs is not reported at all (the age check failedInTunnelHere lacked)
+        PathLedger l(lt);
+        const PathId p{ QStringLiteral("12:xray"), QStringLiteral("r") };
+        l.record(net, p, PathOutcome::NoData, t0);
+        CHECK(!l.tunnelNoDataHere(net, p, t0 + lt.noDataTtlMs) && l.entry(net, p.id) != nullptr);
+        CHECK(l.view(net, p, t0 + lt.noDataTtlMs).state == PathState::Suspect); // still one failure, like any other
+        // persisted and read back after the TTL (the false marks of 25.11 on the phone): expired, no wipe
+        const PathLedger back = PathLedger::fromJson(l.toJson(), lt);
+        CHECK(back.tunnelNoDataHere(net, p, t0 + 1) && !back.tunnelNoDataHere(net, p, t0 + lt.noDataTtlMs));
+        const PathId d{ QStringLiteral("13:xray"), QStringLiteral("r") };
+        l.record(net, d, PathOutcome::NoData, t0);
+        l.record(net, d, PathOutcome::NoData, t0 + 1000);                    // dead: the ladder's
+        CHECK(l.tunnelNoDataHere(net, d, t0 + 1000 + lt.evidenceTtlMs));
+        CHECK(!l.tunnelNoDataHere(net, d, t0 + 1000 + lt.evidenceTtlMs + 1) && l.entry(net, d.id) != nullptr);
+    }
+    {   // a two-failure row in quarantine is unaffected: the ladder still governs, probes past the TTL do not lift it
+        PathLedger l(lt);
+        const PathId p{ QStringLiteral("14:xray"), QStringLiteral("r") };
+        l.record(net, p, PathOutcome::NoData, t0);
+        l.record(net, p, PathOutcome::NoData, t0 + 1000);
+        const qint64 until = t0 + 1000 + lt.quarantineMs[0];
+        bool unaffected = true;
+        for (qint64 t = t0 + minute; t <= t0 + lt.noDataTtlMs + 3600 * 1000; t += minute) {
+            l.record(net, p, PathOutcome::ProbeOk, t, 900);
+            const PathView v = l.view(net, p, t);
+            unaffected = unaffected && v.state == PathState::Dead && v.failStreak == 2 && v.quarantineUntilMs == until
+                && v.inQuarantine == (t < until) && l.tunnelNoDataHere(net, p, t);
+        }
+        CHECK(unaffected);
+        // its next failure climbs the ladder from the newest failure, as before
+        const qint64 t2 = t0 + lt.noDataTtlMs + 2 * 3600 * 1000;
+        l.record(net, p, PathOutcome::NoHandshake, t2);
+        CHECK(l.view(net, p, t2).quarantineUntilMs == t2 + lt.quarantineMs[1]);
+        // a data ok through the tunnel still clears everything
+        l.record(net, p, PathOutcome::DataOk, t2 + 1, 2000, 300);
+        CHECK(l.view(net, p, t2 + 1).state == PathState::Working && !l.tunnelNoDataHere(net, p, t2 + 1));
+    }
+}
+
 // --- PathSelect ------------------------------------------------------------------------------------------
 
 static QStringList ids(const QList<RankedPath> &r)
@@ -2879,6 +2956,7 @@ int main()
     testPathId();
     testNetworkKey();
     testLedger();
+    testNoDataMarkTtl();
     testSelect();
     testChoiceCountryAndLanes();
     testSpeedOrder();

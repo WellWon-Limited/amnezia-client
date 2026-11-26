@@ -1130,6 +1130,22 @@ int main(int argc, char **argv)
         CHECK(r.eng.recordProbeProof(QStringLiteral("17"), QStringLiteral("scanner")));
         CHECK(r.eng.failedInTunnelHere(QStringLiteral("17"))); // the probe does not lift it
         CHECK(!r.eng.failedInTunnelHere(QStringLiteral("16")));
+        // ... for noDataTtlMs from the no-data's own moment (device round R, 26.11): the scans' probe passes every
+        // minute keep the entry touched but do not extend the mark; past it the Scanner no longer says «Не удалось»
+        // and the next probe pass makes the path rankable again
+        const qint64 ttl = path::LedgerTunables{}.noDataTtlMs;
+        const qint64 markedAt = r.now;
+        bool held = true;
+        while (r.now + 60000 < markedAt + ttl) {
+            r.now += 60000;
+            held = held && r.eng.recordProbeProof(QStringLiteral("17"), QStringLiteral("scanner"))
+                && r.eng.failedInTunnelHere(QStringLiteral("17")) && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("suspect");
+        }
+        CHECK(held);
+        r.now = markedAt + ttl;
+        CHECK(!r.eng.failedInTunnelHere(QStringLiteral("17")));
+        CHECK(r.eng.recordProbeProof(QStringLiteral("17"), QStringLiteral("scanner")));
+        CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("working"));
     }
 
     // Local build (Android emulator round 20.11, «Доступ к сайтам РФ» on): the platform reports that it builds the
