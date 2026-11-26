@@ -26,6 +26,11 @@ void anchorOpenSSL() {
     #include "platforms/ios/QtAppDelegate-C-Interface.h"
 #endif
 
+#if defined(Q_OS_ANDROID)
+    #include <QSettings>
+    #include <unistd.h> // AVPN (emulator round 26.11.2026): _exit at the end of the Android UI process, see main()
+#endif
+
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS) && !defined(MACOS_NE)
 bool isAnotherInstanceRunning()
 {
@@ -58,6 +63,27 @@ bool isAnotherInstanceRunning()
 
 int main(int argc, char *argv[])
 {
+#if defined(Q_OS_ANDROID)
+    // AVPN (emulator round 26.11.2026): the Android UI process ends with _exit once main's work is done - the ending the
+    // iOS build already uses (AvpnEngineQml.cpp, its aboutToQuit guard). After main() returns, Qt's Android plugin unloads
+    // this library and calls exit(), so the C++ static destructors run while system threads of the process are still
+    // alive - by all signs the render pool of Android's view layer (libhwui), waiting on a mutex those destructors
+    // destroy. A swipe from recents ended in SIGABRT «FORTIFY: pthread_mutex_lock called on a destroyed mutex» in two such
+    // threads, 10 ms after «main() returned 0». Nothing of ours needs that pass: every settings object writes itself when
+    // destroyed (~AmneziaApplication's SecureQSettings, each local QSettings) and the settings are synced once more here,
+    // as on iOS; the log file is flushed per message; our files are committed QSaveFiles; the tunnel runs in its own
+    // service process (:amneziaAwgService and the others), which the end of this process does not touch.
+    // Declared first, so it runs after every other local of main, ~AmneziaApplication included.
+    struct AndroidUiProcessEnd {
+        int code = 0;
+        ~AndroidUiProcessEnd()
+        {
+            { QSettings settings; settings.sync(); }
+            qInfo().noquote() << QStringLiteral("UI process ends with _exit(%1) after main").arg(code);
+            ::_exit(code);
+        }
+    } androidUiProcessEnd;
+#endif
     Migrations migrationsManager;
     migrationsManager.doMigrations();
 
@@ -128,7 +154,11 @@ int main(int argc, char *argv[])
         qInfo().noquote() << QString("Started %1 version %2 %3").arg(APPLICATION_NAME, APP_VERSION, GIT_COMMIT_HASH);
         qInfo().noquote() << QString("%1 (%2)").arg(QSysInfo::prettyProductName(), QSysInfo::currentCpuArchitecture());
 
+#if defined(Q_OS_ANDROID)
+        return androidUiProcessEnd.code = app.exec(); // AVPN: the code the UI process ends with (androidUiProcessEnd)
+#else
         return app.exec();
+#endif
     }
     return 0;
 }
