@@ -28,8 +28,16 @@ namespace avpn {
 inline const QString kBypassMasterChoiceKey = QStringLiteral("AvpnBypass/masterOnChoice");
 inline const QString kBypassMasterLegacyKey = QStringLiteral("AvpnBypass/masterOn");
 
-// The platform default is off on Android 13 (API 33) and newer (the 963 KB route list breaks the system's binder there).
-inline bool bypassMasterDefaultOff(bool android, int sdkVersion) { return android && sdkVersion >= 33; }
+// THE DEFAULT on Android 13 (API 33) and newer, for a person who never chose: true = off (owner's «ДА» of 26.11 to the
+// AND-67 temporary variant: the 963 KB route list breaks the system's binder there), false = on as everywhere else. The
+// owner has asked again whether it should stay on - this one constant is the answer; nothing else (tests included) needs
+// to change with it. Android below 13 and every other platform are on whatever it says.
+inline constexpr bool kBypassMasterOffByDefaultOnAndroid13 = true;
+
+inline bool bypassMasterDefaultOff(bool android, int sdkVersion)
+{
+    return kBypassMasterOffByDefaultOnAndroid13 && android && sdkVersion >= 33;
+}
 
 inline bool bypassMasterEffective(std::optional<bool> choice, std::optional<bool> legacy, bool defaultOff)
 {

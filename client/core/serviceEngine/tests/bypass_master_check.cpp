@@ -23,8 +23,10 @@ static const std::optional<bool> kAbsent = std::nullopt;
 
 static void platformDefault()
 {
-    CHECK(bypassMasterDefaultOff(true, 33));  // Android 13
-    CHECK(bypassMasterDefaultOff(true, 36));  // Android 16
+    // THE row of the open decision: Android 13+ follows kBypassMasterOffByDefaultOnAndroid13 (flip it there, nowhere else)
+    const bool off13 = kBypassMasterOffByDefaultOnAndroid13;
+    CHECK(bypassMasterDefaultOff(true, 33) == off13); // Android 13
+    CHECK(bypassMasterDefaultOff(true, 36) == off13); // Android 16
     CHECK(!bypassMasterDefaultOff(true, 32)); // Android 12L: unchanged
     CHECK(!bypassMasterDefaultOff(true, 28)); // the minimum SDK
     CHECK(!bypassMasterDefaultOff(false, 0)); // iOS, macOS, Windows
@@ -45,8 +47,9 @@ static void table()
     // legacy true or absent, nothing chosen: the platform default
     const bool android33 = bypassMasterDefaultOff(true, 33), android32 = bypassMasterDefaultOff(true, 32),
                other = bypassMasterDefaultOff(false, 0);
-    CHECK(!bypassMasterEffective(kAbsent, true, android33));    // upgrade from 139 on Android 13+: off (the decision)
-    CHECK(!bypassMasterEffective(kAbsent, kAbsent, android33)); // new install on Android 13+: off
+    const bool on13 = !kBypassMasterOffByDefaultOnAndroid13;
+    CHECK(bypassMasterEffective(kAbsent, true, android33) == on13);    // upgrade from 139 on Android 13+: the default
+    CHECK(bypassMasterEffective(kAbsent, kAbsent, android33) == on13); // new install on Android 13+: the default
     CHECK(bypassMasterEffective(kAbsent, true, android32));     // Android below 13: on, as today
     CHECK(bypassMasterEffective(kAbsent, kAbsent, android32));
     CHECK(bypassMasterEffective(kAbsent, true, other));         // iOS / macOS / Windows: on, as today
