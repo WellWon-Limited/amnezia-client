@@ -15,7 +15,8 @@
 
 #include <QDebug>                       // AVPN awg31-xray-v1: qWarning при фильтрации wg-quick ключей
 #include <QJsonArray>                   // AVPN split-DNS: список RU-суффиксов в корень cfg
-#include <QSettings>                    // AVPN RU-direct: чтение тумблера AvpnBypass/masterOn для DNS-override
+#include <QSettings>                    // AVPN RU-direct: the switches of the RU split (BypassMaster.h, dnsMaskOn) for the DNS override
+#include "BypassMaster.h"              // AVPN «Доступ к сайтам РФ»: the one decision of the effective value
 #include "TuningStore.h"                // AVPN backend-first (T20): server-tunable пороги
 #include "ConnectTunables.h"            // AVPN: клампованные handshake-пороги (ревью 2026-07-11)
 #include "core/utils/constants/configKeys.h" // AVPN seamless roaming: ключи roam* в корень cfg
@@ -353,7 +354,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     // Значения в КОРЕНЬ cfg остаются СТРОКАМИ, где были строками (JSONDecoder-грабля iOS).
     const avpn::BypassLists bl = avpn::BypassListStore::get();
 
-    // AVPN RU-direct (единый «Доступ к сайтам РФ», AvpnBypass/masterOn, default ON): DNS = РУССКИЙ резолвер
+    // AVPN RU-direct (единый «Доступ к сайтам РФ», its effective value: BypassMaster.h): DNS = РУССКИЙ резолвер
     // (Яндекс 77.88.8.8/.1 ∈ 77.88.0.0/18 ⊂ рунет → уходит МИМО туннеля вместе с рунетом → residential-
     // резолвер). Иначе DNS шёл бы на дефолтный 1.1.1.1 через загранузел, и инфра-сервисы со своим
     // авторитативным DNS (Госуслуги/VK/Кинопоиск) палили бы «нероссийский резолвер» → мягкое «возможно VPN».
@@ -368,7 +369,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     {
         QSettings s;
         const bool ruNode = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
-        const bool masterOn = s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+        const bool masterOn = avpn::bypassMasterOn(s); // the effective value (BypassMaster.h)
         // AVPN (звонки, 2026-07-03): dnsMaskOn — саб-опция «RU-DNS маскировка» (дефолт ВКЛ). Измерено:
         // Яндекс-DNS-на-всё с загран-egress выдаёт RU-гео edge → WhatsApp-инфра 131мс vs 75мс честного
         // гео (+75%) — страдают звонки/realtime. Поэтому:

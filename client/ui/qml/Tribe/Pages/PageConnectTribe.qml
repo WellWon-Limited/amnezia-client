@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Shapes
-import QtCore                        // AVPN: Settings (флаг «АвтоVPN» AvpnBypass/masterOn)
 import Qt5Compat.GraphicalEffects as Fx
 
 import ".."              // Theme
@@ -358,21 +357,11 @@ PageType {
     // конструктора уже ПОСЛЕ показа окна (QTimer::singleShot) — безопасно, как обычный start().
     Timer { id: simTimer; interval: 1500; onTriggered: { root.simConnecting = false; root.simConnected = true } }
 
-    // AVPN RU-direct: флаг «АвтоVPN» (единый РФ-доступ). Тот же стор/ключ, что читает движок
-    // (AvpnEngineQml::applyRuBypassSplit → QSettings AvpnBypass/masterOn). defaultOnMigrated — одноразовый
-    // force-on для старых юзеров (перенесён из удалённого PageSecurityTribe), чтобы РФ-доступ работал у всех.
-    Settings {
-        id: bypassStore
-        category: "AvpnBypass"
-        property bool masterOn: true
-        property bool defaultOnMigrated: false
-    }
-    Component.onCompleted: {
-        if (!bypassStore.defaultOnMigrated) {
-            bypassStore.masterOn = true
-            bypassStore.defaultOnMigrated = true
-        }
-    }
+    // AVPN RU-direct: «Доступ к сайтам РФ» shows the engine's effective value (BypassMaster.h, owner 26.11): the person's
+    // choice, else the platform default (off on Android 13+). This page no longer stores the switch: its QtCore Settings
+    // object wrote the default true on the first load (Qt writes every missing key), so «never touched» could not be told
+    // from «chose on»; the one writer is TribeEngine.setBypassMasterOn. Without an engine (preview) it shows on.
+    readonly property bool ruAccessOn: hasEngine ? TribeEngine.bypassMasterOn === true : true
 
     // AVPN: иконка «RU-шар» (редизайн 2026-07-02, по эталон-скрину): тёмная скруглённая плитка,
     // внутри круг с мягким диагональным сине-красным градиентом (RU-мотив, НЕ триколор-полосы)
@@ -647,19 +636,18 @@ PageType {
                 id: avCardIcon
                 width: 52; height: 52
                 anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                active: bypassStore.masterOn
+                active: root.ruAccessOn
             }
             TribeToggle {
                 id: avCardToggle
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                checked: bypassStore.masterOn
+                checked: root.ruAccessOn
                 // тост при переключении убран (реш. 2026-07-02) — состояние видно по текстовке баннера
                 onToggled: {
-                    // bypassStore (QML Settings) флашится с задержкой ~500 мс — для UI-биндингов этого
-                    // достаточно, но движок читает QSettings РАНЬШЕ (teardown быстрее записи). Поэтому
-                    // значение передаём явно: setBypassMasterOn пишет синхронно и передёргивает туннель.
-                    bypassStore.masterOn = checked
+                    // the engine writes the choice synchronously and re-applies the tunnel (setBypassMasterOn); the
+                    // switch then follows the engine's value again
                     if (root.hasEngine) TribeEngine.setBypassMasterOn(checked)
+                    checked = Qt.binding(function() { return root.ruAccessOn })
                 }
             }
             Column {
@@ -671,7 +659,7 @@ PageType {
                 // текстовки зависят от тумблера (реш. 2026-07-02): off = оффер, on = подтверждение
                 Text {
                     width: parent.width
-                    text: bypassStore.masterOn ? qsTr("Доступ к сайтам РФ включён")
+                    text: root.ruAccessOn ? qsTr("Доступ к сайтам РФ включён")
                                                : qsTr("Надоело выключать VPN?")
                     color: "white"; elide: Text.ElideRight
                     fontSizeMode: Text.HorizontalFit; minimumPixelSize: 10
@@ -681,11 +669,11 @@ PageType {
                 // engine's background RU check (RuSplitSentinel) says the sites do not open, the banner says so.
                 // WAITS FOR THE ENGINE: TribeEngine.ruSitesState "ok" | "bad" | "unknown" (not sent yet).
                 Text {
-                    readonly property bool sitesBad: bypassStore.masterOn && root.hasEngine
+                    readonly property bool sitesBad: root.ruAccessOn && root.hasEngine
                                                      && TribeEngine.ruSitesState === "bad"
                     width: parent.width
                     text: sitesBad ? qsTr("Сайты РФ сейчас не открываются")
-                          : bypassStore.masterOn ? qsTr("Теперь VPN выключать не нужно.")
+                          : root.ruAccessOn ? qsTr("Теперь VPN выключать не нужно.")
                                                : qsTr("Ozon, WB, Госуслуги, Банки, Kinopoisk")
                     color: sitesBad ? Theme.color.warning : root.slate500; elide: Text.ElideRight
                     fontSizeMode: Text.HorizontalFit; minimumPixelSize: 9

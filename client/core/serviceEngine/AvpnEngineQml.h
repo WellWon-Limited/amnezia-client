@@ -280,6 +280,8 @@ class AvpnEngineQml : public QObject {
     // (blocked_versions → updateState 3) с откатом на сохранённую предыдущую копию, одноразовое
     // уведомление после отката. Механика — SelfUpdate.cpp + LaunchGuard.cpp.
     Q_PROPERTY(bool autoUpdate READ autoUpdate WRITE setAutoUpdate NOTIFY autoUpdateChanged)
+    // AVPN «Доступ к сайтам РФ»: the effective value (BypassMaster.h, one decision); QML shows it and never stores it.
+    Q_PROPERTY(bool bypassMasterOn READ bypassMasterOn NOTIFY bypassMasterOnChanged)
     Q_PROPERTY(bool selfUpdateBusy READ selfUpdateBusy NOTIFY selfUpdateChanged)
     Q_PROPERTY(bool selfUpdateBackground READ selfUpdateBackground NOTIFY selfUpdateChanged)
     Q_PROPERTY(QString selfUpdateStage READ selfUpdateStage NOTIFY selfUpdateChanged)
@@ -904,6 +906,9 @@ public:
     // QML-стор флашится с батч-задержкой ~500 мс, туннель гасится быстрее → guardedStart читал СТАРОЕ
     // значение и поднимал туннель без сплита («переподключился, а сплит не активен»).
     Q_INVOKABLE void setBypassMasterOn(bool on);
+    // The switch's effective value (avpn::bypassMasterOn, BypassMaster.h): the person's choice, else the platform default.
+    bool bypassMasterOn() const;
+    void abRestoreBypassMaster(); // the bench's end: the switch's stored keys as before it
 
     // AVPN (звонки, 2026-07-03): саб-опция «RU-DNS маскировка» (AvpnBypass/dnsMaskOn, default ВКЛ).
     // OFF ⇒ DNS = бэкендовский 1.1.1.1 через туннель (честный гео для звонков/CDN), маршрутный
@@ -981,6 +986,7 @@ signals:
     void selfUpdateInstalled();
     void selfUpdateChanged();
     void autoUpdateChanged();
+    void bypassMasterOnChanged();
     void rollbackNoticeChanged();
     void changed();
     void error(const QString &message);
@@ -1553,6 +1559,10 @@ private:
     AbPhase                      m_abPhase = AbPhase::Idle;
     int                          m_abEpoch = 0;
     bool                         m_abOrigOn = true;    // исходный AvpnBypass/masterOn (вернём в конце)
+    // The switch's stored keys before the bench (BypassMaster.h; invalid = absent), put back exactly at its end: a bench
+    // never leaves a choice behind (abRestoreBypassMaster).
+    QVariant                     m_abOrigChoice;
+    QVariant                     m_abOrigLegacy;
     bool                         m_abOrigLiAuto = true; // v5.5: исходный liAutoOn — off-фаза A/B гасит
                                                         // и его (иначе «bypass-off» ≠ ваниль: split_on
                                                         // остаётся из-за Li Auto default-ON)

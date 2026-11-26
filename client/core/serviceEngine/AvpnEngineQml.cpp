@@ -71,6 +71,7 @@
 #include "CidrCarve.h"            // AVPN RU-direct: carve-out IP API из сева (control plane всегда в туннеле)
 #include "EdgeWalk.h"             // AVPN (разбор 2026-09-23): хосты всех edge — в carve-out заранее
 #include "BypassSeedStamp.h"      // AVPN: стамп входов сева АнтиВПН — скип пересева 10k CIDR при неизменных входах
+#include "BypassMaster.h"         // AVPN «Доступ к сайтам РФ»: the one decision of the switch's effective value
 #include <QHostInfo>              // AVPN RU-direct: async-резолв хоста API для carve-out
 #include <QPointer>               // AVPN (разбор 2026-09-23): колбэк истечения фонового времени iOS
 #include "LegalDocs.h"            // AVPN in-app Legal: URL/кэш/валидация Privacy/Terms
@@ -594,6 +595,17 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // оплаченных дней). Один блокирующий Keychain-раунд ~мс со сторожем; не-Apple — no-op.
     IdentityAnchor::syncAtStartup();
 
+    // AVPN «Доступ к сайтам РФ» (owner 26.11, BypassMaster.h): a legacy false is the person's choice - moved once into the
+    // choice key, before any reader (QML loads after this engine exists). A legacy true says nothing (Qt's store wrote it).
+    {
+        QSettings s;
+        if (avpn::bypassMasterMigratesLegacy(avpn::storedBool(s, avpn::kBypassMasterChoiceKey),
+                                             avpn::storedBool(s, avpn::kBypassMasterLegacyKey))) {
+            s.setValue(avpn::kBypassMasterChoiceKey, false);
+            s.sync();
+        }
+    }
+
     // AVPN Scanner (lane L6b): the engine interface of the coordinator and the switch-gated probe host exist
     // from the start (the coordinator is attached by coreController); the switches are read again on every
     // /v1/config apply (configApplied below, scanApplySwitches).
@@ -895,10 +907,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                          /*quiet=*/true);
         },
         [this] { return benchExtra().value(QStringLiteral("net_type")).toString(); },
-        [] {
-            QSettings st;
-            return st.value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
-        },
+        [] { return avpn::bypassMasterOn(); },
         this);
     connect(m_ruSentinel, &RuSplitSentinel::sitesStateChanged, this, &AvpnEngineQml::changed);
     connect(this, &AvpnEngineQml::changed, this, [this] {
@@ -4747,7 +4756,7 @@ QJsonObject AvpnEngineQml::benchExtra() const
     extra.insert(QStringLiteral("tunnel_state"), state());
     extra.insert(QStringLiteral("node_id"), debugSnapshot().value(QStringLiteral("currentNodeId")).toString());
     QSettings s;
-    extra.insert(QStringLiteral("bypass_on"), s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool());
+    extra.insert(QStringLiteral("bypass_on"), avpn::bypassMasterOn(s));
     extra.insert(QStringLiteral("liauto_on"), s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool());
     extra.insert(QStringLiteral("dns_mask_on"), s.value(QStringLiteral("AvpnBypass/dnsMaskOn"), true).toBool());
     // системная таймзона = где ФИЗИЧЕСКИ устройство (egress loc в network{} — где выход туннеля).
@@ -4858,7 +4867,7 @@ void AvpnEngineQml::startBench(const QString &label)
     }
     if (effLabel.isEmpty())
         effLabel = connected
-            ? bypassLabel(QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool())
+            ? bypassLabel(avpn::bypassMasterOn())
             : QStringLiteral("manual");
     m_benchRunning = true;
     m_benchStage = QStringLiteral("start");
@@ -5139,7 +5148,12 @@ void AvpnEngineQml::startBypassAb()
         return;
     }
     ++m_abEpoch;
-    m_abOrigOn = QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    {
+        const QSettings s;
+        m_abOrigOn = avpn::bypassMasterOn(s);
+        m_abOrigChoice = s.contains(avpn::kBypassMasterChoiceKey) ? s.value(avpn::kBypassMasterChoiceKey) : QVariant();
+        m_abOrigLegacy = s.contains(avpn::kBypassMasterLegacyKey) ? s.value(avpn::kBypassMasterLegacyKey) : QVariant();
+    }
     m_abOrigLiAuto = QSettings().value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
     m_abFirst = QJsonObject();
     m_abSecond = QJsonObject();
@@ -5163,8 +5177,7 @@ void AvpnEngineQml::cancelBypassAb()
             st.sync();
         }
     }
-    if (QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool() != m_abOrigOn)
-        setBypassMasterOn(m_abOrigOn);
+    abRestoreBypassMaster();
     m_abPhase = AbPhase::Idle;
     m_abProgress.clear();
     emit abChanged();
@@ -5179,7 +5192,7 @@ void AvpnEngineQml::abEnterPhase(AbPhase ph, int guardMs)
 
 void AvpnEngineQml::abStartBench(bool second)
 {
-    const bool on = QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    const bool on = avpn::bypassMasterOn();
     m_abProgress = tr("замер %1/2 · байпас %2").arg(second ? 2 : 1).arg(on ? tr("ВКЛ") : tr("ВЫКЛ"));
     m_benchRunning = true;
     m_benchStage = QStringLiteral("start");
@@ -5284,8 +5297,7 @@ void AvpnEngineQml::abFail(const QString &reason)
             st.sync();
         }
     }
-    if (QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool() != m_abOrigOn)
-        setBypassMasterOn(m_abOrigOn);
+    abRestoreBypassMaster();
     m_abPhase = AbPhase::Idle;
     m_abProgress.clear();
     emit abChanged();
@@ -9969,8 +9981,8 @@ bool AvpnEngineQml::autoPauseEnabled() const
     return s.value(QStringLiteral("AvpnSettings/autoPauseRu"), true).toBool();
 }
 
-// AVPN RU-direct: сев split-tunnel под единый тумблер «Доступ к сайтам РФ» (AvpnBypass/masterOn, default
-// ON). Зовётся из guardedStart ПЕРЕД коннектом → конфиг готов к appendSplitTunnelingConfig. Сеет ВЕСЬ рунет
+// AVPN RU-direct: сев split-tunnel под единый тумблер «Доступ к сайтам РФ» (its effective value: BypassMaster.h;
+// off by default on Android 13+). Зовётся из guardedStart ПЕРЕД коннектом → конфиг готов к appendSplitTunnelingConfig. Сеет ВЕСЬ рунет
 // CIDR в режим VpnAllExceptSites → рунет мимо туннеля (реальный РФ-IP). Домены отсекает сам движок,
 // потому кормим ТОЛЬКО CIDR из ru_prefixes.h: v4 проходит checkIpSubnetFormat везде; v6 — isIpv6Cidr
 // на iOS/Android (десктоп-демон v6-сплит не умеет, там v6 отсеется — см. appendSplitTunnelingConfig).
@@ -9989,7 +10001,7 @@ void AvpnEngineQml::applyRuBypassSplit()
     // старте сервиса + дебаунс RouteMonitor (инцидент: 8646 маршрутов-сирот после краша сервиса).
     using amnezia::RouteMode;
     QSettings s;
-    const bool masterOn = s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    const bool masterOn = avpn::bypassMasterOn(s); // the effective value (BypassMaster.h)
     // AVPN (китайские сервисы, 2026-07-03): второй независимый тумблер «Li Auto» (default ВКЛ). Оба тумблера
     // сеют в один и тот же split-набор (RouteMode::VpnAllExceptSites) — оси не конфликтуют, список объединяется.
     const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
@@ -10129,9 +10141,39 @@ void AvpnEngineQml::applyRuBypassSplit()
 void AvpnEngineQml::setBypassMasterOn(bool on)
 {
     QSettings s;
-    s.setValue(QStringLiteral("AvpnBypass/masterOn"), on);
+    // The person's choice (BypassMaster.h) - this switch is its only writer; the legacy key is mirrored so a build of
+    // before 26.11 (a rollback) reads the same choice.
+    s.setValue(avpn::kBypassMasterChoiceKey, on);
+    s.setValue(avpn::kBypassMasterLegacyKey, on);
     s.sync();
+    emit bypassMasterOnChanged();
     reapplyBypass();
+}
+
+bool AvpnEngineQml::bypassMasterOn() const
+{
+    return avpn::bypassMasterOn();
+}
+
+// The A/B bench flips the switch through setBypassMasterOn and puts the stored keys back exactly at its end: a bench
+// leaves no choice behind (a never-chosen default stays a default). The tunnel is re-applied when the value changes.
+void AvpnEngineQml::abRestoreBypassMaster()
+{
+    QSettings st;
+    const bool before = avpn::bypassMasterOn(st);
+    auto put = [&st](const QString &key, const QVariant &v) {
+        if (v.isValid())
+            st.setValue(key, v);
+        else
+            st.remove(key);
+    };
+    put(avpn::kBypassMasterChoiceKey, m_abOrigChoice);
+    put(avpn::kBypassMasterLegacyKey, m_abOrigLegacy);
+    st.sync();
+    if (avpn::bypassMasterOn(st) != before) {
+        emit bypassMasterOnChanged();
+        reapplyBypass();
+    }
 }
 
 // AVPN (звонки): «RU-DNS маскировка» — гейт Яндекс-DNS-подмены (читается в
@@ -11324,8 +11366,7 @@ QString AvpnEngineQml::buildDiagReport() const
         ? (QDateTime::currentSecsSinceEpoch() - m_lastConfigAppliedEpoch)
         : -1; // конфиг ещё не применялся → ключ опускается
 
-    const bool bypassOn =
-        QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    const bool bypassOn = avpn::bypassMasterOn();
     const QString logTail = avpn::TribeDiagReport::readLogTail(Logger::userLogsFilePath());
     QString report = avpn::TribeDiagReport::build(s, bypassOn, logTail, meta)
         + QStringLiteral("\n[reliability transitions]\n") + m_reliabilityRing.lines.join(QLatin1Char('\n'));
@@ -12014,7 +12055,7 @@ void AvpnEngineQml::docDirectSpeed(double down, int idle, int loaded, bool colla
     bool masterOn = false;
     {
         QSettings st;
-        masterOn = st.value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
+        masterOn = avpn::bypassMasterOn(st);
     }
     if (!suspicious || url.isEmpty() || !masterOn) {
         docStageDone(doctor::speedStage(down, idle, loaded, collapsed, -1));
@@ -12059,7 +12100,7 @@ void AvpnEngineQml::docStartRuSplit()
     bool masterOn = false;
     {
         QSettings st;
-        masterOn = st.value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
+        masterOn = avpn::bypassMasterOn(st);
     }
     if (!masterOn) {
         docStageDone(doctor::ruSplitStage({}, {}, /*enabled=*/false));
