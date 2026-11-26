@@ -1702,11 +1702,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     st == AndroidController::ConnectionState::CONNECTED, st == AndroidController::ConnectionState::DISCONNECTED,
                     thinkConnected, observedTunnelOf(m_lastTunnelState), m_engine.attemptRunning(),
                     m_latch.awaitingStopConfirm, m_wantConnected);
-                // F2 entry c: a service that rebuilds a session the engine does not hold (cold start after the system
-                // killed the UI process during a network change) - decided by the same person's-will rule
+                // F2 entry c: a service that holds an unfinished tunnel no attempt of ours owns (a rebuild, or a start
+                // whose UI process is gone) - decided by the same person's-will rule
                 const AndroidStatusAction rebuild = androidRebuildStatusDecision(
-                    st == AndroidController::ConnectionState::RECONNECTING, !m_serviceSessionMeta.isEmpty(), thinkConnected,
-                    m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);
+                    st == AndroidController::ConnectionState::CONNECTING
+                        || st == AndroidController::ConnectionState::RECONNECTING,
+                    thinkConnected, m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);
                 // F2: a snapshot after a return sees what the live edge would have (the activity was unbound): a rebuild
                 // of the session the engine holds starts its bound from now (no-op when the edge already did), a
                 // Connected service ends it. Nothing else changes for these states.
@@ -1744,14 +1745,17 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     reliabilityEvent(QStringLiteral("takeover_refused why=status reason=person_stopped"));
                     AndroidController::instance()->stop();
                 } else if (rebuild == AndroidStatusAction::TakeOver) {
-                    // F2 entry c: the engine takes the rebuilding session over instead of waiting on a rebuild whose age it
+                    // F2 entry c: the engine takes the unfinished session over instead of waiting on a tunnel whose age it
                     // cannot know. The intent is on (as an adopted CONNECTED service sets it), the view is the service's
-                    // transition, and our own stop goes out (the service's disconnect accepts RECONNECTING): its latch
+                    // transition, and our own stop goes out (the service's disconnect accepts CONNECTING and RECONNECTING): its latch
                     // holds every start (reconcileGate) and a tap is the person's Stop (decideOrbTap: our op in flight) until
                     // the Disconnected, which arrives with no attempt running - nothing is credited to a leg. Then
                     // reconcile starts the ordinary connect, the same one a tap on Connect starts.
-                    reliabilityEvent(QStringLiteral("takeover_rebuild session_node=%1")
-                                         .arg(m_serviceSessionMeta.value(QStringLiteral("node_id")).toString().isEmpty()
+                    reliabilityEvent(QStringLiteral("takeover_rebuild state=%1 session_node=%2")
+                                         .arg(st == AndroidController::ConnectionState::CONNECTING
+                                                  ? QStringLiteral("connecting")
+                                                  : QStringLiteral("reconnecting"),
+                                              m_serviceSessionMeta.value(QStringLiteral("node_id")).toString().isEmpty()
                                                   ? QStringLiteral("-")
                                                   : m_serviceSessionMeta.value(QStringLiteral("node_id")).toString()));
                     m_wantConnected = true;

@@ -1390,28 +1390,40 @@ static void r2LateConnectedAfterThePersonsStop()
 static void f2cStatusTakesOverARebuild()
 {
     using A = AndroidStatusAction;
-    // snapshot RECONNECTING x engine idle x no attempt: found at launch, nothing of ours pending -> taken over (will off
-    // or on: the intent of a fresh process is off, as for an adopted CONNECTED service)
-    CHECK(androidRebuildStatusDecision(true, true, /*engineConnected=*/false, /*attemptRunning=*/false,
+    // one rule for both unfinished states (the facade passes CONNECTING || RECONNECTING, H5): RECONNECTING - the service's
+    // rebuild after a network change; CONNECTING - a start whose UI process is gone (round 3, the app swiped away at the
+    // notification question during the first connect: the service kept the leg's tunnel with no handshake, the reopened
+    // app said "off", nothing loaded). Snapshot unfinished x engine idle x no attempt, nothing of ours pending: taken over
+    // (will off or on: the intent of a fresh process is off, as for an adopted CONNECTED service)
+    CHECK(androidRebuildStatusDecision(/*serviceUnfinished=*/true, /*engineConnected=*/false, /*attemptRunning=*/false,
                                        /*ourStopPending=*/false, /*wantConnected=*/false) == A::TakeOver);
-    CHECK(androidRebuildStatusDecision(true, true, false, false, false, true) == A::TakeOver);
+    CHECK(androidRebuildStatusDecision(true, false, false, false, true) == A::TakeOver);
     // the person's Stop with our stop unconfirmed: stopped, no connect after it
-    CHECK(androidRebuildStatusDecision(true, true, false, false, /*ourStopPending=*/true, /*wantConnected=*/false) == A::StopIt);
+    CHECK(androidRebuildStatusDecision(true, false, false, /*ourStopPending=*/true, /*wantConnected=*/false) == A::StopIt);
     // our stop pending but the will on (the engine's own stop): taken over
-    CHECK(androidRebuildStatusDecision(true, true, false, false, true, true) == A::TakeOver);
+    CHECK(androidRebuildStatusDecision(true, false, false, true, true) == A::TakeOver);
     // the engine holds the session: its rebuild bound decides (ServiceEngine::noteLiveRebuild), not this
-    CHECK(androidRebuildStatusDecision(true, true, /*engineConnected=*/true, false, false, true) == A::Nothing);
-    // a running attempt owns the tunnel
-    CHECK(androidRebuildStatusDecision(true, true, false, /*attemptRunning=*/true, false, true) == A::Nothing);
-    CHECK(androidRebuildStatusDecision(true, true, false, true, true, false) == A::Nothing);
-    // no session metadata: nothing is known to be held
-    CHECK(androidRebuildStatusDecision(true, /*serviceHoldsSession=*/false, false, false, false, false) == A::Nothing);
-    // any other snapshot: not this rule
-    CHECK(androidRebuildStatusDecision(/*serviceReconnecting=*/false, true, false, false, false, false) == A::Nothing);
+    CHECK(androidRebuildStatusDecision(true, /*engineConnected=*/true, false, false, true) == A::Nothing);
+    // a running attempt owns the tunnel (B7: the tap's attempt beside a redelivered start - its own leg judges it)
+    CHECK(androidRebuildStatusDecision(true, false, /*attemptRunning=*/true, false, true) == A::Nothing);
+    CHECK(androidRebuildStatusDecision(true, false, true, true, false) == A::Nothing);
+    CHECK(androidRebuildStatusDecision(true, false, true, false, false) == A::Nothing);
+    // any other snapshot (CONNECTED, DISCONNECTED, DISCONNECTING, UNKNOWN): not this rule, whatever the rest
+    for (const bool engine : { false, true })
+        for (const bool attempt : { false, true })
+            for (const bool pending : { false, true })
+                for (const bool want : { false, true })
+                    CHECK(androidRebuildStatusDecision(/*serviceUnfinished=*/false, engine, attempt, pending, want)
+                          == A::Nothing);
+    // the rule is the Adopt rule's will test exactly: with nothing held and no attempt, StopIt here <=> StopIt there
+    for (const bool pending : { false, true })
+        for (const bool want : { false, true })
+            CHECK((androidRebuildStatusDecision(true, false, false, pending, want) == A::StopIt)
+                  == (adoptObservedTunnel(pending, want) == ObservedTunnelAdoption::StopIt));
     // the Adopt rule for a CONNECTED service is unchanged
     CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Unknown, false, false, false) == A::Adopt);
     CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Transitional, false, true, false) == A::StopIt);
-    // a RECONNECTING snapshot is still Nothing for the CONNECTED/DISCONNECTED rule (it is not a terminal state)
+    // an unfinished snapshot (CONNECTING, RECONNECTING) is still Nothing for the CONNECTED/DISCONNECTED rule
     CHECK(androidStatusDecision(false, false, false, ObservedTunnel::Unknown, false, false, false) == A::Nothing);
     // the take-over's stop holds every start until its Disconnected, and a tap meanwhile is a Stop, never a Start
     TeardownLatch stop;

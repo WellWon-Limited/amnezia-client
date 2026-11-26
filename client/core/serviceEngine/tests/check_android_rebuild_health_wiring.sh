@@ -16,8 +16,9 @@
 #       tick after the tick's events; past it the live session is lost as NoHandshake with the owner's restart; the
 #       rebuild's Connected, a loss and the person's Stop end the wait;
 #   H4  the service's in-place rebuild stays as upstream has it, and the owner's stop still reaches a RECONNECTING service;
-#   H5  (entry c) a rebuilding service the engine does not hold is taken over - our stop, then the ordinary connect -
-#       by the Adopt rule's person's-will test (host case: facade_policy_check f2cStatusTakesOverARebuild).
+#   H5  (entry c) a service in an unfinished state (CONNECTING or RECONNECTING) that no attempt of ours owns is taken
+#       over - our stop, then the ordinary connect - by the Adopt rule's person's-will test, without asking for the
+#       session metadata (host case: facade_policy_check f2cStatusTakesOverARebuild).
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -81,13 +82,13 @@ has "$disc" 'if (isUnknown || isDisconnected || protocolState.value == DISCONNEC
 off="$(code "$WG" | awk '/private fun turnOffVpn\(\) \{/ { on = 1 } on { print } on && /^    }$/ { exit }')"
 has "$off" 'statusJob?.cancel()' || bad "H4: the protocol's stop must end the handshake wait"
 
-# ---- H5 (entry c) ---- a service rebuilding a session the engine does not hold (cold start) is taken over by the Adopt
-# rule's person's-will test: our stop first (its latch holds every start, a tap is a Stop), then the ordinary connect;
-# the will off stops it; the CONNECTED Adopt rule is untouched
+# ---- H5 (entry c) ---- a service holding an unfinished tunnel (CONNECTING or RECONNECTING) that no attempt of ours
+# owns is taken over by the Adopt rule's person's-will test: our stop first (its latch holds every start, a tap is a
+# Stop), then the ordinary connect; the will off stops it; the CONNECTED Adopt rule is untouched
 status="$(code "$FACADE" | awk '/&AndroidController::status, this,/{f=1} f{print} f&&/Qt::QueuedConnection\);/{exit}')"
 flat="$(printf '%s\n' "$status" | tr -s ' \n' ' ')"
-has "$flat" 'const AndroidStatusAction rebuild = androidRebuildStatusDecision( st == AndroidController::ConnectionState::RECONNECTING, !m_serviceSessionMeta.isEmpty(), thinkConnected, m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);' \
-    || bad "H5: the STATUS entry must decide a rebuilding service by the person's-will rule"
+has "$flat" 'const AndroidStatusAction rebuild = androidRebuildStatusDecision( st == AndroidController::ConnectionState::CONNECTING || st == AndroidController::ConnectionState::RECONNECTING, thinkConnected, m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);' \
+    || bad "H5: the STATUS entry must decide a CONNECTING or RECONNECTING service by the person's-will rule"
 tk="$(printf '%s\n' "$status" | awk '/} else if \(rebuild == AndroidStatusAction::TakeOver\) \{/ { on = 1 } on { print } on && /^                }$/ { exit }')"
 w=$(printf '%s\n' "$tk" | grep -nF 'm_wantConnected = true;' | head -1 | cut -d: -f1)
 v=$(printf '%s\n' "$tk" | grep -nF 'onConnectionStateChanged(Vpn::Reconnecting);' | head -1 | cut -d: -f1)
@@ -100,7 +101,7 @@ printf '%s\n' "$status" | grep -A3 -F '} else if (rebuild == AndroidStatusAction
     || bad "H5: a rebuilding service the person did not want must be stopped"
 dsn="$(code "$HERE/../DebugSnapshot.h")"
 dec="$(printf '%s\n' "$dsn" | awk '/inline AndroidStatusAction androidRebuildStatusDecision\(/ { on = 1 } on { print } on && /^}$/ { exit }')"
-has "$dec" 'if (!serviceReconnecting || !serviceHoldsSession || engineConnected || attemptRunning)' \
+has "$dec" 'if (!serviceUnfinished || engineConnected || attemptRunning)' \
     && has "$dec" 'adoptObservedTunnel(ourStopPending, wantConnected) == ObservedTunnelAdoption::StopIt' \
     || bad "H5: the rebuild decision must be the Adopt rule's will test, only with nothing held and no attempt"
 act="$(printf '%s\n' "$dsn" | awk '/inline AndroidStatusAction androidStatusAction\(/ { on = 1 } on { print } on && /^}$/ { exit }')"
