@@ -298,80 +298,208 @@ static void testLedger()
     CHECK(PathLedger::fromJson(json, tiny).size() == 1); // the bound holds on load too
 }
 
-// A single tunnel "no data" ages from its own moment (device round R, 26.11: own «Финляндия 1 Xray» «не удалось» on
-// LTE and Wi-Fi for days - its only no-data was the err=2 false verdict of 25.11, and every scan's probe pass kept the
-// entry touched); two or more failures stay the quarantine ladder's.
-static void testNoDataMarkTtl()
+// Failure evidence expires by its own age (device round R, 26.11: own «Финляндия 1 Xray» «не удалось» on LTE and
+// Wi-Fi for days - its only no-data was the err=2 false verdict of 25.11, and every scan's probe pass kept the entry
+// touched; review of 1ff3cf163: the expiry must hold for every reader and for the next failure, with no probe needed).
+static QStringList ids(const QList<RankedPath> &r);
+
+static void testFailureSettle()
 {
     const LedgerTunables lt;
-    CHECK(lt.noDataTtlMs == lt.quarantineMs.back() && lt.noDataTtlMs == 6LL * 3600 * 1000); // the ladder's top
+    CHECK(lt.failureTtlMs == lt.quarantineMs.back() && lt.failureTtlMs == 6LL * 3600 * 1000); // the ladder's top
     const QString net = QStringLiteral("cell:-:lte");
     const qint64 t0 = 1'800'000'000'000LL;
-    const qint64 minute = 60LL * 1000;
+    const qint64 minute = 60LL * 1000, hour = 60 * minute, ttl = lt.failureTtlMs;
 
-    {   // no data at t0, a probe pass every minute: held until t0 + TTL, then the next pass lifts the path
+    {   // a single no-data, a probe pass every minute: held until t0 + TTL, then gone for every reader
         PathLedger l(lt);
         const PathId p{ QStringLiteral("11:xray"), QStringLiteral("r") };
         CHECK(l.record(net, p, PathOutcome::NoData, t0));
         bool heldAll = true;
-        qint64 t = t0 + minute;
-        for (; t < t0 + lt.noDataTtlMs; t += minute) {
+        for (qint64 t = t0 + minute; t < t0 + ttl; t += minute) {
             l.record(net, p, PathOutcome::ProbeOk, t, 900);
             const PathView v = l.view(net, p, t);
             heldAll = heldAll && v.state == PathState::Suspect && v.failStreak == 1 && l.tunnelNoDataHere(net, p, t);
         }
         CHECK(heldAll);                                                     // the probes neither clear nor extend it
-        CHECK(l.tunnelNoDataHere(net, p, t0 + lt.noDataTtlMs - 1));
-        CHECK(!l.tunnelNoDataHere(net, p, t0 + lt.noDataTtlMs));            // gone at its own age, before any probe
-        CHECK(l.record(net, p, PathOutcome::ProbeOk, t0 + lt.noDataTtlMs, 900));
-        PathView v = l.view(net, p, t0 + lt.noDataTtlMs);
-        CHECK(v.state == PathState::Working && v.strength == EvidenceStrength::Probe && v.failStreak == 0); // rankable
-        // a real no-data after that marks it again, and a probe right after does not lift it
-        const qint64 t1 = t0 + lt.noDataTtlMs + minute;
+        CHECK(l.tunnelNoDataHere(net, p, t0 + ttl - 1) && l.view(net, p, t0 + ttl - 1).state == PathState::Suspect);
+        PathView v = l.view(net, p, t0 + ttl);                              // no new probe needed
+        CHECK(!l.tunnelNoDataHere(net, p, t0 + ttl));
+        CHECK(v.state == PathState::Working && v.strength == EvidenceStrength::Probe && v.failStreak == 0); // recent probe
+        // a real no-data after that marks it again, as the first of a new streak; a probe right after does not lift it
+        const qint64 t1 = t0 + ttl + minute;
         CHECK(l.record(net, p, PathOutcome::NoData, t1));
-        CHECK(l.tunnelNoDataHere(net, p, t1) && l.view(net, p, t1).state == PathState::Suspect);
+        CHECK(l.tunnelNoDataHere(net, p, t1) && l.view(net, p, t1).failStreak == 1);
         CHECK(l.record(net, p, PathOutcome::ProbeOk, t1 + minute, 900));
-        CHECK(l.tunnelNoDataHere(net, p, t1 + minute) && l.view(net, p, t1 + minute).failStreak == 1);
+        CHECK(l.tunnelNoDataHere(net, p, t1 + minute) && l.view(net, p, t1 + minute).state == PathState::Suspect);
         CHECK(!l.tunnelNoDataHere(QStringLiteral("wifi:abc"), p, t1));     // another network knows nothing of it
         CHECK(!l.tunnelNoDataHere(net, PathId{ p.id, QStringLiteral("r2") }, t1)); // another revision neither
     }
-    {   // a mark older than the TTL is not reported even when the entry was never pruned; an entry untouched for
-        // evidenceTtlMs is not reported at all (the age check failedInTunnelHere lacked)
+    {   // no probe at all: unknown at t0 + TTL, and the data proof that predates the failure does not come back
         PathLedger l(lt);
         const PathId p{ QStringLiteral("12:xray"), QStringLiteral("r") };
+        l.record(net, p, PathOutcome::DataOk, t0 - hour, 1800, 900);
         l.record(net, p, PathOutcome::NoData, t0);
-        CHECK(!l.tunnelNoDataHere(net, p, t0 + lt.noDataTtlMs) && l.entry(net, p.id) != nullptr);
-        CHECK(l.view(net, p, t0 + lt.noDataTtlMs).state == PathState::Suspect); // still one failure, like any other
-        // persisted and read back after the TTL (the false marks of 25.11 on the phone): expired, no wipe
-        const PathLedger back = PathLedger::fromJson(l.toJson(), lt);
-        CHECK(back.tunnelNoDataHere(net, p, t0 + 1) && !back.tunnelNoDataHere(net, p, t0 + lt.noDataTtlMs));
-        const PathId d{ QStringLiteral("13:xray"), QStringLiteral("r") };
-        l.record(net, d, PathOutcome::NoData, t0);
-        l.record(net, d, PathOutcome::NoData, t0 + 1000);                    // dead: the ladder's
-        CHECK(l.tunnelNoDataHere(net, d, t0 + 1000 + lt.evidenceTtlMs));
-        CHECK(!l.tunnelNoDataHere(net, d, t0 + 1000 + lt.evidenceTtlMs + 1) && l.entry(net, d.id) != nullptr);
+        CHECK(l.view(net, p, t0 + ttl - 1).state == PathState::Suspect && l.tunnelNoDataHere(net, p, t0 + ttl - 1));
+        const PathView v = l.view(net, p, t0 + ttl);
+        CHECK(v.state == PathState::Unknown && v.strength == EvidenceStrength::None && v.failStreak == 0
+              && v.speedMs == -1 && v.lastSuccessMs == 0);
+        CHECK(!l.tunnelNoDataHere(net, p, t0 + ttl) && l.entry(net, p.id) != nullptr); // never pruned, not reported
+        // the difference pinned (do not unify): a lost handshake contradicted by a fresh probe pass restores the
+        // earlier state, data proof included - contradiction by newer evidence, not forgetting by age
+        const PathId h{ QStringLiteral("h"), QStringLiteral("r") };
+        l.record(net, h, PathOutcome::DataOk, t0 - hour, 1800, 900);
+        l.record(net, h, PathOutcome::NoHandshake, t0);
+        l.record(net, h, PathOutcome::ProbeOk, t0 + minute, 900);
+        const PathView vh = l.view(net, h, t0 + minute);
+        CHECK(vh.state == PathState::Working && vh.strength == EvidenceStrength::Data && vh.failStreak == 0);
+        const PathId a{ QStringLiteral("a"), QStringLiteral("r") };     // ... while age alone drops that proof
+        l.record(net, a, PathOutcome::DataOk, t0 - hour, 1800, 900);
+        l.record(net, a, PathOutcome::NoHandshake, t0);
+        CHECK(l.view(net, a, t0 + ttl).state == PathState::Unknown);
     }
-    {   // a two-failure row in quarantine is unaffected: the ladder still governs, probes past the TTL do not lift it
+    {   // P1: an expired no-data must not come back with fresh failures; the streak counts the fresh failures only
+        for (const bool liftInBetween : { false, true }) {
+            PathLedger l(lt);
+            const PathId p{ QStringLiteral("13:xray"), QStringLiteral("r") };
+            l.record(net, p, PathOutcome::NoData, t0);
+            if (liftInBetween) {
+                CHECK(l.record(net, p, PathOutcome::ProbeOk, t0 + ttl + minute, 900));
+                CHECK(l.view(net, p, t0 + ttl + minute).state == PathState::Working);
+            }
+            const qint64 f1 = t0 + ttl + hour, f2 = f1 + minute;
+            l.record(net, p, PathOutcome::NoHandshake, f1);
+            CHECK(l.view(net, p, f1).failStreak == 1 && l.view(net, p, f1).state == PathState::Suspect);
+            CHECK(!l.tunnelNoDataHere(net, p, f1) && l.entry(net, p.id)->noDataMs == 0);
+            l.record(net, p, PathOutcome::NoHandshake, f2);
+            const PathView v = l.view(net, p, f2);
+            CHECK(v.failStreak == 2 && v.state == PathState::Dead && v.quarantineUntilMs == f2 + lt.quarantineMs[0]);
+            CHECK(!l.tunnelNoDataHere(net, p, f2));
+            CHECK(l.record(net, p, PathOutcome::ProbeOk, f2 + minute, 900)); // a probe lifts no-handshake failures
+            CHECK(l.view(net, p, f2 + minute).state == PathState::Working && l.view(net, p, f2 + minute).failStreak == 0);
+        }
+    }
+    {   // a two-failure row: quarantined until its time, the tail after it, clean at TTL since the last failure, with
+        // probes passing every minute in between; the ladder and its times are unchanged while the evidence is live
         PathLedger l(lt);
         const PathId p{ QStringLiteral("14:xray"), QStringLiteral("r") };
         l.record(net, p, PathOutcome::NoData, t0);
         l.record(net, p, PathOutcome::NoData, t0 + 1000);
-        const qint64 until = t0 + 1000 + lt.quarantineMs[0];
-        bool unaffected = true;
-        for (qint64 t = t0 + minute; t <= t0 + lt.noDataTtlMs + 3600 * 1000; t += minute) {
+        const qint64 last = t0 + 1000, until = last + lt.quarantineMs[0];
+        bool live = true;
+        for (qint64 t = t0 + minute; t < last + ttl; t += minute) {
             l.record(net, p, PathOutcome::ProbeOk, t, 900);
             const PathView v = l.view(net, p, t);
-            unaffected = unaffected && v.state == PathState::Dead && v.failStreak == 2 && v.quarantineUntilMs == until
+            live = live && v.state == PathState::Dead && v.failStreak == 2 && v.quarantineUntilMs == until
                 && v.inQuarantine == (t < until) && l.tunnelNoDataHere(net, p, t);
         }
-        CHECK(unaffected);
-        // its next failure climbs the ladder from the newest failure, as before
-        const qint64 t2 = t0 + lt.noDataTtlMs + 2 * 3600 * 1000;
-        l.record(net, p, PathOutcome::NoHandshake, t2);
-        CHECK(l.view(net, p, t2).quarantineUntilMs == t2 + lt.quarantineMs[1]);
-        // a data ok through the tunnel still clears everything
-        l.record(net, p, PathOutcome::DataOk, t2 + 1, 2000, 300);
-        CHECK(l.view(net, p, t2 + 1).state == PathState::Working && !l.tunnelNoDataHere(net, p, t2 + 1));
+        CHECK(live);
+        const PathView v = l.view(net, p, last + ttl);
+        CHECK(v.state == PathState::Working && v.strength == EvidenceStrength::Probe && v.failStreak == 0
+              && !v.inQuarantine && !l.tunnelNoDataHere(net, p, last + ttl));
+        // at the ladder's top step the path is clean exactly when its quarantine ends
+        const PathId q{ QStringLiteral("15:xray"), QStringLiteral("r") };
+        for (int i = 0; i < 5; ++i)
+            l.record(net, q, PathOutcome::NoData, t0 + i * minute);
+        const qint64 qlast = t0 + 4 * minute;
+        CHECK(l.view(net, q, qlast).quarantineUntilMs == qlast + lt.quarantineMs.back());
+        CHECK(l.view(net, q, qlast + ttl - 1).state == PathState::Dead && l.view(net, q, qlast + ttl - 1).inQuarantine);
+        CHECK(l.view(net, q, qlast + ttl).state == PathState::Unknown && !l.tunnelNoDataHere(net, q, qlast + ttl));
+        // a running quarantine is never cut by the age (a TTL below the ladder's top, to separate the two conditions)
+        LedgerTunables shortTtl = lt;
+        shortTtl.failureTtlMs = hour;
+        PathLedger s(shortTtl);
+        for (int i = 0; i < 5; ++i)
+            s.record(net, q, PathOutcome::NoData, t0 + i * minute);
+        CHECK(s.view(net, q, qlast + 2 * hour).state == PathState::Dead && s.view(net, q, qlast + 2 * hour).inQuarantine
+              && s.tunnelNoDataHere(net, q, qlast + 2 * hour));
+        CHECK(s.view(net, q, qlast + lt.quarantineMs.back()).state == PathState::Unknown);
+        // a data ok through the tunnel still clears everything at once
+        const PathId d{ QStringLiteral("16:xray"), QStringLiteral("r") };
+        l.record(net, d, PathOutcome::NoData, t0);
+        l.record(net, d, PathOutcome::NoData, t0 + 1000);
+        l.record(net, d, PathOutcome::DataOk, t0 + 2000, 2000, 300);
+        CHECK(l.view(net, d, t0 + 2000).state == PathState::Working && !l.tunnelNoDataHere(net, d, t0 + 2000));
+        // an entry untouched for evidenceTtlMs is not reported at all
+        const PathId u{ QStringLiteral("17:xray"), QStringLiteral("r") };
+        for (int i = 0; i < 5; ++i)
+            l.record(net, u, PathOutcome::NoData, t0 + i * minute);
+        CHECK(!l.tunnelNoDataHere(net, u, t0 + 4 * minute + lt.evidenceTtlMs + 1) && l.entry(net, u.id) != nullptr);
+    }
+    {   // save / reload: with "lf" the last failure governs; without it the no-data time does - never the touch
+        PathLedger l(lt);
+        const PathId p{ QStringLiteral("18:xray"), QStringLiteral("r") };
+        l.record(net, p, PathOutcome::NoData, t0);
+        l.record(net, p, PathOutcome::ProbeOk, t0 + ttl - minute, 900); // touched a minute before the TTL
+        const QByteArray json = l.toJson();
+        CHECK(json.contains("\"lf\":"));
+        const PathLedger back = PathLedger::fromJson(json, lt);
+        CHECK(back.tunnelNoDataHere(net, p, t0 + ttl - 1) && !back.tunnelNoDataHere(net, p, t0 + ttl));
+        QJsonDocument doc = QJsonDocument::fromJson(json);
+        QJsonObject root = doc.object();
+        QJsonArray arr = root.value(QStringLiteral("e")).toArray();
+        QJsonObject e0 = arr.at(0).toObject();
+        e0.remove(QStringLiteral("lf"));
+        arr.replace(0, e0);
+        root.insert(QStringLiteral("e"), arr);
+        const PathLedger old = PathLedger::fromJson(QJsonDocument(root).toJson(QJsonDocument::Compact), lt);
+        CHECK(old.entry(net, p.id) && old.entry(net, p.id)->lastFailureMs == 0);
+        CHECK(old.tunnelNoDataHere(net, p, t0 + ttl - 1) && !old.tunnelNoDataHere(net, p, t0 + ttl));
+        CHECK(old.view(net, p, t0 + ttl).failStreak == 0);
+        // no failure time at all (a no-handshake entry without "lf"): left to the entry's evidenceTtlMs
+        const PathId h{ QStringLiteral("19"), QStringLiteral("r") };
+        PathLedger n(lt);
+        n.record(net, h, PathOutcome::NoHandshake, t0);
+        QJsonObject r2 = QJsonDocument::fromJson(n.toJson()).object();
+        QJsonArray a2 = r2.value(QStringLiteral("e")).toArray();
+        QJsonObject h0 = a2.at(0).toObject();
+        h0.remove(QStringLiteral("lf"));
+        a2.replace(0, h0);
+        r2.insert(QStringLiteral("e"), a2);
+        const PathLedger noTime = PathLedger::fromJson(QJsonDocument(r2).toJson(QJsonDocument::Compact), lt);
+        CHECK(noTime.view(net, h, t0 + ttl).state == PathState::Suspect);
+    }
+    {   // several marks expire together on a network where other rows carried data after those failures: the proven
+        // rows lead, the expired rows come after as unknown; an expired row with a recent probe pass is working by
+        // probe, still behind every data-proven row
+        PathLedger l(lt);
+        const PathCandidate fi = xray("11:xray", "FI"), de = awg("12", "DE"), ee = awg("17", "EE"),
+                            wl = prov("up:wl", UpstreamKind::Whitelist, "", 1), pl = xray("20:xray", "PL");
+        l.record(net, fi.id, PathOutcome::DataOk, t0 - hour, 600, 300);   // fast, before its failure
+        l.record(net, fi.id, PathOutcome::NoData, t0);
+        l.record(net, de.id, PathOutcome::DataOk, t0 - hour, 500, 200);
+        l.record(net, de.id, PathOutcome::NoData, t0);
+        l.record(net, pl.id, PathOutcome::NoData, t0);
+        l.record(net, ee.id, PathOutcome::DataOk, t0 + hour, 2500, 500);  // slower, proven after those failures
+        l.record(net, wl.id, PathOutcome::DataOk, t0 + 2 * hour, 3000, 900);
+        SelectInput in;
+        in.pool = { fi, de, ee, wl, pl };
+        in.evidence = l.viewOf(net, in.pool, t0 + ttl - 1);
+        QList<RankedPath> order = selectPaths(in);
+        CHECK(ids(order).mid(0, 2) == QStringList({ "17", "up:wl" }) && order.at(2).group == SelectGroup::Suspect);
+        in.evidence = l.viewOf(net, in.pool, t0 + ttl);
+        order = selectPaths(in);
+        CHECK(ids(order).mid(0, 2) == QStringList({ "17", "up:wl" }));
+        bool unknownTail = order.size() == 5;
+        for (int i = 2; i < order.size(); ++i)
+            unknownTail = unknownTail && order.at(i).group == SelectGroup::Unknown;
+        CHECK(unknownTail);
+        CHECK(detail::laneEvidence(in.pool, in.evidence).value(QStringLiteral("xray"), 1) == 1); // not "only failed"
+        // a recent probe pass on one expired row: working by probe, behind both data-proven rows
+        l.record(net, fi.id, PathOutcome::ProbeOk, t0 + ttl, 400);
+        in.evidence = l.viewOf(net, in.pool, t0 + ttl + 1);
+        order = selectPaths(in);
+        CHECK(ids(order).mid(0, 3) == QStringList({ "17", "up:wl", "11:xray" })
+              && order.at(2).group == SelectGroup::Working && order.at(2).view.strength == EvidenceStrength::Probe);
+        // restricted-network prior: expired rows hold no proof (their old data does not cancel it)
+        PathLedger r(lt);
+        PathCandidate standby = prov("up:sb", UpstreamKind::Whitelist, "", 1);
+        standby.standbyEntry = true;
+        r.record(net, fi.id, PathOutcome::DataOk, t0 - hour, 600, 300);
+        r.record(net, fi.id, PathOutcome::NoData, t0);
+        const QList<PathCandidate> pool{ fi, standby };
+        CHECK(restrictedNetworkPrior(pool, r.viewOf(net, pool, t0 + ttl), ApiReach::Unreachable, true)
+                  .value(QStringLiteral("up:sb")) == kPriorFirstCrowd);
     }
 }
 
@@ -2956,7 +3084,7 @@ int main()
     testPathId();
     testNetworkKey();
     testLedger();
-    testNoDataMarkTtl();
+    testFailureSettle();
     testSelect();
     testChoiceCountryAndLanes();
     testSpeedOrder();
