@@ -23,7 +23,7 @@ has() { printf '%s\n' "$1" | grep -F -- "$2" > /dev/null; }
 tap="$(body_of 'void AvpnEngineQml::connectToNode(' "$FAC")"
 has "$tap" 'if (!pinServer(nodeId, err, /*exactRow=*/true)) {' || bad "E1: the Scanner row must be pinned as an exact row"
 pin="$(body_of 'bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err, bool exactRow)' "$FAC")"
-printf '%s\n' "$pin" | tr -s ' \n' ' ' | grep -qF 'avpn::serverTapSwitchesModeToAuto(pinned, err, exactRow, pinned && m_engine.exactPathRanked(nodeId, m_engine.transportMode()), pinned && m_engine.exactPathRanked(nodeId, avpn::TransportMode::Auto))' \
+printf '%s\n' "$pin" | tr -s ' \n' ' ' | grep -qF 'avpn::serverTapSwitchesModeToAuto(pinned, err, exactRow, pinned && m_engine.exactPathRanked(nodeId, m_engine.transportMode()), m_engine.exactPathRanked(nodeId, avpn::TransportMode::Auto))' \
     || bad "E1: the mode switch must ask whether the attempt ranks the row now and in Auto"
 has "$pin" 'setTransportMode(QStringLiteral("auto"));' || bad "E1: the switch itself stays in pinServer"
 [ "$(code "$FAC" | grep -cF 'transport_mode_auto why=server_tap')" = "1" ] || bad "E1: one owner of the server-tap switch"

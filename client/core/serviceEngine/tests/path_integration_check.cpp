@@ -411,6 +411,51 @@ int main(int argc, char **argv)
         CHECK(r.result().reason == path::FailReason::ExactNodeFailed && r.tun.ups.size() == 1); // never another row
     }
 
+    // 6c. Second read of C4: an exact provider row in AmneziaWG mode - its pin is refused for transport (the location
+    //     has no AmneziaWG node). The mode yields only when Auto would dial the row: healthy -> switch and dial it;
+    //     zero health -> no mode change, the tap not started. A tap from the server list keeps decision 9 (switch).
+    {
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true},
+                              {QStringLiteral("upstream_nodes"), true}}, {}, {});
+        avpn::upstreamPlatformRuntimeReady().store(true);
+        const auto stub = [](const char *id, double health) {
+            SubscriptionNode n;
+            n.nodeId = QString::fromLatin1(id);
+            n.region = QStringLiteral("upstream");
+            n.proto = QStringLiteral("xray");
+            if (health >= 0)
+                n.health.insert(QStringLiteral("ru"), health);
+            UpstreamStub u;
+            u.profileId = n.nodeId.mid(3);
+            u.kind = UpstreamKind::Auto;
+            n.upstream = u;
+            return n;
+        };
+        Rig r(pool);
+        r.eng.setStandbyCandidates({ stub("up:ok1", -1), stub("up:dead1", 0.0) });
+        r.eng.setTransportMode(TransportMode::Awg);
+        QString err;
+        // healthy: the pin is refused for transport, Auto would dial it - the exact row switches (and so does a list tap)
+        CHECK(!r.eng.setPinnedNode(QStringLiteral("up:ok1"), err) && err.startsWith(QLatin1String("no_transport")));
+        const QString okErr = err;
+        CHECK(r.eng.exactPathRanked(QStringLiteral("up:ok1"), TransportMode::Auto));
+        CHECK(serverTapSwitchesModeToAuto(false, okErr, true, false, r.eng.exactPathRanked(QStringLiteral("up:ok1"), TransportMode::Auto)));
+        CHECK(serverTapSwitchesModeToAuto(false, okErr, false, false, false)); // the server list: decision 9 as before
+        // zero health: Auto would not dial it either - the exact row changes no mode, and its tap is not started
+        CHECK(!r.eng.setPinnedNode(QStringLiteral("up:dead1"), err) && err.startsWith(QLatin1String("no_transport")));
+        CHECK(!r.eng.exactPathRanked(QStringLiteral("up:dead1"), TransportMode::Auto));
+        CHECK(!serverTapSwitchesModeToAuto(false, err, true, false, r.eng.exactPathRanked(QStringLiteral("up:dead1"), TransportMode::Auto)));
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("up:dead1")));
+        CHECK(!r.eng.connect(err) && err == QLatin1String("exact_unavailable") && r.tun.ups.isEmpty());
+        // the healthy row after the switch: pinned, started, dialled alone
+        r.eng.setTransportMode(TransportMode::Auto);
+        CHECK(r.eng.setPinnedNode(QStringLiteral("up:ok1"), err));
+        r.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("up:ok1")));
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("up:ok1"));
+        avpn::upstreamPlatformRuntimeReady().store(false);
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true}}, {}, {});
+    }
+
     // 6b. A server of the list is a preference (owner decision of 17.11, coordinator 18.11): its transports first,
     //     then the best available path with the fallback notice; the preference is kept for the next start. A Scanner
     //     row (exact) on the same dead server ends with an honest error instead.

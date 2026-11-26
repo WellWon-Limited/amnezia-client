@@ -653,13 +653,16 @@ inline StartRefusal startRefusal(quint64 endedAttempt, quint64 judgedAttempt)
 // would rank in Auto and does not rank now (ServiceEngine::exactPathRanked: the pool's own admission + the mode rule;
 // judged per row, not per location: Germany 1 has an AmneziaWG listener, so its Xray row passed the pin in AmneziaWG
 // mode and the attempt then refused it, exact_unavailable). Review C4: a row Auto would not dial either (its node no
-// longer runs here or has no health) changes no mode - its tap ends as not started with the engine's own text.
+// longer runs here or has no health) changes no mode - its tap ends as not started with the engine's own text; for an
+// exact row in both branches (second read: a provider row's pin refused for transport too). A tap from the server list
+// (exactRow false) keeps decision 9 as it is: a location without the mode's transport switches.
 inline bool serverTapSwitchesModeToAuto(bool pinned, const QString &pinError, bool exactRow, bool exactRankedNow,
                                         bool exactRankedInAuto)
 {
-    if (!pinned)
-        return pinError.startsWith(QLatin1String("no_transport"));
-    return exactRow && !exactRankedNow && exactRankedInAuto;
+    const bool noTransport = !pinned && pinError.startsWith(QLatin1String("no_transport"));
+    if (!exactRow)
+        return noTransport;
+    return (noTransport || (pinned && !exactRankedNow)) && exactRankedInAuto;
 }
 
 // S1 rule 2 (owner road 26.11): how the owner's failed result ends a Scanner row's request. An attempt that never

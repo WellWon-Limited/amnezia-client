@@ -1939,6 +1939,10 @@ static void s1ExactRowWinsOverTheMode()
     CHECK(!serverTapSwitchesModeToAuto(true, QString(), true, true, true));
     // review C4: a row Auto would not dial either (no health, a platform without its proto): no mode change
     CHECK(!serverTapSwitchesModeToAuto(true, QString(), true, false, false));
+    // second read: also when the exact row's pin was refused for transport (a provider row in AmneziaWG mode) -
+    // switch only if Auto would dial it; a tap from the server list keeps decision 9 (location level)
+    CHECK(!serverTapSwitchesModeToAuto(false, QStringLiteral("no_transport: location x has no 'awg' transport"), true, false, false));
+    CHECK(serverTapSwitchesModeToAuto(false, QStringLiteral("no_transport: location x has no 'awg' transport"), false, false, false));
     // rule 2: only the result of the attempt that ended inside connect() ends the row without a verdict
     CHECK(scanRowEndOf(3, 3) == ScanRowEnd::NoVerdict);
     CHECK(scanRowEndOf(4, 3) == ScanRowEnd::Failed);  // a later attempt that dialled

@@ -3493,7 +3493,7 @@ bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err, bool exactRow
     // serverTapSwitchesModeToAuto) - one owner of the switch, here.
     if (!avpn::serverTapSwitchesModeToAuto(pinned, err, exactRow,
                                            pinned && m_engine.exactPathRanked(nodeId, m_engine.transportMode()),
-                                           pinned && m_engine.exactPathRanked(nodeId, avpn::TransportMode::Auto))) {
+                                           m_engine.exactPathRanked(nodeId, avpn::TransportMode::Auto))) {
         if (!pinned)
             return false;
         syncIntent();
