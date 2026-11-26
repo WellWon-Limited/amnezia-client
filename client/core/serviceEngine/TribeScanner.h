@@ -268,6 +268,8 @@ inline constexpr char kScannerReturnHomeFlag[] = "scanner_return_home";
 // with that reason - the same one the iOS refusal gives.
 inline constexpr char kScanCapsAwgWithheldField[] = "awg_unavailable";
 inline constexpr char kScanBudgetStoreKey[] = "avpn/scanBudget";
+// S3 (review C2): the last plan's projection per network kind, written with the ledger, read back at construction.
+inline constexpr char kScanBudgetProjectionStoreKey[] = "avpn/scanBudgetProjection";
 inline constexpr char kScanCacheStorePrefix[] = "avpn/scanCache/";
 inline constexpr char kScanCacheIndexKey[] = "avpn/scanCacheIndex";
 inline constexpr int kScanCacheMaxNetworks = 8;

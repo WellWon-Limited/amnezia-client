@@ -2152,6 +2152,43 @@ static void caseRefusedStart()
     CHECK_EQ(w.s->view().value("bar").toMap().value("button").toString(), QStringLiteral("retry_in_s"));
 }
 
+// Owner road 26.11 (S3, J8; review C2): the last plan's projection is written with the ledger and read back at the
+// coordinator's construction - a fresh process over a spent hour shows the limit and sends nothing (no manifest, no
+// live probe through the VPN that is up); a scan writes its projection with the ledger for the next process.
+static void caseBudgetGateAfterRelaunch()
+{
+    g_case = QStringLiteral("budget_gate_after_relaunch");
+    {
+        World w(capsMac(), ScanNetKind::Cellular, 6);
+        QJsonArray spent;
+        spent << QJsonObject{{"at_ms", double(w.clock.t - 20 * 60000)}, {"bytes", 3800000.0}, {"cellular", true}};
+        w.store.m.insert(QLatin1String(kScanBudgetStoreKey), QJsonDocument(spent).toJson(QJsonDocument::Compact));
+        w.store.m.insert(QLatin1String(kScanBudgetProjectionStoreKey),
+                         QJsonDocument(QJsonObject{{"cellular", 1435006.0}, {"other", 0.0}}).toJson(QJsonDocument::Compact));
+        w.liveOn(QStringLiteral("4:xray"));
+        w.start();
+        w.s->open();
+        w.run(2000);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 0);
+        CHECK_EQ(int(w.liveProbes.size()), 0);
+        CHECK_EQ(w.s->view().value("bar").toMap().value("button").toString(), QStringLiteral("retry_in_min"));
+        w.s->retry();
+        w.run(1000);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 0);
+        CHECK_EQ(w.ledgerCount(), 1); // nothing charged
+    }
+    {
+        World w(capsMac(), ScanNetKind::Cellular, 6);
+        w.liveOn(QStringLiteral("4:xray"));
+        w.start();
+        w.s->open();
+        w.run(12000);
+        CHECK_EQ(w.phase(), QStringLiteral("done"));
+        const QJsonObject p = QJsonDocument::fromJson(w.store.m.value(QLatin1String(kScanBudgetProjectionStoreKey))).object();
+        CHECK(p.value(QStringLiteral("cellular")).toDouble() > 0); // written with the ledger at the scan's end
+    }
+}
+
 // Owner road 26.11 (S2, J3; review C1): a start refused for MEMORY after the live probe went through the tunnel - its
 // own text, and no pause: the text tells the person to turn the VPN off and run the check again, so a reopen right after
 // scans at once. Every other refused start keeps its pause (caseRefusedStart).
@@ -4662,6 +4699,7 @@ int main(int argc, char **argv)
     caseHostUnavailable();
     caseRefusedStart();
     caseRefusedStartMemory();
+    caseBudgetGateAfterRelaunch();
     caseHostReasons();
     caseServiceErrors();
     caseHostDied();

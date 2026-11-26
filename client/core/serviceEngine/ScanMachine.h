@@ -2329,11 +2329,35 @@ private:
         return budgetBlocked(now).hourly ? QStringLiteral("budget") : QString();
     }
 
-    // S3 (owner road 26.11): the gate is the start's own rule with no plan known (ScanBudget.h decideScanStart).
+    // S3 (owner road 26.11; review C2): the gate is the start's own rule over the last plan's projection of this network
+    // kind (persisted with the ledger, restoreProjection), ScanBudget.h decideScanStart.
     ScanBudgetDecision budgetBlocked(qint64 now) const
     {
-        return decideScanStart(m_ledger, now, m_net.kind, -1, m_manifest.manifest.deviceBytesPerHour, m_t);
+        return decideScanStart(m_ledger, now, m_net.kind, startNeed(lastProjectionFor(m_net.kind)),
+                               m_manifest.manifest.deviceBytesPerHour, m_t);
     }
+    // What a start needs of the allowance for a plan of `planBytes`: the plan, the app side at its worst cases, the host's
+    // opening and closing access attempts. One expression for the gate and the start check.
+    qint64 startNeed(qint64 planBytes) const
+    {
+        return qMax<qint64>(0, planBytes) + appWorstCase() + 2 * qint64(m_t.costNetinfoBytes);
+    }
+    qint64 lastProjectionFor(ScanNetKind k) const { return k == ScanNetKind::Cellular ? m_lastProjectionCell : m_lastProjectionOther; }
+
+public:
+    // S3 (review C2): the last plan's projection per network kind, kept with the ledger in the coordinator's store
+    // (TribeScanner writes it whenever it writes the ledger) and given back at construction, before the first view.
+    void restoreProjection(const QJsonObject &o)
+    {
+        m_lastProjectionCell = qMax<qint64>(0, qint64(o.value(QLatin1String("cellular")).toDouble(0)));
+        m_lastProjectionOther = qMax<qint64>(0, qint64(o.value(QLatin1String("other")).toDouble(0)));
+    }
+    QJsonObject projectionJson() const
+    {
+        return QJsonObject{{QStringLiteral("cellular"), double(m_lastProjectionCell)}, {QStringLiteral("other"), double(m_lastProjectionOther)}};
+    }
+
+private:
 
     void adoptNetwork(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now)
     {
@@ -2649,6 +2673,14 @@ private:
             return;
         if (m_liveProbeNode == m_current.nodeId)
             return;
+        // S3 (review C2): outside a running scan the probe is a request of its own against the hour - it follows the
+        // button's gate: with the hour blocked an open or a tap sends nothing chargeable (the row stays «Подключено»,
+        // unproven, as with no room in the allowance)
+        const bool inScan = m_cur.open && !m_cur.scanEnded && m_cur.scanId == m_scanId;
+        if (!inScan && budgetBlocked(m_last).hourly) {
+            m_liveReasons.insert(m_current.nodeId, QStringLiteral("live_budget"));
+            return;
+        }
         m_liveProbeNode = m_current.nodeId;
         m_liveProbeDone = false;
         ScanAction a = act(ScanActionKind::ProbeLiveTunnel);
@@ -2719,7 +2751,7 @@ private:
 
     void beginScan(qint64 now, ScanStep &s, bool userPressedConnect = false)
     {
-        // Budget pre-check by the start's own rule with no plan known (no manifest fetch on a blocked cellular hour).
+        // Budget pre-check by the start's own rule over the last projection (no manifest fetch on a blocked cellular hour).
         const ScanBudgetDecision pre = budgetBlocked(now);
         if (pre.hourly) {
             toNoScan(QStringLiteral("budget"), now, s);
@@ -2965,8 +2997,10 @@ private:
         m_planRemaining = m_fromServer ? (m_serverExhausted ? 0 : 1) : plan.remaining;
         m_planCandidates = plan.probe.size() + plan.orderOnly.size();
         m_manifestRevision = m_manifest.manifest.upstreamRevision;
-        const qint64 attempts = 2 * qint64(m_t.costNetinfoBytes); // the host's opening + closing access attempts
-        const ScanBudgetDecision b = decideScanStart(m_ledger, now, m_scanNet.kind, plan.projectedBytes + appWorstCase() + attempts,
+        // S3 (review C2): the projection is stored BEFORE the judgement - a plan that grew past what the hour has left
+        // keeps the gate blocked from now on (persisted with the ledger by the coordinator)
+        (m_scanNet.kind == ScanNetKind::Cellular ? m_lastProjectionCell : m_lastProjectionOther) = plan.projectedBytes;
+        const ScanBudgetDecision b = decideScanStart(m_ledger, now, m_scanNet.kind, startNeed(plan.projectedBytes),
                                                      m_manifest.manifest.deviceBytesPerHour, m_t);
         if (!b.allowed) {
             m_startedVpn = false;
@@ -4711,6 +4745,8 @@ private:
     QHash<QString, Charged> m_charged; // request id -> what the ledger got for it (until its real size comes)
     QStringList m_chargedOrder;
     qint64 m_cooldownUntil = 0;
+    qint64 m_lastProjectionCell = 0;  // S3 (review C2): the last plan's projection on cellular / elsewhere (persisted)
+    qint64 m_lastProjectionOther = 0;
     bool m_liveProbeSent = false;     // this scan sent the live-tunnel probe (bytes moved: the cooldown holds)
     qint64 m_cooldownPrev = 0;        // the cooldown before this scan armed its own (a refused start restores it)
     qint64 m_lastManifestAt = LLONG_MIN / 2; // the last manifest request (the buttons' back-off)

@@ -203,17 +203,16 @@ inline ScanBudgetDecision decideScanBudget(const ScanBudgetLedger &ledger, qint6
     return d;
 }
 
-// S3 (owner road 26.11, J8): THE allowance rule of a scan start - the button's gate (before a manifest, and so after a
-// relaunch too) and the start check alike. planBytes = the plan's projection with the app side and the access attempts
-// (the start), or < 0 when no plan is known (the gate): then the start rule's own worst case, scan_budget_scan_bytes -
-// a cellular need is capped there (decideScanBudget), so the gate can never say "free" for a start the same rule then
-// blocks on the cellular hour, whatever the next plan is. The ledger is the persisted one (restoreBudget); nothing of
-// the last plan is needed (before: the last projection, memory only, read 0 after a relaunch - the button looked
-// enabled and each tap fetched manifest + token before the real check blocked it).
-inline ScanBudgetDecision decideScanStart(const ScanBudgetLedger &ledger, qint64 nowMs, ScanNetKind net, qint64 planBytes,
+// S3 (owner road 26.11, J8; review C2): THE allowance rule of a scan start - the button's gate and the start check
+// alike. needBytes = a plan's projection with the app side at its worst cases and the host's access attempts
+// (ScanMachine::startNeed): the start passes the plan it just built, the gate the last plan's projection, persisted with
+// the ledger and restored at construction (none known yet: the smallest need, the app side alone). The start stores
+// its plan's projection before it judges, so a start that blocks because the plan grew leaves the gate blocked from
+// then on - at most one spent request per growth of the plan, never a false block of a scan that fits.
+inline ScanBudgetDecision decideScanStart(const ScanBudgetLedger &ledger, qint64 nowMs, ScanNetKind net, qint64 needBytes,
                                           qint64 deviceBytesPerHour, const ScanTunables &t)
 {
-    return decideScanBudget(ledger, nowMs, net, planBytes >= 0 ? planBytes : qint64(t.budgetScanBytes), deviceBytesPerHour, t);
+    return decideScanBudget(ledger, nowMs, net, needBytes, deviceBytesPerHour, t);
 }
 
 // Whole minutes for the «Повторить через N мин» button (at least 1 while blocked).

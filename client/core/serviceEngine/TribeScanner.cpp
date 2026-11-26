@@ -207,6 +207,7 @@ TribeScanner::TribeScanner(const Deps &d, QObject *parent)
             self->timerFired();
     };
     m_m.restoreBudget(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetStoreKey))).array());
+    m_m.restoreProjection(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetProjectionStoreKey))).object());
     // the pool's last answer is restored in configureApi: it is shown only for the account it was fetched for
     m_enabled = scannerSwitchOn(TuningStore::flag(QLatin1String(kScannerFlag), false), kScanHostOnThisBuild);
     m_doctorLegacy = TuningStore::flag(QLatin1String(kDoctorLegacyFlag), false);
@@ -387,6 +388,8 @@ void TribeScanner::execute(const ScanAction &a)
         break;
     case ScanActionKind::PersistBudget:
         m_store->write(QLatin1String(kScanBudgetStoreKey), compactArray(a.ledger));
+        m_store->write(QLatin1String(kScanBudgetProjectionStoreKey), // S3 (review C2): with the ledger, always
+                       QJsonDocument(m_m.projectionJson()).toJson(QJsonDocument::Compact));
         break;
     case ScanActionKind::CloseScreen:
         emitLog(QStringLiteral("action close_screen"));
@@ -2325,6 +2328,7 @@ void TribeScanner::chargeOutsideScan(qint64 bytes, bool cellular)
     l.prune(now());
     m_m.restoreBudget(l.toJson());
     m_store->write(QLatin1String(kScanBudgetStoreKey), compactArray(l.toJson()));
+    m_store->write(QLatin1String(kScanBudgetProjectionStoreKey), QJsonDocument(m_m.projectionJson()).toJson(QJsonDocument::Compact));
 }
 
 void TribeScanner::sampleSpeed(qint64 bytes, int timeoutMs, std::function<void(const ScanSpeedSample &)> done)
