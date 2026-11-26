@@ -2690,7 +2690,8 @@ void AvpnEngineQml::resolveApiCarveHosts(const QStringList &hosts)
 
 // Device round air-I review F4: the hosts asked before that still have no public address (their answers so far came
 // from inside a provider session, or none came) are looked up again - by the one owner of "the tunnel changed"
-// (applyNativeState, with each API reset). Nothing is dropped from the list.
+// (applyNativeState: once the reset's clear of Qt's host cache is done, or with the reset where there is no clear).
+// Nothing is dropped from the list.
 void AvpnEngineQml::resolveApiCarveHostsStillMissing()
 {
     QStringList missing;
@@ -5985,10 +5986,17 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
         const auto *api = avpn::TribeNetworkAccessManager::of(m_nam);
         reliabilityEvent(QStringLiteral("api_reset generation=%1 retiring=%2")
                              .arg(api ? api->generation() : 0).arg(api ? api->retiringGenerations() : -1));
-        avpn::dropCachedHostNamesSoon(avpn::kQtHostCacheClear, this, [this](qint64 ms) {
+        // Review F4: an API host without a public address yet is asked again - after the clear where there is one:
+        // QHostInfo::lookupHost answers from Qt's cache in the calling thread (qhostinfo.cpp:792-805), so asked before
+        // the clear it would get the gone tunnel's cached FakeDNS name, and its own lookup would be one more for the
+        // clear to wait for. Without a clear (a shared Qt) it is asked now: stale for at most the cache's 60 s, then
+        // an applied config, an edge change or the Scanner's own lookup ask again.
+        const bool dropping = avpn::dropCachedHostNamesSoon(avpn::kQtHostCacheClear, this, [this](qint64 ms) {
             reliabilityEvent(QStringLiteral("host_cache_cleared ms=%1").arg(ms));
+            resolveApiCarveHostsStillMissing();
         });
-        resolveApiCarveHostsStillMissing(); // review F4: an API host without a public address yet is asked again
+        if (!dropping)
+            resolveApiCarveHostsStillMissing();
     }
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).

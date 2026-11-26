@@ -43,6 +43,13 @@ static void table()
                           "ff02::1", "2001:db8::", "2001:db8:ffff:ffff::1", "1fff:ffff::1", "4000::1", "::8.8.8.8"})
         CHECK(!pub(a));
     CHECK(!isPublicUnicastAddress(QHostAddress()));
+    // NAT64 (RFC 6052 well-known prefix 64:ff9b::/96, a DNS64 answer of an IPv6-only network for our IPv4-only API
+    // host): judged as the embedded IPv4 address by the same table; the local-use 64:ff9b:1::/48 is not that prefix
+    for (const char *a : {"64:ff9b::8.8.8.8", "64:ff9b::c922:8667" /* 201.34.134.103 */, "64:ff9b::95.217.135.30"})
+        CHECK(pub(a));
+    for (const char *a : {"64:ff9b::198.18.0.1", "64:ff9b::10.0.0.1", "64:ff9b::100.88.0.5", "64:ff9b::127.0.0.1",
+                          "64:ff9b::", "64:ff9b:1::8.8.8.8", "64:ff9b:0:0:0:1:808:808", "64:ff9a::8.8.8.8"})
+        CHECK(!pub(a));
     CHECK(publicUnicastOnly({QStringLiteral("100.88.0.5"), QStringLiteral(" 8.8.8.8 "), QStringLiteral("api.tribevpn.com"),
                              QStringLiteral("fc00::5"), QStringLiteral("2a01:4f8::1"), QString()})
           == (QStringList{QStringLiteral("8.8.8.8"), QStringLiteral("2a01:4f8::1")}));
@@ -70,10 +77,14 @@ static void recording()
     CHECK(recordApiHostAnswers(all, mine, {QHostAddress(QStringLiteral("10.0.0.1")), QHostAddress(QStringLiteral("2a01:4f8::1")),
                                            QHostAddress(QStringLiteral("201.34.134.103"))}) == 1);
     CHECK(mine == (QStringList{QStringLiteral("201.34.134.103"), QStringLiteral("2a01:4f8::1")}) && all.size() == 2);
+    // an IPv6-only network's DNS64 answer is kept; one embedding the provider's pool is not
+    CHECK(recordApiHostAnswers(all, mine, {QHostAddress(QStringLiteral("64:ff9b::100.88.0.5")),
+                                           QHostAddress(QStringLiteral("64:ff9b::c922:8667"))}) == 1);
+    CHECK(mine.size() == 3 && mine.last() == QHostAddress(QStringLiteral("64:ff9b::c922:8667")).toString() && all.size() == 3);
     // another host's list shares `all` without duplicates
     QStringList other;
     CHECK(recordApiHostAnswers(all, other, {QHostAddress(QStringLiteral("2a01:4f8::1"))}) == 0);
-    CHECK(other == QStringList{QStringLiteral("2a01:4f8::1")} && all.size() == 2);
+    CHECK(other == QStringList{QStringLiteral("2a01:4f8::1")} && all.size() == 3);
 }
 
 int main()

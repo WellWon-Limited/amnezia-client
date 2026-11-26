@@ -6,7 +6,8 @@
 #   A2  the Scanner's own two lookups keep only public answers (TribeScanner::finishResolve, ScanPathProberApi);
 #   A3  without a public probe base address no proof by exclusion (ScanMachine evaluateExclusion "no_base_ip");
 #   A4  a host still without a public address is asked again by the one owner of "the tunnel changed" (the api_reset
-#       block), from one place; nothing drops the list.
+#       block): where Qt's host cache is cleared, only in the clear's `done` (after it - before it the lookup would be
+#       answered from the cache of the gone tunnel), else at once; nothing drops the list.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SE="$(cd "$HERE/.." && pwd)"
@@ -39,8 +40,12 @@ has "$(code "$MACHINE")" ': m_manifest.probeBaseIps.isEmpty() ? QStringLiteral("
 
 # ---- A4 ----
 owner="$(code "$FACADE" | awk '/if \(m_nam && newApiGeneration\(observedTunnelOf\(m_lastTunnelState\), observedTunnelOf\(s\)\)\) \{/{f=1} f{print} f&&/^    }$/{exit}')"
-has "$owner" 'resolveApiCarveHostsStillMissing();' || bad "A4: the api_reset owner must ask the hosts still without a public address"
-[ "$(code "$FACADE" | grep -cF 'resolveApiCarveHostsStillMissing();')" = "1" ] || bad "A4: one place asks them again"
+done_body="$(printf '%s\n' "$owner" | awk '/const bool dropping = avpn::dropCachedHostNamesSoon\(avpn::kQtHostCacheClear, this, \[this\]\(qint64 ms\) \{/{f=1; next} f&&/^        }\);$/{exit} f{print}')"
+has "$done_body" 'resolveApiCarveHostsStillMissing();' || bad "A4: where there is a clear, the hosts must be asked again after it (in its done)"
+after="$(printf '%s\n' "$owner" | awk '/^        }\);$/{f=1; next} f{print}')"
+[ "$(printf '%s\n' "$after" | tr -d ' \n')" = "if(!dropping)resolveApiCarveHostsStillMissing();}" ] \
+    || bad "A4: outside the clear's done the hosts may be asked only when there is no clear (if (!dropping))"
+[ "$(code "$FACADE" | grep -cF 'resolveApiCarveHostsStillMissing();')" = "2" ] || bad "A4: the hosts are asked again from the api_reset block only"
 code "$FACADE" | grep -qE 'm_apiHostIps(ByHost)?\.(clear|remove|removeAll|removeOne|take)\(' && bad "A4: nothing may drop the list"
 
 [ "$fail" = "0" ] && echo "check_api_host_address_wiring: OK"
