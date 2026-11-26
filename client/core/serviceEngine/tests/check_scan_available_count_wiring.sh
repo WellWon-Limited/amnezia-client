@@ -4,7 +4,8 @@
 # caseAvailableCountOneDefinition. Wired here - each line fails if reverted:
 #   C1  the ids the coordinator asks the ledger about cover the held rows and every stored result's rows;
 #   C2  the coordinator asks for exactly those ids;
-#   C3  both counts read the one set (slotWorks and the row's verdict).
+#   C3  both counts read one rule (failedHere: the tunnel-no-data set and the tap-failed set - review C6) - slotWorks
+#       and the row's verdict (rowViewOf) alike.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SE="$HERE/.."
@@ -19,7 +20,8 @@ has "$ids" 'for (const Row &r : m_rows)' && has "$ids" 'for (const ScanCachedRes
 sync="$(code "$SE/TribeScanner.cpp" | awk '/^void TribeScanner::syncTunnelFacts\(\)/{f=1} f{print} f&&/^}$/{exit}')"
 has "$sync" 'for (const QString &id : m_m.tunnelFactIds())' || bad "C2: the coordinator must ask about tunnelFactIds()"
 printf '%s\n' "$M" | grep -q 'rowIds()' && bad "C2: a held-rows-only id list is back"
-has "$M" '&& !(m_tunnelNoData.contains(r.id) && !r.fullProof)) ? 1 : 0;' || bad "C3: slotWorks must read the one set"
-has "$M" 'if (!isCurrent && m_tunnelNoData.contains(r.id) && !fullProofOf(r))' || bad "C3: the row's verdict must read the one set"
+has "$M" '&& !failedHere(r.id, r.fullProof)) ? 1 : 0;' || bad "C3: slotWorks must read the one rule"
+has "$M" 'if (!isCurrent && failedHere(r.id, fullProofOf(r)))' || bad "C3: the row's verdict must read the one rule"
+has "$M" 'return (m_tunnelNoData.contains(id) && !fullProof) || m_tapFailed.contains(id);' || bad "C3: the rule must hold both sets"
 [ "$fail" = "0" ] && echo "check_scan_available_count_wiring: OK"
 exit "$fail"

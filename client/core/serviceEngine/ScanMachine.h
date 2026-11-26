@@ -2490,9 +2490,16 @@ private:
         const QString scope = scanScopeOf(c.scope);
         int n = 0;
         for (const ScanCachedRow &r : c.rows)
-            n += (scanClassWorking(r.cls) && scanRowInScope(r.countryCode, scope)
-                  && !(m_tunnelNoData.contains(r.id) && !r.fullProof)) ? 1 : 0;
+            n += (scanClassWorking(r.cls) && scanRowInScope(r.countryCode, scope) && !failedHere(r.id, r.fullProof)) ? 1 : 0;
         return n;
+    }
+    // The one rule of «не удалось здесь» for both counts of «N доступно» (the result's rings through rowViewOf, the
+    // choice through slotWorks): the row's real tunnel carried no data on this network (unless this result proved its
+    // full path), or a tap on it failed now (review C6 of the owner road 26.11: the rings left a tap-failed row out, the
+    // choice counted it).
+    bool failedHere(const QString &id, bool fullProof) const
+    {
+        return (m_tunnelNoData.contains(id) && !fullProof) || m_tapFailed.contains(id);
     }
     qint64 slotFreshMs() const { return qMin(kScanCacheShowMaxMs, qint64(m_t.cacheWorksTtlS) * 1000); }
 
@@ -4311,7 +4318,7 @@ private:
         // S6 (device round 5) in the one verdict of the row: its real tunnel carried no data on this network and nothing
         // proved it through its own full path since - «Не удалось», never «Доступно» on a light probe (PathLedger stage
         // 2). This network's handshake + data download of the same path outranks the older mark (device round air-C, D1).
-        if (!isCurrent && m_tunnelNoData.contains(r.id) && !fullProofOf(r))
+        if (!isCurrent && failedHere(r.id, fullProofOf(r)))
             v.state = ScanRowState::Failed;
         if (isCurrent) {
             v.state = ScanRowState::Connected;

@@ -4436,6 +4436,22 @@ static void caseAvailableCountOneDefinition()
     w.run(500);
     CHECK_EQ(ringsAvailable(), want);
     CHECK_EQ(slotWorks(), want);
+    // review C6: a row whose tap failed now leaves both counts (the rings left it out, the choice counted it)
+    QString tapped;
+    for (const QVariant &v : w.rows()) {
+        const QVariantMap r = v.toMap();
+        const QString st = r.value(QStringLiteral("state")).toString();
+        if (tapped.isEmpty() && (st == QStringLiteral("works") || st == QStringLiteral("slow"))
+            && !r.value(QStringLiteral("current")).toBool() && !marked.contains(r.value(QStringLiteral("id")).toString()))
+            tapped = r.value(QStringLiteral("id")).toString();
+    }
+    CHECK(!tapped.isEmpty());
+    w.s->tapRow(tapped);
+    w.run(100);
+    w.s->exactRowFailed(tapped);
+    w.run(200);
+    CHECK_EQ(ringsAvailable(), want - 1);
+    CHECK_EQ(slotWorks(), want - 1);
     w.s->close();
 }
 
