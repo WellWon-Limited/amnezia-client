@@ -5,7 +5,8 @@
 //
 // What is recorded - only outcomes that belong to the path itself (design Р12):
 //   probe ok       a light check next to the tunnel passed (weak proof: may raise the path, never "Connected";
-//                  it never clears a tunnel "no data" - only a data ok does), with its time to proof when known;
+//                  it never clears a live tunnel "no data" - only a data ok does, noDataMarkHolds), with its time
+//                  to proof when known;
 //   data ok        data passed through the raised tunnel, with time to tunnel and time to first byte (strong);
 //   no handshake   the path did not come up within its start deadline (AmneziaWG handshake, Xray connect);
 //   no data        the tunnel came up, no data passed within the check deadline;
@@ -25,6 +26,12 @@
 //             any success resets streak and ladder.
 //   Refused / no seat do not touch the streak or the ladder (they say nothing about the network): they keep
 //   the path "dead, in quarantine" for refusalCooldownMs only.
+// Failure evidence expires by its own age (settled(), device round R 26.11): once the quarantine is over and the
+// newest failure is failureTtlMs old (6 h, the ladder's top), the streak, the no-data time, the ended quarantine and
+// the data proof that predates the failure are void - for record() (a later failure starts a new streak at 1) and for
+// every reader (view(), tunnelNoDataHere()). Probe facts are kept: such a path is unknown, or working by probe after
+// a recent probe pass. Forgetting by age is not contradiction by newer evidence: a probe pass right after a lost
+// handshake still lifts the path back to its earlier state, data proof included (record(), probe ok).
 // Speed (device round 19.11, iPhone Air on LTE: repeats kept landing on Estonia 3 AmneziaWG, median 5.0 s, while
 // Finland 1 Xray proven on the same network connected in 3.7 s - "newest proof first" made the last path win for
 // ever): a measured time is evidence like any other. dataMs = time to tunnel + time to first byte of the data oks of
@@ -157,6 +164,7 @@ public:
             e.path = path.id;
             e.revision = path.revision;
         }
+        e = settled(e, nowMs, m_t); // expired failure evidence is not counted with the new observation
         switch (o) {
         case PathOutcome::DataOk:
             if (connectMs > 0 && ttfbMs >= 0)
@@ -172,10 +180,10 @@ public:
                 if (connectMs >= 0)
                     e.probeMs = connectMs;
                 // Stage 2: a tunnel that came up and carried no data outranks a light probe (device round 18.11:
-                // own Xray 15 on LTE probes fine, the real tunnel passes nothing). Only a data ok through the
-                // tunnel clears such a failure; the probe is kept, the path stays suspect / dead, so the race
-                // does not pick it again and again.
-                if (e.failStreak > 0 && e.noDataMs > 0 && e.noDataMs >= e.dataOkMs)
+                // own Xray 15 on LTE probes fine, the real tunnel passes nothing). While the mark holds
+                // (noDataMarkHolds) only a data ok through the tunnel clears the failure; the probe is kept, the
+                // path stays suspect / dead, so the race does not pick it again and again.
+                if (noDataMarkHolds(e))
                     break;
             }
             e.failStreak = 0;
@@ -213,9 +221,9 @@ public:
         const auto it = m_entries.constFind(keyOf(network, path.id));
         if (it == m_entries.constEnd())
             return v;
-        const LedgerEntry &e = it.value();
-        if (e.revision != path.revision || nowMs - e.touchedMs > m_t.evidenceTtlMs)
+        if (it->revision != path.revision || nowMs - it->touchedMs > m_t.evidenceTtlMs)
             return v;
+        const LedgerEntry e = settled(it.value(), nowMs, m_t);
         v.failStreak = e.failStreak;
         v.lastFailureMs = e.lastFailureMs;
         v.quarantineUntilMs = e.quarantineUntilMs;
@@ -260,6 +268,58 @@ public:
     {
         const auto it = m_entries.constFind(keyOf(network, pathId));
         return it == m_entries.constEnd() ? nullptr : &it.value();
+    }
+
+    // "The real tunnel of this path carried no data on this network" (the Scanner's «Не удалось», via
+    // ServiceEngine::failedInTunnelHere): the probe-pass block's own rule, on an entry view() still reads (this
+    // revision, touched within evidenceTtlMs).
+    bool tunnelNoDataHere(const QString &network, const PathId &path, qint64 nowMs) const
+    {
+        const auto it = m_entries.constFind(keyOf(network, path.id));
+        if (it == m_entries.constEnd())
+            return false;
+        if (it->revision != path.revision || nowMs - it->touchedMs > m_t.evidenceTtlMs)
+            return false;
+        return noDataMarkHolds(settled(it.value(), nowMs, m_t));
+    }
+
+    // The time of the streak's newest failure: lastFailureMs (every no handshake / no data sets it; persisted as "lf"
+    // since the ledger's first version); an entry without it falls back to the no-data time - never to touchedMs,
+    // which probe passes refresh. 0 = no failure time known.
+    static qint64 lastFailureAt(const LedgerEntry &e) { return e.lastFailureMs > 0 ? e.lastFailureMs : e.noDataMs; }
+
+    // The one settle rule over an entry (device round R 26.11, review of 1ff3cf163): failure evidence is void once
+    // the quarantine is over and the newest failure is at least failureTtlMs old - the streak, the no-data time,
+    // the ended quarantine, and the data proof that predates the failure (a later failure superseded it; when the
+    // failure is forgotten for age, that proof does not come back - a data ok newer than the failure cannot coexist
+    // with a streak, it resets it). Probe facts are kept. A live failure is never shortened or extended by a probe
+    // pass: the pass changes neither the newest failure's time nor the quarantine. A streak with no failure time at
+    // all (a hand-made entry) is left to the entry's evidenceTtlMs. Applied to the stored entry at the top of
+    // record() and to a copy in every const reader.
+    static LedgerEntry settled(LedgerEntry e, qint64 nowMs, const LedgerTunables &t)
+    {
+        if (e.failStreak <= 0)
+            return e;
+        const qint64 last = lastFailureAt(e);
+        if (last <= 0 || nowMs < e.quarantineUntilMs || nowMs - last < t.failureTtlMs)
+            return e;
+        e.failStreak = 0;
+        e.noDataMs = 0;
+        e.quarantineUntilMs = 0;
+        if (e.dataOkMs > 0 && e.dataOkMs <= last) {
+            e.dataOkMs = 0;
+            e.connectMs = -1;
+            e.ttfbMs = -1;
+            e.dataMs = -1;
+        }
+        return e;
+    }
+
+    // The tunnel "no data" mark on a settled entry - the probe-pass block (record) and tunnelNoDataHere: the tunnel
+    // came up and carried no data, and nothing carried data through it since.
+    static bool noDataMarkHolds(const LedgerEntry &e)
+    {
+        return e.failStreak > 0 && e.noDataMs > 0 && e.noDataMs >= e.dataOkMs;
     }
 
     // Drops entries untouched for evidenceTtlMs, then the oldest beyond maxEntries.

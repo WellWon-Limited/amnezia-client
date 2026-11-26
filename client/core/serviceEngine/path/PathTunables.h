@@ -77,6 +77,13 @@ struct LedgerTunables {
     long long probeOkTtlMs = 10LL * 60 * 1000;
     // An entry nothing touched for this long is ignored and pruned (the network or the fleet has changed).
     long long evidenceTtlMs = 7LL * 24 * 3600 * 1000;
+    // Failure evidence (the streak, a tunnel "no data", an ended quarantine) is void once its quarantine is over and
+    // its newest failure is this old (PathLedger::settled) - the top of the quarantine ladder: a failure is never held
+    // longer than the longest quarantine, and a path at the top step is clean exactly when that quarantine ends
+    // (coordinator, 26.11). The key of a mobile network covers the whole operator, while the cause of a failure (a
+    // whitelist zone, a frozen path) is local in place and time; device round R 26.11: an own Xray row stayed «не
+    // удалось» for days because the scans' probes kept the entry fresh. Compile-time, as the rest here.
+    long long failureTtlMs = quarantineMs.back();
     // A server refusal or "no free seat" keeps the path out of the first places for this long, without
     // touching the quarantine ladder (it says nothing about the network).
     long long refusalCooldownMs = 2LL * 60 * 1000;
