@@ -23,6 +23,7 @@ namespace avpn {
 #if defined(Q_OS_ANDROID)
 namespace {
 constexpr char kPhysicalSourceClass[] = "org/amnezia/vpn/util/net/ScanAppNetwork";
+constexpr char kVpnDefaultClass[] = "org/amnezia/vpn/util/net/VpnDefaultNetwork";
 // Set before the watch starts: the callback thread never runs instance()'s static initialisation (start() runs
 // inside it).
 std::atomic<UplinkMonitor *> g_physicalMonitor{nullptr};
@@ -32,7 +33,49 @@ void JNICALL onPhysicalUplink(JNIEnv *, jobject, jboolean up)
 {
     UplinkMonitor::postPhysicalUp(up == JNI_TRUE);
 }
+
+// VpnDefaultNetwork.onVpnDefault: the ConnectivityManager callback thread.
+void JNICALL onVpnDefault(JNIEnv *, jobject, jboolean vpn)
+{
+    UplinkMonitor::postVpnDefault(vpn == JNI_TRUE);
+}
 } // namespace
+
+void UplinkMonitor::postVpnDefault(bool vpn)
+{
+    UplinkMonitor *m = g_physicalMonitor.load();
+    if (!m)
+        return;
+    QMetaObject::invokeMethod(m, [m, vpn]() {
+        const int was = m->m_vpnDefault;
+        m->m_vpnDefault = vpn ? 1 : 0;
+        if (was != m->m_vpnDefault)
+            emit m->vpnDefaultChanged(vpn);
+    }, Qt::QueuedConnection);
+}
+
+void UplinkMonitor::startVpnDefault()
+{
+    g_physicalMonitor.store(this);
+    const JNINativeMethod methods[] = {
+        {"onVpnDefault", "(Z)V", reinterpret_cast<void *>(onVpnDefault)},
+    };
+    QJniEnvironment env;
+    if (!env.registerNativeMethods(kVpnDefaultClass, methods, 1)) {
+        env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent);
+        qWarning() << "[uplink] no VPN default-network source in the Kotlin half - the data check starts as before";
+        return;
+    }
+    const QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (!context.isValid())
+        return;
+    const jint initial = QJniObject::callStaticMethod<jint>(kVpnDefaultClass, "watch", "(Landroid/content/Context;)I",
+                                                            context.object());
+    if (env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent))
+        return;
+    m_vpnDefault = int(initial) >= -2 && int(initial) <= 1 ? int(initial) : -2;
+    qInfo() << "[uplink] VPN default-network source, initial" << m_vpnDefault;
+}
 
 void UplinkMonitor::postPhysicalUp(bool up)
 {
@@ -115,6 +158,7 @@ UplinkMedium mediumOf(const QNetworkInformation *ni)
 void UplinkMonitor::start()
 {
 #if defined(Q_OS_ANDROID)
+    startVpnDefault(); // independent of the physical source below
     if (startPhysical())
         return;
 #endif

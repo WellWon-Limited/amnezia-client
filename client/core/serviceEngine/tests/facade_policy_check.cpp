@@ -1435,6 +1435,31 @@ static void f2cStatusTakesOverARebuild()
                        /*ownOpInFlight=*/true, false, false) == OrbTap::Stop);
 }
 
+// Phone 26.11 (T1) / round 58 review, finding 3: Connect, Stop in the app, then the notification's «Подключиться» - a
+// session the service started by itself in a live UI process. Its CONNECTED edge now reaches the facade as a native
+// Connected (VpnConnection restores the protocol it dropped at the Stop) and the STATUS snapshot gets the protocol back too
+// (ensureAndroidProtocol); both go through the ONE Adopt rule. The notification's button is the person's own tap: after a
+// confirmed Stop nothing of ours is pending, so the OFF intent does not block the new session (A4) - it is adopted, never
+// stopped; only a Stop of ours still unconfirmed with the request off stops it.
+static void t1NotificationStartIsAdopted()
+{
+    using A = AndroidStatusAction;
+    // the live edge's rule (tryAdoptObservedTunnel on Android = adoptObservedTunnel): confirmed Stop, request off -> adopt
+    CHECK(adoptObservedTunnel(/*ourStopPending=*/false, /*wantConnected=*/false) == ObservedTunnelAdoption::Adopt);
+    // the person's Stop still unconfirmed (the CONNECTED is that same session's, arriving late): stopped
+    CHECK(adoptObservedTunnel(true, false) == ObservedTunnelAdoption::StopIt);
+    // the snapshot's rule for the same facts gives the same answer (one decision for edge and snapshot)
+    for (const bool pending : { false, true })
+        for (const bool want : { false, true }) {
+            const A snap = androidStatusDecision(/*serviceConnected=*/true, false, /*engineConnected=*/false,
+                                                 ObservedTunnel::Disconnected, /*attemptRunning=*/false, pending, want);
+            CHECK((snap == A::StopIt) == (adoptObservedTunnel(pending, want) == ObservedTunnelAdoption::StopIt));
+            CHECK(snap == A::StopIt || snap == A::Adopt);
+        }
+    // the engine holds a session: no adoption from either entry (the views agree)
+    CHECK(androidStatusDecision(true, false, /*engineConnected=*/true, ObservedTunnel::Connected, false, false, true) == A::Nothing);
+}
+
 // Review R3 (21.11): Connect, Stop during the first bind, the app to the background; on return the service's STATUS said
 // "connected" and the STATUS entry adopted it - setting the intent on before the person's-will rule was asked. Both
 // entries (native state, STATUS) now decide by the same rule.
@@ -2115,6 +2140,7 @@ static void t1ThawStallCheck()
 int main()
 {
     f2cStatusTakesOverARebuild();
+    t1NotificationStartIsAdopted();
     s1ExactRowWinsOverTheMode();
     t1ThawStallCheck();
     r50UplinkMoveVoidsTheLiveClaim();

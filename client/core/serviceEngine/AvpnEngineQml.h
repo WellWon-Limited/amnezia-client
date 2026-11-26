@@ -282,10 +282,10 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(bool autoUpdate READ autoUpdate WRITE setAutoUpdate NOTIFY autoUpdateChanged)
     // AVPN «Доступ к сайтам РФ»: the effective value (BypassMaster.h, one decision); QML shows it and never stores it.
     Q_PROPERTY(bool bypassMasterOn READ bypassMasterOn NOTIFY bypassMasterOnChanged)
-    // Whether this device can apply the split at all (BypassMaster.h: the route budget is not 0 - RouteBudget.h) - the
-    // main screen's switch is disabled with a caption where it cannot; the same predicate turns the effective value off.
-    // The budget can change with the server's number (and a developer build's control file): notified with the value.
-    Q_PROPERTY(bool bypassMasterAvailable READ bypassMasterAvailable NOTIFY bypassMasterOnChanged)
+    // Whether the mode's sites go directly on this device (RouteBudget.h: the route budget is not 0 - false only on Android
+    // 13+ at N = 0, where the apps layer alone works): the main screen's caption says so. The budget can change with the
+    // server's number (and a developer build's control file): notified with the value.
+    Q_PROPERTY(bool bypassSitesDirect READ bypassSitesDirect NOTIFY bypassMasterOnChanged)
     Q_PROPERTY(bool selfUpdateBusy READ selfUpdateBusy NOTIFY selfUpdateChanged)
     Q_PROPERTY(bool selfUpdateBackground READ selfUpdateBackground NOTIFY selfUpdateChanged)
     Q_PROPERTY(QString selfUpdateStage READ selfUpdateStage NOTIFY selfUpdateChanged)
@@ -910,9 +910,9 @@ public:
     // QML-стор флашится с батч-задержкой ~500 мс, туннель гасится быстрее → guardedStart читал СТАРОЕ
     // значение и поднимал туннель без сплита («переподключился, а сплит не активен»).
     Q_INVOKABLE void setBypassMasterOn(bool on);
-    // The switch's effective value (avpn::bypassMasterOn, BypassMaster.h): the person's choice, else the platform default.
+    // The switch's value (avpn::bypassMasterOn, BypassMaster.h): the stored key, on when absent.
     bool bypassMasterOn() const;
-    bool bypassMasterAvailable() const; // !avpn::bypassMasterUnavailableHere()
+    bool bypassSitesDirect() const; // avpn::bypassRouteBudgetHere() != 0
     // «Доступ к сайтам РФ», Android layer 1 (RuApps.h): the listed Russian apps excluded from the tunnel while the mode
     // is on, stored as upstream's per-app split; no app excluded while it is off. No-op off Android.
     void applyRuBypassApps(bool masterOn);
@@ -1567,10 +1567,9 @@ private:
     AbPhase                      m_abPhase = AbPhase::Idle;
     int                          m_abEpoch = 0;
     bool                         m_abOrigOn = true;    // исходный AvpnBypass/masterOn (вернём в конце)
-    // The switch's stored keys before the bench (BypassMaster.h; invalid = absent), put back exactly at its end: a bench
+    // The switch's stored key before the bench (BypassMaster.h; invalid = absent), put back exactly at its end: a bench
     // never leaves a choice behind (abRestoreBypassMaster).
-    QVariant                     m_abOrigChoice;
-    QVariant                     m_abOrigLegacy;
+    QVariant                     m_abOrigStored;
     bool                         m_abOrigLiAuto = true; // v5.5: исходный liAutoOn — off-фаза A/B гасит
                                                         // и его (иначе «bypass-off» ≠ ваниль: split_on
                                                         // остаётся из-за Li Auto default-ON)

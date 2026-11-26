@@ -275,3 +275,54 @@ object ScanAppNetwork {
         }
     }
 }
+
+// AVPN (phone 26.11, the data check with split routes): whether this app's default network is a VPN - the system's own
+// report that the VPN network is usable for the app's sockets (ConnectivityService moves the app's default request to it,
+// "NetReassign", after it has installed the network's routes: +0.2-0.3 s with 8 routes, +0.6-1.2 s with 500, +2.1-3.1 s
+// with 1000). A VPN app's own traffic goes into its VPN unless excluded, so in this app's process it is our tunnel. Read
+// by C++ (UplinkMonitor.cpp: the data check starts its first request when this turns true), told on every change.
+object VpnDefaultNetwork {
+    private val lock = Any()
+    private var started = false
+    private var vpn: Boolean? = null
+
+    // Registered by UplinkMonitor.cpp before watch(): the default network became / stopped being a VPN.
+    external fun onVpnDefault(vpn: Boolean)
+
+    // 1 = the default network is a VPN, 0 = it is not, -1 = not known yet, -2 = no source.
+    @JvmStatic
+    fun watch(context: Context): Int {
+        val cm = context.applicationContext.getSystemService<ConnectivityManager>() ?: return -2
+        synchronized(lock) {
+            if (!started) {
+                val ok = runCatching {
+                    cm.registerDefaultNetworkCallback(object : NetworkCallback() {
+                        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                            set(caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+                        }
+
+                        override fun onLost(network: Network) {
+                            set(false)
+                        }
+                    })
+                }.onFailure { Log.w(TAG, "VPN default network watch not started: ${it.javaClass.simpleName}") }.isSuccess
+                if (!ok) return -2
+                started = true
+            }
+            return when (vpn) {
+                true -> 1
+                false -> 0
+                null -> -1
+            }
+        }
+    }
+
+    private fun set(value: Boolean) {
+        synchronized(lock) {
+            if (vpn == value) return
+            vpn = value
+            // told under the lock: C++ gets the changes in the order they happened
+            runCatching { onVpnDefault(value) }
+        }
+    }
+}

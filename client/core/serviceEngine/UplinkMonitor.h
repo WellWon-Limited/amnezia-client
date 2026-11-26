@@ -210,10 +210,16 @@ public:
     // Android: the physical set became empty / non-empty (ScanAppNetwork.onPhysicalUplink, any thread); applied
     // on the monitor's thread in the order told.
     static void postPhysicalUp(bool up);
+    // Android (phone 26.11, the data check with split routes): the app's default network is a VPN - the system's report
+    // that our VPN network is usable for this app's sockets (NetworkState.kt VpnDefaultNetwork). 1 = yes, 0 = no,
+    // -1 = not known yet, -2 = no source (the data check then starts as before).
+    static void postVpnDefault(bool vpn);
 #endif
+    int vpnDefault() const { return m_vpnDefault; }
 
 signals:
     void changed(bool up);
+    void vpnDefaultChanged(bool vpn); // Android only: vpnDefault() moved between 0 and 1
     void pathChanged(); // AVPN Scanner: pathCounter() or the path facts moved
 
 private:
@@ -223,8 +229,10 @@ private:
     void setUp(bool up, int reason = -1);
 #if defined(Q_OS_ANDROID)
     bool startPhysical();
+    void startVpnDefault();
 #endif
 
+    int m_vpnDefault = -2; // no source off Android
     bool m_up = true;
     bool m_authoritative = false;
     bool m_physicalUp = false; // fallback only: fallbackPhysicalUp() of the last reading

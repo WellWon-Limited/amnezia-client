@@ -91,6 +91,16 @@ abstract class Protocol {
         }
     }
 
+    // AVPN (layer 1): installed and visible to this app (the manifest's <queries> lists every package of the list)
+    private fun isInstalled(packageName: String): Boolean =
+        try {
+            @Suppress("DEPRECATION")
+            context.packageManager.getApplicationInfo(packageName, 0)
+            true
+        } catch (e: PackageManager.NameNotFoundException) {
+            false
+        }
+
     protected open fun buildVpnInterface(config: ProtocolConfig, vpnBuilder: Builder) {
         vpnBuilder.setSession(VPN_SESSION_NAME)
 
@@ -136,9 +146,12 @@ abstract class Protocol {
         }
 
         // AVPN «Доступ к сайтам РФ», layer 1 (RuApps.h): the list is a compiled one, so a listed app that is not installed
-        // (or not visible: AndroidManifest <queries>) is skipped - one missing package must never fail the build.
+        // (or not visible: AndroidManifest <queries>) is skipped - one missing package must never fail the build. Asked of
+        // the package manager first: on the phone of 26.11 (Android 16) addDisallowedApplication accepted all 286 listed
+        // packages though 8 were installed (the system drops unknown names later), so its success counted nothing.
         var appsExcluded = 0
         for (app in config.excludedApplications) {
+            if (!isInstalled(app)) continue
             Log.d(TAG, "addDisallowedApplication")
             try {
                 vpnBuilder.addDisallowedApplication(app)

@@ -4,9 +4,21 @@ import android.net.ProxyInfo
 import android.os.Build
 import androidx.annotation.RequiresApi
 import java.net.InetAddress
+import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.net.InetNetwork
 import org.amnezia.vpn.util.net.IpRange
 import org.amnezia.vpn.util.net.IpRangeSet
+
+// AVPN «Доступ к сайтам РФ» (owner 26.11.2026): the hard ceiling of split routes the service hands Android 13+ in one
+// build - the platform's limit (above it the build's LinkProperties overran the system's binder: 10,841 routes = 0 of 3
+// connects; 1000 = the largest count measured clean for binder on the phone of 26.11, a placeholder the owner sets). The
+// engine's route budget is clamped to the same number: RouteBudget.h kAndroidSplitRouteCeiling (two constants, one value -
+// check_android_bypass_apps_wiring.sh A6). A config over it (a saved config of an older build, started without the app:
+// Always-on, the tile, the notification, a redelivered start) gets none of its split routes: that start runs as with the
+// mode off for sites - a subset is the safe direction; the selection itself is the engine's (RouteReduce.h), not repeated here.
+const val ANDROID_SPLIT_ROUTE_CEILING = 1000
+
+private const val CONFIG_TAG = "ProtocolConfig"
 
 open class ProtocolConfig protected constructor(
     val addresses: Set<InetNetwork>,
@@ -126,6 +138,12 @@ open class ProtocolConfig protected constructor(
                 prependRoutes {
                     addRoutes(includedAddresses)
                 }
+            } else if (excludedAddresses.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                excludedAddresses.size > ANDROID_SPLIT_ROUTE_CEILING) {
+                // AVPN: over the platform's ceiling - none applied (see ANDROID_SPLIT_ROUTE_CEILING)
+                Log.w(CONFIG_TAG, "bypass routes refused=${excludedAddresses.size} ceiling=$ANDROID_SPLIT_ROUTE_CEILING: " +
+                    "none applied")
+                excludedAddresses.clear()
             } else if (excludedAddresses.isNotEmpty()) {
                 prependRoutes {
                     addRoute(InetNetwork("0.0.0.0", 0))

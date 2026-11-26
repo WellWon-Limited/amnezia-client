@@ -35,6 +35,8 @@
 #include <QString>
 #include <QtGlobal>
 
+#include <algorithm>
+
 namespace avpn {
 
 enum class WhoamiVerdict { Works, NoData, BypassVpn, CheckLimited, Inconclusive };
@@ -127,12 +129,15 @@ struct WhoamiNext {
 //  - "past the VPN" (the answer came by the physical path - routes of a fresh tunnel not applied yet): one retry on
 //    the same spacing within the answered-request cap, then bypass is final;
 //  - any other inconclusive answer: the tiebreak; every other verdict is final.
+// sentBeforeUsable (Android, phone 26.11): the try left before the system made our VPN network this app's default (the
+// network's routes were still being installed - longer with more split routes). Its answer, whatever it was - nothing, a
+// cut transfer, or "past the VPN" - says nothing about the path: it is "not yet", like a try that got nothing.
 inline WhoamiNext whoamiNext(WhoamiVerdict v, const WhoamiObservation &o, int answeredSoFar, int retriesSoFar,
-                             qint64 whoamiBudgetLeftMs)
+                             qint64 whoamiBudgetLeftMs, bool sentBeforeUsable = false)
 {
     WhoamiNext n;
     const DataCheckRetry spacing = decideDataCheckRetry(true, retriesSoFar, whoamiBudgetLeftMs);
-    if (whoamiNotYet(o)) {
+    if (whoamiNotYet(o) || (sentBeforeUsable && v != WhoamiVerdict::Works)) {
         n.step = spacing.retry ? WhoamiStep::Retry : WhoamiStep::Tiebreak;
         n.delayMs = spacing.retry ? spacing.delayMs : 0;
         return n;
@@ -147,6 +152,15 @@ inline WhoamiNext whoamiNext(WhoamiVerdict v, const WhoamiObservation &o, int an
     if (v == WhoamiVerdict::Inconclusive)
         n.step = WhoamiStep::Tiebreak;
     return n;
+}
+
+// Android (phone 26.11): how long the data check may wait for the system to make our VPN network usable (the app's
+// default network is the VPN) before its first request. The check's own window then starts; the attempt owner's backstop
+// for the check is dataCheckMs + checkGraceMs from "tunnel up", so the wait stays inside the grace (minus a margin) and
+// the window always ends before the backstop. 0 = no wait.
+inline int whoamiUsableWaitMs(int checkGraceMs)
+{
+    return std::max(0, checkGraceMs - 300);
 }
 
 // The tiebreak is the existing generate_204 verification with the rest of the verify budget.

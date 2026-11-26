@@ -354,6 +354,22 @@ int main(int argc, char **argv)
             r.pass(boundMs * 2);
             CHECK(r.tun.downs == downs && !r.eng.attemptRunning());
         }
+        // h. Round 58 review, finding 4: a rebuild whose Connected was missed while unbound, then a NEW rebuild (the live
+        //    edge - the service reports Reconnecting only from CONNECTED): the new one gets its own full bound; a
+        //    snapshot's sight of the same wait never extends it.
+        {
+            Rig r(pool);
+            live(r);
+            const int downs = r.tun.downs;
+            CHECK(r.eng.noteLiveRebuild(/*newRebuild=*/true)); // the first rebuild's edge
+            r.pass(15000);                                     // its Connected came while the activity was unbound
+            CHECK(!r.eng.noteLiveRebuild());                   // a snapshot's sight: no extension
+            CHECK(r.eng.noteLiveRebuild(/*newRebuild=*/true)); // the second rebuild's edge: armed afresh
+            r.pass(boundMs - 1000); // 38.5 s after the first edge: the first bound would have fired 14 s ago
+            CHECK(r.tun.downs == downs && r.eng.liveRebuildWaiting());
+            r.pass(1500);
+            CHECK(r.tun.downs == downs + 1 && r.eng.attemptRunning());
+        }
         // g. A suspension inside the wait does not count, and the platform's answer gets the resume grace.
         {
             Rig r(pool);

@@ -329,7 +329,7 @@ PageType {
                 // карточка «АнтиVPN активирован» с демо-тумблером
                 Rectangle {
                     // The card says «Доступ к сайтам РФ включён»: shown only while the engine's effective value is on
-                    // (BypassMaster.h; always off on Android 13+ in this release, the mode is unavailable there). Hidden, the column
+                    // (BypassMaster.h: the stored switch, on when absent). Hidden, the column
                     // drops it with its margin: the next label keeps its own top margin, the spacers re-centre the rest.
                     visible: !root.hasEngine || TribeEngine.bypassMasterOn === true
                     Layout.fillWidth: true

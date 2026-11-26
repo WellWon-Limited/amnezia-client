@@ -12,7 +12,11 @@
 #   A4  the service excludes the installed ones and skips a missing one (NameNotFoundException), for every protocol
 #       that builds the interface (AmneziaWG, WireGuard, Xray, OpenVPN); one log line per build, counts only;
 #   A5  the seed cuts the RU part to the budget with an empty priority list, never the fixed groups, and a new budget
-#       is a new seed.
+#       is a new seed;
+#   A6  one ceiling of split routes for the engine's budget and the service's own guard (round 58 review, findings 1+6):
+#       the two constants are equal, the budget is clamped to it, and on Android 13+ the service applies none of a
+#       config's split routes above it (a saved config of an older build started without the app);
+#   A7  an app counts as excluded only if the package manager knows it (the phone counted 286 of 286 with 8 installed).
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -54,7 +58,7 @@ has "$ap" 'm_store->setVpnApps(AppsRouteMode::VpnAllExceptApps, v);' \
     || bad "A2: the list must be stored as upstream's all-apps-except-these split"
 split="$(body "$ENG" 'void AvpnEngineQml::applyRuBypassSplit()')"
 a=$(printf '%s\n' "$split" | grep -nF 'applyRuBypassApps(masterOn);' | head -1 | cut -d: -f1)
-r=$(printf '%s\n' "$split" | grep -nF 'if (!masterOn && !liAutoOn) {' | head -1 | cut -d: -f1)
+r=$(printf '%s\n' "$split" | grep -nF 'if (!sitesOn && !liAutoOn) {' | head -1 | cut -d: -f1)
 if [ -z "$a" ] || [ -z "$r" ] || [ "$a" -ge "$r" ]; then bad "A2: the app layer must be applied before the sites' early return"; fi
 
 # ---- A3 ----
@@ -91,6 +95,24 @@ has "$split" '(avpn::routeInsideAny(it.key(), fixedCover) ? fixedPart : ruPart) 
     || bad "A5: the fixed groups must never be cut"
 has "$split" '+ QStringLiteral("|budget=") + QString::number(routeBudget);' || bad "A5: a new budget must be a new seed"
 has "$split" 'if (routeBudget < 0) {' || bad "A5: an unlimited budget must leave the list as before"
+
+# ---- A6 ----
+PC="$CLIENT/android/protocolApi/src/main/kotlin/ProtocolConfig.kt"
+RB="$HERE/../RouteBudget.h"
+cpp=$(code "$RB" | sed -n 's/^inline constexpr int kAndroidSplitRouteCeiling = \([0-9][0-9]*\);.*/\1/p')
+kt=$(code "$PC" | sed -n 's/^const val ANDROID_SPLIT_ROUTE_CEILING = \([0-9][0-9]*\).*/\1/p')
+[ -n "$cpp" ] && [ -n "$kt" ] && [ "$cpp" = "$kt" ] || bad "A6: the engine's and the service's ceilings differ ($cpp vs $kt)"
+rbf="$(code "$RB" | tr -s ' \n' ' ')"
+has "$rbf" 'if (!std::isfinite(v) || v < 0) return fallback; if (v > kAndroidSplitRouteCeiling) return kAndroidSplitRouteCeiling;' \
+    || bad "A6: a negative or non-finite value must be the compiled one, a larger one the ceiling"
+pcf="$(code "$PC" | tr -s ' \n' ' ')"
+has "$pcf" '} else if (excludedAddresses.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && excludedAddresses.size > ANDROID_SPLIT_ROUTE_CEILING) {' \
+    && has "$pcf" 'excludedAddresses.clear()' \
+    || bad "A6: the service must apply none of a config's split routes above the ceiling on Android 13+"
+
+# ---- A7 ----
+has "$flat" 'if (!isInstalled(app)) continue' && has "$flat" 'context.packageManager.getApplicationInfo(packageName, 0)' \
+    || bad "A7: only an installed app may count as excluded"
 
 [ "$fail" -eq 0 ] && echo "android bypass apps wiring: OK"
 exit "$fail"

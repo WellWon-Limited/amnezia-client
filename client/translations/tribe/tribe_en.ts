@@ -1124,7 +1124,7 @@
         <translation>Access activated on this device</translation>
     </message>
     <message>
-        <location line="+331"/>
+        <location line="+328"/>
         <source>Доступ к сайтам РФ включён</source>
         <translation>Access to Russian sites is on</translation>
     </message>
@@ -1134,12 +1134,7 @@
         <translation>Tired of turning the VPN off?</translation>
     </message>
     <message>
-        <location line="+15"/>
-        <source>На Android 13 и новее пока недоступно. Вернём в одном из следующих обновлений.</source>
-        <translation>Not available on Android 13 and later yet. It will return in an upcoming update.</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+17"/>
         <source>Сайты РФ сейчас не открываются</source>
         <translation>Russian sites are not opening right now</translation>
     </message>
@@ -1154,7 +1149,7 @@
         <translation>Ozon, WB, Gosuslugi (gov services), Banks, Kinopoisk</translation>
     </message>
     <message>
-        <location line="+205"/>
+        <location line="+206"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>No network — we will connect when it is back</translation>
     </message>
@@ -1206,7 +1201,7 @@
         <translation>Connected, but traffic is not getting through</translation>
     </message>
     <message>
-        <location line="-715"/>
+        <location line="-714"/>
         <source>Нет связи</source>
         <translation>No connection</translation>
     </message>
@@ -1216,7 +1211,12 @@
         <translation>Loading…</translation>
     </message>
     <message>
-        <location line="+711"/>
+        <location line="+491"/>
+        <source>На Android 13 и новее напрямую работают российские приложения. Сайты РФ в браузере идут через VPN.</source>
+        <translation>On Android 13 and later, Russian apps connect directly. Russian sites in a browser go through the VPN.</translation>
+    </message>
+    <message>
+        <location line="+219"/>
         <source>Ищем рабочий сервер — пробуем %1 из %2</source>
         <translation>Looking for a working server — trying %1 of %2</translation>
     </message>
@@ -3256,7 +3256,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4888"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4900"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3276,7 +3276,7 @@ You can attach a photo or video.</translation>
         <translation>Bypass auto-A/B: connect Tribe VPN first</translation>
     </message>
     <message>
-        <location line="+53"/>
+        <location line="+48"/>
         <source>замер %1/2 · байпас %2</source>
         <translation>measurement %1/2 · bypass %2</translation>
     </message>
@@ -3356,7 +3356,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-3335"/>
+        <location line="-3330"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3372,12 +3372,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+163"/>
-        <location line="+4837"/>
+        <location line="+4832"/>
         <source>Готово, перезапускаем приложение…</source>
         <translation>Done, restarting the app…</translation>
     </message>
     <message>
-        <location line="-4817"/>
+        <location line="-4812"/>
         <source>Обновление внутри приложения тут недоступно</source>
         <translation>In-app updates are not available here</translation>
     </message>
@@ -3453,12 +3453,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+4271"/>
+        <location line="+4266"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>There is no server in the selected mode — switch to “Auto”</translation>
     </message>
     <message>
-        <location line="-4268"/>
+        <location line="-4263"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>No network — connect when it is back</translation>
     </message>
@@ -3488,12 +3488,7 @@ You can attach a photo or video.</translation>
         <translation>Recording, sent at %1</translation>
     </message>
     <message>
-        <location line="+705"/>
-        <source>Авто-A/B байпаса: на Android 13 и новее режим пока недоступен</source>
-        <translation>Bypass auto A/B: the mode is not available on Android 13 and later yet</translation>
-    </message>
-    <message>
-        <location line="+480"/>
+        <location line="+1180"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>This report has already been delivered</translation>
     </message>
@@ -3620,8 +3615,8 @@ You can attach a photo or video.</translation>
         <translation>This server is unavailable right now — connecting another one</translation>
     </message>
     <message>
-        <location line="-4292"/>
-        <location line="+4304"/>
+        <location line="-4287"/>
+        <location line="+4299"/>
         <source>Нет сети — подключимся, когда она появится</source>
         <translation>No network — we will connect when it is back</translation>
     </message>
@@ -3717,7 +3712,7 @@ You can attach a photo or video.</translation>
         <translation>Could not activate the key</translation>
     </message>
     <message>
-        <location line="+461"/>
+        <location line="+547"/>
         <source>Не указано устройство</source>
         <translation>No device specified</translation>
     </message>

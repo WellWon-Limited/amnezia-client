@@ -257,11 +257,11 @@ bool ServiceEngine::leaveUpstreamNode(const QString &code, const QString &detail
     return true;
 }
 
-bool ServiceEngine::noteLiveRebuild()
+bool ServiceEngine::noteLiveRebuild(bool newRebuild)
 {
     if (m_state != EngineState::Connected || m_owner.phase() != path::AttemptPhase::Connected || m_owner.running())
         return false;
-    if (m_rebuildDeadline >= 0)
+    if (m_rebuildDeadline >= 0 && !newRebuild)
         return false; // the wait runs already: a later sight of the same rebuild does not extend it
     const path::AttemptTimings t = attemptTimings();
     m_owner.setTimings(t);

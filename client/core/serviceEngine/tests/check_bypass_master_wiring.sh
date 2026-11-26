@@ -1,21 +1,18 @@
 #!/bin/bash
-# AVPN «Доступ к сайтам РФ» (owner 26.11.2026, AND-67): the switch's effective value has ONE decision (BypassMaster.h:
-# off where the platform's route budget is 0 - RouteBudget.h - else the person's choice, a legacy false, else the
-# platform default, off on Android 13+). The rule is pure and tested by behaviour (build_bypass_master.sh,
-# build_route_budget.sh). What is checked here is that nothing goes around it - each line fails if a reader or a store
-# comes back:
-#   B1  no code outside BypassMaster.h names either stored key (AvpnBypass/masterOn, AvpnBypass/masterOnChoice);
-#   B2  the choice key is written only by the switch (setBypassMasterOn), the engine start's one-time move of a legacy
-#       false, and the A/B bench's exact restore; the engine start runs that move;
+# AVPN «Доступ к сайтам РФ» (owner 26.11.2026, AND-67): the switch's value has ONE reading (BypassMaster.h: the stored
+# AvpnBypass/masterOn, on when absent, on every platform); where the mode's sites go directly is the route budget's
+# (RouteBudget.h). The rules are pure and tested by behaviour (build_bypass_master.sh, build_route_budget.sh). What is
+# checked here is that nothing goes around them - each line fails if a reader, a store or a second state comes back:
+#   B1  no code outside BypassMaster.h names the stored key, and the explicit-choice key is gone everywhere;
+#   B2  the key is written only by the switch (setBypassMasterOn) and the A/B bench's exact restore;
 #   B3  every C++ reader asks avpn::bypassMasterOn (the engine and its tunnel control);
 #   B4  QML no longer stores the switch: no QtCore Settings of the AvpnBypass category anywhere, and the main screen reads
 #       TribeEngine.bypassMasterOn and writes only through TribeEngine.setBypassMasterOn; the engine notifies it;
-#   B5  unavailable is the route budget's zero case, read before any stored key; the Android 13+ boundary is one
-#       predicate (androidRoutesLimited) for the budget and the default; the two constants the owner flips exist once;
-#   B6  the onboarding card that states the switch is on is shown only while the effective value is on;
-#   B7  the UI asks the same predicate: the engine exposes bypassMasterAvailable from it, the main screen's switch is
-#       disabled there and its secondary line carries the caption (RU source, EN/ES translated);
-#   B8  where it is unavailable the switch's write and the A/B bench are refused before anything is stored.
+#   B5  no "unavailable" state and no Android-only default are left (the mode is always available; off-by-default gone);
+#   B6  the onboarding card that states the switch is on is shown only while the value is on;
+#   B7  the main screen's switch is an ordinary one, and its secondary line says what the mode does where the sites do
+#       not go directly (TribeEngine.bypassSitesDirect = the route budget is not 0; RU source, EN/ES translated);
+#   B8  the switch's write and the A/B bench are never refused; the seed gives the sites only with a budget.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -39,18 +36,18 @@ hits=$(cd "$CLIENT" && grep -rlE '"AvpnBypass/masterOn(Choice)?"' --include='*.c
 for f in $hits; do
     code "$CLIENT/$f" | grep -qE '"AvpnBypass/masterOn(Choice)?"' && bad "B1: $f names a stored key of the switch"
 done
+grep -rlE 'kBypassMasterChoiceKey|kBypassMasterLegacyKey|bypassMasterMigratesLegacy' --include='*.cpp' --include='*.h' \
+    "$CLIENT/core" "$CLIENT/platforms" "$CLIENT/ui" 2>/dev/null | grep -v '/tests/' | grep -q . \
+    && bad "B1: the explicit-choice key or its migration is back"
 
 # ---- B2 ----
 eng="$(code "$ENG")"
-n=$(count "$eng" 'setValue(avpn::kBypassMasterChoiceKey')
-[ "$n" -eq 2 ] || bad "B2: the choice key is written in $n places, expected 2 (the switch and the start's move)"
-has "$(body "$ENG" 'void AvpnEngineQml::setBypassMasterOn(bool on)')" 'setValue(avpn::kBypassMasterChoiceKey, on);' \
-    || bad "B2: the switch must write the choice"
-ctor="$(body "$ENG" 'AvpnEngineQml::AvpnEngineQml(')"
-has "$ctor" 'avpn::bypassMasterMigratesLegacy(' && has "$ctor" 's.setValue(avpn::kBypassMasterChoiceKey, false);' \
-    || bad "B2: the engine start must move a legacy false into the choice"
+n=$(count "$eng" 'setValue(avpn::kBypassMasterKey')
+[ "$n" -eq 1 ] || bad "B2: the key is written in $n places, expected 1 (the switch)"
+has "$(body "$ENG" 'void AvpnEngineQml::setBypassMasterOn(bool on)')" 's.setValue(avpn::kBypassMasterKey, on);' \
+    || bad "B2: the switch must write the key"
 rest="$(body "$ENG" 'void AvpnEngineQml::abRestoreBypassMaster()')"
-has "$rest" 'put(avpn::kBypassMasterChoiceKey, m_abOrigChoice);' || bad "B2: the bench must put the choice back exactly"
+has "$rest" 'put(avpn::kBypassMasterKey, m_abOrigStored);' || bad "B2: the bench must put the key back exactly"
 [ "$(count "$eng" 'abRestoreBypassMaster();')" -eq 2 ] || bad "B2: both ends of the bench must restore through abRestoreBypassMaster"
 
 # ---- B3 ----
@@ -71,63 +68,51 @@ has "$(code "$HDR")" 'Q_PROPERTY(bool bypassMasterOn READ bypassMasterOn NOTIFY 
 has "$(body "$ENG" 'void AvpnEngineQml::setBypassMasterOn(bool on)')" 'emit bypassMasterOnChanged();' \
     || bad "B4: the switch's write must notify QML"
 
-# ---- B5 ---- unavailable = budget 0, before any stored key; one boundary; the owner's two constants
+# ---- B5 ---- one value, no second state
 bm="$(code "$HERE/../BypassMaster.h")"
 bmf="$(printf '%s\n' "$bm" | tr -s ' \n' ' ')"
-rb="$(code "$HERE/../RouteBudget.h")"
-rbf="$(printf '%s\n' "$rb" | tr -s ' \n' ' ')"
-[ "$(count "$bm" 'inline constexpr bool kBypassMasterOffByDefaultOnAndroid13 = ')" -eq 1 ] \
-    || bad "B5: the Android 13+ default must be one constant"
-[ "$(count "$rb" 'inline constexpr int kAndroidBypassRouteBudget = ')" -eq 1 ] || bad "B5: the compiled N must be one constant"
-has "$rbf" 'inline bool androidRoutesLimited(bool android, int sdkVersion) { return android && sdkVersion >= 33; }' \
-    || bad "B5: the Android 13+ boundary must be one predicate"
-has "$bmf" 'return kBypassMasterOffByDefaultOnAndroid13 && androidRoutesLimited(android, sdkVersion);' \
-    || bad "B5: the default must use the same boundary"
-has "$rbf" 'if (!androidRoutesLimited(android, sdkVersion)) return kRouteBudgetUnlimited;' \
-    || bad "B5: the budget must use the same boundary"
-has "$bmf" 'inline bool bypassMasterUnavailable(int routeBudget) { return routeBudget == 0; }' \
-    || bad "B5: unavailable must be the budget's zero case"
-has "$bmf" 'bool unavailable, bool defaultOff) { if (unavailable) return false; if (choice.has_value()) return *choice;' \
-    || bad "B5: where the budget is 0 the value must be off whatever is stored"
-has "$bmf" 'inline bool bypassMasterUnavailableHere() { return bypassMasterUnavailable(bypassRouteBudgetHere()); }' \
-    || bad "B5: this device's availability must be its route budget"
-has "$bmf" 'storedBool(s, kBypassMasterLegacyKey), bypassMasterUnavailableHere(), bypassMasterDefaultOffHere()); }' \
-    || bad "B5: the store reading must pass this device's budget and default"
-printf '%s\n' "$bm" | grep -qE 'UnavailableOnAndroid13' && bad "B5: a second (unavailable) boundary is back"
+has "$bmf" 'inline bool bypassMasterValue(std::optional<bool> stored) { return stored.value_or(true); }' \
+    || bad "B5: the value must be the stored key, on when absent"
+has "$bmf" 'inline bool bypassMasterOn(const QSettings &s) { return bypassMasterValue(storedBool(s, kBypassMasterKey)); }' \
+    || bad "B5: the store reading must be that value"
+printf '%s\n' "$bm" | grep -qE 'Unavailable|DefaultOff|OffByDefault|sdkVersion|Q_OS_ANDROID' \
+    && bad "B5: an Android-only state or default is back in the switch's value"
+grep -rqE 'bypassMasterUnavailable|bypassMasterAvailable|bypassMasterDefaultOff' --include='*.cpp' --include='*.h' \
+    --include='*.qml' "$CLIENT/core" "$CLIENT/ui" 2>/dev/null && bad "B5: the unavailable state is referenced again"
 
 # ---- B6 ---- the onboarding card that says «Доступ к сайтам РФ включён» shows only while the effective value is on
 onb="$(code "$CLIENT/ui/qml/Tribe/Pages/PageOnboardingTribe.qml")"
 printf '%s\n' "$onb" | grep -A1 -F '                Rectangle {' | grep -qF 'visible: !root.hasEngine || TribeEngine.bypassMasterOn === true' \
     || bad "B6: the onboarding's «включён» card must follow TribeEngine.bypassMasterOn"
 
-# ---- B7 ---- the UI: one predicate, the switch disabled with its caption
-has "$(code "$HDR")" 'Q_PROPERTY(bool bypassMasterAvailable READ bypassMasterAvailable NOTIFY bypassMasterOnChanged)' \
-    || bad "B7: the engine must expose the availability"
-has "$(body "$ENG" 'bool AvpnEngineQml::bypassMasterAvailable() const')" 'return !avpn::bypassMasterUnavailableHere();' \
-    || bad "B7: the availability must be the value's own predicate"
-has "$page" 'readonly property bool ruAccessAvailable: hasEngine ? TribeEngine.bypassMasterAvailable === true : true' \
-    || bad "B7: the main screen must read the engine's availability"
+# ---- B7 ---- an ordinary switch; the caption where the sites do not go directly
+has "$(code "$HDR")" 'Q_PROPERTY(bool bypassSitesDirect READ bypassSitesDirect NOTIFY bypassMasterOnChanged)' \
+    || bad "B7: the engine must expose whether the sites go directly"
+has "$(body "$ENG" 'bool AvpnEngineQml::bypassSitesDirect() const')" 'return avpn::bypassRouteBudgetHere() != 0;' \
+    || bad "B7: the sites go directly unless the route budget is 0"
+has "$page" 'readonly property bool ruSitesDirect: hasEngine ? TribeEngine.bypassSitesDirect === true : true' \
+    || bad "B7: the main screen must read it from the engine"
 tog="$(printf '%s\n' "$page" | awk '/id: avCardToggle/ { on = 1 } on { print } on && /onToggled/ { exit }')"
-has "$tog" 'enabled: root.ruAccessAvailable' || bad "B7: the switch must be disabled where the mode is unavailable"
-cap='На Android 13 и новее пока недоступно. Вернём в одном из следующих обновлений.'
-has "$page" "text: !root.ruAccessAvailable" && has "$page" "? qsTr(\"$cap\")" \
-    || bad "B7: the card's secondary line must carry the caption where the mode is unavailable"
+printf '%s\n' "$tog" | grep -q 'enabled:' && bad "B7: the switch must be an ordinary one (no disabled state)"
+cap='На Android 13 и новее напрямую работают российские приложения. Сайты РФ в браузере идут через VPN.'
+has "$page" "text: !root.ruSitesDirect" && has "$page" "? qsTr(\"$cap\")" \
+    || bad "B7: the card's secondary line must say what the mode does where the sites do not go directly"
 TR="$CLIENT/translations/tribe"
 for l in en es; do
     grep -A1 -F "<source>$cap</source>" "$TR/tribe_$l.ts" | grep -q '<translation>[^<]' \
         || bad "B7: the caption has no finished $l translation"
 done
+grep -qF 'пока недоступно' "$PAGE" && bad "B7: the «unavailable» caption is back"
 
-# ---- B8 ---- unavailable: nothing is stored by the switch or the bench
+# ---- B8 ---- never refused; the seed gives the sites only with a budget
 sw="$(body "$ENG" 'void AvpnEngineQml::setBypassMasterOn(bool on)')"
-g=$(printf '%s\n' "$sw" | grep -nF 'if (avpn::bypassMasterUnavailableHere()) {' | head -1 | cut -d: -f1)
-w=$(printf '%s\n' "$sw" | grep -nF 'setValue(avpn::kBypassMasterChoiceKey, on);' | head -1 | cut -d: -f1)
-if [ -z "$g" ] || [ -z "$w" ] || [ "$g" -ge "$w" ]; then bad "B8: the switch must refuse before it stores a choice"; fi
-printf '%s\n' "$sw" | sed -n "${g:-1},${w:-1}p" | grep -qF 'return;' || bad "B8: the refusal must return before the write"
+printf '%s\n' "$sw" | grep -qE 'return;' && bad "B8: the switch's write must not be refused"
 ab="$(body "$ENG" 'void AvpnEngineQml::startBypassAb()')"
-ga=$(printf '%s\n' "$ab" | grep -nF 'if (avpn::bypassMasterUnavailableHere()) {' | head -1 | cut -d: -f1)
-ea=$(printf '%s\n' "$ab" | grep -nF '++m_abEpoch;' | head -1 | cut -d: -f1)
-if [ -z "$ga" ] || [ -z "$ea" ] || [ "$ga" -ge "$ea" ]; then bad "B8: the A/B bench must refuse where the mode is unavailable"; fi
+printf '%s\n' "$ab" | grep -qF 'Android 13' && bad "B8: the A/B bench must not be refused on Android 13+"
+seed="$(body "$ENG" 'void AvpnEngineQml::applyRuBypassSplit()')"
+has "$seed" 'const bool sitesOn = masterOn && routeBudget != 0;' && has "$seed" 'if (sitesOn) {' \
+    && has "$seed" 'applyRuBypassApps(masterOn);' \
+    || bad "B8: the apps follow the switch, the sites the switch and a non-zero budget"
 
 [ "$fail" -eq 0 ] && echo "bypass master wiring: OK"
 exit "$fail"

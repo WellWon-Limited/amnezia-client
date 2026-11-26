@@ -599,17 +599,6 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // оплаченных дней). Один блокирующий Keychain-раунд ~мс со сторожем; не-Apple — no-op.
     IdentityAnchor::syncAtStartup();
 
-    // AVPN «Доступ к сайтам РФ» (owner 26.11, BypassMaster.h): a legacy false is the person's choice - moved once into the
-    // choice key, before any reader (QML loads after this engine exists). A legacy true says nothing (Qt's store wrote it).
-    {
-        QSettings s;
-        if (avpn::bypassMasterMigratesLegacy(avpn::storedBool(s, avpn::kBypassMasterChoiceKey),
-                                             avpn::storedBool(s, avpn::kBypassMasterLegacyKey))) {
-            s.setValue(avpn::kBypassMasterChoiceKey, false);
-            s.sync();
-        }
-    }
-
     // AVPN Scanner (lane L6b): the engine interface of the coordinator and the switch-gated probe host exist
     // from the start (the coordinator is attached by coreController); the switches are read again on every
     // /v1/config apply (configApplied below, scanApplySwitches).
@@ -1719,14 +1708,16 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     m_latch.awaitingStopConfirm, m_wantConnected);
                 // F2 entry c: a service that holds an unfinished tunnel no attempt of ours owns (a rebuild, or a start
                 // whose UI process is gone) - decided by the same person's-will rule
+                // the service holds an unfinished tunnel: a rebuild (RECONNECTING) or a start (CONNECTING)
+                const bool serviceUnfinished = st == AndroidController::ConnectionState::CONNECTING
+                                               || st == AndroidController::ConnectionState::RECONNECTING;
                 const AndroidStatusAction rebuild = androidRebuildStatusDecision(
-                    st == AndroidController::ConnectionState::CONNECTING
-                        || st == AndroidController::ConnectionState::RECONNECTING,
-                    thinkConnected, m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);
-                // F2: a snapshot after a return sees what the live edge would have (the activity was unbound): a rebuild
-                // of the session the engine holds starts its bound from now (no-op when the edge already did), a
-                // Connected service ends it. Nothing else changes for these states.
-                if (st == AndroidController::ConnectionState::RECONNECTING && m_engine.noteLiveRebuild())
+                    serviceUnfinished, thinkConnected, m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);
+                // F2: a snapshot after a return sees what the live edge would have (the activity was unbound): the service
+                // in an unfinished state for a session the engine holds - a rebuild, or (round 58 review, finding 7) a
+                // start Android redelivered after the service process was restarted - starts its bound from now (no-op
+                // when the edge already did), a Connected service ends it. Nothing else changes for these states.
+                if (serviceUnfinished && m_engine.noteLiveRebuild())
                     reliabilityEvent(QStringLiteral("rebuild_wait node=%1 via=status").arg(m_engine.currentNodeId()));
                 else if (st == AndroidController::ConnectionState::CONNECTED)
                     m_engine.noteLiveSessionUp();
@@ -1736,6 +1727,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     reliabilityEvent(QStringLiteral("adopt_refused why=status reason=person_stopped"));
                     AndroidController::instance()->stop();
                 } else if (action == AndroidStatusAction::Adopt) {
+                    // round 58 review, finding 3: a later stop must reach the service - the connection object gets the
+                    // protocol back if an earlier stop of this process dropped it (queued before any stop of ours)
+                    QMetaObject::invokeMethod(m_conn, "ensureAndroidProtocol", Qt::QueuedConnection);
                     m_wantConnected = true;
                     syncIntent(); // I7
                     m_engine.setLocalBuildReported(AndroidController::reportsTunnelBuild()); // android2 V2: its failover legs
@@ -1773,6 +1767,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                                               m_serviceSessionMeta.value(QStringLiteral("node_id")).toString().isEmpty()
                                                   ? QStringLiteral("-")
                                                   : m_serviceSessionMeta.value(QStringLiteral("node_id")).toString()));
+                    QMetaObject::invokeMethod(m_conn, "ensureAndroidProtocol", Qt::QueuedConnection); // finding 3
                     m_wantConnected = true;
                     syncIntent(); // I7
                     onConnectionStateChanged(Vpn::Reconnecting);
@@ -5187,16 +5182,11 @@ void AvpnEngineQml::startBypassAb()
         emit error(tr("Авто-A/B байпаса: сначала подключи Tribe VPN"));
         return;
     }
-    if (avpn::bypassMasterUnavailableHere()) { // both halves would measure the same tunnel (BypassMaster.h)
-        emit error(tr("Авто-A/B байпаса: на Android 13 и новее режим пока недоступен"));
-        return;
-    }
     ++m_abEpoch;
     {
         const QSettings s;
         m_abOrigOn = avpn::bypassMasterOn(s);
-        m_abOrigChoice = s.contains(avpn::kBypassMasterChoiceKey) ? s.value(avpn::kBypassMasterChoiceKey) : QVariant();
-        m_abOrigLegacy = s.contains(avpn::kBypassMasterLegacyKey) ? s.value(avpn::kBypassMasterLegacyKey) : QVariant();
+        m_abOrigStored = s.contains(avpn::kBypassMasterKey) ? s.value(avpn::kBypassMasterKey) : QVariant();
     }
     m_abOrigLiAuto = QSettings().value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
     m_abFirst = QJsonObject();
@@ -6392,7 +6382,7 @@ void AvpnEngineQml::applyNativeState(Vpn::ConnectionState s, bool confirmsOwnSto
         // upstream has it; the engine gives it a leg's bound (ServiceEngine::noteLiveRebuild): in time it is invisible,
         // past it the live session is lost as a failed leg and the owner's attempt walks on. iOS keeps its intermediate
         // Reconnecting (below).
-        if (m_engine.noteLiveRebuild())
+        if (m_engine.noteLiveRebuild(/*newRebuild=*/true)) // the edge is always a new rebuild (from CONNECTED)
             reliabilityEvent(QStringLiteral("rebuild_wait node=%1 via=edge").arg(m_engine.currentNodeId()));
 #endif
         // Промежуточное iOS-Reconnecting: НЕ инициируем свитч/реконнект — дождёмся терминала.
@@ -9399,6 +9389,38 @@ void AvpnEngineQml::startWhoamiVerification()
     m_pathCheck = QStringLiteral("checking");
     qInfo() << "[avpn whoami] tunnel up on" << m_engine.currentNodeId() << m_engine.currentNodeProto()
             << "— checking the data path";
+#if defined(Q_OS_ANDROID)
+    // Phone 26.11 (the data check with split routes): the service says CONNECTED on the handshake, ~0.1 s after the
+    // interface exists, but Android makes the VPN network usable for this app's sockets only after it has installed the
+    // network's routes - +0.2-0.3 s with 8 routes, +0.6-1.2 s with 500, +2.1-3.1 s with 1000 (ConnectivityService
+    // "NetReassign" of the app's default request). A request sent before that is cut or gets nothing, and a cut used to
+    // be final "no data" within ~1.4 s - the node marked dead. The first request now waits for the system's own report
+    // (UplinkMonitor::vpnDefault: the app's default network is the VPN), bounded inside the attempt owner's grace
+    // (whoamiUsableWaitMs), and the check's window starts then; a try sent before it anyway is "not yet" (whoamiNext).
+    {
+        auto *uplink = avpn::UplinkMonitor::instance();
+        const int waitMs = avpn::whoamiUsableWaitMs(m_engine.checkGraceMs());
+        if ((uplink->vpnDefault() == 0 || uplink->vpnDefault() == -1) && waitMs > 0) {
+            auto *hold = new QObject(this); // one wait: the system's report or the bound, whichever comes first
+            const auto go = [this, epoch, hold](const char *why) {
+                if (hold->property("done").toBool())
+                    return;
+                hold->setProperty("done", true);
+                hold->deleteLater();
+                reliabilityEvent(QStringLiteral("check_waited_usable why=%1 ms=%2")
+                                     .arg(QLatin1String(why)).arg(m_verifyClock.elapsed()));
+                m_verifyClock.start(); // the check's window starts when the network is usable (or at the bound)
+                whoamiAttempt(epoch);
+            };
+            connect(uplink, &avpn::UplinkMonitor::vpnDefaultChanged, hold, [go](bool vpn) {
+                if (vpn)
+                    go("usable");
+            });
+            QTimer::singleShot(waitMs, hold, [go]() { go("bound"); });
+            return;
+        }
+    }
+#endif
     // Floor 19.11 (DataCheckRetry.h): the request goes as soon as the tunnel is up - no 800 ms wait by the clock.
     // Next event-loop turn, not inline: after this transition's queued handlers (upstream's connection-cache clear
     // on Connected, the deferred abort snapshot) so the fresh request is never stranded or cancelled by them. A try
@@ -9458,6 +9480,11 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
     req.setRawHeader(QByteArrayLiteral("Accept-Encoding"), QByteArrayLiteral("identity"));
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *r = m_nam->get(req);
+    // Android (phone 26.11): sent before the system made our VPN network this app's default - its answer is "not yet"
+    bool sentBeforeUsable = false;
+#if defined(Q_OS_ANDROID)
+    sentBeforeUsable = avpn::UplinkMonitor::instance()->vpnDefault() == 0 || avpn::UplinkMonitor::instance()->vpnDefault() == -1;
+#endif
     // S3 (device round 5): judged by progress, not by a hard per-request cut. The first byte must come within the
     // whoami share (`left`); once bytes flow, the request lives while they keep coming (no gap longer than
     // kWhoamiStallMs), up to the whole check budget (the backstop below). A path that moves its payload steadily but
@@ -9499,7 +9526,8 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
     }
     const qint64 armedWall = QDateTime::currentMSecsSinceEpoch();
     const bool otherEdge = base != m_baseUrl;
-    connect(r, &QNetworkReply::finished, this, [this, r, epoch, nonce, rx, drain, t0, armedWall, left, otherEdge]() {
+    connect(r, &QNetworkReply::finished, this,
+            [this, r, epoch, nonce, rx, drain, t0, armedWall, left, otherEdge, sentBeforeUsable]() {
         r->deleteLater();
         drain();
         if (epoch != m_verifyEpoch || !m_engine.isVerifying())
@@ -9531,7 +9559,7 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
                 .arg(m_verifyClock.elapsed() - t0)
                 .arg(m_verifyAttempts)
                 .arg(otherEdge ? QStringLiteral("other") : QStringLiteral("active"))
-            + QStringLiteral(" sent_ms=%1").arg(t0);
+            + QStringLiteral(" sent_ms=%1 usable=%2").arg(t0).arg(sentBeforeUsable ? 0 : 1);
         // Review N2: cut before a decisive answer and the timer fired late (monotonic or wall clock -
         // the latter also covers device sleep) = the app was suspended mid-request: no evidence.
         // Not counted as a sent request; Connected without the mark; memory and streak untouched.
@@ -9562,7 +9590,8 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
         if (!avpn::whoamiNotYet(o))
             ++m_whoamiAnswered;
         const qint64 leftNow = avpn::whoamiBudgetMs(m_engine.dataCheckMs()) - m_verifyClock.elapsed();
-        const avpn::WhoamiNext next = avpn::whoamiNext(v, o, m_whoamiAnswered, m_verifyAttempts - 1, leftNow);
+        const avpn::WhoamiNext next =
+            avpn::whoamiNext(v, o, m_whoamiAnswered, m_verifyAttempts - 1, leftNow, sentBeforeUsable);
         if (next.step == avpn::WhoamiStep::Retry) {
             // The shared data-check rule (DataCheckRetry.h): a try that got nothing (no route / DNS yet / refused
             // before any byte), or "past the VPN" on the first answer (routes of a fresh tunnel not applied yet) -
@@ -10063,9 +10092,12 @@ void AvpnEngineQml::applyRuBypassSplit()
     }
 #endif
     QSettings s;
-    const bool masterOn = avpn::bypassMasterOn(s); // the effective value (BypassMaster.h)
+    const bool masterOn = avpn::bypassMasterOn(s); // the switch (BypassMaster.h)
     const int routeBudget = avpn::bypassRouteBudgetHere(); // RouteBudget.h: unlimited off Android and on Android <= 12
     applyRuBypassApps(masterOn); // Android layer 1 (apps) - before the sites' early returns: the mode off clears it too
+    // the mode's sites (the RU list and its foreign endpoints): with the switch, unless the budget is 0 (Android 13+ at
+    // N = 0 - no routes, the apps layer alone); Li Auto keeps its own switch as before
+    const bool sitesOn = masterOn && routeBudget != 0;
     // AVPN (китайские сервисы, 2026-07-03): второй независимый тумблер «Li Auto» (default ВКЛ). Оба тумблера
     // сеют в один и тот же split-набор (RouteMode::VpnAllExceptSites) — оси не конфликтуют, список объединяется.
     const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
@@ -10078,7 +10110,7 @@ void AvpnEngineQml::applyRuBypassSplit()
     // иначе прежний seed продолжил бы исключать трафик). Вкл/выкл сплита под РФ-ноду решается ПО
     // ФАКТИЧЕСКОЙ ноде в VpnConnectionTunnelControl::up() (покрывает failover/авто-RU-fallback/мёртвый
     // RU-pin — прежний гейт по pinnedNodeIsRu() тут расходился с реальностью, когда нода ≠ pin).
-    if (!masterOn && !liAutoOn) {
+    if (!sitesOn && !liAutoOn) {
         avpn::RouteBudgetInputs::setLastSeed(0, routeBudget);
         m_store->setSitesSplitTunnelingEnabled(false);
         // Страховка (ревью A5): пока сплит выключен, стор могли мутировать в обход этой функции —
@@ -10098,7 +10130,7 @@ void AvpnEngineQml::applyRuBypassSplit()
     // Оба-OFF выше чистят стамп (страховка от мутаций стора при выключенном сплите) — ре-ВКЛ
     // всегда пересеет. Carve-IP — из apiCarveIps(), ЕДИНОГО источника с rebuildApiCarveOut.
     const QString seedStamp =
-            avpn::bypassSeedStamp(masterOn, liAutoOn, useRemote, bl.version, apiCarveIps())
+            avpn::bypassSeedStamp(sitesOn, liAutoOn, useRemote, bl.version, apiCarveIps())
             + QStringLiteral("|budget=") + QString::number(routeBudget); // a new budget = a new seed
     if (seedStamp == m_lastBypassSeedStamp) {
         qInfo("[AVPN bypass] seed unchanged — skip (v=%d)", useRemote ? bl.version : -1);
@@ -10114,7 +10146,7 @@ void AvpnEngineQml::applyRuBypassSplit()
     // источник для лога (см. qInfo в конце функции).
     bool usedRemoteRu = false, usedRemoteExtra = false, usedRemoteLiAuto = false;
     QStringList fixedGroups; // the foreign groups below (Gosuslugi endpoints, Li Auto): never cut by the route budget
-    if (masterOn) {
+    if (sitesOn) {
         // AVPN Task 10: рунет CIDR — серверный (bl.ruCidrs) при валидном снапшоте, иначе вкомпиленный.
         usedRemoteRu = useRemote;
         const QStringList ru = useRemote ? bl.ruCidrs : avpn::ruPrefixes();
@@ -10221,7 +10253,7 @@ void AvpnEngineQml::applyRuBypassSplit()
     // как пустая группа на сервере падает на вкомпиленный дефолт, а не на пустой список (см. выше).
     // ru/extra/liauto=1 → взят серверный снапшот для этой группы, =0 → вкомпиленный фолбэк.
     qInfo("[AVPN bypass] seed source cidrs=%d (master=%d liauto=%d) remote{ru=%d extra=%d liauto=%d} v=%d",
-          int(sites.size()), masterOn ? 1 : 0, liAutoOn ? 1 : 0,
+          int(sites.size()), sitesOn ? 1 : 0, liAutoOn ? 1 : 0,
           usedRemoteRu ? 1 : 0, usedRemoteExtra ? 1 : 0, usedRemoteLiAuto ? 1 : 0,
           useRemote ? bl.version : -1);
 
@@ -10241,18 +10273,8 @@ void AvpnEngineQml::applyRuBypassSplit()
 // движок не должен зависеть от дебаунса UI-стора.
 void AvpnEngineQml::setBypassMasterOn(bool on)
 {
-    // Where the split cannot be applied (Android 13+ in this release) the switch is disabled and the stored choice is
-    // left as it is - it applies again when the mode returns (BypassMaster.h). The view re-reads the value (off).
-    if (avpn::bypassMasterUnavailableHere()) {
-        qInfo().noquote() << "[AVPN bypass] switch refused: the mode is unavailable on this Android version";
-        emit bypassMasterOnChanged();
-        return;
-    }
     QSettings s;
-    // The person's choice (BypassMaster.h) - this switch is its only writer; the legacy key is mirrored so a build of
-    // before 26.11 (a rollback) reads the same choice.
-    s.setValue(avpn::kBypassMasterChoiceKey, on);
-    s.setValue(avpn::kBypassMasterLegacyKey, on);
+    s.setValue(avpn::kBypassMasterKey, on); // BypassMaster.h: this switch is the key's only writer
     s.sync();
     emit bypassMasterOnChanged();
     reapplyBypass();
@@ -10263,9 +10285,9 @@ bool AvpnEngineQml::bypassMasterOn() const
     return avpn::bypassMasterOn();
 }
 
-bool AvpnEngineQml::bypassMasterAvailable() const
+bool AvpnEngineQml::bypassSitesDirect() const
 {
-    return !avpn::bypassMasterUnavailableHere();
+    return avpn::bypassRouteBudgetHere() != 0;
 }
 
 // AVPN «Доступ к сайтам РФ», Android layer 1 (RuApps.h, owner 26.11): the listed Russian apps (ru_apps.h) excluded from
@@ -10315,8 +10337,8 @@ void AvpnEngineQml::applyRuBypassApps(bool masterOn)
 #endif
 }
 
-// The A/B bench flips the switch through setBypassMasterOn and puts the stored keys back exactly at its end: a bench
-// leaves no choice behind (a never-chosen default stays a default). The tunnel is re-applied when the value changes.
+// The A/B bench flips the switch through setBypassMasterOn and puts the stored key back exactly at its end: a bench
+// leaves no choice behind (an absent key stays absent). The tunnel is re-applied when the value changes.
 void AvpnEngineQml::abRestoreBypassMaster()
 {
     QSettings st;
@@ -10327,8 +10349,7 @@ void AvpnEngineQml::abRestoreBypassMaster()
         else
             st.remove(key);
     };
-    put(avpn::kBypassMasterChoiceKey, m_abOrigChoice);
-    put(avpn::kBypassMasterLegacyKey, m_abOrigLegacy);
+    put(avpn::kBypassMasterKey, m_abOrigStored);
     st.sync();
     if (avpn::bypassMasterOn(st) != before) {
         emit bypassMasterOnChanged();

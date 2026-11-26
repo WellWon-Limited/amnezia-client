@@ -46,6 +46,13 @@ public:
 #ifdef Q_OS_ANDROID
     void restoreConnection();
 #endif
+    // AVPN (round 58 review, finding 3; Android): the service holds a session this object has no protocol for - one the
+    // engine adopted or takes over from a STATUS snapshot after an earlier stop in this process (the protocol is dropped
+    // at the end of every disconnect and restored only by the first snapshot, initConnectionState). Without it the
+    // engine's stop was dropped here (disconnectFromVpn: no protocol = "already Disconnected") and the service's live
+    // states reached nobody. Wired back the way the first snapshot does (restoreConnection), only when missing. No-op
+    // elsewhere.
+    Q_INVOKABLE void ensureAndroidProtocol();
 
 public slots:
     void setRepositories(SecureServersRepository* serversRepository, SecureAppSettingsRepository* appSettingsRepository);

@@ -38,7 +38,8 @@ WG="$CLIENT/android/wireguard/src/main/kotlin/org/amnezia/vpn/protocol/wireguard
 ans="$(body "$FACADE" 'void AvpnEngineQml::applyNativeState(')"
 [ -n "$ans" ] || bad "H1: applyNativeState not found"
 rc="$(printf '%s\n' "$ans" | awk '/    case Vpn::Reconnecting:/ { on = 1 } on { print } on && /^        break;$/ { exit }' | tr -s ' \n' ' ')"
-has "$rc" '#if defined(Q_OS_ANDROID) if (m_engine.noteLiveRebuild())' || bad "H1: the Android Reconnecting case must start the rebuild's bound"
+has "$rc" '#if defined(Q_OS_ANDROID) if (m_engine.noteLiveRebuild(/*newRebuild=*/true))' \
+    || bad "H1: the Android Reconnecting edge must start the rebuild's bound afresh (review finding 4)"
 has "$rc" '#endif' || bad "H1: the bound's start must stay Android-only"
 printf '%s\n' "$rc" | grep -qE 'leaveRebuiltSession|loseLiveSession|requestStop' && bad "H1: the Reconnecting case hands the live session over again"
 tick="$(body "$FACADE" 'void AvpnEngineQml::onTick()')"
@@ -49,13 +50,14 @@ grep -rqF --include='*.h' --include='*.cpp' 'leaveRebuiltSession' "$HERE/.." && 
 
 # ---- H2 ----
 fac="$(code "$FACADE")"
-has "$fac" 'if (st == AndroidController::ConnectionState::RECONNECTING && m_engine.noteLiveRebuild())' \
-    || bad "H2: a RECONNECTING snapshot must start the bound"
+has "$fac" 'if (serviceUnfinished && m_engine.noteLiveRebuild())' \
+    || bad "H2: a snapshot of an unfinished state (RECONNECTING or CONNECTING, review finding 7) must start the bound"
 has "$fac" 'else if (st == AndroidController::ConnectionState::CONNECTED)' && has "$fac" 'm_engine.noteLiveSessionUp();' \
     || bad "H2: a CONNECTED snapshot must end the bound"
 
 # ---- H3 ----
-nl="$(body "$SE" 'bool ServiceEngine::noteLiveRebuild()')"
+nl="$(body "$SE" 'bool ServiceEngine::noteLiveRebuild(bool newRebuild)')"
+has "$nl" 'if (m_rebuildDeadline >= 0 && !newRebuild)' || bad "H3: only a new rebuild restarts a running wait"
 has "$nl" 'if (m_state != EngineState::Connected || m_owner.phase() != path::AttemptPhase::Connected || m_owner.running())' \
     || bad "H3: only a session the engine holds gets the bound"
 has "$nl" 'const qint64 boundMs = qint64(t.localBuildMs) + m_owner.startTimeoutMs(kind);' || bad "H3: the bound is a leg's"
@@ -85,9 +87,9 @@ has "$off" 'statusJob?.cancel()' || bad "H4: the protocol's stop must end the ha
 # ---- H5 (entry c) ---- a service holding an unfinished tunnel (CONNECTING or RECONNECTING) that no attempt of ours
 # owns is taken over by the Adopt rule's person's-will test: our stop first (its latch holds every start, a tap is a
 # Stop), then the ordinary connect; the will off stops it; the CONNECTED Adopt rule is untouched
-status="$(code "$FACADE" | awk '/&AndroidController::status, this,/{f=1} f{print} f&&/Qt::QueuedConnection\);/{exit}')"
+status="$(code "$FACADE" | awk '/&AndroidController::status, this,/{f=1} f{print} f&&/^            Qt::QueuedConnection\);$/{exit}')"
 flat="$(printf '%s\n' "$status" | tr -s ' \n' ' ')"
-has "$flat" 'const AndroidStatusAction rebuild = androidRebuildStatusDecision( st == AndroidController::ConnectionState::CONNECTING || st == AndroidController::ConnectionState::RECONNECTING, thinkConnected, m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);' \
+has "$flat" 'const bool serviceUnfinished = st == AndroidController::ConnectionState::CONNECTING || st == AndroidController::ConnectionState::RECONNECTING; const AndroidStatusAction rebuild = androidRebuildStatusDecision( serviceUnfinished, thinkConnected, m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);' \
     || bad "H5: the STATUS entry must decide a CONNECTING or RECONNECTING service by the person's-will rule"
 tk="$(printf '%s\n' "$status" | awk '/} else if \(rebuild == AndroidStatusAction::TakeOver\) \{/ { on = 1 } on { print } on && /^                }$/ { exit }')"
 w=$(printf '%s\n' "$tk" | grep -nF 'm_wantConnected = true;' | head -1 | cut -d: -f1)

@@ -34,16 +34,29 @@ static void budget()
     // Android 13+: the compiled N, overridden by the server number, overridden by the developer file
     for (const int sdk : {33, 36}) {
         CHECK(bypassRouteBudget(true, sdk, none, noDev) == kAndroidBypassRouteBudget);
-        CHECK(bypassRouteBudget(true, sdk, 1500.0, noDev) == 1500);
-        CHECK(bypassRouteBudget(true, sdk, 1500.0, 700) == 700);
+        CHECK(bypassRouteBudget(true, sdk, 500.0, noDev) == 500);
+        CHECK(bypassRouteBudget(true, sdk, 500.0, 700) == 700);
         CHECK(bypassRouteBudget(true, sdk, none, 0) == 0);
-        // clamps: negative -> 0 (unavailable), over the ceiling -> the ceiling, non-finite -> the compiled value
-        CHECK(bypassRouteBudget(true, sdk, -5.0, noDev) == 0);
-        CHECK(bypassRouteBudget(true, sdk, 1e9, noDev) == kRouteBudgetCeiling);
+        // the ceiling (the service's own guard): a larger server or developer value is the ceiling, never more
+        CHECK(bypassRouteBudget(true, sdk, 1500.0, noDev) == kAndroidSplitRouteCeiling);
+        CHECK(bypassRouteBudget(true, sdk, 1e9, noDev) == kAndroidSplitRouteCeiling);
+        CHECK(bypassRouteBudget(true, sdk, none, 50000) == kAndroidSplitRouteCeiling);
+        // negative or non-finite = the compiled default: never "unlimited" (-1 is the code's own word) and never 0
+        CHECK(bypassRouteBudget(true, sdk, -1.0, noDev) == kAndroidBypassRouteBudget);
+        CHECK(bypassRouteBudget(true, sdk, -5.0, noDev) == kAndroidBypassRouteBudget);
         CHECK(bypassRouteBudget(true, sdk, std::nan(""), noDev) == kAndroidBypassRouteBudget);
-        CHECK(bypassRouteBudget(true, sdk, 1500.7, noDev) == 1500);
+        CHECK(bypassRouteBudget(true, sdk, INFINITY, noDev) == kAndroidBypassRouteBudget);
+        CHECK(bypassRouteBudget(true, sdk, none, -1) == kAndroidBypassRouteBudget);
+        CHECK(bypassRouteBudget(true, sdk, 500.7, noDev) == 500);
     }
     CHECK(kRouteBudgetNumberKey == QStringLiteral("android_bypass_route_budget"));
+    CHECK(kAndroidBypassRouteBudget >= 0 && kAndroidBypassRouteBudget <= kAndroidSplitRouteCeiling);
+    // where the mode's sites go directly (TribeEngine.bypassSitesDirect = budget != 0): not only on Android 13+ at N = 0
+    for (const int sdk : {33, 36})
+        CHECK((bypassRouteBudget(true, sdk, std::nullopt, std::nullopt) != 0) == (kAndroidBypassRouteBudget != 0));
+    CHECK(bypassRouteBudget(true, 33, std::nullopt, 0) == 0);
+    CHECK(bypassRouteBudget(true, 32, std::nullopt, 0) != 0); // Android 12 and lower: today's routes
+    CHECK(bypassRouteBudget(false, 0, std::nullopt, 0) != 0); // iOS, macOS, Windows: untouched
     // the host is not Android: unlimited here
     CHECK(bypassRouteBudgetHere() == kRouteBudgetUnlimited);
     RouteBudgetInputs::setServer(10.0);

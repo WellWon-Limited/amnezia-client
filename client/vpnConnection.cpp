@@ -110,6 +110,24 @@ VpnConnection::VpnConnection(SecureServersRepository* serversRepository, SecureA
     // Polling belongs to the observer lifetime: Settings/Shortcuts can start without connectToVpn.
     connect(&m_checkTimer, &QTimer::timeout, IosController::Instance(), &IosController::checkStatus);
 #endif
+#ifdef Q_OS_ANDROID
+    // AVPN (round 58 review, finding 3; phone 26.11, T1): the service reports a live session this object has no protocol
+    // for - Connect, Stop in the app (the protocol is dropped at the end of every disconnect), then the notification's
+    // «Подключиться» or the tile: the CONNECTED edge reached nobody and the app showed «Connect» over a working VPN. An
+    // attempt of ours always has its protocol (connectToVpn creates it before the service is asked to start), so a
+    // CONNECTED without one is never our attempt's: the protocol is wired back the way the first snapshot does
+    // (restoreConnection) and the fact goes on as a native Connected - the engine's one Adopt rule decides (the attempt
+    // owner first: onTunnelConnected; else tryAdoptObservedTunnel with the person's-will test). The copy of this CONNECTED
+    // that AndroidController queues to the new protocol (connectionStateChanged) is the same state and is dropped there.
+    connect(AndroidController::instance(), &AndroidController::vpnStateChanged, this,
+            [this](AndroidController::ConnectionState state) {
+                if (state != AndroidController::ConnectionState::CONNECTED || !m_vpnProtocol.isNull())
+                    return;
+                restoreConnection();
+                if (m_vpnProtocol)
+                    m_vpnProtocol->setConnectionState(Vpn::ConnectionState::Connected);
+            });
+#endif
 }
 
 VpnConnection::~VpnConnection()
@@ -664,6 +682,12 @@ void VpnConnection::appendSplitTunnelingConfig()
 }
 
 #ifdef Q_OS_ANDROID
+void VpnConnection::ensureAndroidProtocol()
+{
+    if (m_vpnProtocol.isNull())
+        restoreConnection();
+}
+
 void VpnConnection::restoreConnection()
 {
     createAndroidConnections();
@@ -686,6 +710,9 @@ AndroidVpnProtocol *VpnConnection::createDefaultAndroidVpnProtocol()
 {
     return new AndroidVpnProtocol(m_vpnConfiguration);
 }
+#endif
+#ifndef Q_OS_ANDROID
+void VpnConnection::ensureAndroidProtocol() {}
 #endif
 
 QString VpnConnection::bytesPerSecToText(quint64 bytes)
@@ -761,20 +788,14 @@ void VpnConnection::disconnectFromVpn()
                                   setConnectionState(Vpn::ConnectionState::Disconnected);
                                   disconnect(*connection);
                                   delete connection;
-                              } else if (state == AndroidController::ConnectionState::CONNECTED && m_vpnProtocol.isNull()) {
+                              } else if (state == AndroidController::ConnectionState::CONNECTED) {
                                   // AVPN (android3 runs a, f, 21.11): the service reports a running tunnel instead of the
-                                  // stop - the stop never reached it (or it brought the session up again). With the protocol
-                                  // gone this fact reached nobody: the tunnel ran behind a «Connect» screen and no later stop
-                                  // could reach the service. The protocol is wired back as for a live service found at start
-                                  // (restoreConnection) and the fact goes on: the engine adopts the session or stops it.
-                                  // Review R2: through the restored protocol's own state, so the copy of this CONNECTED that
-                                  // AndroidController queues to that protocol (connectionStateChanged) is the same state and
-                                  // is dropped there - the facade sees one Connected, not two.
+                                  // stop - the stop never reached it (or it brought the session up again). This listener
+                                  // ends; the protocol is wired back and the fact goes on by the constructor's listener
+                                  // (connected first, so it has already run: a CONNECTED without a protocol, round 58
+                                  // review finding 3) - the engine adopts the session or stops it (review R2).
                                   disconnect(*connection);
                                   delete connection;
-                                  restoreConnection();
-                                  if (m_vpnProtocol)
-                                      m_vpnProtocol->setConnectionState(Vpn::ConnectionState::Connected);
                               }
                           });
 #endif

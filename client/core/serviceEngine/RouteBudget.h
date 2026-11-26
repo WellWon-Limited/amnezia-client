@@ -9,13 +9,15 @@
 // through the VPN, as with the mode off.
 //
 // The budget, ONE function for the engine (the seed), the service's route build (the seed's counts in its log) and the
-// UI (TribeEngine.bypassMasterAvailable, BypassMaster.h):
+// UI (TribeEngine.bypassSitesDirect: the caption where the sites do not go directly):
 //   - unlimited off Android and on Android 12 and lower (exactly the behaviour before; those versions apply the
 //     excluded routes as their complement and were never measured to fail);
 //   - N on Android 13+: the compiled kAndroidBypassRouteBudget, overridden by the server-published client number
-//     android_bypass_route_budget (/v1/config numbers; absent = the compiled value; clamped to 0..20000, a
-//     non-finite value = the compiled one), overridden in a developer build only by a control file (see below).
-//   - N = 0 means the mode is unavailable there (BypassMaster.h: the switch is disabled and off, with a caption).
+//     android_bypass_route_budget (/v1/config numbers; absent, negative or non-finite = the compiled value; above the
+//     platform's ceiling = the ceiling), overridden in a developer build only by a control file (see below), clamped
+//     the same way. The ceiling (kAndroidSplitRouteCeiling) is also the service's own guard where the routes reach
+//     VpnService.Builder (ProtocolConfig.kt ANDROID_SPLIT_ROUTE_CEILING): a config over it gets none of its routes.
+//   - N = 0 means no routes: the mode's apps layer still works (RuApps.h), its sites go through the VPN.
 #pragma once
 
 #include <QString>
@@ -35,12 +37,17 @@
 
 namespace avpn {
 
-// THE N on Android 13 (API 33) and newer, compiled. 0 = the mode is unavailable there (this release until the phone
-// measurement picks a number; the owner's decision, 26.11).
+// THE N on Android 13 (API 33) and newer, compiled. 0 = no split routes there (apps layer only) until the data check is
+// fixed and measured (the owner's decision, 26.11).
 inline constexpr int kAndroidBypassRouteBudget = 0;
 
+// THE platform's ceiling of split routes in one Android 13+ build - the same value as the service's guard
+// (client/android/protocolApi/src/main/kotlin/ProtocolConfig.kt ANDROID_SPLIT_ROUTE_CEILING; the two are held equal by
+// check_android_bypass_apps_wiring.sh A6). 1000 = the largest count measured clean for binder (phone, 26.11) - a
+// placeholder the owner sets.
+inline constexpr int kAndroidSplitRouteCeiling = 1000;
+
 inline constexpr int kRouteBudgetUnlimited = -1;
-inline constexpr int kRouteBudgetCeiling = 20000;
 inline const QString kRouteBudgetNumberKey = QStringLiteral("android_bypass_route_budget");
 
 // The one boundary of the Android limits (the budget here, the switch's default in BypassMaster.h).
@@ -49,14 +56,14 @@ inline bool androidRoutesLimited(bool android, int sdkVersion)
     return android && sdkVersion >= 33;
 }
 
+// A published or developer value: negative or non-finite = the compiled default (never unlimited, never 0 by accident),
+// above the ceiling = the ceiling.
 inline int clampRouteBudget(double v, int fallback)
 {
-    if (!std::isfinite(v))
+    if (!std::isfinite(v) || v < 0)
         return fallback;
-    if (v < 0)
-        return 0;
-    if (v > kRouteBudgetCeiling)
-        return kRouteBudgetCeiling;
+    if (v > kAndroidSplitRouteCeiling)
+        return kAndroidSplitRouteCeiling;
     return int(v);
 }
 
@@ -65,11 +72,12 @@ inline int bypassRouteBudget(bool android, int sdkVersion, std::optional<double>
 {
     if (!androidRoutesLimited(android, sdkVersion))
         return kRouteBudgetUnlimited;
+    const int compiled = clampRouteBudget(double(kAndroidBypassRouteBudget), 0);
     if (dev.has_value())
-        return clampRouteBudget(double(*dev), kAndroidBypassRouteBudget);
+        return clampRouteBudget(double(*dev), compiled);
     if (server.has_value())
-        return clampRouteBudget(*server, kAndroidBypassRouteBudget);
-    return kAndroidBypassRouteBudget;
+        return clampRouteBudget(*server, compiled);
+    return compiled;
 }
 
 // The process's inputs of the budget: the engine sets the server number when the remote config is applied and the
@@ -107,7 +115,7 @@ private:
 
 #ifdef AVPN_DEV_TOOLS
 // Developer build only (a release build compiles none of this): <app files dir>/tribe-dev-route-budget holds one
-// integer N that overrides the compiled and the server value - set over adb without a rebuild:
+// integer N that overrides the compiled and the server value (clamped like them) - set over adb without a rebuild:
 //   adb shell run-as com.tribevpn.client sh -c 'echo 1500 > files/tribe-dev-route-budget'   (rm it = no override)
 // (QStandardPaths AppDataLocation on Android = /data/user/0/<pkg>/files, reached through run-as of the debuggable
 // developer build.) Read at the engine's start and before every seed (each connect).

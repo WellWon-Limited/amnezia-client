@@ -327,6 +327,23 @@ int main()
         CHECK(avpn::whoamiNext(WhoamiVerdict::Inconclusive, none, 0, 0, plenty).delayMs
                   == avpn::decideDataCheckRetry(true, 0, plenty).delayMs,
               "one spacing for every data check (DataCheckRetry.h, the provider check uses it too)");
+        // Phone 26.11 (Android, split routes): a try sent before the system made our VPN network the app's default -
+        // a cut transfer (the measured "whoami no data" at ~1.4 s), a short body or "past the VPN" - is "not yet"
+        n = avpn::whoamiNext(WhoamiVerdict::NoData, stalled, 1, 0, plenty, /*sentBeforeUsable=*/true);
+        CHECK(n.step == WhoamiStep::Retry && n.delayMs == 300, "a cut before the network was usable -> retry, not no-data");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::BypassVpn, bypass, 2, 1, plenty, true).step == WhoamiStep::Retry,
+              "past the VPN before the network was usable -> not yet (not the answered cap)");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::NoData, stalled, 1, 0, 300 + avpn::kWhoamiMinAttemptMs - 1, true).step
+                  == WhoamiStep::Tiebreak,
+              "before usable, no room for another try -> the tiebreak, never a no-data verdict");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::Works, good(), 1, 0, plenty, true).step == WhoamiStep::Finish,
+              "works is final even if sent early");
+        CHECK(avpn::whoamiNext(WhoamiVerdict::NoData, stalled, 1, 0, plenty, /*sentBeforeUsable=*/false).step
+                  == WhoamiStep::Finish,
+              "a cut on a usable network is still the path's verdict");
+        // the wait for usability stays inside the attempt owner's grace (dataCheckMs + checkGraceMs backstop)
+        CHECK(avpn::whoamiUsableWaitMs(1500) == 1200 && avpn::whoamiUsableWaitMs(200) == 0,
+              "the wait ends 300 ms inside the owner's grace; no grace, no wait");
     }
 
     // --- floor 19.11: the whoami loop as the facade runs it, on a fake clock (AvpnEngineQml::whoamiAttempt) ---

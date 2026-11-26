@@ -215,7 +215,10 @@ public:
     // passed (NoHandshake: the node counts as tried) and the owner's ordinary attempt walks on - judgeLiveRebuild on the
     // attempt tick. Only for a session the engine holds (Connected, owner Connected, no attempt running).
     // true = the wait began now (false: no live session, or it waits already - a later sight does not extend it).
-    bool noteLiveRebuild();
+    // newRebuild (round 58 review, finding 4): the live Reconnecting edge - the service reports it only from CONNECTED,
+    // so it is always a NEW rebuild: it starts the bound afresh even when one is still armed from a rebuild whose
+    // Connected was missed while the activity was unbound. A snapshot's sight (false) never extends a running wait.
+    bool noteLiveRebuild(bool newRebuild = false);
     // A platform fact that the live session is up (a status snapshot after a return): ends a rebuild's wait, nothing else.
     void noteLiveSessionUp();
     bool liveRebuildWaiting() const { return m_rebuildDeadline >= 0; }
@@ -339,6 +342,7 @@ public:
     int attemptTotal() const { return m_owner.running() ? m_owner.progressTotal() : 0; }
     // The data check deadline of a leg (the facade's checks finish inside it).
     int dataCheckMs() const { return m_owner.timings().dataCheckMs; }
+    int checkGraceMs() const { return m_owner.timings().checkGraceMs; } // the owner's backstop past dataCheckMs
     std::optional<path::AttemptResult> takeAttemptResult() { return std::exchange(m_lastResult, std::nullopt); }
     // android3 runs a, f: the owner gave a stop up (StopUnconfirmed) since the last look - the platform's view of the
     // tunnel is unknown and only a fresh native status can tell it (the facade asks for one on Android).

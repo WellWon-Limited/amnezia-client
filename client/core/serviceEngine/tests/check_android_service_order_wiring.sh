@@ -52,14 +52,16 @@ has "$act" 'serviceCommands.offer(command, bound = isServiceConnected, binding =
 
 # ---- Q2 ----
 dis="$(body "$VC" 'void VpnConnection::disconnectFromVpn()')"
-has "$dis" '} else if (state == AndroidController::ConnectionState::CONNECTED && m_vpnProtocol.isNull()) {' \
-    || bad "Q2: a CONNECTED after our stop must not be dropped"
-cn="$(printf '%s\n' "$dis" | grep -nF 'CONNECTED && m_vpnProtocol.isNull()' | head -1 | cut -d: -f1)"
-printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 10 ))p" | grep -qF 'restoreConnection();' \
-    && printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 14 ))p" | grep -qF 'm_vpnProtocol->setConnectionState(Vpn::ConnectionState::Connected);' \
+has "$dis" '} else if (state == AndroidController::ConnectionState::CONNECTED) {' \
+    || bad "Q2: a CONNECTED after our stop must end the stop's listener"
+# round 58 review, finding 3: ONE place wires the protocol back for any CONNECTED without one - the constructor's
+# listener (connected first, so it runs before the stop's listener) - and reports it through the protocol (review R2)
+ctor="$(body "$VC" 'VpnConnection::VpnConnection(' | tr -s ' \n' ' ')"
+has "$ctor" 'if (state != AndroidController::ConnectionState::CONNECTED || !m_vpnProtocol.isNull()) return; restoreConnection(); if (m_vpnProtocol) m_vpnProtocol->setConnectionState(Vpn::ConnectionState::Connected);' \
     || bad "Q2: the protocol must be wired back and the running tunnel reported through it (review R2: one Connected)"
-printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 14 ))p" | grep -qE '^[[:space:]]+setConnectionState\(Vpn::ConnectionState::Connected\);' \
-    && bad "R2: VpnConnection must not report the restored Connected itself (the protocol's copy would be a second one)"
+cn="$(printf '%s\n' "$dis" | grep -nF 'state == AndroidController::ConnectionState::CONNECTED) {' | head -1 | cut -d: -f1)"
+printf '%s\n' "$dis" | sed -n "${cn:-1},$(( ${cn:-1} + 12 ))p" | grep -qE 'restoreConnection\(\);|setConnectionState\(Vpn::ConnectionState::Connected\);' \
+    && bad "R2: the stop's listener must not restore or report the Connected itself (the constructor's listener does, once)"
 has "$(code "$FACADE")" 'tryAdoptObservedTunnel("connected", ourStopPendingBefore);' \
     && has "$(code "$FACADE")" 'ourStopPendingBefore = m_latch.awaitingStopConfirm;' \
     || bad "R2: the native Connected must tell the adoption whether our stop was pending (before the latch clears)"
@@ -93,7 +95,7 @@ has "$act" 'ContextCompat.startForegroundService(this, Intent(this, proto.servic
 has "$act" '                startIntentAccepted = true // review R3' && has "$act" 'startIntentAccepted = false // review R3' \
     || bad "R3: the accepted start intent is known until a bind completes"
 has "$(code "$SVC")" 'if (intent?.action == ACTION_DISCONNECT) {' || bad "R3: the service must take the stop intent"
-status="$(code "$FACADE" | awk '/&AndroidController::status, this,/{f=1} f{print} f&&/Qt::QueuedConnection\);/{exit}')"
+status="$(code "$FACADE" | awk '/&AndroidController::status, this,/{f=1} f{print} f&&/^            Qt::QueuedConnection\);$/{exit}')"
 has "$status" 'const AndroidStatusAction action = androidStatusDecision(' && has "$status" 'm_latch.awaitingStopConfirm, m_wantConnected);' \
     || bad "R3: the STATUS entry must decide by the person's-will rule"
 stopit="$(printf '%s\n' "$status" | grep -nF 'if (action == AndroidStatusAction::StopIt) {' | head -1 | cut -d: -f1)"
