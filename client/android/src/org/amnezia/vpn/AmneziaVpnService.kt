@@ -402,6 +402,9 @@ open class AmneziaVpnService : VpnService() {
     }
 
     private fun registerScreenStateBroadcastReceivers() {
+        // AVPN (emulator round 26.11.2026, D5): the app now starts the service before the notification question and tells
+        // it of a grant (enableNotification); a service created after the grant has registered already - once only.
+        if (screenOnReceiver != null) return
         if (serviceNotification.isNotificationEnabled()) {
             Log.d(TAG, "Register screen state broadcast receivers")
             screenOnReceiver = registerBroadcastReceiver(Intent.ACTION_SCREEN_ON) {

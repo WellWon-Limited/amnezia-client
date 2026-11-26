@@ -224,6 +224,11 @@ class AmneziaActivity : QtActivity() {
                 // AVPN (android3 runs a, f): what was given before the bind, in order
                 startIntentAccepted = false // review R3: from here the messenger reaches this service
                 serviceCommands.onBound().forEach(::sendServiceCommand)
+                // AVPN (emulator round 26.11.2026, D5): a notification grant given before this bind
+                if (notificationGrantForService) {
+                    notificationGrantForService = false
+                    vpnServiceMessenger.send(Action.NOTIFICATION_PERMISSION_GRANTED)
+                }
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
@@ -712,19 +717,15 @@ class AmneziaActivity : QtActivity() {
 
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private fun showNotificationPermissionDialog(onChecked: () -> Unit) {
-        // AVPN (Android permission prompt): this dialog (and the system one behind "Yes") also stands between the
-        // tap and the tunnel start: the engine's clock pauses for it like for the VPN dialog; one report at its end.
-        reportPermissionPrompt(PROMPT_PENDING)
-        val done: () -> Unit = {
-            reportPermissionPrompt(PROMPT_GRANTED)
-            onChecked()
-        }
+        // AVPN (emulator round 26.11.2026, D5): asked after the tunnel start (start()), so this dialog no longer stands
+        // between the tap and the tunnel: no permission-prompt report, the engine's clock runs (c2ff72b32 paused it here
+        // too; the VPN dialog keeps its pause). A grant reaches the running service (tellServiceNotificationGranted).
         AlertDialog.Builder(this)
             .setTitle(R.string.notificationDialogTitle)
             .setMessage(R.string.notificationDialogMessage)
             .setNegativeButton(R.string.no) { _, _ ->
                 Prefs.save(PREFS_NOTIFICATION_PERMISSION_ASKED, true)
-                done()
+                onChecked()
             }
             .setPositiveButton(R.string.yes) { _, _ ->
                 val saveAsked: () -> Unit = {
@@ -734,16 +735,33 @@ class AmneziaActivity : QtActivity() {
                     Manifest.permission.POST_NOTIFICATIONS,
                     CHECK_NOTIFICATION_PERMISSION_ACTION_CODE,
                     PermissionRequestHandler(
-                        onSuccess = saveAsked,
+                        onSuccess = {
+                            saveAsked()
+                            tellServiceNotificationGranted()
+                        },
                         onFail = saveAsked,
-                        onAny = done
+                        onAny = onChecked
                     )
                 )
             }
-            // AVPN: a dialog dismissed outside its buttons used to leave the connect hanging; it now counts as "No"
-            // for this tap (asked again next time) so the pause always ends.
-            .setOnCancelListener { done() }
+            // AVPN: a dialog dismissed outside its buttons counts as "No" for this tap (asked again next time).
+            .setOnCancelListener { onChecked() }
             .show()
+    }
+
+    // AVPN (emulator round 26.11.2026, D5): the service was started before the person answered, so it decided at its start
+    // that there is no notification to keep fresh. A grant tells it the way the Settings request does
+    // (requestNotificationPermission: enableNotification in the service); a grant given before the bind waits for it,
+    // as the start/stop commands do. A denial needs nothing: the service runs and Android hides the notification.
+    private var notificationGrantForService = false
+
+    private fun tellServiceNotificationGranted() {
+        if (isServiceConnected) vpnServiceMessenger.send(Action.NOTIFICATION_PERMISSION_GRANTED)
+        else notificationGrantForService = true
+        mainScope.launch {
+            qtInitialized.await()
+            QtAndroidController.onNotificationStateChanged()
+        }
     }
 
     @MainThread
@@ -895,9 +913,14 @@ class AmneziaActivity : QtActivity() {
         Log.v(TAG, "Start VPN")
         mainScope.launch {
             checkVpnPermission {
-                checkNotificationPermission {
-                    startVpn(vpnConfig)
-                }
+                // AVPN (emulator round 26.11.2026, D5): the tunnel starts right after the VPN consent; the notification
+                // question comes after it and only shows or hides the service's notification. Upstream asked it first,
+                // so the first connect waited for its answer (71 s in the round) while the screen said «trying 1 of 6».
+                // Android's rule: an app does not need POST_NOTIFICATIONS to start a foreground service (it must still
+                // give the notification object); a denial hides the notification from the drawer, the service runs.
+                // Every later connect already took this path: the question is asked once.
+                startVpn(vpnConfig)
+                checkNotificationPermission {}
             }
         }
     }
