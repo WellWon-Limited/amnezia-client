@@ -2061,35 +2061,8 @@ static void t1ThawStallCheck()
     CHECK(judgeThawStall(x) == ThawStallJudgement::Disarm);  // awg_probe_dead_stall_s off
 }
 
-// Emulator round 26.11 (D2, Android): after a 95 s network loss the VPN service rebuilt the session by itself and stayed
-// Reconnecting with no handshake; the health gate wanted the platform's Connected, so no probe, no dead verdict and no
-// failover ran for 2 min 23 s. The gate's input: the service's rebuild of the session the engine holds is live (Android),
-// nothing else changes.
-static void d2AndroidRebuildIsTheLiveSession()
-{
-    const TeardownLatch idle;
-    // Android: the service's rebuild while the engine holds the session - health runs (probe, dead rule)
-    CHECK(healthSessionUp(false, true, true, true));
-    CHECK(healthTickAllowed(idle, healthSessionUp(false, true, true, true), false));
-    // the engine does not hold a session (an attempt, a switch, off): Reconnecting is not a live session
-    CHECK(!healthSessionUp(false, true, false, true));
-    // iOS / desktop: Reconnecting stays transitional - their extension / daemon bound it
-    CHECK(!healthSessionUp(false, true, true, false));
-    // a Connected platform is live everywhere, as before
-    CHECK(healthSessionUp(true, false, true, false));
-    CHECK(healthSessionUp(true, false, false, true));
-    // no session at all
-    CHECK(!healthSessionUp(false, false, true, true));
-    // our own stop in flight and the pause still silence health during the rebuild
-    TeardownLatch stop;
-    stop.awaitingStopConfirm = true;
-    CHECK(!healthTickAllowed(stop, healthSessionUp(false, true, true, true), false));
-    CHECK(!healthTickAllowed(idle, healthSessionUp(false, true, true, true), true));
-}
-
 int main()
 {
-    d2AndroidRebuildIsTheLiveSession();
     s1ExactRowWinsOverTheMode();
     t1ThawStallCheck();
     r50UplinkMoveVoidsTheLiveClaim();

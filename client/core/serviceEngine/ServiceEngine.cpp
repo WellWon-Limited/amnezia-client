@@ -257,6 +257,16 @@ bool ServiceEngine::leaveUpstreamNode(const QString &code, const QString &detail
     return true;
 }
 
+bool ServiceEngine::leaveRebuiltSession()
+{
+    if (m_state != EngineState::Connected || m_owner.phase() != path::AttemptPhase::Connected)
+        return false;
+    appendSwitchLog(QStringLiteral("service rebuilt the session on %1: the attempt takes over").arg(m_currentNodeId));
+    loseLiveSession(path::PathOutcome::Inconclusive, /*tunnelGone=*/false, /*restart=*/true,
+                    QStringLiteral("service rebuilt the session"));
+    return true;
+}
+
 void ServiceEngine::noteStartRefused(const QString &nodeId, const QString &code)
 {
     if (nodeId.isEmpty() || m_owner.phase() != path::AttemptPhase::Starting || m_owner.currentPath().id.id != nodeId)

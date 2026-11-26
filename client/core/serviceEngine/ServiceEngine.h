@@ -205,6 +205,11 @@ public:
     // The lease owner said the running upstream session must leave its node: the live session is lost (refused /
     // no seat recorded) and the failover attempt walks on without it. false = not connected on an upstream node.
     bool leaveUpstreamNode(const QString &code, const QString &detail = QString());
+    // Android (emulator round 2, 26.11, F2): the VPN service rebuilt the session it holds by itself after a network change
+    // (AmneziaVpnService.reconnect: RECONNECTING until the rebuilt tunnel's first handshake, with no deadline). The live
+    // session is lost - Inconclusive, nothing against the node - and the owner's ordinary attempt takes over: its stop
+    // ends the rebuild, its legs run on the existing deadlines. false = no live session (not Connected).
+    bool leaveRebuiltSession();
     bool currentNodeIsUpstream() const;
     // upstream_revision of the subscription in force (0 = none).
     qint64 upstreamRevision() const { return m_pool.subscription().upstreamRevision; }

@@ -255,6 +255,30 @@ int main(int argc, char **argv)
         CHECK(r.eng.pathStateHere(QStringLiteral("16")) == QLatin1String("suspect"));
     }
 
+    // 2r. Emulator round 2 (26.11, F2, Android): the VPN service rebuilt the live session by itself after a network change
+    //     and the rebuild never handshook - 3 min 58 s of «Connecting…» with nothing judging it. Now the live session is
+    //     lost (Inconclusive: nothing recorded against the node), the owner's stop ends the rebuild and its ordinary
+    //     attempt walks on the existing leg deadlines.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(!r.eng.leaveRebuiltSession()); // no live session yet: nothing to lose
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        r.up();
+        CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
+        r.result();
+        const int downs = r.tun.downs;
+        const int ups = int(r.tun.ups.size());
+        CHECK(r.eng.leaveRebuiltSession() && r.tun.downs == downs + 1 && r.eng.attemptRunning());
+        CHECK(!r.eng.leaveRebuiltSession()); // once: the session is already lost
+        r.confirmStop();
+        CHECK(int(r.tun.ups.size()) == ups + 1); // the attempt's own start after the stop
+        CHECK(r.eng.pathStateHere(QStringLiteral("17")) != QLatin1String("suspect")); // Inconclusive: no evidence
+        CHECK(r.last() == QLatin1String("17")); // the same node first again
+        r.noHandshake(); // the restarted leg never handshakes either: an ordinary failed leg on its deadline
+        CHECK(int(r.tun.ups.size()) == ups + 2 && r.last() == QLatin1String("16"));
+    }
+
     // 2a. T1 (owner road 26.11, J1; review C5): the app returns on an AmneziaWG session whose path is dead and the first
     //     status asked after the return says so: the stall verdict as the live probe reads it (freshDataStallSec) is past
     //     the threshold outside the network grace - the facade's judgement (DebugSnapshot.h judgeThawStall) starts the
