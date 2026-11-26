@@ -21,4 +21,4 @@
 #
 # БАМПИТЬ — ТОЛЬКО ЗДЕСЬ (две строки ниже). Больше нигде, ни для одной платформы, трогать не нужно.
 set(TRIBE_VERSION 5.1.113.143)
-set(TRIBE_ANDROID_VERSION_CODE 2179)
+set(TRIBE_ANDROID_VERSION_CODE 2180)
