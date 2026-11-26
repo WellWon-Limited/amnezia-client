@@ -15,7 +15,9 @@
 #   H3  the bound is a leg's (local-build limit + the kind's start deadline, no tunable of its own), judged on the attempt
 #       tick after the tick's events; past it the live session is lost as NoHandshake with the owner's restart; the
 #       rebuild's Connected, a loss and the person's Stop end the wait;
-#   H4  the service's in-place rebuild stays as upstream has it, and the owner's stop still reaches a RECONNECTING service.
+#   H4  the service's in-place rebuild stays as upstream has it, and the owner's stop still reaches a RECONNECTING service;
+#   H5  (entry c) a rebuilding service the engine does not hold is taken over - our stop, then the ordinary connect -
+#       by the Adopt rule's person's-will test (host case: facade_policy_check f2cStatusTakesOverARebuild).
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -78,6 +80,32 @@ has "$disc" 'if (isUnknown || isDisconnected || protocolState.value == DISCONNEC
     || bad "H4: the service's stop must not refuse a RECONNECTING session"
 off="$(code "$WG" | awk '/private fun turnOffVpn\(\) \{/ { on = 1 } on { print } on && /^    }$/ { exit }')"
 has "$off" 'statusJob?.cancel()' || bad "H4: the protocol's stop must end the handshake wait"
+
+# ---- H5 (entry c) ---- a service rebuilding a session the engine does not hold (cold start) is taken over by the Adopt
+# rule's person's-will test: our stop first (its latch holds every start, a tap is a Stop), then the ordinary connect;
+# the will off stops it; the CONNECTED Adopt rule is untouched
+status="$(code "$FACADE" | awk '/&AndroidController::status, this,/{f=1} f{print} f&&/Qt::QueuedConnection\);/{exit}')"
+flat="$(printf '%s\n' "$status" | tr -s ' \n' ' ')"
+has "$flat" 'const AndroidStatusAction rebuild = androidRebuildStatusDecision( st == AndroidController::ConnectionState::RECONNECTING, !m_serviceSessionMeta.isEmpty(), thinkConnected, m_engine.attemptRunning(), m_latch.awaitingStopConfirm, m_wantConnected);' \
+    || bad "H5: the STATUS entry must decide a rebuilding service by the person's-will rule"
+tk="$(printf '%s\n' "$status" | awk '/} else if \(rebuild == AndroidStatusAction::TakeOver\) \{/ { on = 1 } on { print } on && /^                }$/ { exit }')"
+w=$(printf '%s\n' "$tk" | grep -nF 'm_wantConnected = true;' | head -1 | cut -d: -f1)
+v=$(printf '%s\n' "$tk" | grep -nF 'onConnectionStateChanged(Vpn::Reconnecting);' | head -1 | cut -d: -f1)
+g=$(printf '%s\n' "$tk" | grep -nF 'guardedStop("takeover_rebuild");' | head -1 | cut -d: -f1)
+if [ -z "$w" ] || [ -z "$v" ] || [ -z "$g" ] || [ "$w" -ge "$v" ] || [ "$v" -ge "$g" ]; then
+    bad "H5: the take-over must set the intent, take the service's transition as the view, then send our own stop"
+fi
+printf '%s\n' "$tk" | grep -qE 'guardedStart|start\(\)|m_engine.connect' && bad "H5: the take-over must not start beside its stop"
+printf '%s\n' "$status" | grep -A3 -F '} else if (rebuild == AndroidStatusAction::StopIt) {' | grep -qF 'AndroidController::instance()->stop();' \
+    || bad "H5: a rebuilding service the person did not want must be stopped"
+dsn="$(code "$HERE/../DebugSnapshot.h")"
+dec="$(printf '%s\n' "$dsn" | awk '/inline AndroidStatusAction androidRebuildStatusDecision\(/ { on = 1 } on { print } on && /^}$/ { exit }')"
+has "$dec" 'if (!serviceReconnecting || !serviceHoldsSession || engineConnected || attemptRunning)' \
+    && has "$dec" 'adoptObservedTunnel(ourStopPending, wantConnected) == ObservedTunnelAdoption::StopIt' \
+    || bad "H5: the rebuild decision must be the Adopt rule's will test, only with nothing held and no attempt"
+act="$(printf '%s\n' "$dsn" | awk '/inline AndroidStatusAction androidStatusAction\(/ { on = 1 } on { print } on && /^}$/ { exit }')"
+printf '%s\n' "$act" | tr -s ' \n' ' ' | grep -qF 'ObservedTunnel facadeView, bool attemptRunning) { if (serviceConnected && !engineConnected) return AndroidStatusAction::Adopt;' \
+    || bad "H5: the Adopt rule for a CONNECTED service must stay as it was"
 
 [ "$fail" -eq 0 ] && echo "android rebuild wiring: OK"
 exit "$fail"

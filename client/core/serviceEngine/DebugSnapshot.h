@@ -227,8 +227,10 @@ inline ReconcileGate reconcileGate(const TeardownLatch &latch, ObservedTunnel s,
 //                   nothing: that is the end of OUR stop, not a loss (the attempt's result already decided the request).
 //                   Before, the view stayed transitional forever: reconcile waited for a terminal, and both the uplink's
 //                   return and a tap did nothing;
-//  Nothing        - the views agree, or the snapshot is in between (its terminal state comes as an event).
-enum class AndroidStatusAction { Nothing, Adopt, Disconnected, ConfirmOwnStop, StopIt };
+//  Nothing        - the views agree, or the snapshot is in between (its terminal state comes as an event);
+//  TakeOver       - F2 entry c (androidRebuildStatusDecision): the service rebuilds a session the engine does not hold -
+//                   stop it with our own stop, then the ordinary connect.
+enum class AndroidStatusAction { Nothing, Adopt, Disconnected, ConfirmOwnStop, StopIt, TakeOver };
 inline AndroidStatusAction androidStatusAction(bool serviceConnected, bool serviceDisconnected, bool engineConnected,
                                                ObservedTunnel facadeView, bool attemptRunning)
 {
@@ -254,6 +256,24 @@ inline AndroidStatusAction androidStatusDecision(bool serviceConnected, bool ser
     if (a == AndroidStatusAction::Adopt && adoptObservedTunnel(ourStopPending, wantConnected) == ObservedTunnelAdoption::StopIt)
         return AndroidStatusAction::StopIt;
     return a;
+}
+
+// Emulator rounds of 26.11 (F2, entry c - Android): a snapshot says the service REBUILDS a session (RECONNECTING after a
+// network change, its session metadata present) while the engine holds nothing and no attempt runs - typically a cold
+// start after the system killed the cached UI process: the screen showed "off" over a held interface that carried
+// nothing, with no Stop to press. The engine cannot know how old that rebuild is, so it takes the session over instead
+// of waiting on it, by the Adopt rule's person's-will test (adoptObservedTunnel): the will that adopts a CONNECTED
+// service takes this one over - our stop, then the ordinary connect (TakeOver); the will that stops a CONNECTED service
+// the person did not want stops this one (StopIt). Everything else: Nothing (a session the engine holds has its rebuild
+// bound, ServiceEngine::noteLiveRebuild; a running attempt owns the tunnel). androidStatusAction (CONNECTED) is untouched.
+inline AndroidStatusAction androidRebuildStatusDecision(bool serviceReconnecting, bool serviceHoldsSession,
+                                                        bool engineConnected, bool attemptRunning, bool ourStopPending,
+                                                        bool wantConnected)
+{
+    if (!serviceReconnecting || !serviceHoldsSession || engineConnected || attemptRunning)
+        return AndroidStatusAction::Nothing;
+    return adoptObservedTunnel(ourStopPending, wantConnected) == ObservedTunnelAdoption::StopIt ? AndroidStatusAction::StopIt
+                                                                                               : AndroidStatusAction::TakeOver;
 }
 
 inline bool reconcileActionable(ObservedTunnel s, const TeardownLatch &latch)

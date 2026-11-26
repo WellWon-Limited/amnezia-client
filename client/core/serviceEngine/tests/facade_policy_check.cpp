@@ -1384,6 +1384,45 @@ static void r2LateConnectedAfterThePersonsStop()
     CHECK(adoptObservedTunnel(false, false) == A::Adopt);
 }
 
+// Emulator rounds of 26.11 (F2, entry c): a cold start while the service rebuilds a session after a network change -
+// the screen showed "off" over a held interface that carried nothing. The STATUS entry takes the session over (our stop,
+// then the ordinary connect) by the same person's-will rule an adopted CONNECTED service obeys.
+static void f2cStatusTakesOverARebuild()
+{
+    using A = AndroidStatusAction;
+    // snapshot RECONNECTING x engine idle x no attempt: found at launch, nothing of ours pending -> taken over (will off
+    // or on: the intent of a fresh process is off, as for an adopted CONNECTED service)
+    CHECK(androidRebuildStatusDecision(true, true, /*engineConnected=*/false, /*attemptRunning=*/false,
+                                       /*ourStopPending=*/false, /*wantConnected=*/false) == A::TakeOver);
+    CHECK(androidRebuildStatusDecision(true, true, false, false, false, true) == A::TakeOver);
+    // the person's Stop with our stop unconfirmed: stopped, no connect after it
+    CHECK(androidRebuildStatusDecision(true, true, false, false, /*ourStopPending=*/true, /*wantConnected=*/false) == A::StopIt);
+    // our stop pending but the will on (the engine's own stop): taken over
+    CHECK(androidRebuildStatusDecision(true, true, false, false, true, true) == A::TakeOver);
+    // the engine holds the session: its rebuild bound decides (ServiceEngine::noteLiveRebuild), not this
+    CHECK(androidRebuildStatusDecision(true, true, /*engineConnected=*/true, false, false, true) == A::Nothing);
+    // a running attempt owns the tunnel
+    CHECK(androidRebuildStatusDecision(true, true, false, /*attemptRunning=*/true, false, true) == A::Nothing);
+    CHECK(androidRebuildStatusDecision(true, true, false, true, true, false) == A::Nothing);
+    // no session metadata: nothing is known to be held
+    CHECK(androidRebuildStatusDecision(true, /*serviceHoldsSession=*/false, false, false, false, false) == A::Nothing);
+    // any other snapshot: not this rule
+    CHECK(androidRebuildStatusDecision(/*serviceReconnecting=*/false, true, false, false, false, false) == A::Nothing);
+    // the Adopt rule for a CONNECTED service is unchanged
+    CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Unknown, false, false, false) == A::Adopt);
+    CHECK(androidStatusDecision(true, false, false, ObservedTunnel::Transitional, false, true, false) == A::StopIt);
+    // a RECONNECTING snapshot is still Nothing for the CONNECTED/DISCONNECTED rule (it is not a terminal state)
+    CHECK(androidStatusDecision(false, false, false, ObservedTunnel::Unknown, false, false, false) == A::Nothing);
+    // the take-over's stop holds every start until its Disconnected, and a tap meanwhile is a Stop, never a Start
+    TeardownLatch stop;
+    stop.awaitingStopConfirm = true;
+    CHECK(reconcileGate(stop, ObservedTunnel::Transitional, /*wantConnected=*/true, true) == ReconcileGate::AwaitStatus);
+    CHECK(reconcileGate(stop, ObservedTunnel::Transitional, true, false) == ReconcileGate::Wait);
+    CHECK(!ownStopInFlight(/*wantConnected=*/true, /*opStopping=*/true, true)); // shown as a transition, not «Disconnecting»
+    CHECK(decideOrbTap(/*engineConnected=*/false, /*busy=*/true, /*wantConnected=*/true, /*ownStopping=*/false,
+                       /*ownOpInFlight=*/true, false, false) == OrbTap::Stop);
+}
+
 // Review R3 (21.11): Connect, Stop during the first bind, the app to the background; on return the service's STATUS said
 // "connected" and the STATUS entry adopted it - setting the intent on before the person's-will rule was asked. Both
 // entries (native state, STATUS) now decide by the same rule.
@@ -2063,6 +2102,7 @@ static void t1ThawStallCheck()
 
 int main()
 {
+    f2cStatusTakesOverARebuild();
     s1ExactRowWinsOverTheMode();
     t1ThawStallCheck();
     r50UplinkMoveVoidsTheLiveClaim();
