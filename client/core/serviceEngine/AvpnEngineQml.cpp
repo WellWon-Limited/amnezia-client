@@ -4603,7 +4603,19 @@ void AvpnEngineQml::onTick()
     maybeRefreshStandby("periodic");
     // AVPN (фикс-волна 2026-09-22, A1): health глушит только НАШ стоп в пути или пауза. Error
     // (needStatusBeforeStart) health не выключает — иначе ложный Error убивал DEAD-детект и roaming.
-    if (!healthTickAllowed(m_latch, m_lastTunnelState == Vpn::Connected, m_paused)) {
+    // Emulator round 26.11 (D2): on Android the service's own rebuild of the session it holds (Reconnecting) counts as
+    // the live session while the engine holds it (DebugSnapshot.h healthSessionUp): a rebuild that never handshakes ends
+    // through the existing probe and dead rule in the ordinary failover, not in an endless «Connecting…».
+#if defined(Q_OS_ANDROID)
+    constexpr bool kReconnectingKeepsSession = true;
+#else
+    constexpr bool kReconnectingKeepsSession = false;
+#endif
+    const bool liveSessionUp = avpn::healthSessionUp(m_lastTunnelState == Vpn::Connected,
+                                                     m_lastTunnelState == Vpn::Reconnecting,
+                                                     m_engine.state() == avpn::EngineState::Connected,
+                                                     kReconnectingKeepsSession);
+    if (!healthTickAllowed(m_latch, liveSessionUp, m_paused)) {
         m_engine.resetHealthSampling();
         return;
     }

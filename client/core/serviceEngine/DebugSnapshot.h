@@ -202,6 +202,19 @@ inline bool healthTickAllowed(const TeardownLatch &latch, bool connected, bool p
 {
     return connected && !latch.awaitingStopConfirm && !paused;
 }
+// The "connected" input of healthTickAllowed: is the live session up. Emulator round 26.11 (D2, Android): the VPN service
+// rebuilds the session it holds on a network change by itself (AmneziaVpnService.reconnect) and reports Reconnecting
+// until the rebuilt tunnel's first handshake - with no deadline. A rebuild that never handshook left the engine waiting
+// 2 min 23 s, with the live probe and the dead rule off (they need the platform's Connected), until the person pressed
+// Stop. Where Reconnecting is only that rebuild of the same session (reconnectingKeepsSession: Android) and the engine
+// holds it (Connected), it counts as the live session: the existing probe and dead rule judge it, and a dead one ends in
+// the ordinary failover (the owner's liveLost). Elsewhere Reconnecting stays transitional: the iOS extension and the
+// desktop daemon bound their own.
+inline bool healthSessionUp(bool platformConnected, bool platformReconnecting, bool engineConnected,
+                            bool reconnectingKeepsSession)
+{
+    return platformConnected || (reconnectingKeepsSession && platformReconnecting && engineConnected);
+}
 // Гейт reconcile. AwaitStatus — запросить статус (с backoff, ограниченно) и ждать; Wait — ждать
 // без запроса (бюджет запросов исчерпан, стоп ведёт сторож стопа); Proceed — обычная логика.
 // Для needStatusBeforeStart исчерпанный бюджет = Proceed: натив сам проверяет владение профилем
