@@ -59,6 +59,7 @@ import org.amnezia.vpn.protocol.xray.Xray
 import org.amnezia.vpn.util.LoadLibraryException
 import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.Prefs
+import org.amnezia.vpn.util.ServicePrefs
 import org.amnezia.vpn.util.TribeSession
 import org.amnezia.vpn.util.TribeStart
 import org.amnezia.vpn.util.net.NetworkState
@@ -227,7 +228,8 @@ open class AmneziaVpnService : VpnService() {
                     }
 
                     Action.SET_SAVE_LOGS -> {
-                        Log.saveLogs = msg.data.getBoolean(MSG_SAVE_LOGS)
+                        // AVPN (C1): taken, not written - the app's process saved it in its own file
+                        Log.useSaveLogs(msg.data.getBoolean(MSG_SAVE_LOGS))
                     }
                 }
             }
@@ -662,9 +664,9 @@ open class AmneziaVpnService : VpnService() {
         reportTunnelBuild(TUNNEL_BUILDING, seq, leg)
         Log.i(TAG, "Tunnel build $seq: begin leg=$leg")
         val launched = if (vpnConfig == null) {
-            connectToVpn(Prefs.load(PREFS_CONFIG_KEY), seq, leg, begin)
+            connectToVpn(loadServiceKey(PREFS_CONFIG_KEY), seq, leg, begin)
         } else {
-            Prefs.save(PREFS_CONFIG_KEY, vpnConfig)
+            ServicePrefs.save(PREFS_CONFIG_KEY, vpnConfig)
             connectToVpn(vpnConfig, seq, leg, begin)
         }
         if (!launched) {
@@ -804,13 +806,19 @@ open class AmneziaVpnService : VpnService() {
         serverName = config?.opt("description") as String?
         serverIndex = config?.opt("serverIndex") as Int? ?: -1
         Log.d(TAG, "Save server data: ($serverIndex, $serverName)")
-        Prefs.save(PREFS_SERVER_NAME, serverName)
-        Prefs.save(PREFS_SERVER_INDEX, serverIndex)
+        ServicePrefs.save(PREFS_SERVER_NAME, serverName ?: "") // "" = none (a removed key would read the old file)
+        ServicePrefs.save(PREFS_SERVER_INDEX, serverIndex)
     }
 
+    // AVPN (emulator round 3, C1): the service's keys live in its own file (ServicePrefs) - the app's file is written by
+    // the app's process only, since every write of a process puts its whole copy back (Prefs.kt). An install updated
+    // from a build that kept them in the app's file reads them there (read only) until this service writes its own.
+    private inline fun <reified T> loadServiceKey(key: String): T =
+        if (ServicePrefs.contains(key)) ServicePrefs.load(key) else Prefs.load(key)
+
     private fun loadServerData() {
-        serverName = Prefs.load<String>(PREFS_SERVER_NAME).ifBlank { null }
-        if (serverName != null) serverIndex = Prefs.load(PREFS_SERVER_INDEX)
+        serverName = loadServiceKey<String>(PREFS_SERVER_NAME).ifBlank { null }
+        if (serverName != null) serverIndex = loadServiceKey(PREFS_SERVER_INDEX)
         Log.d(TAG, "Load server data: ($serverIndex, $serverName)")
     }
 

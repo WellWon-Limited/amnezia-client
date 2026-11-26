@@ -50,18 +50,25 @@ object Log {
 
     @Volatile
     private var _saveLogs: Boolean = false
+    // set by the app's (UI) process: the flag is taken and saved in its file (Prefs)
     var saveLogs: Boolean
         get() = _saveLogs
         set(value) {
-            if (_saveLogs != value) {
-                if (value && !logDir.exists() && !logDir.mkdir()) {
-                    NativeLog.e(TAG, "Failed to create dir: $logDir")
-                    return
-                }
-                _saveLogs = value
-                Prefs.save(PREFS_SAVE_LOGS_KEY, value)
-            }
+            if (useSaveLogs(value)) Prefs.save(PREFS_SAVE_LOGS_KEY, value)
         }
+
+    // AVPN (emulator round 3, C1): the flag taken without writing it - for the value just read from the app's file and
+    // for a VPN service told by message (MSG_SAVE_LOGS): the app's file is written by the app's process only, since every
+    // write of a process puts its whole copy back (Prefs.kt). true: the flag changed.
+    fun useSaveLogs(value: Boolean): Boolean {
+        if (_saveLogs == value) return false
+        if (value && !logDir.exists() && !logDir.mkdir()) {
+            NativeLog.e(TAG, "Failed to create dir: $logDir")
+            return false
+        }
+        _saveLogs = value
+        return true
+    }
 
     @JvmStatic
     fun v(tag: String, msg: String) = log(tag, msg, V)
@@ -96,7 +103,7 @@ object Log {
     fun init(context: Context) {
         v(TAG, "Init Log")
         logDir = File(context.cacheDir, "logs")
-        saveLogs = Prefs.load(PREFS_SAVE_LOGS_KEY)
+        useSaveLogs(Prefs.load(PREFS_SAVE_LOGS_KEY)) // every process reads it; only the app's process writes it
     }
 
     fun getLogs(): String =

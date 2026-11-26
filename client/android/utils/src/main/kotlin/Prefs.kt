@@ -10,25 +10,32 @@ import kotlin.reflect.typeOf
 private const val TAG = "Prefs"
 private const val PREFS_FILE = "org.amnezia.vpn.prefs"
 private const val SECURE_PREFS_FILE = "$PREFS_FILE.secure"
+// AVPN (emulator round 3, C1): the VPN service processes' own file (ServicePrefs)
+private const val SERVICE_PREFS_FILE = "org.amnezia.vpn.service.prefs"
+private const val SECURE_SERVICE_PREFS_FILE = "$SERVICE_PREFS_FILE.secure"
 
-object Prefs {
-    private lateinit var app: Application
+private lateinit var prefsApp: Application
+
+// AVPN (emulator round 3, C1): Android's SharedPreferences live per process - a process loads a file once, and each of
+// its writes puts that process's WHOLE copy back. A write in one process therefore drops or reverts every key another
+// process wrote after this one loaded the file: the notification question's "asked" mark vanished when the VPN service
+// (started by the same tap, so it loaded the file before the question was shown) saved its config on the next leg.
+// One writing process per file: Prefs is the app's (UI) process's, ServicePrefs the VPN service processes'; any other
+// process only reads a file.
+open class PrefsFile internal constructor(private val plainName: String, private val secureName: String) {
     val prefs: SharedPreferences
         get() = try {
             EncryptedSharedPreferences(
-                app,
-                SECURE_PREFS_FILE,
-                MasterKey(app)
+                prefsApp,
+                secureName,
+                MasterKey(prefsApp)
             )
         } catch (e: Exception) {
             Log.e(TAG, "Getting Encryption Storage failed: $e, plaintext fallback")
-            app.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+            prefsApp.getSharedPreferences(plainName, Context.MODE_PRIVATE)
         }
 
-    fun init(app: Application) {
-        Log.v(TAG, "Init Prefs")
-        this.app = app
-    }
+    fun contains(key: String): Boolean = prefs.contains(key)
 
     fun save(key: String, value: Boolean) =
         prefs.edit().putBoolean(key, value).apply()
@@ -56,3 +63,16 @@ object Prefs {
         } as T
     }
 }
+
+// Written by the app's (UI) process only.
+object Prefs : PrefsFile(PREFS_FILE, SECURE_PREFS_FILE) {
+    fun init(app: Application) {
+        Log.v(TAG, "Init Prefs")
+        prefsApp = app
+    }
+}
+
+// AVPN (C1): written by the VPN service processes only (AmneziaVpnService: the last config and server). A start that
+// carries a config sets all of these keys; only the service processes' own keys are here, so no write of theirs can
+// drop a key of the app's.
+object ServicePrefs : PrefsFile(SERVICE_PREFS_FILE, SECURE_SERVICE_PREFS_FILE)
