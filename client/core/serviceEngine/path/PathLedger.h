@@ -27,11 +27,12 @@
 //   Refused / no seat do not touch the streak or the ladder (they say nothing about the network): they keep
 //   the path "dead, in quarantine" for refusalCooldownMs only.
 // Failure evidence expires by its own age (settled(), device round R 26.11): once the quarantine is over and the
-// newest failure is failureTtlMs old (6 h, the ladder's top), the streak, the no-data time, the ended quarantine and
-// the data proof that predates the failure are void - for record() (a later failure starts a new streak at 1) and for
-// every reader (view(), tunnelNoDataHere()). Probe facts are kept: such a path is unknown, or working by probe after
-// a recent probe pass. Forgetting by age is not contradiction by newer evidence: a probe pass right after a lost
-// handshake still lifts the path back to its earlier state, data proof included (record(), probe ok).
+// newest failure is failureTtlMs old (6 h, the ladder's top), the streak, the no-data time and the ended quarantine
+// are void - for record() (a later failure starts a new streak at 1) and for every reader (view(),
+// tunnelNoDataHere()). A data proof is voided with them only when a tunnel that carried no data superseded it: such
+// a path is unknown, or working by probe after a recent probe pass. Lost handshakes alone are forgotten with the
+// data proof kept, as a probe pass right after a lost handshake lifts the path back to its earlier state (record(),
+// probe ok). Probe facts are always kept.
 // Speed (device round 19.11, iPhone Air on LTE: repeats kept landing on Estonia 3 AmneziaWG, median 5.0 s, while
 // Finland 1 Xray proven on the same network connected in 3.7 s - "newest proof first" made the last path win for
 // ever): a measured time is evidence like any other. dataMs = time to tunnel + time to first byte of the data oks of
@@ -289,10 +290,12 @@ public:
     static qint64 lastFailureAt(const LedgerEntry &e) { return e.lastFailureMs > 0 ? e.lastFailureMs : e.noDataMs; }
 
     // The one settle rule over an entry (device round R 26.11, review of 1ff3cf163): failure evidence is void once
-    // the quarantine is over and the newest failure is at least failureTtlMs old - the streak, the no-data time,
-    // the ended quarantine, and the data proof that predates the failure (a later failure superseded it; when the
-    // failure is forgotten for age, that proof does not come back - a data ok newer than the failure cannot coexist
-    // with a streak, it resets it). Probe facts are kept. A live failure is never shortened or extended by a probe
+    // the quarantine is over and the newest failure is at least failureTtlMs old - the streak, the no-data time and
+    // the ended quarantine. The data proof goes with it only when the forgotten evidence holds a tunnel that carried
+    // no data not older than that proof (noDataMarkHolds; review of 863c9d8e8): a no-data superseded the proof, and
+    // forgetting the failure for age does not bring the proof back. Lost handshakes alone, of any count, are
+    // forgotten with the proof kept - forgetting by age is never harsher than the probe lift (one lost handshake
+    // must not kill a path). Probe facts are kept. A live failure is never shortened or extended by a probe
     // pass: the pass changes neither the newest failure's time nor the quarantine. A streak with no failure time at
     // all (a hand-made entry) is left to the entry's evidenceTtlMs. Applied to the stored entry at the top of
     // record() and to a copy in every const reader.
@@ -303,10 +306,11 @@ public:
         const qint64 last = lastFailureAt(e);
         if (last <= 0 || nowMs < e.quarantineUntilMs || nowMs - last < t.failureTtlMs)
             return e;
+        const bool supersededProof = noDataMarkHolds(e); // only a tunnel that carried no data supersedes a data proof
         e.failStreak = 0;
         e.noDataMs = 0;
         e.quarantineUntilMs = 0;
-        if (e.dataOkMs > 0 && e.dataOkMs <= last) {
+        if (supersededProof) {
             e.dataOkMs = 0;
             e.connectMs = -1;
             e.ttfbMs = -1;
