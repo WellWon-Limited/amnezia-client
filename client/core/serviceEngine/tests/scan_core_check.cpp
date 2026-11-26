@@ -3066,6 +3066,58 @@ static void labSeams()
     }
 }
 
+// S3 (owner road 26.11, J8): after a relaunch the button already knows the hour is spent. The gate is the start's own
+// rule with no plan known (ScanBudget.h decideScanStart): a fresh machine over the persisted ledger shows the limit and
+// a tap sends nothing; with the hour free the button is enabled and a tap fetches the manifest; and whatever the next
+// plan, a gate that says free is never followed by a start the same rule blocks.
+static void s3BudgetGateIsTheStartRule()
+{
+    World w = baseWorld("s3_gate", hostMac(), ScanNetKind::Cellular);
+    const ScanTunables t;
+    const auto ledgerOf = [](qint64 spent) {
+        QJsonArray l;
+        l << QJsonObject{{QStringLiteral("at_ms"), double(kT0 - 20 * 60000)}, {QStringLiteral("bytes"), double(spent)},
+                         {QStringLiteral("cellular"), true}};
+        return l;
+    };
+    // the hour spent (as on 26.11: about 3.7 MB of 5 MiB, less than one scan's cap left)
+    {
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(3800000));
+        ScanOpen o = openOf(w, QString(), false);
+        o.connectOnOpen = false;
+        const ScanStep open = m.opened(o, kT0);
+        CHECK(!open.has(ScanActionKind::RequestManifest) && m.phase() == ScanPhase::NoScan);
+        const ScanView v = m.view(kT0);
+        CHECK(v.bar.button == ScanBarButton::RetryInMinutes && !v.bar.buttonEnabled && v.bar.buttonValue >= 1
+              && v.bar.hint == ScanHint::CellularBudgetHour);
+        CHECK(!m.retryTapped(kT0 + 2000).has(ScanActionKind::RequestManifest));
+        CHECK(!m.moreTapped(QString(), kT0 + 2100).has(ScanActionKind::RequestManifest));
+    }
+    // the hour free: enabled, a tap fetches the manifest
+    {
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(1000000));
+        ScanOpen o = openOf(w, QString(), false);
+        o.connectOnOpen = false;
+        const ScanStep open = m.opened(o, kT0);
+        const ScanView v = m.view(kT0);
+        CHECK(v.bar.button != ScanBarButton::RetryInMinutes && v.bar.hint != ScanHint::CellularBudgetHour);
+        // a desktop host scans on open: the manifest is fetched at once
+        CHECK(open.has(ScanActionKind::RequestManifest) && m.phase() == ScanPhase::Preparing);
+    }
+    // the two can never disagree in that direction: gate free => the start allowed for any plan
+    for (qint64 spent = 0; spent <= 5242880; spent += 65536) {
+        ScanBudgetLedger l = ScanBudgetLedger::fromJson(ledgerOf(spent));
+        const ScanBudgetDecision gate = decideScanStart(l, kT0, ScanNetKind::Cellular, -1, 0, t);
+        for (const qint64 plan : {qint64(0), qint64(65536), qint64(600000), qint64(1572864), qint64(5000000), qint64(1) << 40}) {
+            const ScanBudgetDecision start = decideScanStart(l, kT0, ScanNetKind::Cellular, plan, 268435456, t);
+            if (gate.allowed && !start.allowed)
+                CHECK(!"gate free but the start blocked");
+        }
+    }
+}
+
 static void cooldownRule()
 {
     World w = baseWorld("cool", hostMac(), ScanNetKind::Cellular);
@@ -3296,7 +3348,9 @@ static void overruns()
             if (n.id == QLatin1String("1") || n.id == QLatin1String("4:xray"))
                 two << n;
         wh.nodes = two;
-        const qint64 cap = 5242880, left = 640000; // the projection (one own Xray burst) and the app side fit
+        // S3 (owner road 26.11): a start needs a whole scan's cap left in the hour (the gate is the start rule with no
+        // plan known), so the hour can be crossed only from exactly that much left
+        const qint64 cap = 5242880, left = 1572864;
         QJsonArray ledger;
         ledger << QJsonObject{{QStringLiteral("at_ms"), double(kT0 - 20 * 60000)}, {QStringLiteral("bytes"), double(cap - left)}, {QStringLiteral("cellular"), true}};
         ScanMachine m(wh.caps);
@@ -5716,6 +5770,7 @@ int main(int argc, char **argv)
     hostFailures();
     contractV23();
     labSeams();
+    s3BudgetGateIsTheStartRule();
     cooldownRule();
     rowsAfter17Nov();
     countrylessRows();

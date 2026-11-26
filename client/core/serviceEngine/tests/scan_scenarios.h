@@ -1105,7 +1105,9 @@ inline QList<Scenario> scenarios()
                       f.check(bar.value(QLatin1String("button")).toString() == QLatin1String("retry_in_min"), QStringLiteral("retry in minutes"));
                       f.check(bar.value(QLatin1String("button_value")).toInt() >= 1, QStringLiteral("minutes >= 1"));
                       f.check(bar.value(QLatin1String("hint")).toString() == QLatin1String("cellular_budget_hour"), QStringLiteral("budget hint"));
-                      f.check(countActions(d, ScanActionKind::RequestManifest) == 1, QStringLiteral("second open fetched nothing"));
+                      // S3 (owner road 26.11): less than a scan's cap left in the hour - the gate (the start's own rule,
+                      // no plan known) blocks before any request; before, the first open fetched manifest + token
+                      f.check(countActions(d, ScanActionKind::RequestManifest) == 0, QStringLiteral("no open fetched anything"));
                   }};
 
     // 20. Support chat run_diag: scan, then the button's check runs by itself.

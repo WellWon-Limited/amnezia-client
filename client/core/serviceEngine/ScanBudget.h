@@ -203,6 +203,19 @@ inline ScanBudgetDecision decideScanBudget(const ScanBudgetLedger &ledger, qint6
     return d;
 }
 
+// S3 (owner road 26.11, J8): THE allowance rule of a scan start - the button's gate (before a manifest, and so after a
+// relaunch too) and the start check alike. planBytes = the plan's projection with the app side and the access attempts
+// (the start), or < 0 when no plan is known (the gate): then the start rule's own worst case, scan_budget_scan_bytes -
+// a cellular need is capped there (decideScanBudget), so the gate can never say "free" for a start the same rule then
+// blocks on the cellular hour, whatever the next plan is. The ledger is the persisted one (restoreBudget); nothing of
+// the last plan is needed (before: the last projection, memory only, read 0 after a relaunch - the button looked
+// enabled and each tap fetched manifest + token before the real check blocked it).
+inline ScanBudgetDecision decideScanStart(const ScanBudgetLedger &ledger, qint64 nowMs, ScanNetKind net, qint64 planBytes,
+                                          qint64 deviceBytesPerHour, const ScanTunables &t)
+{
+    return decideScanBudget(ledger, nowMs, net, planBytes >= 0 ? planBytes : qint64(t.budgetScanBytes), deviceBytesPerHour, t);
+}
+
 // Whole minutes for the «Повторить через N мин» button (at least 1 while blocked).
 inline int scanRetryMinutes(qint64 retryInMs)
 {

@@ -2323,14 +2323,10 @@ private:
         return budgetBlocked(now).hourly ? QStringLiteral("budget") : QString();
     }
 
+    // S3 (owner road 26.11): the gate is the start's own rule with no plan known (ScanBudget.h decideScanStart).
     ScanBudgetDecision budgetBlocked(qint64 now) const
     {
-        if (m_net.kind != ScanNetKind::Cellular && m_manifest.manifest.deviceBytesPerHour <= 0) {
-            ScanBudgetDecision d;
-            return d;
-        }
-        const qint64 projection = (m_lastProjection > 0 ? m_lastProjection : 0) + appWorstCase();
-        return decideScanBudget(m_ledger, now, m_net.kind, projection, m_manifest.manifest.deviceBytesPerHour, m_t);
+        return decideScanStart(m_ledger, now, m_net.kind, -1, m_manifest.manifest.deviceBytesPerHour, m_t);
     }
 
     void adoptNetwork(const ScanNetwork &n, const ScanCachedResult &cached, qint64 now)
@@ -2715,7 +2711,7 @@ private:
 
     void beginScan(qint64 now, ScanStep &s, bool userPressedConnect = false)
     {
-        // Budget pre-check with the last projection (no manifest fetch on a blocked cellular hour).
+        // Budget pre-check by the start's own rule with no plan known (no manifest fetch on a blocked cellular hour).
         const ScanBudgetDecision pre = budgetBlocked(now);
         if (pre.hourly) {
             toNoScan(QStringLiteral("budget"), now, s);
@@ -2960,10 +2956,9 @@ private:
         m_planRemaining = m_fromServer ? (m_serverExhausted ? 0 : 1) : plan.remaining;
         m_planCandidates = plan.probe.size() + plan.orderOnly.size();
         m_manifestRevision = m_manifest.manifest.upstreamRevision;
-        m_lastProjection = plan.projectedBytes;
         const qint64 attempts = 2 * qint64(m_t.costNetinfoBytes); // the host's opening + closing access attempts
-        const ScanBudgetDecision b = decideScanBudget(m_ledger, now, m_scanNet.kind, plan.projectedBytes + appWorstCase() + attempts,
-                                                      m_manifest.manifest.deviceBytesPerHour, m_t);
+        const ScanBudgetDecision b = decideScanStart(m_ledger, now, m_scanNet.kind, plan.projectedBytes + appWorstCase() + attempts,
+                                                     m_manifest.manifest.deviceBytesPerHour, m_t);
         if (!b.allowed) {
             m_startedVpn = false;
             toNoScan(QStringLiteral("budget"), now, s);
@@ -4663,7 +4658,6 @@ private:
     qint64 m_lastSeq = 0;
     qint64 m_spent = 0;
     qint64 m_cap = -1;
-    qint64 m_lastProjection = 0;
     QHash<QString, ScanClass> m_verdicts;     // per candidate of this scan (the Doctor summary): every planned one ends here
     QHash<QString, QString> m_nvReasonOf;     // candidate id -> reason key of its NotVerified verdict
     QHash<QString, QString> m_liveReasons;    // node id -> why the live row stayed unproven (live_budget, live_<reason>)
