@@ -2154,7 +2154,8 @@ static void caseRefusedStart()
 
 // Owner road 26.11 (S3, J8; review C2): the last plan's projection is written with the ledger and read back at the
 // coordinator's construction - a fresh process over a spent hour shows the limit and sends nothing (no manifest, no
-// live probe through the VPN that is up); a scan writes its projection with the ledger for the next process.
+// live probe through the VPN that is up); a scan writes its projection with the ledger for the next process. No numbers
+// stored here: the hour is judged by the compiled 5 MiB (caseBudgetNumbersAfterRelaunch has the numbers in force).
 static void caseBudgetGateAfterRelaunch()
 {
     g_case = QStringLiteral("budget_gate_after_relaunch");
@@ -2186,6 +2187,133 @@ static void caseBudgetGateAfterRelaunch()
         CHECK_EQ(w.phase(), QStringLiteral("done"));
         const QJsonObject p = QJsonDocument::fromJson(w.store.m.value(QLatin1String(kScanBudgetProjectionStoreKey))).object();
         CHECK(p.value(QStringLiteral("cellular")).toDouble() > 0); // written with the ledger at the scan's end
+    }
+}
+
+// Review round 60 (claim B): the numbers in force are written when a manifest is applied and with the ledger, and read
+// back at construction - after a relaunch the gate, the connect race's share and the requests outside a scan judge with
+// the limit that was in force (the server's 100 MiB an hour since 26.11), not the compiled 5 MiB.
+static void caseBudgetNumbersAfterRelaunch()
+{
+    g_case = QStringLiteral("budget_numbers_after_relaunch");
+    const QJsonObject n100{{"scan_budget_cellular_bytes_per_hour", 104857600.0}};
+    const QByteArray n100Json = QJsonDocument(n100).toJson(QJsonDocument::Compact);
+    const auto seed = [](World &w, qint64 spent, const QByteArray &numbers) {
+        QJsonArray l;
+        l << QJsonObject{{"at_ms", double(w.clock.t - 20 * 60000)}, {"bytes", double(spent)}, {"cellular", true}};
+        w.store.m.insert(QLatin1String(kScanBudgetStoreKey), QJsonDocument(l).toJson(QJsonDocument::Compact));
+        w.store.m.insert(QLatin1String(kScanBudgetProjectionStoreKey),
+                         QJsonDocument(QJsonObject{{"cellular", 1435006.0}, {"other", 0.0}}).toJson(QJsonDocument::Compact));
+        if (!numbers.isNull())
+            w.store.m.insert(QLatin1String(kScanBudgetNumbersStoreKey), numbers);
+    };
+    const auto stored = [](World &w) {
+        return QJsonDocument::fromJson(w.store.m.value(QLatin1String(kScanBudgetNumbersStoreKey))).object();
+    };
+    const auto bar = [](World &w) { return w.s->view().value("bar").toMap(); };
+    const qint64 defaultHour = ScanTunables().budgetCellularBytesPerHour;
+    // the numbers a manifest applied are written at once (the app may be ended mid-scan) and again with the ledger; the
+    // next process restores them before any request of its own
+    {
+        World w(capsMac(), ScanNetKind::Cellular, 6);
+        w.server.numbers = n100;
+        w.liveOn(QStringLiteral("4:xray"));
+        w.start();
+        w.s->open();
+        w.run(60); // the manifest (40 ms) is applied, the scan runs
+        CHECK(w.phase() != QStringLiteral("done") && w.phase() != QStringLiteral("no_scan"));
+        CHECK_EQ(stored(w), n100);
+        w.run(12000);
+        CHECK_EQ(w.phase(), QStringLiteral("done"));
+        CHECK_EQ(stored(w), n100);
+        w.s->close();
+        w.run(500);
+        const int manifests = w.http.count("/v1/scan/manifest");
+        w.s.reset();
+        w.start();
+        CHECK_EQ(qint64(w.s->machine().tunables().budgetCellularBytesPerHour), qint64(104857600));
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), manifests);
+    }
+    // the relaunch of the finding: three scans on LTE inside the hour (3.8 MB), the full plan's projection, the server's
+    // 100 MiB in force - «Сканировать» is offered and enabled (was «Сканировать через N мин» for up to an hour); the tap
+    // fetches the manifest and the scan runs
+    {
+        World w(capsMac(), ScanNetKind::Cellular, 6);
+        w.server.numbers = n100;
+        seed(w, 3800000, n100Json);
+        w.liveOn(QStringLiteral("4:xray"));
+        w.start();
+        w.s->show();
+        w.run(200);
+        CHECK_EQ(bar(w).value("button").toString(), QStringLiteral("retry"));
+        CHECK(bar(w).value("button_enabled").toBool());
+        CHECK(bar(w).value("hint").toString() != QStringLiteral("cellular_budget_hour"));
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 0); // showing never scans
+        w.s->retry();
+        w.run(12000);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 1);
+        CHECK_EQ(w.host.count("scan_start"), 1);
+        CHECK_EQ(w.phase(), QStringLiteral("done"));
+    }
+    // no numbers stored (a store from before this build), or an unreadable value: the compiled defaults - blocked as
+    // before, nothing sent
+    for (const QByteArray &numbers : {QByteArray(), QByteArray("not json {"), QByteArray("[104857600]")}) {
+        World w(capsMac(), ScanNetKind::Cellular, 6);
+        w.server.numbers = n100;
+        seed(w, 3800000, numbers);
+        w.liveOn(QStringLiteral("4:xray"));
+        w.start();
+        CHECK_EQ(qint64(w.s->machine().tunables().budgetCellularBytesPerHour), defaultHour);
+        w.s->open();
+        w.run(2000);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 0);
+        CHECK_EQ(int(w.liveProbes.size()), 0);
+        CHECK_EQ(bar(w).value("button").toString(), QStringLiteral("retry_in_min"));
+    }
+    // the server LOWERED the limit while the restored numbers say 100 MiB: one manifest request, whose start check judges
+    // with the fresh 5 MiB and blocks; the fresh numbers are kept - the tap and the next relaunch send nothing
+    {
+        World w(capsMac(), ScanNetKind::Cellular, 6);
+        const QJsonObject n5{{"scan_budget_cellular_bytes_per_hour", 5242880.0}};
+        w.server.numbers = n5;
+        seed(w, 4500000, n100Json);
+        w.liveOn(QStringLiteral("4:xray"));
+        w.start();
+        w.s->open();
+        w.run(2000);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 1);
+        CHECK_EQ(w.host.count("scan_start"), 0);
+        CHECK_EQ(int(w.liveProbes.size()), 0);
+        CHECK_EQ(w.phase(), QStringLiteral("no_scan"));
+        CHECK_EQ(w.s->view().value("empty").toMap().value("reason").toString(), QStringLiteral("budget"));
+        CHECK_EQ(bar(w).value("button").toString(), QStringLiteral("retry_in_min"));
+        CHECK_EQ(stored(w), n5);
+        w.s->retry();
+        w.run(1000);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 1);
+        w.s->close();
+        w.run(500);
+        w.s.reset();
+        w.start();
+        w.s->open();
+        w.run(2000);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 1);
+        CHECK_EQ(bar(w).value("button").toString(), QStringLiteral("retry_in_min"));
+    }
+    // the connect race's share and a request outside a scan, before the first manifest of the process: 5.3 MB of the
+    // hour spent - with the restored 100 MiB the race gets the rest of the hour and the pool is asked; with no numbers
+    // stored both get nothing (the compiled 5 MiB), as before
+    for (const bool withNumbers : {true, false}) {
+        World w(capsMac(), ScanNetKind::Cellular, 6);
+        w.server.scopeApi = true;
+        w.poolOnOpen = true;
+        seed(w, 5300000, withNumbers ? n100Json : QByteArray());
+        w.start();
+        CHECK_EQ(w.s->raceBytesLeft(), withNumbers ? qint64(104857600 - 5300000) : qint64(0));
+        w.s->show();
+        w.run(5000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), withNumbers ? 1 : 0);
+        CHECK_EQ(w.http.count("/v1/scan/manifest"), 0);
     }
 }
 
@@ -4716,6 +4844,7 @@ int main(int argc, char **argv)
     caseRefusedStart();
     caseRefusedStartMemory();
     caseBudgetGateAfterRelaunch();
+    caseBudgetNumbersAfterRelaunch();
     caseHostReasons();
     caseServiceErrors();
     caseHostDied();

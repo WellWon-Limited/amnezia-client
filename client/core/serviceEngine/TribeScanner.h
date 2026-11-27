@@ -63,7 +63,8 @@
 //    machine's own host-gen guard covers that scan; joining later would break the S6 cooldown). Only the
 //    CURRENT scan's progress (binding captured when its start was sent) moves the element, and it only moves
 //    forward: an older counter of the same monitor start, or a start already left, is a late reply's past.
-//  - Persistence (IScanStore): ledger "avpn/scanBudget" (restored at construction), cached results per
+//  - Persistence (IScanStore): ledger "avpn/scanBudget" with the last plan's projection "avpn/scanBudgetProjection"
+//    and the numbers in force "avpn/scanBudgetNumbers" (all three restored at construction), cached results per
 //    network key + weak fingerprint under "avpn/scanCache/<16 hex>" (index "avpn/scanCacheIndex", <= 8), the
 //    stored manifests (ScanApiClient).
 // Upstream Amnezia has no counterpart.
@@ -270,6 +271,9 @@ inline constexpr char kScanCapsAwgWithheldField[] = "awg_unavailable";
 inline constexpr char kScanBudgetStoreKey[] = "avpn/scanBudget";
 // S3 (review C2): the last plan's projection per network kind, written with the ledger, read back at construction.
 inline constexpr char kScanBudgetProjectionStoreKey[] = "avpn/scanBudgetProjection";
+// Review round 60 (claim B): the numbers in force (the last applied manifest's `numbers`), written when a manifest is
+// applied and with the ledger, read back at construction - the gate after a relaunch judges with the limit in force.
+inline constexpr char kScanBudgetNumbersStoreKey[] = "avpn/scanBudgetNumbers";
 inline constexpr char kScanCacheStorePrefix[] = "avpn/scanCache/";
 inline constexpr char kScanCacheIndexKey[] = "avpn/scanCacheIndex";
 inline constexpr int kScanCacheMaxNetworks = 8;

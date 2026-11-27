@@ -1081,6 +1081,7 @@ public:
         ScanStep s;
         m_manifest = m;
         m_haveManifest = true;
+        m_numbers = m.manifest.numbers; // the numbers in force from now on (persisted by the coordinator, restoreNumbers)
         m_t = ScanTunables::fromNumbers(m.manifest.numbers);
         // Access evidence belongs to this network AND this scan token (net tokens are salted per token, F5):
         // the manifest's facts replace the old ones, also when there are none.
@@ -2330,7 +2331,8 @@ private:
     }
 
     // S3 (owner road 26.11; review C2): the gate is the start's own rule over the last plan's projection of this network
-    // kind (persisted with the ledger, restoreProjection), ScanBudget.h decideScanStart.
+    // kind (persisted with the ledger, restoreProjection), ScanBudget.h decideScanStart, judged with the numbers in force
+    // (persisted too, restoreNumbers).
     ScanBudgetDecision budgetBlocked(qint64 now) const
     {
         return decideScanStart(m_ledger, now, m_net.kind, startNeed(lastProjectionFor(m_net.kind)),
@@ -2355,6 +2357,27 @@ public:
     QJsonObject projectionJson() const
     {
         return QJsonObject{{QStringLiteral("cellular"), double(m_lastProjectionCell)}, {QStringLiteral("other"), double(m_lastProjectionOther)}};
+    }
+    // Review round 60 (claim B): the numbers in force - the last applied manifest's `numbers`, as the server published
+    // them - kept with the ledger and the projection in the coordinator's store and given back at construction, before
+    // the first view: after a relaunch the gate judges the persisted ledger and projection with the limit that was in
+    // force (the server's 100 MiB an hour), not the compiled defaults (5 MiB). Read back through fromNumbers, the
+    // manifest's own clamps; a value that is no number is absent, an absent or unreadable store is the compiled
+    // defaults. The first manifest of the process replaces them (manifestReady) before its start check (startHost).
+    void restoreNumbers(const QJsonObject &o)
+    {
+        m_numbers.clear();
+        for (auto it = o.constBegin(); it != o.constEnd(); ++it)
+            if (it.value().isDouble())
+                m_numbers.insert(it.key(), it.value().toDouble());
+        m_t = ScanTunables::fromNumbers(m_numbers);
+    }
+    QJsonObject numbersJson() const
+    {
+        QJsonObject o;
+        for (auto it = m_numbers.constBegin(); it != m_numbers.constEnd(); ++it)
+            o.insert(it.key(), it.value());
+        return o;
     }
 
 private:
@@ -4679,6 +4702,7 @@ private:
     // --- state ------------------------------------------------------------------------------------------------
     ScanHostCaps m_caps;
     ScanTunables m_t;
+    QMap<QString, double> m_numbers; // the numbers m_t was built from: the last manifest's, or restored (persisted); none = defaults
     ScanBudgetLedger m_ledger;
     ScanPhase m_phase = ScanPhase::Idle;
     ScanNetwork m_net;

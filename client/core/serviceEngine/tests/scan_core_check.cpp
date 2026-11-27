@@ -3099,7 +3099,8 @@ static void s3BudgetGateIsTheStartRule()
                || st.has(ScanActionKind::RequestCandidates) || st.has(ScanActionKind::SendOutcomes);
     };
     // the hour spent (as on 26.11: about 3.7 MB of 5 MiB) and the last plan's projection persisted - a fresh process,
-    // the VPN up on a row: blocked, nothing chargeable on open, tap or «Найти ещё»
+    // the VPN up on a row: blocked, nothing chargeable on open, tap or «Найти ещё». No numbers restored: the compiled
+    // 5 MiB an hour (the numbers in force were the server's 5 MiB, or none were stored - the cases below)
     {
         ScanMachine m(w.caps);
         m.restoreBudget(ledgerOf(3800000));
@@ -3143,6 +3144,114 @@ static void s3BudgetGateIsTheStartRule()
         CHECK(m.phase() == ScanPhase::NoScan && m.view(kT0 + 60).empty.reason == QLatin1String("budget"));
         CHECK(m.projectionJson().value(QStringLiteral("cellular")).toDouble() > 0);
         CHECK(!chargeable(m.retryTapped(kT0 + 2000)) && m.view(kT0 + 2000).bar.button == ScanBarButton::RetryInMinutes);
+    }
+
+    // Review round 60 (claim B): the numbers in force are an input of the gate too - persisted with the ledger and the
+    // projection (restoreNumbers / numbersJson) - so after a relaunch the gate judges with the limit that was in force,
+    // not the compiled 5 MiB. 26.11 on: the server publishes 100 MiB an hour on cellular.
+    const QJsonObject n100{{QStringLiteral("scan_budget_cellular_bytes_per_hour"), 104857600.0}};
+    const auto blockedView = [](const ScanView &v) {
+        return v.bar.button == ScanBarButton::RetryInMinutes && !v.bar.buttonEnabled && v.bar.buttonValue >= 1
+               && v.bar.hint == ScanHint::CellularBudgetHour;
+    };
+    const auto freeView = [](const ScanView &v) {
+        return v.bar.button == ScanBarButton::Retry && v.bar.buttonEnabled && v.bar.hint != ScanHint::CellularBudgetHour;
+    };
+    // N1: three scans on LTE inside the hour (3.8 MB), the app ended, opened again: the full plan's projection and the
+    // server's 100 MiB restored - «Сканировать» is offered and enabled, the tap fetches the manifest (was: «Сканировать
+    // через N мин» for up to an hour, with about 95 MiB of the hour free)
+    {
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(3800000));
+        m.restoreProjection(projection(1435006));
+        m.restoreNumbers(n100);
+        CHECK(m.tunables().budgetCellularBytesPerHour == 104857600);
+        CHECK(!chargeable(m.shown(openOf(w, QStringLiteral("1"), true), kT0)));
+        CHECK(freeView(m.view(kT0)));
+        const ScanStep tap = m.retryTapped(kT0 + 1000);
+        CHECK(tap.has(ScanActionKind::RequestManifest) && m.phase() != ScanPhase::NoScan);
+    }
+    // N2: the same relaunch with no numbers stored (a store from before this build, or none written yet): the compiled
+    // defaults - blocked exactly as before
+    {
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(3800000));
+        m.restoreProjection(projection(1435006));
+        m.restoreNumbers(QJsonObject());
+        CHECK(m.tunables().budgetCellularBytesPerHour == ScanTunables().budgetCellularBytesPerHour);
+        CHECK(m.numbersJson().isEmpty());
+        m.shown(openOf(w, QStringLiteral("1"), true), kT0);
+        CHECK(blockedView(m.view(kT0)));
+        CHECK(!chargeable(m.retryTapped(kT0 + 1000)));
+    }
+    // N3: numbers in force LOWER than the defaults and than what the hour used: blocked by them (1 MB spent, the
+    // compiled 5 MiB would let it start, the restored 2 MiB leave 1.05 MB < the 1.5 MiB the start needs)
+    {
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(1000000));
+        m.restoreProjection(projection(1435006));
+        m.restoreNumbers(QJsonObject{{QStringLiteral("scan_budget_cellular_bytes_per_hour"), 2097152.0}});
+        m.shown(openOf(w, QStringLiteral("1"), true), kT0);
+        CHECK(blockedView(m.view(kT0)));
+        CHECK(!chargeable(m.retryTapped(kT0 + 1000)) && !chargeable(m.moreTapped(QString(), kT0 + 1100)));
+    }
+    // N4: a corrupt store is the compiled defaults (values that are no number are absent); a number out of range is
+    // clamped by the manifest's own clamps (fromNumbers), never taken as is
+    {
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(3800000));
+        m.restoreProjection(projection(1435006));
+        m.restoreNumbers(QJsonObject{{QStringLiteral("scan_budget_cellular_bytes_per_hour"), QStringLiteral("104857600")},
+                                     {QStringLiteral("scan_budget_scan_bytes"), true},
+                                     {QStringLiteral("scan_cost_manifest_bytes"), QJsonValue::Null},
+                                     {QStringLiteral("scan_stop_ms"), QJsonArray{1, 2}}});
+        const ScanTunables d;
+        for (const ScanTunableSpec &s : scanTunableTable())
+            CHECK(m.tunables().*(s.field) == d.*(s.field));
+        CHECK(m.numbersJson().isEmpty());
+        m.shown(openOf(w, QStringLiteral("1"), true), kT0);
+        CHECK(blockedView(m.view(kT0)));
+        ScanMachine c(w.caps);
+        c.restoreNumbers(QJsonObject{{QStringLiteral("scan_budget_cellular_bytes_per_hour"), 1e300},
+                                     {QStringLiteral("scan_budget_scan_bytes"), -5.0}});
+        CHECK(c.tunables().budgetCellularBytesPerHour == 256 * 1024 * 1024 && c.tunables().budgetScanBytes == 65536);
+    }
+    // N5: the numbers travel with the ledger: what a manifest applied, the next machine (a relaunch) restores as is
+    {
+        World ws = w;
+        ws.numbers.insert(QStringLiteral("scan_budget_cellular_bytes_per_hour"), 104857600);
+        ws.numbers.insert(QStringLiteral("scan_awg_concurrency"), 2);
+        ScanMachine a(w.caps);
+        CHECK(a.opened(openOf(ws, QString(), false), kT0).has(ScanActionKind::RequestManifest));
+        a.manifestReady(manifestInputFrom(manifestArgs(ws)), kT0 + 50);
+        CHECK(a.numbersJson().value(QStringLiteral("scan_budget_cellular_bytes_per_hour")).toDouble() == 104857600);
+        ScanMachine b(w.caps);
+        b.restoreNumbers(a.numbersJson());
+        CHECK(b.numbersJson() == a.numbersJson());
+        for (const ScanTunableSpec &s : scanTunableTable())
+            CHECK(b.tunables().*(s.field) == a.tunables().*(s.field));
+    }
+    // N6: a fresh manifest replaces the restored numbers BEFORE its start check: the server lowered the limit back to
+    // 5 MiB - the gate passes on the restored 100 MiB (one manifest request), the start check judges with the fresh
+    // 5 MiB and blocks, and from then on the gate does (nothing more is sent)
+    {
+        World wl = w;
+        wl.numbers.insert(QStringLiteral("scan_budget_cellular_bytes_per_hour"), 5242880);
+        ScanMachine m(w.caps);
+        m.restoreBudget(ledgerOf(4500000));
+        m.restoreProjection(projection(1435006));
+        m.restoreNumbers(n100);
+        m.shown(openOf(wl, QString(), false), kT0);
+        CHECK(freeView(m.view(kT0)));
+        CHECK(m.retryTapped(kT0 + 1000).has(ScanActionKind::RequestManifest));
+        const ScanStep ms = m.manifestReady(manifestInputFrom(manifestArgs(wl)), kT0 + 1050);
+        CHECK(m.tunables().budgetCellularBytesPerHour == 5242880
+              && m.numbersJson().value(QStringLiteral("scan_budget_cellular_bytes_per_hour")).toDouble() == 5242880);
+        CHECK(!ms.has(ScanActionKind::StartHostScan) && !ms.has(ScanActionKind::RequestCandidates)
+              && !ms.has(ScanActionKind::ProbeLiveTunnel));
+        CHECK(m.phase() == ScanPhase::NoScan && m.view(kT0 + 1060).empty.reason == QLatin1String("budget"));
+        CHECK(blockedView(m.view(kT0 + 1060)));
+        CHECK(!chargeable(m.retryTapped(kT0 + 3000)) && !chargeable(m.moreTapped(QString(), kT0 + 3100)));
     }
 }
 

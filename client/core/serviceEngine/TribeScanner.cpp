@@ -208,6 +208,7 @@ TribeScanner::TribeScanner(const Deps &d, QObject *parent)
     };
     m_m.restoreBudget(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetStoreKey))).array());
     m_m.restoreProjection(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetProjectionStoreKey))).object());
+    m_m.restoreNumbers(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetNumbersStoreKey))).object());
     // the pool's last answer is restored in configureApi: it is shown only for the account it was fetched for
     m_enabled = scannerSwitchOn(TuningStore::flag(QLatin1String(kScannerFlag), false), kScanHostOnThisBuild);
     m_doctorLegacy = TuningStore::flag(QLatin1String(kDoctorLegacyFlag), false);
@@ -390,6 +391,7 @@ void TribeScanner::execute(const ScanAction &a)
         m_store->write(QLatin1String(kScanBudgetStoreKey), compactArray(a.ledger));
         m_store->write(QLatin1String(kScanBudgetProjectionStoreKey), // S3 (review C2): with the ledger, always
                        QJsonDocument(m_m.projectionJson()).toJson(QJsonDocument::Compact));
+        m_store->write(QLatin1String(kScanBudgetNumbersStoreKey), QJsonDocument(m_m.numbersJson()).toJson(QJsonDocument::Compact));
         break;
     case ScanActionKind::CloseScreen:
         emitLog(QStringLiteral("action close_screen"));
@@ -1004,6 +1006,8 @@ void TribeScanner::deliverManifest(const QString &id, const ScanApiClient::Manif
         if (!m_shade.visible() && m_shade.pendingCount() == 0)
             m_shade = ShadeQueue(shadeTimingFrom(r.view.numbers));
         dispatch(m_m.manifestReady(in, t));
+        // the numbers in force from now on, kept at once (a process ended mid-scan restores them, restoreNumbers)
+        m_store->write(QLatin1String(kScanBudgetNumbersStoreKey), QJsonDocument(m_m.numbersJson()).toJson(QJsonDocument::Compact));
     } else {
         if (r.reason == QLatin1String("scanner_off")) {
             // A 404 of the scan endpoints = the server's switch is off: no Scanner for this account now. No
@@ -2329,6 +2333,7 @@ void TribeScanner::chargeOutsideScan(qint64 bytes, bool cellular)
     m_m.restoreBudget(l.toJson());
     m_store->write(QLatin1String(kScanBudgetStoreKey), compactArray(l.toJson()));
     m_store->write(QLatin1String(kScanBudgetProjectionStoreKey), QJsonDocument(m_m.projectionJson()).toJson(QJsonDocument::Compact));
+    m_store->write(QLatin1String(kScanBudgetNumbersStoreKey), QJsonDocument(m_m.numbersJson()).toJson(QJsonDocument::Compact));
 }
 
 void TribeScanner::sampleSpeed(qint64 bytes, int timeoutMs, std::function<void(const ScanSpeedSample &)> done)

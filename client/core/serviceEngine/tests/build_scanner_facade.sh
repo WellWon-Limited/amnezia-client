@@ -169,6 +169,8 @@ if [ "${1:-}" = "--mutate" ]; then
     "left-epoch-forgotten@@TribeScanner.cpp@@        m_hostGenLeft << m_hostGen;\n@@"
     "held-start-stopped-kept-held@@TribeScanner.cpp@@        it->state = HostStart::Refused; // the held retry is never sent now\n@@"
     "cache-identity-from-reporting-key@@TribeScanner.cpp@@scanNetIdentity(f, n.key), f.gatewayHash)@@n.key, f.gatewayHash)"
+    "budget-numbers-not-restored@@TribeScanner.cpp@@    m_m.restoreNumbers(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetNumbersStoreKey))).object());\n@@"
+    "budget-numbers-not-kept-on-manifest@@TribeScanner.cpp@@        dispatch(m_m.manifestReady(in, t));\n        // the numbers in force from now on, kept at once (a process ended mid-scan restores them, restoreNumbers)\n        m_store->write(QLatin1String(kScanBudgetNumbersStoreKey), QJsonDocument(m_m.numbersJson()).toJson(QJsonDocument::Compact));@@        dispatch(m_m.manifestReady(in, t));"
   )
   caught=0; missed=0; broken=0
   printf '%-38s %s\n' "mutation" "result"

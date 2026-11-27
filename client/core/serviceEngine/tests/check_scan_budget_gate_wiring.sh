@@ -10,6 +10,11 @@
 #       writes the ledger;
 #   B5  outside a running scan the live probe follows the gate (a blocked hour sends nothing chargeable);
 #   B6  the projection is read back through the ledger's own guard (ScanBudgetLedger::storedBytes), not a second one.
+#   B7  (review round 60, claim B) the numbers in force are an input of the gate too: the machine keeps what a manifest
+#       applied and restores it through the manifest's own clamps (fromNumbers), nothing else sets them; the coordinator
+#       restores them at construction before its first step, writes them when a manifest is applied and wherever it
+#       writes the ledger (behaviour: scan_core_check s3BudgetGateIsTheStartRule N1-N6, scanner_facade_check
+#       caseBudgetNumbersAfterRelaunch).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SE="$HERE/.."
@@ -37,5 +42,21 @@ has "$live" 'if (!inScan && budgetBlocked(m_last).hourly) {' || bad "B5: the liv
 has "$M" 'm_lastProjectionCell = ScanBudgetLedger::storedBytes(o.value(QLatin1String("cellular")));' \
     && has "$(code "$SE/ScanBudget.h")" 'const qint64 b = storedBytes(o.value(QLatin1String("bytes")));' \
     || bad "B6: the ledger and the projection must be read back through one guard"
+ready="$(printf '%s\n' "$M" | awk '/    ScanStep manifestReady\(const ScanManifestInput &m, qint64 now\)/{f=1} f{print} f&&/^    }$/{exit}' | tr -s ' \n' ' ')"
+has "$ready" 'm_numbers = m.manifest.numbers; m_t = ScanTunables::fromNumbers(m.manifest.numbers);' \
+    || bad "B7: the manifest must keep the numbers it applies"
+restoreN="$(printf '%s\n' "$M" | awk '/    void restoreNumbers\(const QJsonObject &o\)/{f=1} f{print} f&&/^    }$/{exit}' | tr -s ' \n' ' ')"
+has "$restoreN" 'm_t = ScanTunables::fromNumbers(m_numbers);' || bad "B7: the numbers must be restored through fromNumbers"
+[ "$(printf '%s\n' "$M" | grep -c 'm_t = ')" = "2" ] || bad "B7: only a manifest and the restore set the numbers"
+ctor="$(printf '%s\n' "$T" | awk '/^TribeScanner::TribeScanner\(const Deps &d, QObject \*parent\)/{f=1} f{print} f&&/^}$/{exit}' | tr -s ' \n' ' ')"
+restoredAt="$(printf '%s\n' "$ctor" | grep -bo 'm_m.restoreNumbers(QJsonDocument::fromJson(m_store->read(QLatin1String(kScanBudgetNumbersStoreKey))).object());' | head -1 | cut -d: -f1)"
+firstStep="$(printf '%s\n' "$ctor" | grep -bo 'dispatch(' | head -1 | cut -d: -f1)"
+[ -n "$restoredAt" ] && [ -n "$firstStep" ] && [ "$restoredAt" -lt "$firstStep" ] \
+    || bad "B7: the numbers must be restored at construction, before the first step"
+numbersWrite='kScanBudgetNumbersStoreKey), QJsonDocument(m_m.numbersJson()).toJson(QJsonDocument::Compact));'
+[ "$(printf '%s\n' "$T" | grep -cF -- "$numbersWrite")" = "$(( $(printf '%s\n' "$T" | grep -c 'kScanBudgetStoreKey), compactArray(') + 1 ))" ] \
+    || bad "B7: the numbers must be written wherever the ledger is, and once more when a manifest is applied"
+has "$(printf '%s\n' "$T" | tr -s ' \n' ' ')" "dispatch(m_m.manifestReady(in, t)); m_store->write(QLatin1String($numbersWrite" \
+    || bad "B7: the numbers must be written when a manifest is applied"
 [ "$fail" = "0" ] && echo "check_scan_budget_gate_wiring: OK"
 exit "$fail"
