@@ -53,6 +53,9 @@ has "$waf" 'sentBeforeUsable = avpn::UplinkMonitor::instance()->vpnDefault() == 
     && has "$waf" 'avpn::whoamiNext(v, o, m_whoamiAnswered, m_verifyAttempts - 1, leftNow, sentBeforeUsable);' \
     && has "$waf" 'usable=%2' \
     || bad "U3: a try sent before the network was usable must be 'not yet', and the journal must say which"
+has "$waf" 'finishWhoami(epoch, next.verdict, facts);' \
+    || bad "U3: the facade must finish with the step's own verdict (an early try never ends as no-data / bypass)"
+printf '%s\n' "$waf" | grep -qF 'finishWhoami(epoch, v, facts);' && bad "U3: the facade re-decides the step (the try's own verdict)"
 has "$(code "$WV" | tr -s ' \n' ' ')" 'if (whoamiNotYet(o) || (sentBeforeUsable && v != WhoamiVerdict::Works)) {' \
     || bad "U3: whoamiNext must take a pre-usability answer as not yet"
 

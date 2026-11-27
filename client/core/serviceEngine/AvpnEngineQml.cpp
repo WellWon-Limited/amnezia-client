@@ -9627,9 +9627,10 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
             return;
         }
         // S3: the transfer time is the path's speed on this network (the ledger ranks slower working paths lower)
-        if (v == avpn::WhoamiVerdict::Works)
+        if (next.verdict == avpn::WhoamiVerdict::Works)
             m_lastVerifyTtfbMs = int(m_verifyClock.elapsed() - t0);
-        finishWhoami(epoch, v, facts);
+        // the step's own verdict (WhoamiNext::verdict): a try that said nothing about the path ends in the tiebreak
+        finishWhoami(epoch, next.verdict, facts);
     });
 }
 

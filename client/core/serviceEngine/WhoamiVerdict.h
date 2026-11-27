@@ -119,6 +119,10 @@ inline bool whoamiNotYet(const WhoamiObservation &o)
 struct WhoamiNext {
     WhoamiStep step = WhoamiStep::Finish;
     qint64 delayMs = 0; // Retry: wait this long, then the next request
+    // Finish / Tiebreak: the verdict the facade finishes with (finishWhoami -> whoamiAction). A try that says nothing
+    // about the path ends as Inconclusive, which whoamiAction sends to the generate_204 tiebreak; every other step
+    // carries the try's own verdict. The caller executes the step and never re-decides it (round 60 review).
+    WhoamiVerdict verdict = WhoamiVerdict::Inconclusive;
 };
 
 // What to do after one whoami try. answeredSoFar = tries of this check that got an HTTP answer (the server counted
@@ -131,15 +135,19 @@ struct WhoamiNext {
 //  - any other inconclusive answer: the tiebreak; every other verdict is final.
 // sentBeforeUsable (Android, phone 26.11): the try left before the system made our VPN network this app's default (the
 // network's routes were still being installed - longer with more split routes). Its answer, whatever it was - nothing, a
-// cut transfer, or "past the VPN" - says nothing about the path: it is "not yet", like a try that got nothing.
+// cut transfer, or "past the VPN" - says nothing about the path: it is "not yet", like a try that got nothing - retried,
+// and with no retry left it ends in the same tiebreak (verdict Inconclusive), never as no-data or bypass (round 60
+// review: the step was Tiebreak but the facade finished with the try's own NoData / BypassVpn).
 inline WhoamiNext whoamiNext(WhoamiVerdict v, const WhoamiObservation &o, int answeredSoFar, int retriesSoFar,
                              qint64 whoamiBudgetLeftMs, bool sentBeforeUsable = false)
 {
     WhoamiNext n;
+    n.verdict = v;
     const DataCheckRetry spacing = decideDataCheckRetry(true, retriesSoFar, whoamiBudgetLeftMs);
     if (whoamiNotYet(o) || (sentBeforeUsable && v != WhoamiVerdict::Works)) {
         n.step = spacing.retry ? WhoamiStep::Retry : WhoamiStep::Tiebreak;
         n.delayMs = spacing.retry ? spacing.delayMs : 0;
+        n.verdict = WhoamiVerdict::Inconclusive; // nothing about the path: the tiebreak decides
         return n;
     }
     if (v == WhoamiVerdict::BypassVpn) {

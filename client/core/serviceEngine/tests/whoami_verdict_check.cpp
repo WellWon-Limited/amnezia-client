@@ -341,6 +341,49 @@ int main()
         CHECK(avpn::whoamiNext(WhoamiVerdict::NoData, stalled, 1, 0, plenty, /*sentBeforeUsable=*/false).step
                   == WhoamiStep::Finish,
               "a cut on a usable network is still the path's verdict");
+        // Round 60 review: the step's verdict is what the facade finishes with (it executes the step, finishWhoami ->
+        // whoamiAction). An early try {nothing, a cut 200, past the VPN} x {retry fits, does not fit}: never a final
+        // NoData / BypassVpn - a retry, or the tiebreak (Inconclusive -> generate_204).
+        {
+            struct Early { WhoamiVerdict v; WhoamiObservation o; const char *what; };
+            const Early early[] = {{WhoamiVerdict::Inconclusive, none, "nothing"},
+                                   {WhoamiVerdict::NoData, stalled, "cut 200"},
+                                   {WhoamiVerdict::BypassVpn, bypass, "past the VPN"}};
+            for (const Early &e : early) {
+                for (const qint64 budgetLeft : {plenty, qint64(300 + avpn::kWhoamiMinAttemptMs - 1)}) {
+                    const avpn::WhoamiNext x = avpn::whoamiNext(e.v, e.o, 1, 0, budgetLeft, /*sentBeforeUsable=*/true);
+                    const bool fits = budgetLeft == plenty;
+                    CHECK(x.step == (fits ? WhoamiStep::Retry : WhoamiStep::Tiebreak), e.what);
+                    CHECK(x.verdict != WhoamiVerdict::NoData && x.verdict != WhoamiVerdict::BypassVpn,
+                          "an early try is never a final no-data / bypass");
+                    if (!fits)
+                        CHECK(x.verdict == WhoamiVerdict::Inconclusive
+                                  && avpn::whoamiAction(x.verdict, false, false) == avpn::WhoamiAction::Tiebreak,
+                              "no retry left -> the same tiebreak the not-yet case reaches");
+                }
+            }
+            // a try sent after the network was usable keeps today's rules exactly (and so does every platform but
+            // Android, where sentBeforeUsable is always false)
+            for (const bool usableArg : {false}) {
+                Q_UNUSED(usableArg)
+                const avpn::WhoamiNext cut = avpn::whoamiNext(WhoamiVerdict::NoData, stalled, 1, 0, plenty, false);
+                CHECK(cut.step == WhoamiStep::Finish && cut.verdict == WhoamiVerdict::NoData, "a cut on a usable network is no-data");
+                const avpn::WhoamiNext byp = avpn::whoamiNext(WhoamiVerdict::BypassVpn, bypass, 2, 1, plenty, false);
+                CHECK(byp.step == WhoamiStep::Finish && byp.verdict == WhoamiVerdict::BypassVpn, "second bypass is final");
+                const avpn::WhoamiNext byp1 = avpn::whoamiNext(WhoamiVerdict::BypassVpn, bypass, 1, 0, plenty, false);
+                CHECK(byp1.step == WhoamiStep::Retry, "first bypass is retried");
+                const avpn::WhoamiNext nothingLeft =
+                    avpn::whoamiNext(WhoamiVerdict::Inconclusive, none, 0, 0, 300 + avpn::kWhoamiMinAttemptMs - 1, false);
+                CHECK(nothingLeft.step == WhoamiStep::Tiebreak && nothingLeft.verdict == WhoamiVerdict::Inconclusive,
+                      "nothing, no room -> the tiebreak, as before");
+                const avpn::WhoamiNext w = avpn::whoamiNext(WhoamiVerdict::Works, good(), 1, 0, plenty, false);
+                CHECK(w.step == WhoamiStep::Finish && w.verdict == WhoamiVerdict::Works, "works is final");
+                const avpn::WhoamiNext lim = avpn::whoamiNext(WhoamiVerdict::CheckLimited, limited, 1, 0, plenty, false);
+                CHECK(lim.step == WhoamiStep::Finish && lim.verdict == WhoamiVerdict::CheckLimited, "429 keeps its verdict");
+                const avpn::WhoamiNext inc = avpn::whoamiNext(WhoamiVerdict::Inconclusive, answered502, 1, 0, plenty, false);
+                CHECK(inc.step == WhoamiStep::Tiebreak && inc.verdict == WhoamiVerdict::Inconclusive, "502 -> tiebreak");
+            }
+        }
         // the wait for usability stays inside the attempt owner's grace (dataCheckMs + checkGraceMs backstop)
         CHECK(avpn::whoamiUsableWaitMs(1500) == 1200 && avpn::whoamiUsableWaitMs(200) == 0,
               "the wait ends 300 ms inside the owner's grace; no grace, no wait");
